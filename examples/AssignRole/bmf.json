@@ -1,0 +1,5 @@
+{
+  "name": "AssignRole",
+  "version": "0.1.0",
+  "description": "Plans a copied RoleAssignments.json-style player role assignment patch."
+}

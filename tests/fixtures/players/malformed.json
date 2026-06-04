@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "case": "malformed",
+  "description": "Bad and partial records for wrapper hardening. This does not represent Brickadia output.",
+  "players": [
+    {
+      "displayName": "Missing Id"
+    },
+    {
+      "id": "not-a-uuid",
+      "uuid": "not-a-uuid",
+      "username": 123,
+      "roles": "Admin"
+    },
+    {
+      "id": "22222222-2222-4222-8222-222222222222",
+      "uuid": "22222222-2222-4222-8222-222222222222",
+      "username": "PartialUser"
+    }
+  ],
+  "expected": {
+    "validCount": 1,
+    "invalidCount": 2,
+    "validIds": [
+      "22222222-2222-4222-8222-222222222222"
+    ],
+    "validationLevel": "L0 Static"
+  }
+}

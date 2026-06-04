@@ -1,0 +1,91 @@
+{
+  "fixtureSchemaVersion": 1,
+  "case": "default-role",
+  "description": "Minimal RoleSetup2-style fixture for no-spawn-item applicator policy tests.",
+  "roles": [
+    {
+      "name": "Moderator",
+      "permissions": [],
+      "color": {
+        "b": 255,
+        "g": 255,
+        "r": 0,
+        "a": 255
+      },
+      "bHasColor": true
+    },
+    {
+      "name": "Admin",
+      "permissions": [
+        {
+          "name": "BR.Permission.Building",
+          "state": "Allowed"
+        },
+        {
+          "name": "BR.Permission.SpawnItems",
+          "state": "Allowed"
+        }
+      ],
+      "color": {
+        "b": 255,
+        "g": 0,
+        "r": 0,
+        "a": 255
+      },
+      "bHasColor": true
+    }
+  ],
+  "defaultRole": {
+    "name": "Default",
+    "permissions": [
+      {
+        "name": "BR.Permission.Building",
+        "state": "Allowed"
+      },
+      {
+        "name": "BR.Permission.Building.Applicator",
+        "state": "Allowed"
+      },
+      {
+        "name": "BR.Permission.Building.Applicator.EditBricks",
+        "state": "Allowed"
+      },
+      {
+        "name": "BR.Permission.Building.Applicator.EditEntities",
+        "state": "Allowed"
+      },
+      {
+        "name": "BR.Permission.Building.Connector",
+        "state": "Allowed"
+      },
+      {
+        "name": "BR.Permission.Building.Manipulator",
+        "state": "Allowed"
+      },
+      {
+        "name": "BR.Permission.SpawnItems",
+        "state": "Allowed"
+      }
+    ],
+    "color": {
+      "b": 0,
+      "g": 255,
+      "r": 255,
+      "a": 255
+    },
+    "bHasColor": true
+  },
+  "expected": {
+    "roleName": "Default",
+    "safeApplicatorPermissions": [
+      "BR.Permission.Building",
+      "BR.Permission.Building.Applicator",
+      "BR.Permission.Building.Applicator.EditBricks",
+      "BR.Permission.Building.Applicator.EditEntities"
+    ],
+    "forbiddenPermissions": [
+      "BR.Permission.SpawnItems"
+    ],
+    "validationLevel": "L0 Static"
+  }
+}

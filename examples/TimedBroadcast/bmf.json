@@ -1,0 +1,7 @@
+{
+  "name": "TimedBroadcast",
+  "version": "0.1.0",
+  "author": "BMF",
+  "description": "Broadcasts once after a startup delay.",
+  "capabilities": ["chat.broadcast", "timers.basic"]
+}

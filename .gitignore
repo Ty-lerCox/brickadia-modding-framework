@@ -1,0 +1,33 @@
+# Generated validation and runtime evidence
+artifacts/
+runtime/
+logs/
+*.log
+*.jsonl
+
+# Release/build output
+site/
+site-*/
+dist/
+build/
+*.zip
+*.7z
+
+# Local dependency caches
+.venv/
+venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+
+# Editor and OS noise
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Secrets and local-only config
+.env
+.env.*
+*.token
+*.secret

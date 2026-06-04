@@ -1,0 +1,9 @@
+{
+  "name": "LoadCarBrz",
+  "version": "0.1.0",
+  "description": "Loads a BRZ-derived world bundle after stage-brz-prefab.ps1 has copied it into Saved/Worlds.",
+  "capabilities": [
+    "prefabs.loadBrz",
+    "world.saveAs"
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "name": "SpawnVehicleSet",
+  "displayName": "Spawn Vehicle Set",
+  "version": "0.1.0",
+  "entry": "main.lua"
+}

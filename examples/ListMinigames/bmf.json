@@ -1,0 +1,5 @@
+{
+  "name": "ListMinigames",
+  "version": "0.1.0",
+  "description": "Runs the safe minigame list command through BMF after startup."
+}

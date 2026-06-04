@@ -1,0 +1,43 @@
+{
+  "type": "object",
+  "required": [
+    "feature",
+    "status",
+    "validationLevel",
+    "startedAt",
+    "finishedAt",
+    "evidence"
+  ],
+  "properties": {
+    "feature": { "type": "string" },
+    "status": {
+      "type": "string",
+      "enum": ["passed", "failed", "blocked", "skipped"]
+    },
+    "validationLevel": {
+      "type": "string",
+      "enum": ["L0 Static", "L1 Boot", "L2 Headless", "L3 Live Player", "L4 Multiplayer", "L5 Negative"]
+    },
+    "startedAt": { "type": "string" },
+    "finishedAt": { "type": "string" },
+    "brickadiaBuild": { "type": "string" },
+    "ue4ssBundle": { "type": "string" },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["kind", "path"],
+        "properties": {
+          "kind": { "type": "string" },
+          "path": { "type": "string" },
+          "summary": { "type": "string" }
+        }
+      }
+    },
+    "errors": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "data": { "type": "object" }
+  }
+}

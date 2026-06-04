@@ -1,0 +1,267 @@
+{
+  "generatedFor": "BMF 0.1.0-dev",
+  "brickadia": {
+    "primaryTarget": "Brickadia EA2 (PC-Shipping-CL13530)",
+    "serverExecutable": "BrickadiaServer-Win64-Shipping.exe",
+    "platform": "Windows"
+  },
+  "ue4ss": {
+    "required": true,
+    "status": "patched-runtime-required",
+    "notes": "BMF assumes the Brickadia-compatible UE4SS runtime and custom game configuration from the Brickadia reverse-engineering workspace."
+  },
+  "features": {
+    "installer.windows": {
+      "status": "tempdir-proven",
+      "minimumValidation": "L0 Static for install, backup, rollback, and remove-only behavior; L1 Boot after installing into a real test server",
+      "notes": "install-bmf.ps1 refuses a running matching server process, backs up an existing Mods/BMF when -Force is used, installs the BMF UE4SS mod folder, and writes runtime/install-manifest.json. uninstall-bmf.ps1 can restore a backup or remove BMF while backing up the removed directory."
+    },
+    "release.package": {
+      "status": "static-proven",
+      "minimumValidation": "L0 Static for zip build, hash manifest, artifact exclusion, and expanded package validation",
+      "notes": "build-release-package.ps1 creates a bmf-<version>.zip from source-controlled package roots and writes manifests/release-manifest.json. validate-release-package.ps1 expands the zip and runs scripts/validate-package.ps1 against the expanded copy."
+    },
+    "framework.healthCommands": {
+      "status": "headless-proven",
+      "minimumValidation": "L2 Headless for bmf.health and bmf.version command-worker responses plus BMF.version API label visibility",
+      "notes": "BMF.health() remains the structured Lua health API. BMF.version is a stable string field. The bmf.health command is an explicit alias for health automation, while bmf.version reports version, target build, platform, executable, compatibility status, and build-detection mode."
+    },
+    "plugins.lifecycleStorage": {
+      "status": "headless-proven",
+      "minimumValidation": "L2 Headless + L5 Negative for onLoad, onUnload during reload, metadata listing, text and JSON storage persistence, traversal denial, and malformed JSON failure",
+      "notes": "BMF reads simple bmf.json metadata, exposes BMF.plugins.list, calls plugin onUnload during bmf.reload, and provides BMF.storage text plus JSON config/data helpers scoped to each plugin directory. Malformed JSON returns JSON_PARSE_FAILED instead of throwing."
+    },
+    "plugins.lifecycleHooks": {
+      "status": "headless-proven",
+      "minimumValidation": "L2 Headless for onServerReady, recurring onTick, onError from a tick failure, and onError from a plugin-owned command failure",
+      "notes": "BMF dispatches onServerReady after the command worker starts, runs onTick through a lazy recurring timer only while loaded plugins define it, and calls onError with structured context when plugin hooks or plugin-owned command handlers fail."
+    },
+    "plugins.loadUnloadCommands": {
+      "status": "headless-proven",
+      "minimumValidation": "L2 Headless for bmf.unload removing a loaded plugin and plugin-owned command, bmf.load loading the plugin from disk again, and the plugin command working after load",
+      "notes": "bmf.unload delegates to BMF.unloadPlugins and reports plugins_unloaded plus unload_errors. bmf.load delegates to BMF.loadPlugins and reports plugins_loaded plus plugin_errors. The console-command canary proves the CommandCanary plugin command works again after an unload/load cycle."
+    },
+    "plugins.commandCleanup": {
+      "status": "headless-proven",
+      "minimumValidation": "L2 Headless for plugin command ownership, removal when a plugin disappears, and UNKNOWN_COMMAND after reload",
+      "notes": "Commands registered through a plugin facade are tagged with that plugin owner and removed when the plugin unloads or reloads. The cleanup canary deletes a staged plugin directory, reloads BMF, and proves the old plugin command is no longer dispatched."
+    },
+    "plugins.watchdog": {
+      "status": "headless-negative-proven",
+      "minimumValidation": "L2 Headless + L5 Negative for repeated plugin command failures, automatic isolation, blocked isolated commands, last-error reporting, audit records, status fields, and reload recovery",
+      "notes": "BMF tracks per-plugin error counts and last error metadata. By default, a loaded plugin is isolated after three plugin-owned failures. Isolated plugin hooks are skipped and plugin-owned commands return PLUGIN_ISOLATED before the handler runs. bmf.reload resets watchdog state."
+    },
+    "plugins.capabilityGates": {
+      "status": "headless-negative-proven",
+      "minimumValidation": "L2 Headless + L5 Negative for denied dangerous APIs, allowed declared APIs, server.exec.restricted aliasing, direct server exec config opt-in, _G.BMF facade shadowing, and cross-plugin storage denial",
+      "notes": "Plugins receive a scoped BMF facade. BMF.server.exec, broadcast, world load/save, prefab loading, vehicle spawn sets, and storage require explicit capabilities. Missing capabilities return CAPABILITY_REQUIRED without running the underlying API. Direct plugin BMF.server.exec also requires Mods/BMF/config.json allowPluginServerExec=true and otherwise returns CONFIG_OPT_IN_REQUIRED."
+    },
+    "plugins.unsafeGlobals": {
+      "status": "headless-negative-proven",
+      "minimumValidation": "L2 Headless + L5 Negative for denied raw Omegga/UE4SS console executors, hooks, object lookup, game-thread helpers, bmf.sandbox output, audit denial records, and status counters",
+      "notes": "Plugin environments deny known unsafe native globals by default while ordinary Lua globals and BMF wrappers remain available. Experimental access requires both framework allowPluginUnsafeGlobals=true and plugin capability unsafe.globals."
+    },
+    "compatibility.diagnostics": {
+      "status": "headless-proven",
+      "minimumValidation": "L2 Headless for BMF.compatibility.check/helpers, bmf.compatibility output, health/status compatibility fields, target build metadata, and UE4SS helper availability",
+      "notes": "BMF reports the declared target Brickadia build PC-Shipping-CL13530, Windows dedicated-server scope, report-only unsupported-build policy, and required/optional runtime helper groups. Full unsupported-build refusal waits for reliable runtime Brickadia build detection."
+    },
+    "apiLabels.runtime": {
+      "status": "headless-proven",
+      "minimumValidation": "L2 Headless for BMF.apis.get/list/summary from plugin Lua, bmf.apis command filters, live-player and unsafe-native labels, and status API label counts",
+      "notes": "BMF.apis exposes machine-readable stability, risk, validation, player-requirement, and capability labels. Labels distinguish stable, experimental, scaffold, file-backed, and restricted APIs, including live-player-required and unsafe-native surfaces."
+    },
+    "logging.runtime": {
+      "status": "headless-proven",
+      "minimumValidation": "L2 Headless for framework log, per-plugin log, and JSONL event records",
+      "notes": "BMF writes runtime/bmf.log, runtime/events.jsonl, and runtime/logs/plugins/<PluginName>.log. Plugin scoped logging helpers mirror plugin messages into the framework log and JSONL stream for canary automation."
+    },
+    "audit.runtime": {
+      "status": "headless-proven",
+      "minimumValidation": "L2 Headless for custom plugin audit records, capability denials, command dispatch, private-message target-not-found records, audit tail command output, and audit.jsonl parsing",
+      "notes": "BMF writes runtime/audit.jsonl and exposes BMF.audit.record, BMF.audit.recent, and bmf.audit.tail. Built-in audit records cover framework/plugin lifecycle, command dispatch/errors, capability/config denials, plugin errors, server exec, world load/save, server save, chat broadcast, and private-message scaffold failures."
+    },
+    "rateLimits.runtime": {
+      "status": "headless-negative-proven",
+      "minimumValidation": "L2 Headless + L5 Negative for custom plugin limits, default chat.whisper limit, bmf.ratelimits output, audit denial records, and status bucket counts",
+      "notes": "BMF.rateLimits.check and BMF.rateLimits.recent are available to framework and plugin code. Built-in protection currently covers server.exec, server.save, world.loadAdditive, world.saveAs, chat.broadcast, chat.whisper, and chat.statusMessage. Plugin calls are counted under plugin:<PluginName>."
+    },
+    "timers.runtime": {
+      "status": "headless-proven",
+      "minimumValidation": "L2 Headless for one-shot timers, recurring timers, and cancellation",
+      "notes": "BMF.timers.after, BMF.timers.every, BMF.timers.cancel, and BMF.timers.activeCount are available to plugins. The timer canary proves a cancelled one-shot does not fire and a recurring timer can cancel itself after the expected count."
+    },
+    "events.runtime": {
+      "status": "headless-proven",
+      "minimumValidation": "L2 Headless for serverReady, pluginLoaded, pluginUnloaded, custom event on/off/emit, worldSaved after SaveAs, and plugin reload handler cleanup",
+      "notes": "BMF.events.on/off/emit/listenerCount are available to plugins. Framework events currently include serverReady, pluginLoaded, pluginUnloaded, worldLoaded, and worldSaved. Event handlers registered through a plugin facade are removed when that plugin unloads or reloads."
+    },
+    "chat.broadcast": {
+      "status": "live-player-ui-confirmed",
+      "minimumValidation": "L3 Live Player UI confirmed for ClientPushChatMessage fanout; L2 Headless for legacy fallback command acceptance only",
+      "notes": "BMF.chat.broadcast now prefers one ClientPushChatMessage call per unique live PlayerController and reports deliveredCount, attemptedCount, targets, and deliveryMode. Legacy Chat.Broadcast is fallback-only and does not claim visible delivery."
+    },
+    "chat.privateMessaging": {
+      "status": "single-live-player-ui-confirmed",
+      "minimumValidation": "L3 Live Player UI confirmed for one matched controller; two-player negative targeting still pending",
+      "notes": "BMF.chat.whisper resolves a live target by player-ish query and sends ClientPushChatMessage to that controller. BMF.chat.statusMessage still shares the private-message route but has not been separately UI-validated as status-specific feedback."
+    },
+    "players.list": {
+      "status": "headless-empty-safe",
+      "minimumValidation": "L2 Headless for empty list safety, L3 Live Player for identity fields",
+      "notes": "The bmf.players.list command currently proves the no-player adapter returns players_count=0 without requiring a player controller."
+    },
+    "server.settingsPatch": {
+      "status": "file-backed",
+      "minimumValidation": "L2 Headless for GameUserSettings.ini copy patching, restart/live player for runtime effect"
+    },
+    "players.normalize": {
+      "status": "fixture-backed",
+      "minimumValidation": "L0 Static for shape handling, L3 Live Player for real adapter records"
+    },
+    "players.lookup": {
+      "status": "fixture-proven-and-headless-negative",
+      "minimumValidation": "L0 Fixture for exact/partial lookup and getName on synthetic records; L2 Headless for PLAYER_NOT_FOUND on empty current-list lookups; L3 Live Player for real identity fields",
+      "notes": "BMF.players.find supports provided records and current-list lookup. BMF.players.resolve and BMF.players.getName normalize direct records without touching unsafe live objects."
+    },
+    "commands.console": {
+      "status": "headless-proven",
+      "minimumValidation": "L2 Headless for bridge console.exec invocation, L3 Live Player before chat/staff auth routing",
+      "notes": "Built-in bmf.status, bmf.health, bmf.version, bmf.plugins, bmf.commands, bmf.load, bmf.unload, bmf.reload, bmf.world.saveas, bmf.prefabs.loadbrz, bmf.prefabs.loadbrdb, bmf.vehicles.spawnset, and bmf.minigames.* lifecycle commands register through UE4SS RegisterConsoleCommandGlobalHandler when available. The current headless proof invokes them through Omegga.Bridge.BMF, which queues a request for the BMF command worker and verifies the response file. Plugin commands can register under the bmf.* namespace."
+    },
+    "commands.prefabLoadBrz": {
+      "status": "headless-proven-through-bmf-command-worker",
+      "minimumValidation": "L2 Headless for external BRZ staging, command-worker load, SaveAs output, saved BRDB parsing, and one-car inventory text export; L3 Live Player for visual/drivable vehicle behavior",
+      "notes": "The bmf.prefabs.loadbrz command delegates to BMF.prefabs.loadBrz after stage-brz-prefab.ps1 has copied the BRZ-derived world into Saved/Worlds. Raw BRZ conversion remains outside UE4SS Lua."
+    },
+    "commands.prefabLoadBrdb": {
+      "status": "headless-proven-through-bmf-command-worker",
+      "minimumValidation": "L2 Headless for staged BRDB command-worker load, SaveAs output, saved BRDB parsing, and three-car inventory text export; L3 Live Player for visual/drivable vehicle behavior",
+      "notes": "The bmf.prefabs.loadbrdb command delegates to BMF.prefabs.loadBrdb after an existing BRDB world bundle has been copied into Saved/Worlds. The canary stages the known threecars.brdb fixture, saves the result, and exports a three-car inventory text report."
+    },
+    "commands.vehicleSpawnSet": {
+      "status": "headless-proven-through-bmf-command-worker",
+      "minimumValidation": "L2 Headless for staged-world load/save graph counts, L3 Live Player for drivable vehicle behavior",
+      "notes": "The bmf.vehicles.spawnset command loads staged vehicle worlds through BMF.vehicles.spawnSet. The bmf.world.saveas command saves the result for offline BRDB parsing and inventory matching, and the validation helper waits for a non-empty stable saved BRDB before parsing."
+    },
+    "commands.vehicleSnapshot": {
+      "status": "headless-proven-through-bmf-command-worker",
+      "minimumValidation": "L2 Headless for SaveAs plus offline vehicle inventory parsing, L3 Live Player for visual/drivable vehicle behavior",
+      "notes": "The bmf.vehicles.snapshot command saves the running world through BMF. The companion snapshot-bmf-server-vehicles.ps1 script waits for a non-empty stable saved BRDB, then parses it and exports JSON, Markdown, CSV, and console-style text vehicle inventory."
+    },
+    "commands.admin": {
+      "status": "headless-proven",
+      "minimumValidation": "L2 Headless for broadcast acceptance, empty player list, and minigame-list transport; L3 Live Player for player-visible chat and player identity fields",
+      "notes": "Covers bmf.chat.broadcast, bmf.players.list, and bmf.minigames.list through the BMF command worker."
+    },
+    "commands.minigameLifecycle": {
+      "status": "headless-proven-through-bmf-command-worker",
+      "minimumValidation": "L2 Headless + L5 Negative for BMF command-worker transport of loadPreset, savePreset, nextRound, reset, and delete plus invalid preset/index rejection; L3 Live Player for gameplay effects",
+      "notes": "The bmf.minigames.loadpreset/savepreset/nextround/reset/delete commands delegate to the existing BMF.minigames wrappers and print deterministic command/action/index/preset lines. The headless canary proves server-console transport and argument validation only; it does not prove minigame membership, teams, scoring, or visible gameplay effects."
+    },
+    "commands.accessPolicy": {
+      "status": "headless-negative-proven",
+      "minimumValidation": "L2 Headless + L5 Negative for BMF.permissions.evaluateCommandAccess over file-shaped RoleAssignments data, direct actor roles, explicit allow/deny rules, console policy, unknown-command default deny, and invalid command rejection; L3 Live Player for authenticated player command routing",
+      "notes": "The command access policy evaluator lets Lua decide whether a player/console actor should be allowed to run a bmf.* command. It does not yet change BMF.commands.dispatch or prove live player-authenticated staff command enforcement."
+    },
+    "commands.dispatchAccess": {
+      "status": "headless-negative-proven",
+      "minimumValidation": "L2 Headless + L5 Negative for BMF.commands.dispatchWithAccess using an allowed role-backed dispatch, denied role-backed dispatch, console-allowed dispatch, invalid command rejection, API label visibility, and command.denied/access_granted audit records; L3 Live Player for authenticated player command routing",
+      "notes": "The dispatchWithAccess wrapper is opt-in and delegates to the normal command dispatcher only after BMF.permissions.evaluateCommandAccess allows the actor. Existing console dispatch behavior is unchanged."
+    },
+    "server.status": {
+      "status": "headless-proven-partial",
+      "minimumValidation": "L2 Headless for BMF runtime fields, command count, plugin count, timer count, empty player adapter, and explicit unknown world/server-browser fields",
+      "notes": "BMF.server.status returns structured data and the bmf.server.status command prints stable key/value lines. Live server name, description, world name, brick count, and component count are represented as unknown until safe live-object discovery is available."
+    },
+    "server.save": {
+      "status": "headless-proven",
+      "minimumValidation": "L2 Headless for BMF command worker invocation, SaveAs output file creation, and saved BRDB parsing",
+      "notes": "BMF.server.save delegates to the proven BMF.world.saveAs path and is exposed through bmf.server.save. Plugin calls require the server.save capability."
+    },
+    "server.shutdown": {
+      "status": "headless-negative-proven-unavailable",
+      "minimumValidation": "L2 Headless + L5 Negative for missing-confirmation rejection and confirmed CL13530 executor safe failure",
+      "notes": "BMF.server.shutdown attempts exit only after confirm=BMF_SHUTDOWN, writes server.shutdown and server.shutdown.executed audit records, and is exposed through bmf.server.shutdown. Current CL13530 console-manager exit returns SHUTDOWN_UNAVAILABLE / CONSOLE_EXEC_FAILED, so actual stop/restart remains external-supervisor work. Plugin calls require server.shutdown plus allowPluginServerShutdown=true."
+    },
+    "permissions.rolePatch": {
+      "status": "file-backed",
+      "minimumValidation": "L2 Headless for RoleSetup2 copy patching, L3 Live Player for runtime effect"
+    },
+    "permissions.roleAssignments": {
+      "status": "file-backed",
+      "minimumValidation": "L2 Headless for RoleAssignments.json copy patching, L3 Live Player for runtime effect"
+    },
+    "permissions.roleAssignmentReaders": {
+      "status": "headless-negative-proven",
+      "minimumValidation": "L2 Headless + L5 Negative for RoleAssignments.json-style record description, player UUID role lookup, case-insensitive membership checks, duplicate role detection, invalid player id rejection, and planner/readback integration; L3 Live Player for tying live BMF.players records to current server roles",
+      "notes": "BMF.permissions.describeRoleAssignments, getPlayerRoles, and playerHasRole now read file-shaped role assignments from Lua. This proves assignment semantics and malformed-record handling, not live player role state."
+    },
+    "permissions.noSpawnItemPolicy": {
+      "status": "headless-negative-proven",
+      "minimumValidation": "L2 Headless + L5 Negative for RoleSetup2-style role description, unsafe role detection, no-spawn-item applicator patch evaluation, duplicate permission rejection, and API labels; L3 Live Player + L5 Negative for actual applicator spawn-item exploit denial",
+      "notes": "BMF.permissions.describeRole and BMF.permissions.evaluateNoSpawnItemApplicator now let Lua validate that safe applicator permissions remain allowed while BR.Permission.SpawnItems is forbidden. This proves policy shape and duplicate-entry rejection, not live tool behavior."
+    },
+    "archives.describe": {
+      "status": "fixture-backed",
+      "minimumValidation": "L0 Static for BRDB parser output, L3 Live Player for vehicle behavior"
+    },
+    "archives.vehicleInventory": {
+      "status": "snapshot-backed",
+      "minimumValidation": "L0 Static for saved BRDB or snapshot JSON inventory output, L3 Live Player for drivable vehicle behavior",
+      "notes": "Formats vehicle-like dynamic actor snapshots into JSON, Markdown, CSV, and standalone console-style text reports for unattended map inspection. The running-server SaveAs path can export this inventory in the same L2 canary pass. Optional stage-manifest matching correlates planned staged world names back to observed vehicle labels and coordinate deltas."
+    },
+    "archives.stagedVehicleIdRemap": {
+      "status": "headless-proven-for-dynamic-actor-slices",
+      "minimumValidation": "L2 Headless for duplicate load/save isolation, L3 Live Player for drivable vehicle behavior",
+      "notes": "Remaps persistent entity ids, brick grid folder ids, component joint refs, microchip grid refs, and remote wire grid refs. Owner arrays must remain unchanged."
+    },
+    "server.vehicleSpawnSet": {
+      "status": "headless-proven-for-remapped-dynamic-actor-slices",
+      "minimumValidation": "L2 Headless for isolated load/save graph counts, L3 Live Player for drivable vehicle behavior",
+      "notes": "Generates multiple staged copies from one graph-closure single-car slice by remapping ids per copy, loads each through BR.World.LoadAdditive, then verifies isolated saved vehicle graphs by SaveAs parsing."
+    },
+    "vehicles.spawnSet": {
+      "status": "headless-proven-through-bmf-lua",
+      "minimumValidation": "L2 Headless for BMF Lua load/save graph counts, L3 Live Player for drivable vehicle behavior",
+      "notes": "Lua consumes staged world names from stage-vehicle-spawn-set.ps1 and delegates each load to the proven BMF.world.loadAdditive path. Archive rewriting remains outside Lua."
+    },
+    "minigames.list": {
+      "status": "command-backed",
+      "minimumValidation": "L2 Headless for command transport, L3 Live Player for gameplay effects"
+    },
+    "minigames.lifecycle": {
+      "status": "headless-command-backed",
+      "minimumValidation": "L2 Headless + L5 Negative for command-worker transport and argument validation, L3 Live Player for reset/round/delete behavior",
+      "notes": "BMF exposes loadPreset, savePreset, nextRound, reset, and delete through Lua and through bmf.minigames.* command-worker routes. Current evidence proves accepted console command transport on a disposable server and invalid preset/index rejection."
+    },
+    "world.loadAdditive": {
+      "status": "headless-proven",
+      "minimumValidation": "L2 Headless",
+      "notes": "Console command, server log, SaveAs output, parsed BRDB, and BMF Lua wrapper are proven headlessly."
+    },
+    "world.saveAs": {
+      "status": "headless-proven",
+      "minimumValidation": "L2 Headless",
+      "notes": "SaveAs output, parsing, and BMF Lua wrapper are proven headlessly."
+    },
+    "prefabs.loadBrz": {
+      "status": "headless-proven-after-staging",
+      "minimumValidation": "L2 Headless for staged archive survival, L3 Live Player for drivable vehicle behavior",
+      "notes": "BRZ staging is handled by the BMF tooling lane; the Lua runtime wrapper delegates the staged world to world.loadAdditive. The bmf.prefabs.loadbrz command exposes the same staged-load path to the server-console command worker."
+    },
+    "prefabs.loadBrdb": {
+      "status": "headless-proven-through-bmf-command-worker",
+      "minimumValidation": "L2 Headless for staged BRDB command-worker load, SaveAs parsing, and inventory export; L3 Live Player for visual behavior",
+      "notes": "Loads an already staged BRDB world bundle through the proven world.loadAdditive path. The bmf.prefabs.loadbrdb command exposes the same path to server-console automation."
+    },
+    "dynamicActor.save": {
+      "status": "research",
+      "minimumValidation": "L0 Static for archive graph parsing, L3 Live Player for true vehicle behavior"
+    },
+    "applicator.spawnItemPolicy": {
+      "status": "research",
+      "minimumValidation": "L3 Live Player plus L5 Negative"
+    }
+  }
+}

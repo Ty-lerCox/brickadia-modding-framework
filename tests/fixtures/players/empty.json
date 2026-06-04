@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "case": "empty",
+  "description": "Headless server with no connected players.",
+  "players": [],
+  "expected": {
+    "listCount": 0,
+    "findByUuid": null,
+    "validationLevel": "L2 Headless"
+  }
+}

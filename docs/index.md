@@ -1,0 +1,28 @@
+# Brickadia Modding Framework
+
+BMF is a server-side Lua modding framework for Brickadia dedicated servers.
+It runs through UE4SS and exposes Brickadia-specific APIs so server mods can be
+written without every plugin author reverse-engineering the game.
+
+Current target: Brickadia EA2 `PC-Shipping-CL13530`.
+
+## What BMF Provides
+
+- A UE4SS-loadable Lua framework package.
+- Server-side plugin discovery and lifecycle hooks.
+- Capability-gated APIs for chat, storage, commands, world helpers, and more.
+- Headless validation scripts and live-player validation notes.
+- Markdown API documentation for each public BMF surface.
+
+## Start Here
+
+- [First plugin](getting-started/first-plugin.md)
+- [Windows install](install/windows.md)
+- [API overview](api/index.md)
+- [Current status](status.md)
+
+## Project State
+
+BMF is experimental. Some APIs are static or headless validated, while a smaller
+set has live-player validation. Each API page calls out its current validation
+level where known.

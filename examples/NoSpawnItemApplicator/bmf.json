@@ -1,0 +1,5 @@
+{
+  "name": "NoSpawnItemApplicator",
+  "version": "0.1.0",
+  "description": "Plans a default-role policy that keeps applicator access but forbids spawn-item permission."
+}

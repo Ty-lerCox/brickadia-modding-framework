@@ -1,0 +1,177 @@
+# Commands API
+
+BMF has a small server-console command registry for headless administration.
+Commands are registered through UE4SS `RegisterConsoleCommandGlobalHandler` when
+that helper is available. The current headless bridge route is:
+
+```text
+Omegga.Bridge.BMF bmf.status
+```
+
+That route queues a request under `Mods/BMF/runtime/commands`. The BMF command
+worker dispatches the command and writes a matching `.response.txt` file with
+console-style output.
+
+## Built-In Commands
+
+- `bmf.status`: prints BMF health, version, loaded plugin count, and runtime
+  artifact paths.
+- `bmf.health`: alias of `bmf.status` for automation that expects an explicit
+  health command.
+- `bmf.version`: prints the BMF runtime version, target Brickadia build,
+  Windows dedicated-server platform, server executable, compatibility status,
+  and build-detection mode.
+- `bmf.plugins`: lists loaded BMF plugins and plugin error count.
+- `bmf.commands`: lists registered BMF console commands.
+- `bmf.load`: loads BMF plugins from disk without restarting the server.
+- `bmf.unload`: unloads currently loaded BMF plugins, removing plugin-owned
+  commands and event handlers.
+- `bmf.reload`: reloads BMF plugins from disk.
+- `bmf.server.status`: prints structured BMF server/runtime status as
+  key/value lines.
+- `bmf.server.save name=<world>`: saves the current running world through
+  `BMF.server.save`.
+- `bmf.server.shutdown confirm=BMF_SHUTDOWN [delayms=<ms>] [reason=<text>]`:
+  attempts a guarded graceful server exit. Without the exact confirmation token
+  it returns `CONFIRMATION_REQUIRED`; on CL13530 the confirmed path currently
+  returns `SHUTDOWN_UNAVAILABLE` with `executor_code=CONSOLE_EXEC_FAILED`.
+- `bmf.chat.broadcast message=<text>`: broadcasts a server chat message through
+  `BMF.chat.broadcast`. Headless validation proves command acceptance only.
+- `bmf.players.list`: prints the current BMF player adapter count. On a
+  no-player headless server this should safely report `players_count=0`.
+- `bmf.minigames.list`: runs the safe minigame list command through
+  `BMF.minigames.list`.
+- `bmf.minigames.loadpreset name=<preset> [owner=<name>]`: runs
+  `BMF.minigames.loadPreset`.
+- `bmf.minigames.savepreset index=<n> name=<preset>`: runs
+  `BMF.minigames.savePreset`.
+- `bmf.minigames.nextround index=<n>`: runs `BMF.minigames.nextRound`.
+- `bmf.minigames.reset index=<n>`: runs `BMF.minigames.reset`.
+- `bmf.minigames.delete index=<n>`: runs `BMF.minigames.delete`.
+- `bmf.world.saveas name=<world>`: saves the current running world as a named
+  `.brdb`.
+- `bmf.prefabs.loadbrz source=<file.brz> name=<staged-world> x=<x> y=<y>
+  z=<z> yaw=<yaw>`: loads a BRZ-derived world that has already been staged into
+  Brickadia `Saved/Worlds` by `scripts/stage-brz-prefab.ps1`.
+- `bmf.prefabs.loadbrdb name=<staged-world> x=<x> y=<y> z=<z> yaw=<yaw>`:
+  loads an already staged `.brdb` world bundle through `BMF.prefabs.loadBrdb`.
+- `bmf.vehicles.spawnset prefix=<world-prefix> count=<n> startX=<x> stepX=<x>
+  y=<y> z=<z> yaw=<yaw>`: loads a pre-staged vehicle spawn set through
+  `BMF.vehicles.spawnSet`.
+- `bmf.vehicles.snapshot name=<world>`: saves the current running world through
+  BMF so external tooling can parse and render vehicle inventory.
+
+These commands are intended for server console or bridge `console.exec` use, not
+player chat. Chat-command routing still requires player identity and chat
+interception validation.
+
+Role-based command access can be evaluated with
+`BMF.permissions.evaluateCommandAccess(policy, actor, command)`. That helper is
+documented in `docs/api/permissions.md` and is intentionally evaluator-only for
+now; `BMF.commands.dispatch` does not enforce player permissions until a live
+authenticated player command route is proven.
+
+`BMF.commands.dispatchWithAccess(policy, actor, name, args, ar)` is the opt-in
+wrapper for routes that do have actor identity. It evaluates policy first,
+prints/audits `ACCESS_DENIED` when blocked, and delegates to
+`BMF.commands.dispatch` only when allowed. Existing console dispatch behavior is
+unchanged.
+
+## `BMF.commands.register(name, description, handler)`
+
+Plugins can register additional `bmf.*` console commands:
+
+```lua
+return {
+  onLoad = function(BMF)
+    BMF.commands.register("bmf.example", "Example command.", function(args)
+      return BMF.result(true, "OK", "Example handled", {
+        lines = {
+          "args=" .. tostring(args or ""),
+        },
+      })
+    end)
+  end,
+}
+```
+
+The handler receives the raw argument text when UE4SS provides it. Return the
+standard BMF result shape and include optional `data.lines` for console output.
+The BMF command worker writes those lines to the response file and to
+`runtime/bmf.log`.
+
+Commands registered through a plugin's scoped `BMF` facade are owned by that
+plugin and are automatically removed when the plugin unloads or reloads.
+
+## `BMF.commands.dispatchWithAccess(policy, actor, name, args, ar)`
+
+Dispatch a registered command only if the command access policy allows the
+actor:
+
+```lua
+local handled = BMF.commands.dispatchWithAccess(
+  policy,
+  "11111111-1111-4111-8111-111111111111",
+  "bmf.server.save",
+  "name=NightlyBackup",
+  ar
+)
+```
+
+Denied commands are considered handled and produce console-style lines:
+
+```text
+BMF bmf.server.save ACCESS_DENIED role-missing
+actor_source=player
+actor_uuid=11111111-1111-4111-8111-111111111111
+matched_roles=
+```
+
+The wrapper writes `command.access_granted` and `command.denied` audit records.
+It is intended for future chat/staff command routing once an authenticated
+player actor is available.
+
+## Validation
+
+- `L0 Static`: package validator checks command API markers and docs.
+- `L2 Headless`: `scripts/validate-bmf-console-commands.ps1` starts a disposable
+  bridge server and invokes `bmf.status`, `bmf.health`, `bmf.version`,
+  `bmf.plugins`, `bmf.commands`, `bmf.canary`, `bmf.unload`, `bmf.load`, the
+  reloaded `bmf.canary`, and `bmf.reload` through `Omegga.Bridge.BMF`, then
+  verifies the BMF response files.
+- `L2 Headless`: `scripts/validate-bmf-admin-commands.ps1` invokes
+  `bmf.players.list`, `bmf.chat.broadcast`, and `bmf.minigames.list` through the
+  same command worker.
+- `L2 Headless + L5 Negative`:
+  `scripts/validate-bmf-minigame-commands.ps1` invokes minigame lifecycle
+  command routes and proves invalid preset/index rejection.
+- `L2 Headless`: `scripts/validate-bmf-vehicle-spawn-set-command.ps1` stages
+  vehicle worlds, invokes `bmf.vehicles.spawnset`, invokes `bmf.world.saveas`,
+  then parses the saved world and exports a matched vehicle inventory.
+- `L2 Headless`: `scripts/validate-bmf-vehicle-snapshot-command.ps1` stages and
+  spawns vehicles, invokes `bmf.vehicles.snapshot`, then parses the saved world
+  and exports the matched car inventory.
+- `L2 Headless`: `scripts/validate-bmf-prefab-command.ps1` stages `Car.brz`,
+  invokes `bmf.prefabs.loadbrz`, invokes `bmf.world.saveas`, then parses the
+  saved world and exports a one-car inventory text report.
+- `L2 Headless`: `scripts/validate-bmf-prefab-brdb-command.ps1` stages the
+  known `threecars.brdb` fixture, invokes `bmf.prefabs.loadbrdb`, invokes
+  `bmf.world.saveas`, then parses the saved world and exports a three-car
+  inventory text report.
+- `L2 Headless + L5 Negative`:
+  `scripts/validate-bmf-server-shutdown.ps1` proves
+  `bmf.server.shutdown` refuses to run without `confirm=BMF_SHUTDOWN`, then
+  proves the confirmed CL13530 console-manager exit path fails safely with
+  `SHUTDOWN_UNAVAILABLE` and an audit record.
+- `L2 Headless`: `scripts/validate-bmf-plugin-command-cleanup.ps1` proves a
+  plugin command works before reload and returns `UNKNOWN_COMMAND` after the
+  plugin directory is removed and BMF reloads.
+- `L2 Headless + L5 Negative`:
+  `scripts/validate-bmf-command-access-policy.ps1` proves role/default/console
+  command access decisions from file-shaped assignment data.
+- `L2 Headless + L5 Negative`:
+  `scripts/validate-bmf-command-dispatch-access.ps1` proves opt-in
+  access-checked dispatch, denial output, console allow, invalid command
+  rejection, and grant/deny audit records.
+- `L3 Live Player`: required before mapping these commands into chat commands
+  or player-authenticated staff commands.

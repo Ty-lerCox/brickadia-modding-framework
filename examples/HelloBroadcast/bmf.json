@@ -1,0 +1,7 @@
+{
+  "name": "HelloBroadcast",
+  "version": "0.1.0",
+  "author": "BMF",
+  "description": "Broadcasts a message when the plugin loads.",
+  "capabilities": ["chat.broadcast"]
+}

@@ -1,0 +1,9 @@
+{
+  "name": "LoadThreeCars",
+  "version": "0.1.0",
+  "description": "Loads a staged three-car BRDB additively, then saves the world.",
+  "capabilities": [
+    "world.loadAdditive",
+    "world.saveAs"
+  ]
+}

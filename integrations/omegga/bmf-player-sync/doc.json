@@ -1,0 +1,18 @@
+{
+  "name": "BMF Player Sync",
+  "description": "Feeds Omegga player identity records into the Brickadia Modding Framework player cache.",
+  "author": "BMF",
+  "config": {
+    "commandDir": {
+      "description": "Path to Mods/BMF/runtime/commands. If blank, OMEGGA_BMF_COMMAND_DIR or OMEGGA_BMF_RUNTIME_DIR is used.",
+      "default": "",
+      "type": "string"
+    },
+    "syncDelayMs": {
+      "description": "Debounce delay before writing a sync request after player list changes.",
+      "default": 250,
+      "type": "number"
+    }
+  },
+  "commands": []
+}

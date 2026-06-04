@@ -1,7 +1,10 @@
 # Players API
 
-BMF player APIs are split between wrapper behavior that can be validated with
-static fixtures and runtime behavior that requires a connected Brickadia player.
+BMF player APIs use safe normalized records. The primary live identity path is
+BMF-native: configure `brickadiaSavedDir` and BMF will read Brickadia's own
+`Saved/Logs/Brickadia.log` plus `Saved/Server/PlayerNameCache.json`. The
+external `runtime/players.json` cache remains as an optional adapter path for
+Omegga or another launcher/test harness.
 
 ## `BMF.players.list()`
 
@@ -14,8 +17,11 @@ if result.ok then
 end
 ```
 
-The current live adapter only proves an empty list on a headless server. Real
-identity fields still require a connected player.
+`BMF.players.list()` prefers native Brickadia saved/log identity when
+`brickadiaSavedDir` is configured. If no native players are found, it falls back
+to `runtime/players.json` when present. It also reports the live controller
+count discovered through the safe `FindFirstOf` controller route. With no native
+identity or cache, it safely returns an empty player list.
 
 Server-console command route:
 
@@ -24,8 +30,39 @@ Omegga.Bridge.BMF bmf.players.list
 ```
 
 On a headless no-player server, the current command canary expects
-`players_count=0`. This is a safety proof that the API does not require a
-persisting player controller for the empty-list case.
+`players_count=0`. With an identity cache, the command also prints
+`known_players_count`, `live_controllers_count`, and one `player_<n>=...` line
+per known player.
+
+## `BMF.players.sync(records, options)`
+
+Syncs safe external records into `runtime/players.json`. This is an optional
+fallback/integration route for Omegga or another launcher-side adapter to feed
+BMF usernames, display names, UUIDs, controller paths, and player-state paths
+without reading live UE4SS properties. BMF core does not require this cache when
+the native Brickadia saved/log adapter is configured.
+
+Omegga raw player arrays are accepted:
+
+```lua
+BMF.players.sync({
+  { "OriginalBuilder", "Build Lead", "11111111-1111-4111-8111-111111111111", "BP_PlayerController_C_1073741824", "BP_PlayerState_C_2147483648" }
+}, {
+  source = "omegga.players.raw",
+  adapter = "omegga-cache"
+})
+```
+
+Server-console command route:
+
+```text
+Omegga.Bridge.BMF bmf.players.sync players=[["OriginalBuilder","Build Lead","11111111-1111-4111-8111-111111111111","BP_PlayerController_C_1073741824","BP_PlayerState_C_2147483648"]]
+```
+
+The optional Omegga feeder lives at
+`integrations/omegga/bmf-player-sync/`. Configure its `commandDir` to the active
+`Mods/BMF/runtime/commands` directory, or set `OMEGGA_BMF_COMMAND_DIR`, and it
+will queue this sync automatically on Omegga player-list changes.
 
 ## `BMF.players.normalize(record)`
 
@@ -127,16 +164,66 @@ Server-console command route:
 Omegga.Bridge.BMF bmf.players.getname query=<uuid-or-name>
 ```
 
+## `BMF.players.summary(player)`
+
+Resolves one cached player and includes lobby counts:
+
+```lua
+local summary = BMF.players.summary("OriginalBuilder")
+if summary.ok then
+  BMF.log("username=" .. summary.data.username)
+  BMF.log("known players=" .. tostring(summary.data.knownPlayerCount))
+  BMF.log("live controllers=" .. tostring(summary.data.liveControllerCount))
+end
+```
+
+If the cache contains exactly one player, an empty query resolves that one
+record. Otherwise a query is required.
+
+Server-console command route:
+
+```text
+Omegga.Bridge.BMF bmf.players.summary target=OriginalBuilder
+```
+
+## `BMF.players.whisperSummary(player)`
+
+Builds a compact summary and sends it through `BMF.chat.whisper`:
+
+```lua
+BMF.players.whisperSummary("OriginalBuilder")
+```
+
+The whispered text is intentionally simple:
+
+```text
+BMF player summary: username=OriginalBuilder displayName=Build Lead id=11111111-1111-4111-8111-111111111111 knownPlayers=1 liveControllers=1
+```
+
+Server-console command route:
+
+```text
+Omegga.Bridge.BMF bmf.players.summary target=OriginalBuilder whisper=true
+```
+
 ## Validation Split
 
 - Empty player listing can be proven at `L2 Headless`.
+- Native Brickadia saved/log identity discovery is BMF core behavior and does
+  not require Omegga. It should be validated against `Brickadia.log` plus
+  `PlayerNameCache.json` fixtures and then confirmed with `L3 Live Player`.
+- Cache sync, normalization, summary formatting, and lookup can be proven from
+  `L0 Static` and `L2 Headless` command-worker tests.
 - Name normalization, query matching, missing-field handling, and permission map
   interpretation can be tested with `L0 Static` fixtures.
 - `scripts/validate-bmf-player-messaging.ps1` proves direct-record name
   resolution, exact lookup, UUID lookup, partial display-name lookup, and
   empty-server `PLAYER_NOT_FOUND` command behavior.
-- Real UUID, username, display name, health, position, pawn, controller, and
-  role-effect reads require `L3 Live Player`.
+- Real UUID, username, and display name can be supplied by native Brickadia logs
+  when `brickadiaSavedDir` is configured. Controller path and player-state path
+  mapping can still be supplied by optional adapters until BMF has native
+  controller-to-identity binding. Health, position, pawn, and role-effect reads
+  still require separate `L3 Live Player` validation.
 - Whisper delivery, join/leave events, health mutation, avatar mutation, and
   tool policy require `L3 Live Player` or higher.
 

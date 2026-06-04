@@ -98,18 +98,18 @@
     },
     "chat.broadcast": {
       "status": "live-player-ui-confirmed",
-      "minimumValidation": "L3 Live Player UI confirmed for ClientPushChatMessage fanout; L2 Headless for legacy fallback command acceptance only",
-      "notes": "BMF.chat.broadcast now prefers one ClientPushChatMessage call per unique live PlayerController and reports deliveredCount, attemptedCount, targets, and deliveryMode. Legacy Chat.Broadcast is fallback-only and does not claim visible delivery."
+      "minimumValidation": "L3 Live Player UI confirmed for ClientPushChatMessage to a live PlayerController; L2 Headless for legacy fallback command acceptance only",
+      "notes": "BMF.chat.broadcast now prefers ClientPushChatMessage on a live PlayerController and reports deliveredCount, attemptedCount, targets, and deliveryMode. The validated CL13530 route avoids PlayerState/PlayerArray property reads because those crashed UE4SS while pushing struct properties into Lua. Legacy Chat.Broadcast is fallback-only and does not claim visible delivery."
     },
     "chat.privateMessaging": {
       "status": "single-live-player-ui-confirmed",
-      "minimumValidation": "L3 Live Player UI confirmed for one matched controller; two-player negative targeting still pending",
-      "notes": "BMF.chat.whisper resolves a live target by player-ish query and sends ClientPushChatMessage to that controller. BMF.chat.statusMessage still shares the private-message route but has not been separately UI-validated as status-specific feedback."
+      "minimumValidation": "L3 Live Player UI confirmed for one live controller; safe identity matching and two-player negative targeting still pending",
+      "notes": "BMF.chat.whisper sends ClientPushChatMessage to the single live controller when exactly one controller is available. Live name/UUID matching waits for a safe identity adapter because direct PlayerState reflection is not validated. BMF.chat.statusMessage still shares the private-message route but has not been separately UI-validated as status-specific feedback."
     },
     "players.list": {
-      "status": "headless-empty-safe",
-      "minimumValidation": "L2 Headless for empty list safety, L3 Live Player for identity fields",
-      "notes": "The bmf.players.list command currently proves the no-player adapter returns players_count=0 without requiring a player controller."
+      "status": "cache-backed-and-headless-safe",
+      "minimumValidation": "L2 Headless for empty list safety and cache parsing; L3 Live Player for Omegga-fed identity plus visible whisper summary",
+      "notes": "BMF.players.list reads the safe runtime/players.json cache when present and reports knownPlayerCount plus liveControllerCount. With no cache it still returns players_count=0 without requiring a player controller."
     },
     "server.settingsPatch": {
       "status": "file-backed",
@@ -120,9 +120,9 @@
       "minimumValidation": "L0 Static for shape handling, L3 Live Player for real adapter records"
     },
     "players.lookup": {
-      "status": "fixture-proven-and-headless-negative",
-      "minimumValidation": "L0 Fixture for exact/partial lookup and getName on synthetic records; L2 Headless for PLAYER_NOT_FOUND on empty current-list lookups; L3 Live Player for real identity fields",
-      "notes": "BMF.players.find supports provided records and current-list lookup. BMF.players.resolve and BMF.players.getName normalize direct records without touching unsafe live objects."
+      "status": "fixture-proven-and-cache-backed",
+      "minimumValidation": "L0 Fixture for exact/partial lookup and getName on synthetic records; L2 Headless for PLAYER_NOT_FOUND on empty current-list lookups; L3 Live Player for Omegga-fed identity summary whisper",
+      "notes": "BMF.players.sync accepts external/Omegga raw player records, BMF.players.find supports provided records and current-list lookup, and BMF.players.summary reports username/display/id plus known-player and live-controller counts without touching unsafe live PlayerState reflection."
     },
     "commands.console": {
       "status": "headless-proven",

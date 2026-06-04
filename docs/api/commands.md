@@ -39,6 +39,11 @@ console-style output.
   `BMF.chat.broadcast`. Headless validation proves command acceptance only.
 - `bmf.players.list`: prints the current BMF player adapter count. On a
   no-player headless server this should safely report `players_count=0`.
+- `bmf.players.sync players=<json>`: syncs safe external/Omegga player identity
+  records into `runtime/players.json`.
+- `bmf.players.summary target=<uuid-or-name> [whisper=true]`: resolves one
+  cached player, prints username/display/id plus known-player and live-controller
+  counts, and optionally whispers that summary to the target.
 - `bmf.minigames.list`: runs the safe minigame list command through
   `BMF.minigames.list`.
 - `bmf.minigames.loadpreset name=<preset> [owner=<name>]`: runs

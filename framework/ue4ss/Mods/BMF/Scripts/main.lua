@@ -10,6 +10,7 @@ local EVENT_LOG_PATH = RUNTIME_DIR .. "/events.jsonl"
 local AUDIT_LOG_PATH = RUNTIME_DIR .. "/audit.jsonl"
 local PLUGIN_LOG_DIR = RUNTIME_DIR .. "/logs/plugins"
 local COMMAND_DIR = RUNTIME_DIR .. "/commands"
+local PLAYER_CACHE_PATH = RUNTIME_DIR .. "/players.json"
 local TARGET_BRICKADIA_BUILD = "PC-Shipping-CL13530"
 local TARGET_BRICKADIA_NAME = "Brickadia EA2"
 local TARGET_SERVER_EXECUTABLE = "BrickadiaServer-Win64-Shipping.exe"
@@ -36,6 +37,8 @@ local state = {
   commands = {},
   console_command_callbacks = {},
   command_worker_started = false,
+  player_cache = nil,
+  player_cache_error = "",
   server_ready = false,
   server_ready_data = nil,
   plugin_tick_timer_id = nil,
@@ -48,6 +51,7 @@ local state = {
     pluginWatchdogEnabled = true,
     pluginWatchdogMaxErrors = 3,
     allowPluginUnsafeGlobals = false,
+    brickadiaSavedDir = "",
   },
 }
 
@@ -1013,11 +1017,14 @@ API_REGISTRY = {
   { name = "BMF.chat.broadcast", namespace = "chat", kind = "function", stability = "experimental", risk = "medium", validation = "L3 Live Player UI confirmed", requiresPlayer = false, capability = "chat.broadcast", summary = "Broadcasts by fanning out ClientPushChatMessage once per live player controller." },
   { name = "BMF.chat.whisper", namespace = "chat", kind = "function", stability = "experimental", risk = "live-player", validation = "L3 Live Player UI confirmed with one local player; two-player targeting pending", requiresPlayer = true, capability = "chat.whisper", summary = "Sends ClientPushChatMessage to one matched live player controller." },
   { name = "BMF.chat.statusMessage", namespace = "chat", kind = "function", stability = "scaffold", risk = "live-player", validation = "L2 Headless + L0 Fixture; L3 Live Player for delivery", requiresPlayer = true, capability = "chat.statusMessage", summary = "Private status-message scaffold; visible delivery unproven." },
-  { name = "BMF.players.list", namespace = "players", kind = "function", stability = "scaffold", risk = "live-player", validation = "L2 Headless empty adapter; L3 Live Player for identity", requiresPlayer = true, capability = "", summary = "Safe empty adapter until live player fields are proven." },
+  { name = "BMF.players.sync", namespace = "players", kind = "function", stability = "experimental", risk = "low", validation = "L0 Static + L2 Headless; optional adapter cache path", requiresPlayer = false, capability = "", summary = "Sync optional external player identity records into the BMF cache." },
+  { name = "BMF.players.list", namespace = "players", kind = "function", stability = "experimental", risk = "low", validation = "L2 Headless empty adapter; L3 Live Player for native Brickadia log identity", requiresPlayer = false, capability = "", summary = "List safe player identity records and live controller count." },
   { name = "BMF.players.normalize", namespace = "players", kind = "function", stability = "stable", risk = "low", validation = "L0 Fixture", requiresPlayer = false, capability = "", summary = "Normalize synthetic/player record shape." },
   { name = "BMF.players.find", namespace = "players", kind = "function", stability = "scaffold", risk = "live-player", validation = "L0 Fixture + L2 Headless negative; L3 Live Player for real records", requiresPlayer = true, capability = "", summary = "Fixture-proven lookup plus empty live adapter safety." },
   { name = "BMF.players.resolve", namespace = "players", kind = "function", stability = "scaffold", risk = "live-player", validation = "L0 Fixture + L2 Headless negative; L3 Live Player for real records", requiresPlayer = true, capability = "", summary = "Resolve direct or current-list player query." },
   { name = "BMF.players.getName", namespace = "players", kind = "function", stability = "scaffold", risk = "live-player", validation = "L0 Fixture + L2 Headless negative; L3 Live Player for real records", requiresPlayer = true, capability = "", summary = "Return normalized identity fields." },
+  { name = "BMF.players.summary", namespace = "players", kind = "function", stability = "experimental", risk = "low", validation = "L0 Static + L2 Headless; L3 Live Player for whispered delivery", requiresPlayer = false, capability = "", summary = "Resolve one player and include known-player/live-controller counts." },
+  { name = "BMF.players.whisperSummary", namespace = "players", kind = "function", stability = "experimental", risk = "live-player", validation = "L0 Static + L3 Live Player for visible delivery", requiresPlayer = true, capability = "chat.whisper", summary = "Whisper a cached identity summary back to the selected player." },
   { name = "BMF.permissions.describeRole", namespace = "permissions", kind = "function", stability = "stable", risk = "low", validation = "L0 Fixture + L2 Headless", requiresPlayer = false, capability = "", summary = "Normalize a RoleSetup2-style role permission map." },
   { name = "BMF.permissions.evaluateNoSpawnItemApplicator", namespace = "permissions", kind = "function", stability = "stable", risk = "medium", validation = "L0 Fixture + L2 Headless; L3 Live Player + L5 Negative for runtime exploit denial", requiresPlayer = false, capability = "", summary = "Evaluate the default-role policy that keeps applicator access but forbids spawn items." },
   { name = "BMF.permissions.describeRoleAssignments", namespace = "permissions", kind = "function", stability = "stable", risk = "low", validation = "L0 Fixture + L2 Headless", requiresPlayer = false, capability = "", summary = "Normalize RoleAssignments.json-style player role records." },
@@ -2861,6 +2868,11 @@ local function register_builtin_commands()
     if broadcast.data then
       lines[#lines + 1] = "executor=" .. tostring(broadcast.data.executor or "")
       lines[#lines + 1] = "command=" .. tostring(broadcast.data.command or "")
+      lines[#lines + 1] = "delivered=" .. tostring(broadcast.data.delivered or false)
+      lines[#lines + 1] = "delivered_count=" .. tostring(broadcast.data.deliveredCount or 0)
+      lines[#lines + 1] = "attempted_count=" .. tostring(broadcast.data.attemptedCount or 0)
+      lines[#lines + 1] = "delivery_mode=" .. tostring(broadcast.data.deliveryMode or "")
+      lines[#lines + 1] = "validation=" .. tostring(broadcast.data.validation or "")
     end
     broadcast.data.lines = lines
     return broadcast
@@ -2878,8 +2890,16 @@ local function register_builtin_commands()
     }
     if whispered.data then
       lines[#lines + 1] = "delivered=" .. tostring(whispered.data.delivered or false)
-      lines[#lines + 1] = "adapter=" .. tostring(whispered.data.adapter or "")
-      lines[#lines + 1] = "validation_required=" .. tostring(whispered.data.validationRequired or "")
+      lines[#lines + 1] = "delivered_count=" .. tostring(whispered.data.deliveredCount or 0)
+      lines[#lines + 1] = "attempted_count=" .. tostring(whispered.data.attemptedCount or 0)
+      lines[#lines + 1] = "delivery_mode=" .. tostring(whispered.data.deliveryMode or "")
+      lines[#lines + 1] = "validation=" .. tostring(whispered.data.validation or "")
+      if whispered.data.adapter ~= nil then
+        lines[#lines + 1] = "adapter=" .. tostring(whispered.data.adapter or "")
+      end
+      if whispered.data.validationRequired ~= nil then
+        lines[#lines + 1] = "validation_required=" .. tostring(whispered.data.validationRequired or "")
+      end
     end
     whispered.data = whispered.data or {}
     whispered.data.lines = lines
@@ -2898,8 +2918,16 @@ local function register_builtin_commands()
     }
     if sent.data then
       lines[#lines + 1] = "delivered=" .. tostring(sent.data.delivered or false)
-      lines[#lines + 1] = "adapter=" .. tostring(sent.data.adapter or "")
-      lines[#lines + 1] = "validation_required=" .. tostring(sent.data.validationRequired or "")
+      lines[#lines + 1] = "delivered_count=" .. tostring(sent.data.deliveredCount or 0)
+      lines[#lines + 1] = "attempted_count=" .. tostring(sent.data.attemptedCount or 0)
+      lines[#lines + 1] = "delivery_mode=" .. tostring(sent.data.deliveryMode or "")
+      lines[#lines + 1] = "validation=" .. tostring(sent.data.validation or "")
+      if sent.data.adapter ~= nil then
+        lines[#lines + 1] = "adapter=" .. tostring(sent.data.adapter or "")
+      end
+      if sent.data.validationRequired ~= nil then
+        lines[#lines + 1] = "validation_required=" .. tostring(sent.data.validationRequired or "")
+      end
     end
     sent.data = sent.data or {}
     sent.data.lines = lines
@@ -2915,10 +2943,92 @@ local function register_builtin_commands()
 
     local lines = {
       "players_count=" .. tostring(#players),
-      "adapter=headless-empty",
+      "known_players_count=" .. tostring((listed.data and listed.data.knownPlayerCount) or #players),
+      "live_controllers_count=" .. tostring((listed.data and listed.data.liveControllerCount) or 0),
+      "adapter=" .. tostring((listed.data and listed.data.adapter) or "headless-empty"),
+      "cache_path=" .. tostring((listed.data and listed.data.cachePath) or PLAYER_CACHE_PATH),
     }
+    if listed.data and listed.data.updatedAt then
+      lines[#lines + 1] = "updated_at=" .. tostring(listed.data.updatedAt or "")
+    end
+    if listed.data and listed.data.cacheError and tostring(listed.data.cacheError) ~= "" then
+      lines[#lines + 1] = "cache_error=" .. tostring(listed.data.cacheError)
+    end
+    for index, player in ipairs(players) do
+      lines[#lines + 1] =
+        "player_" .. tostring(index) ..
+        "=" .. tostring(player.uuid or player.id or "") ..
+        "|username=" .. tostring(player.username or "") ..
+        "|display_name=" .. tostring(player.displayName or "") ..
+        "|controller=" .. tostring(player.controllerPath or "")
+    end
     listed.data.lines = lines
     return listed
+  end)
+
+  BMF.commands.register("bmf.players.sync", "Sync safe external player identity records into BMF.", function(args)
+    local text = tostring(args or "")
+    local options = parse_command_options(args)
+    local raw = ""
+    local source = tostring(options.source or "command")
+    local adapter = tostring(options.adapter or "external-cache")
+
+    if options.file and tostring(options.file) ~= "" then
+      raw = read_file(tostring(options.file)) or ""
+      source = "file:" .. tostring(options.file)
+    else
+      raw = text:match("json=(.*)$") or text:match("players=(.*)$") or ""
+    end
+
+    if trim_string(raw) == "" then
+      local response = result(false, "INVALID_OPTIONS", "players JSON or file is required", {
+        lines = {
+          "source=" .. source,
+          "adapter=" .. adapter,
+          "cache_path=" .. PLAYER_CACHE_PATH,
+        },
+      })
+      return response
+    end
+
+    local decoded, err = json_decode(raw)
+    if err ~= nil then
+      local response = result(false, "JSON_PARSE_FAILED", "player sync JSON could not be parsed", {
+        error = err,
+        lines = {
+          "source=" .. source,
+          "adapter=" .. adapter,
+          "error=" .. tostring(err),
+          "cache_path=" .. PLAYER_CACHE_PATH,
+        },
+      })
+      return response
+    end
+
+    local records = decoded
+    if type(decoded) == "table" and type(decoded.players) == "table" then
+      records = decoded.players
+      source = tostring(decoded.source or source)
+      adapter = tostring(decoded.adapter or adapter)
+    end
+
+    local synced = BMF.players.sync(records, {
+      source = source,
+      adapter = adapter,
+    })
+    local lines = {
+      "source=" .. source,
+      "adapter=" .. adapter,
+      "players_count=" .. tostring((synced.data and synced.data.playerCount) or 0),
+      "invalid_count=" .. tostring((synced.data and synced.data.invalidCount) or 0),
+      "cache_path=" .. tostring((synced.data and synced.data.cachePath) or PLAYER_CACHE_PATH),
+    }
+    if synced.data and synced.data.updatedAt then
+      lines[#lines + 1] = "updated_at=" .. tostring(synced.data.updatedAt or "")
+    end
+    synced.data = synced.data or {}
+    synced.data.lines = lines
+    return synced
   end)
 
   BMF.commands.register("bmf.players.find", "Find a known BMF player record.", function(args)
@@ -2959,6 +3069,42 @@ local function register_builtin_commands()
     named.data = named.data or {}
     named.data.lines = lines
     return named
+  end)
+
+  BMF.commands.register("bmf.players.summary", "Resolve and optionally whisper a player identity summary.", function(args)
+    local options = parse_command_options(args)
+    local target = trim_string(options.target or options.query or table.concat(options._positional or {}, " "))
+    local whisper = tostring(options.whisper or options.tell or ""):lower()
+    local should_whisper = whisper == "true" or whisper == "1" or whisper == "yes"
+    local summarized = should_whisper and BMF.players.whisperSummary(target) or BMF.players.summary(target)
+    local data = summarized.data or {}
+    local summary_data = data.summary or data
+    local player = summary_data.player or data.player or {}
+
+    local lines = {
+      "target=" .. target,
+      "code=" .. tostring(summarized.code or ""),
+      "player_uuid=" .. tostring(player.uuid or player.id or ""),
+      "username=" .. tostring(player.username or ""),
+      "player_name=" .. tostring(player.playerName or ""),
+      "display_name=" .. tostring(player.displayName or ""),
+      "original_name=" .. tostring(player.originalName or ""),
+      "known_players_count=" .. tostring(summary_data.knownPlayerCount or summary_data.playerCount or 0),
+      "live_controllers_count=" .. tostring(summary_data.liveControllerCount or 0),
+      "adapter=" .. tostring(summary_data.adapter or data.adapter or ""),
+    }
+    if data.message or summary_data.message then
+      lines[#lines + 1] = "message=" .. tostring(data.message or summary_data.message or "")
+    end
+    if should_whisper then
+      lines[#lines + 1] = "whispered=" .. tostring(data.delivered == true)
+      lines[#lines + 1] = "whisper_code=" .. tostring(data.whisperCode or "")
+      lines[#lines + 1] = "delivered_count=" .. tostring(data.deliveredCount or 0)
+      lines[#lines + 1] = "delivery_mode=" .. tostring(data.deliveryMode or "")
+    end
+    summarized.data = summarized.data or {}
+    summarized.data.lines = lines
+    return summarized
   end)
 
   BMF.commands.register("bmf.minigames.list", "List minigames through the server console.", function()
@@ -4659,8 +4805,6 @@ end
 BMF.chat = {}
 
 local LIVE_CHAT_CONTROLLER_CLASSES = { "PlayerController", "BRPlayerController", "BP_PlayerController_C" }
-local LIVE_CHAT_PLAYER_STATE_CLASSES = { "BRPlayerState", "PlayerState", "BP_PlayerState_C" }
-local LIVE_CHAT_NAME_PROPERTIES = { "UserName", "PlayerNamePrivate", "PlayerName", "DisplayName" }
 
 local function live_chat_is_valid_object(object)
   if object == nil then
@@ -4673,20 +4817,6 @@ local function live_chat_is_valid_object(object)
     return object:IsValid()
   end)
   return ok and is_valid == true
-end
-
-local function live_chat_value_to_string(value)
-  if value == nil then
-    return ""
-  end
-  if type(value) == "string" or type(value) == "number" or type(value) == "boolean" then
-    return tostring(value)
-  end
-  local ok, text = pcall(tostring, value)
-  if ok then
-    return tostring(text or "")
-  end
-  return ""
 end
 
 local function live_chat_object_key(object, fallback)
@@ -4709,110 +4839,66 @@ local function live_chat_object_label(object, fallback)
   return tostring(fallback or "object")
 end
 
-local function live_chat_get_property(object, property_name)
-  if not live_chat_is_valid_object(object) then
-    return nil
-  end
-  if type(object.GetPropertyValue) == "function" then
-    local ok, value = pcall(function()
-      return object:GetPropertyValue(property_name)
+local function live_chat_object_full_name(object)
+  if live_chat_is_valid_object(object) and type(object.GetFullName) == "function" then
+    local ok, full_name = pcall(function()
+      return object:GetFullName()
     end)
-    if ok and value ~= nil then
-      return value
+    if ok and full_name ~= nil then
+      return tostring(full_name)
     end
   end
-  local ok, value = pcall(function()
-    return object[property_name]
-  end)
-  if ok then
-    return value
+  return ""
+end
+
+local function live_chat_find_controller_by_name(object_name)
+  local name = trim_string(tostring(object_name or ""))
+  if name == "" then
+    return nil
   end
+
+  if type(FindObject) == "function" then
+    local ok, object = pcall(FindObject, nil, name, nil, nil)
+    if ok and live_chat_is_valid_object(object) then
+      return object
+    end
+
+    for _, class_name in ipairs(LIVE_CHAT_CONTROLLER_CLASSES) do
+      ok, object = pcall(FindObject, class_name, name, nil, nil)
+      if ok and live_chat_is_valid_object(object) then
+        return object
+      end
+    end
+  end
+
+  if type(StaticFindObject) == "function" then
+    local ok, object = pcall(StaticFindObject, name)
+    if ok and live_chat_is_valid_object(object) then
+      return object
+    end
+  end
+
   return nil
 end
 
-local function live_chat_first_property(object, property_names)
-  for _, property_name in ipairs(property_names or {}) do
-    local value = live_chat_get_property(object, property_name)
-    if value ~= nil then
-      return value, property_name
-    end
-  end
-  return nil, nil
-end
-
-local function live_chat_player_name(player_state)
-  return trim_string(live_chat_value_to_string(select(1, live_chat_first_property(player_state, LIVE_CHAT_NAME_PROPERTIES))))
-end
-
-local function live_chat_collect_player_states()
-  local results = {}
-  local seen = {}
-
-  local function add_player_state(player_state)
-    if not live_chat_is_valid_object(player_state) then
-      return
-    end
-    local key = live_chat_object_key(player_state, tostring(player_state))
-    if seen[key] then
-      return
-    end
-    local owner = live_chat_get_property(player_state, "Owner")
-    if live_chat_player_name(player_state) == "" and not live_chat_is_valid_object(owner) then
-      return
-    end
-    seen[key] = true
-    results[#results + 1] = player_state
+local function live_chat_cached_players()
+  local raw = read_file(PLAYER_CACHE_PATH)
+  if not raw or trim_string(raw) == "" then
+    return {}
   end
 
-  local game_state = nil
-  if type(FindFirstOf) == "function" then
-    for _, class_name in ipairs({ "BRGameState", "GameState", "BP_GameState_C" }) do
-      local ok, found = pcall(FindFirstOf, class_name)
-      if ok and live_chat_is_valid_object(found) then
-        game_state = found
-        break
-      end
-    end
+  local cache = json_decode(raw)
+  if type(cache) ~= "table" or type(cache.players) ~= "table" then
+    return {}
   end
-
-  if live_chat_is_valid_object(game_state) then
-    local player_array = live_chat_get_property(game_state, "PlayerArray")
-    if player_array ~= nil then
-      local count_ok, player_count = pcall(function()
-        return #player_array
-      end)
-      if count_ok and type(player_count) == "number" then
-        for index = 1, player_count do
-          local ok, player_state = pcall(function()
-            return player_array[index]
-          end)
-          if ok then
-            add_player_state(player_state)
-          end
-        end
-      end
-    end
-  end
-
-  if type(FindAllOf) == "function" then
-    for _, class_name in ipairs(LIVE_CHAT_PLAYER_STATE_CLASSES) do
-      local ok, found = pcall(FindAllOf, class_name)
-      if ok and type(found) == "table" then
-        for _, player_state in ipairs(found) do
-          add_player_state(player_state)
-        end
-      end
-    end
-  end
-
-  return results
+  return cache.players
 end
 
 local function live_chat_collect_targets()
   local targets = {}
   local seen = {}
 
-  local function add_target(controller, player_state, source)
+  local function add_target(controller, source, metadata)
     if not live_chat_is_valid_object(controller) then
       return
     end
@@ -4822,50 +4908,36 @@ local function live_chat_collect_targets()
     end
     seen[key] = true
 
-    local name = live_chat_player_name(player_state)
-    local display_name = trim_string(live_chat_value_to_string(live_chat_get_property(player_state, "DisplayName")))
-    local player_id = trim_string(live_chat_value_to_string(select(1, live_chat_first_property(player_state, {
-      "UserId",
-      "UserID",
-      "UniqueId",
-      "PlayerId",
-      "PlayerID",
-      "PlayerNum",
-    }))))
-    local label = live_chat_object_label(controller, source or "player_controller")
+    metadata = type(metadata) == "table" and metadata or {}
+    local full_name = live_chat_object_full_name(controller)
+    local label = full_name ~= "" and full_name or live_chat_object_label(controller, source or "player_controller")
 
     targets[#targets + 1] = {
       controller = controller,
-      playerState = player_state,
-      name = name,
-      userName = name,
-      displayName = display_name ~= "" and display_name or name,
-      playerId = player_id,
+      name = tostring(metadata.name or metadata.playerName or metadata.username or ""),
+      userName = tostring(metadata.userName or metadata.username or metadata.playerName or ""),
+      displayName = tostring(metadata.displayName or metadata.name or metadata.username or ""),
+      playerId = tostring(metadata.uuid or metadata.id or metadata.playerId or ""),
+      controllerPath = tostring(metadata.controllerPath or ""),
+      playerStatePath = tostring(metadata.playerStatePath or ""),
       label = label,
       source = tostring(source or ""),
     }
   end
 
-  for _, player_state in ipairs(live_chat_collect_player_states()) do
-    add_target(live_chat_get_property(player_state, "Owner"), player_state, "player_state.owner")
-  end
-
-  if type(FindAllOf) == "function" then
-    for _, class_name in ipairs(LIVE_CHAT_CONTROLLER_CLASSES) do
-      local ok, found = pcall(FindAllOf, class_name)
-      if ok and type(found) == "table" then
-        for _, controller in ipairs(found) do
-          add_target(controller, live_chat_get_property(controller, "PlayerState"), "FindAllOf(" .. class_name .. ")")
-        end
-      end
+  for _, player in ipairs(live_chat_cached_players()) do
+    local controller_path = tostring(player.controllerPath or "")
+    local controller = live_chat_find_controller_by_name(controller_path)
+    if controller ~= nil then
+      add_target(controller, "player_cache.controllerPath", player)
     end
   end
 
-  if #targets == 0 and type(FindFirstOf) == "function" then
+  if type(FindFirstOf) == "function" then
     for _, class_name in ipairs(LIVE_CHAT_CONTROLLER_CLASSES) do
       local ok, controller = pcall(FindFirstOf, class_name)
       if ok then
-        add_target(controller, live_chat_get_property(controller, "PlayerState"), "FindFirstOf(" .. class_name .. ")")
+        add_target(controller, "FindFirstOf(" .. class_name .. ")")
       end
     end
   end
@@ -4879,6 +4951,8 @@ local function live_chat_target_summary(target)
     userName = tostring(target.userName or ""),
     displayName = tostring(target.displayName or ""),
     playerId = tostring(target.playerId or ""),
+    controllerPath = tostring(target.controllerPath or ""),
+    playerStatePath = tostring(target.playerStatePath or ""),
     label = tostring(target.label or ""),
     source = tostring(target.source or ""),
   }
@@ -4894,6 +4968,8 @@ local function live_chat_target_matches(target, query)
     target.userName,
     target.displayName,
     target.playerId,
+    target.controllerPath,
+    target.playerStatePath,
     target.label,
   }) do
     local text = trim_string(tostring(value or "")):lower()
@@ -4928,6 +5004,9 @@ end
 local function live_chat_resolve_target(player)
   local query = live_chat_query_text(player)
   local targets = live_chat_collect_targets()
+  if trim_string(query) ~= "" and #targets == 1 then
+    return targets[1], targets
+  end
   for _, target in ipairs(targets) do
     if live_chat_target_matches(target, query) then
       return target, targets
@@ -5041,10 +5120,289 @@ BMF.chat.broadcast = function(message)
 end
 
 BMF.players = {}
+
+local function external_player_record(record)
+  if type(record) ~= "table" then
+    return record
+  end
+
+  if record[1] ~= nil or record[2] ~= nil or record[3] ~= nil then
+    return {
+      username = tostring(record[1] or ""),
+      playerName = tostring(record[1] or ""),
+      originalName = tostring(record[1] or ""),
+      displayName = tostring(record[2] or record[1] or ""),
+      id = tostring(record[3] or ""),
+      uuid = tostring(record[3] or ""),
+      controllerPath = tostring(record[4] or ""),
+      playerStatePath = tostring(record[5] or ""),
+      controllerAvailable = trim_string(record[4] or "") ~= "",
+    }
+  end
+
+  return record
+end
+
+local function load_player_cache()
+  local raw = read_file(PLAYER_CACHE_PATH)
+  if raw == nil or trim_string(raw) == "" then
+    state.player_cache = nil
+    state.player_cache_error = ""
+    return nil, ""
+  end
+
+  local decoded, err = json_decode(raw)
+  if err ~= nil then
+    state.player_cache = nil
+    state.player_cache_error = tostring(err)
+    return nil, tostring(err)
+  end
+
+  state.player_cache = decoded
+  state.player_cache_error = ""
+  return decoded, ""
+end
+
+local function write_player_cache(cache)
+  local ok = write_file(PLAYER_CACHE_PATH, json_encode(cache or {}) .. "\n")
+  if ok then
+    state.player_cache = cache
+    state.player_cache_error = ""
+  end
+  return ok
+end
+
+local function join_path(base, child)
+  local left = tostring(base or ""):gsub("\\", "/"):gsub("/+$", "")
+  local right = tostring(child or ""):gsub("\\", "/"):gsub("^/+", "")
+  if left == "" then
+    return right
+  end
+  if right == "" then
+    return left
+  end
+  return left .. "/" .. right
+end
+
+local function configured_saved_dir()
+  local saved_dir = trim_string(state.config.brickadiaSavedDir or "")
+  if saved_dir == "" then
+    return ""
+  end
+  return saved_dir:gsub("\\", "/"):gsub("/+$", "")
+end
+
+local function load_player_name_cache(saved_dir)
+  local path = join_path(saved_dir, "Server/PlayerNameCache.json")
+  local raw = read_file(path)
+  if not raw or trim_string(raw) == "" then
+    return {}, path, "missing"
+  end
+
+  local decoded, err = json_decode(raw)
+  if err ~= nil or type(decoded) ~= "table" or type(decoded.savedPlayerNames) ~= "table" then
+    return {}, path, tostring(err or "invalid name cache")
+  end
+  return decoded.savedPlayerNames, path, ""
+end
+
+local function player_name_cache_lookup(name_cache, uuid)
+  if type(name_cache) ~= "table" then
+    return ""
+  end
+  return tostring(name_cache[tostring(uuid or "")] or "")
+end
+
+local function record_from_pending_login(pending, name_cache)
+  if type(pending) ~= "table" or not is_uuid(pending.uuid) then
+    return nil
+  end
+  local original_name = player_name_cache_lookup(name_cache, pending.uuid)
+  local username = first_string(pending.username, original_name, pending.displayName) or ""
+  local display_name = first_string(pending.displayName, username, original_name) or ""
+  return {
+    id = pending.uuid,
+    uuid = pending.uuid,
+    username = username,
+    playerName = username,
+    displayName = display_name,
+    originalName = first_string(original_name, username) or "",
+    controllerAvailable = false,
+    source = "brickadia-log",
+  }
+end
+
+local function remove_active_player_by_name(active, order, player_name)
+  local lowered = trim_string(player_name):lower()
+  if lowered == "" then
+    return
+  end
+  for uuid, player in pairs(active) do
+    for _, value in ipairs({ player.username, player.playerName, player.displayName, player.originalName }) do
+      if trim_string(value):lower() == lowered then
+        active[uuid] = nil
+        for index = #order, 1, -1 do
+          if order[index] == uuid then
+            table.remove(order, index)
+          end
+        end
+        return
+      end
+    end
+  end
+end
+
+local function parse_brickadia_log_players(saved_dir)
+  local path = join_path(saved_dir, "Logs/Brickadia.log")
+  local raw = read_file(path)
+  if not raw or trim_string(raw) == "" then
+    return {}, {
+      adapter = "brickadia-log",
+      path = path,
+      error = "missing",
+    }
+  end
+
+  local name_cache = load_player_name_cache(saved_dir)
+  local active = {}
+  local order = {}
+  local pending = nil
+
+  local function upsert_player(player)
+    if not player or not is_uuid(player.uuid) then
+      return
+    end
+    if active[player.uuid] == nil then
+      order[#order + 1] = player.uuid
+    end
+    active[player.uuid] = player
+  end
+
+  for line in raw:gmatch("[^\r\n]+") do
+    if line:find("LogServerList:%s+Auth payload valid%. Result:") then
+      pending = {}
+    elseif pending ~= nil then
+      local username = line:match("LogServerList:%s+UserName:%s*(.-)%s*$")
+      local display_name = line:match("LogServerList:%s+DisplayName:%s*(.-)%s*$")
+      local user_id = line:match("LogServerList:%s+UserId:%s*([0-9a-fA-F%-]+)")
+      if username then
+        pending.username = username
+      elseif display_name then
+        pending.displayName = display_name
+      elseif user_id then
+        pending.uuid = user_id:lower()
+      end
+    end
+
+    local joined = line:match("LogChat:%s*(.-)%s+joined the game%.")
+    if joined then
+      local player = record_from_pending_login(pending, name_cache)
+      if player ~= nil then
+        upsert_player(player)
+      end
+      pending = nil
+    end
+
+    local left = line:match("LogChat:%s*(.-)%s+left the game%.")
+    if left then
+      remove_active_player_by_name(active, order, left)
+    end
+  end
+
+  local players = {}
+  for _, uuid in ipairs(order) do
+    if active[uuid] ~= nil then
+      players[#players + 1] = active[uuid]
+    end
+  end
+
+  return players, {
+    adapter = "brickadia-log",
+    path = path,
+    error = "",
+  }
+end
+
+local function native_player_records()
+  local saved_dir = configured_saved_dir()
+  if saved_dir == "" then
+    return {}, {
+      adapter = "none",
+      source = "native-disabled",
+      error = "brickadiaSavedDir is not configured",
+    }
+  end
+
+  local players, detail = parse_brickadia_log_players(saved_dir)
+  detail = type(detail) == "table" and detail or {}
+  detail.source = "brickadia-log"
+  detail.savedDir = saved_dir
+  return players, detail
+end
+
+local function live_player_controller_count()
+  local targets = live_chat_collect_targets()
+  return #targets, targets
+end
+
+local function player_cache_records(cache)
+  if type(cache) ~= "table" then
+    return {}
+  end
+  if type(cache.players) == "table" then
+    return cache.players
+  end
+  return cache
+end
+
 BMF.players.list = function()
-  return result(true, "OK", "No live player adapter is installed yet", {
-    players = {},
-    adapter = "headless-empty",
+  local native_records, native_detail = native_player_records()
+  local cache, cache_err = load_player_cache()
+  local raw_records = #native_records > 0 and native_records or player_cache_records(cache)
+  local adapter = "headless-empty"
+  local source = ""
+  local updated_at = ""
+  local cache_path = PLAYER_CACHE_PATH
+  local cache_error = cache_err
+  if #native_records > 0 then
+    adapter = tostring(native_detail.adapter or "brickadia-log")
+    source = tostring(native_detail.source or "brickadia-log")
+    cache_path = tostring(native_detail.path or "")
+    cache_error = tostring(native_detail.error or "")
+    updated_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+  elseif type(cache) == "table" and type(cache.players) == "table" then
+    adapter = tostring(cache.adapter or "external-cache")
+    source = tostring(cache.source or "")
+    updated_at = tostring(cache.updatedAt or "")
+  elseif type(raw_records) == "table" and #raw_records > 0 then
+    adapter = "external-cache"
+  end
+
+  local normalized = BMF.players.normalizeList(raw_records)
+  local players = {}
+  local invalid = {}
+  if normalized.ok and normalized.data then
+    players = normalized.data.players or {}
+    invalid = normalized.data.invalid or {}
+  end
+  if #players == 0 then
+    adapter = "headless-empty"
+  end
+
+  local live_count = live_player_controller_count()
+  return result(true, "OK", #players > 0 and "Known player records listed" or "No cached player identity records are available", {
+    players = players,
+    invalid = invalid,
+    playerCount = #players,
+    knownPlayerCount = #players,
+    invalidCount = #invalid,
+    liveControllerCount = live_count,
+    adapter = adapter,
+    source = source,
+    updatedAt = updated_at,
+    cachePath = cache_path,
+    cacheError = cache_error,
+    native = native_detail,
   })
 end
 
@@ -5120,7 +5478,7 @@ BMF.players.normalizeList = function(records)
   local players = {}
   local invalid = {}
   for index, record in ipairs(records) do
-    local normalized = BMF.players.normalize(record)
+    local normalized = BMF.players.normalize(external_player_record(record))
     if normalized.ok then
       players[#players + 1] = normalized.data.player
     else
@@ -5136,6 +5494,57 @@ BMF.players.normalizeList = function(records)
     players = players,
     invalid = invalid,
   })
+end
+
+BMF.players.sync = function(records, options)
+  if type(records) ~= "table" then
+    return result(false, "INVALID_PLAYERS", "players array is required", {
+      cachePath = PLAYER_CACHE_PATH,
+    })
+  end
+
+  options = type(options) == "table" and options or {}
+  local normalized = BMF.players.normalizeList(records)
+  if not normalized.ok then
+    return normalized
+  end
+
+  local players = normalized.data.players or {}
+  local invalid = normalized.data.invalid or {}
+  local cache = {
+    schemaVersion = 1,
+    adapter = tostring(options.adapter or "external-cache"),
+    source = tostring(options.source or "external"),
+    updatedAt = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    players = players,
+    invalid = invalid,
+  }
+
+  local written = write_player_cache(cache)
+  local response = result(written, written and (#invalid > 0 and "PARTIAL" or "OK") or "CACHE_WRITE_FAILED", written and "Player identity cache synced" or "Player identity cache could not be written", {
+    players = players,
+    invalid = invalid,
+    playerCount = #players,
+    knownPlayerCount = #players,
+    invalidCount = #invalid,
+    adapter = cache.adapter,
+    source = cache.source,
+    updatedAt = cache.updatedAt,
+    cachePath = PLAYER_CACHE_PATH,
+  })
+  audit_record("players.sync", {
+    playerCount = #players,
+    invalidCount = #invalid,
+    adapter = cache.adapter,
+    source = cache.source,
+    cachePath = PLAYER_CACHE_PATH,
+  }, {
+    source = "framework",
+    severity = response.ok and "info" or "warn",
+    ok = response.ok,
+    code = response.code,
+  })
+  return response
 end
 
 local function player_query_text(query)
@@ -5276,6 +5685,117 @@ BMF.players.getName = function(player)
     source = resolved.data.source,
     adapter = resolved.data.adapter,
   })
+end
+
+BMF.players.summary = function(player)
+  local listed = BMF.players.list()
+  if not listed.ok then
+    return listed
+  end
+
+  local players = (listed.data and listed.data.players) or {}
+  local query = trim_string(player_query_text(player))
+  local found = nil
+  local match = ""
+
+  if query == "" and #players == 1 then
+    found = players[1]
+    match = "single-player-cache"
+  elseif query ~= "" then
+    local lookup = BMF.players.find(players, query)
+    if lookup.ok then
+      found = lookup.data.player
+      match = lookup.data.match or ""
+    else
+      lookup.data = lookup.data or {}
+      lookup.data.knownPlayerCount = #players
+      lookup.data.playerCount = #players
+      lookup.data.liveControllerCount = (listed.data and listed.data.liveControllerCount) or 0
+      lookup.data.adapter = (listed.data and listed.data.adapter) or ""
+      lookup.data.cachePath = PLAYER_CACHE_PATH
+      return lookup
+    end
+  else
+    return result(false, "PLAYER_REQUIRED", "player query is required when the cache has zero or multiple players", {
+      players = players,
+      knownPlayerCount = #players,
+      playerCount = #players,
+      liveControllerCount = (listed.data and listed.data.liveControllerCount) or 0,
+      adapter = (listed.data and listed.data.adapter) or "",
+      cachePath = PLAYER_CACHE_PATH,
+    })
+  end
+
+  local data = {
+    player = found,
+    id = found.id,
+    uuid = found.uuid,
+    username = found.username,
+    playerName = found.playerName,
+    displayName = found.displayName,
+    originalName = found.originalName,
+    match = match,
+    query = query,
+    knownPlayerCount = #players,
+    playerCount = #players,
+    liveControllerCount = (listed.data and listed.data.liveControllerCount) or 0,
+    adapter = (listed.data and listed.data.adapter) or "",
+    source = (listed.data and listed.data.source) or "",
+    updatedAt = (listed.data and listed.data.updatedAt) or "",
+    cachePath = PLAYER_CACHE_PATH,
+  }
+  return result(true, "OK", "Player summary resolved", data)
+end
+
+BMF.players.formatSummary = function(summary)
+  local data = summary or {}
+  local player = data.player or data
+  local username = first_string(player.username, player.playerName, player.originalName, player.name) or "unknown"
+  local display_name = first_string(player.displayName, player.name, username) or "unknown"
+  local player_id = first_string(player.uuid, player.id, player.playerId, player.playerID) or "unknown"
+  local known_count = tonumber(data.knownPlayerCount or data.playerCount or 0) or 0
+  local live_count = tonumber(data.liveControllerCount or 0) or 0
+  return "BMF player summary: username=" .. tostring(username) ..
+    " displayName=" .. tostring(display_name) ..
+    " id=" .. tostring(player_id) ..
+    " knownPlayers=" .. tostring(known_count) ..
+    " liveControllers=" .. tostring(live_count)
+end
+
+BMF.players.whisperSummary = function(player)
+  local summarized = BMF.players.summary(player)
+  if not summarized.ok then
+    return summarized
+  end
+
+  local message = BMF.players.formatSummary(summarized.data)
+  local whispered = BMF.chat.whisper(summarized.data.player, message)
+  local response = result(whispered.ok, whispered.code or (whispered.ok and "OK" or "ERROR"), whispered.ok and "Player summary whispered" or "Player summary resolved but whisper failed", {
+    player = summarized.data.player,
+    summary = summarized.data,
+    message = message,
+    delivered = whispered.ok == true and whispered.data and whispered.data.delivered == true,
+    deliveredCount = whispered.data and whispered.data.deliveredCount or 0,
+    attemptedCount = whispered.data and whispered.data.attemptedCount or 0,
+    deliveryMode = whispered.data and whispered.data.deliveryMode or "",
+    whisperCode = whispered.code,
+    whisper = whispered.data,
+  })
+  audit_record("players.summary.whisper", {
+    target = summarized.data.uuid,
+    username = summarized.data.username,
+    displayName = summarized.data.displayName,
+    knownPlayerCount = summarized.data.knownPlayerCount,
+    liveControllerCount = summarized.data.liveControllerCount,
+    deliveredCount = response.data.deliveredCount,
+    deliveryMode = response.data.deliveryMode,
+  }, {
+    source = "framework",
+    severity = response.ok and "info" or "warn",
+    ok = response.ok,
+    code = response.code,
+  })
+  return response
 end
 
 local function private_chat_result(kind, player, message)
@@ -5741,6 +6261,7 @@ local function read_framework_config()
     pluginWatchdogEnabled = watchdog_enabled,
     pluginWatchdogMaxErrors = math.floor(watchdog_max_errors),
     allowPluginUnsafeGlobals = parse_json_boolean_field(raw, "allowPluginUnsafeGlobals") == true,
+    brickadiaSavedDir = parse_json_string_field(raw, "brickadiaSavedDir") or "",
   }
 end
 

@@ -67,6 +67,8 @@
     "server.settings-patch.static",
     "players.mock-fixtures",
     "players.list.empty-headless-l2",
+    "players.sync.cache",
+    "players.summary.cache",
     "players.normalize.static",
     "players.find.fixture-l0",
     "players.get-name.fixture-l0",

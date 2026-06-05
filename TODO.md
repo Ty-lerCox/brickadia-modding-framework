@@ -4,6 +4,11 @@ BMF means Brickadia Modding Framework. The project goal is to provide a
 server-side Lua framework for Windows Brickadia dedicated servers, backed by
 UE4SS and Brickadia-specific reverse engineering.
 
+Direction update: BMF currently supports and depends on a BMF-compatible Omegga
+runtime for Windows server launch, UE4SS setup, command transport, server logs,
+player identity sync, live helper calls, and unattended canaries. Upstream
+Omegga is not assumed sufficient unless it includes the BMF compatibility work.
+
 This file is intentionally broad. Each item should eventually become either a
 GitHub issue, a documentation page, a canary, or a tracked research note.
 
@@ -18,6 +23,48 @@ validation levels.
 - `P2`: Important server administration or gameplay API.
 - `P3`: Larger research-heavy feature.
 - `P4`: Nice-to-have ecosystem/tooling feature.
+
+## Runtime Dependency Direction
+
+- [ ] `P0` Define the BMF-compatible Omegga runtime.
+  - Track the exact Omegga fork/build, Windows requirements, UE4SS bundle,
+    bridge mod, helper globals, environment variables, and plugin install
+    shape BMF needs.
+  - Validation: `L0 Static` manifest and docs, then `L1 Boot`.
+- [ ] `P0` Package or reference the supported Omegga runtime.
+  - BMF should not depend on an ambiguous upstream checkout.
+  - Release docs should explain whether users install a BMF-maintained Omegga
+    fork, a patched release artifact, or a future upstream Omegga build.
+  - Validation: `L0 Static`, then `L1 Boot`.
+- [ ] `P0` Keep `Omegga.Bridge.BMF` command transport supported.
+  - This is the current validated route into the BMF command worker.
+  - Add canary coverage for every public `bmf.*` command that relies on it.
+  - Validation: `L2 Headless`.
+- [ ] `P0` Keep BMF chat delivery compatible with the Omegga/UE4SS helper path.
+  - Visible chat currently depends on live `PlayerController` fanout plus
+    `CallFunctionByNameWithArguments` helper support from the compatible
+    Omegga/UE4SS bridge stack.
+  - Validation: `L3 Live Player`.
+- [ ] `P0` Keep Omegga player sync as a supported adapter.
+  - The Brickadia-log adapter is still useful, but Omegga-fed identity records
+    should remain a first-class supported source.
+  - Progress: after a full Omegga restart on June 4, 2026, the BMF Player Sync
+    adapter populated `runtime/players.json` with Ty through
+    `source=omegga.players.raw.interval.log-fallback`.
+  - Gap: Omegga's native `getPlayers()` list still remains empty on the current
+    Windows runtime because its PlayerState/PlayerController matcher does not
+    complete; controller/state paths are not proven from Omegga sync yet.
+  - Validation: `L2 Headless` for cache parsing and `L3 Live Player` for
+    visible summary whisper.
+- [ ] `P1` Add dependency health checks.
+  - `bmf.health` should report Omegga bridge/helper availability clearly enough
+    to explain why command transport, player sync, or chat delivery is down.
+  - Validation: `L2 Headless`.
+- [ ] `P3` Keep standalone BMF as a future independence track.
+  - Replacing Omegga would require BMF-owned server launch, UE4SS install,
+    command injection, log watching, player sync, and native helper surfaces.
+  - This is not the first package direction.
+  - Validation: separate research plan.
 
 ## Status Legend
 
@@ -50,8 +97,12 @@ public docs, example if relevant, and validation artifact are all updated.
 These are the local findings this roadmap assumes.
 
 - `chat.broadcast` has working bridge/demo evidence on CL13530.
-- `chat.whisper` and `chat.status_message` have bridge methods, but typed
-  native delivery is not yet proven.
+- `chat.whisper` is live-proven for a single joined player through
+  `ClientPushChatMessage` on a live `PlayerController`. Exact two-player
+  targeting still needs safe identity binding from Omegga player sync and/or
+  Brickadia saved/log adapters.
+- `chat.status_message` shares the private-message route, but status-specific
+  UI semantics are not separately proven yet.
 - `players.list` has partial bridge support, but player object/property reads
   must be treated carefully because CL13530 notes identify crash-prone object
   access paths.
@@ -235,13 +286,16 @@ known bridge routes.
   - Validation: `L2 Headless` for accepted command, `L3 Live Player` for
     visible delivery.
 - [ ] `P1` Expose `BMF.chat.whisper(player, message)`.
-  - Status: `Partial`.
-  - Existing bridge has `chat.whisper`, but typed native whisper is disabled and
-    real delivery needs a live target player.
-  - Progress: `BMF.chat.whisper(player, message)` exists as a safe scaffold.
-    It resolves direct/synthetic player records and current-list queries, then
-    returns `PLAYER_DELIVERY_UNAVAILABLE` until a live delivery adapter is
-    proven. Empty-server command route returns `PLAYER_NOT_FOUND` safely.
+  - Status: `Live tested, experimental`.
+  - Progress: `BMF.chat.whisper(player, message)` resolves live controllers and
+    sends `ClientPushChatMessage` to the matched controller. With exactly one
+    live controller, any non-empty target string routes to that controller and
+    returns `delivered=true`.
+  - Progress: direct/synthetic player records and current-list queries still
+    return safe structured errors when no live delivery target is available.
+    Empty-server command route returns `PLAYER_NOT_FOUND` safely.
+  - Gap: exact UUID/name targeting needs safe identity records from Omegga
+    player sync and/or Brickadia saved/log adapters before `L4 Multiplayer`.
   - Validation: `L3 Live Player`, ideally `L4 Multiplayer` with sender and
     receiver separation.
 - [ ] `P1` Expose `BMF.chat.statusMessage(player, message)`.
@@ -263,12 +317,14 @@ known bridge routes.
 
 - [ ] `P1` Expose `BMF.players.list()`.
   - Status: `Partial`.
-  - Existing bridge can collect player records from GameState/PlayerArray or
-    fallback scans, but CL13530 notes warn that object-backed player status can
-    be crash-prone.
-  - Progress: `BMF.players.list()` currently returns a safe empty adapter, and
-    `bmf.players.list` is L2-proven to report `players_count=0` without a
-    player controller.
+  - Omegga player sync and Brickadia saved/log parsing are the supported safe
+    identity paths. Direct GameState/PlayerArray or PlayerState reflection stays
+    avoided because CL13530 notes identify crash-prone object access paths.
+  - Progress: `BMF.players.list()` safely reports known identity records when
+    cache/log adapters provide them, reports live controller count, and is
+    L2-proven to return `players_count=0` without a player controller.
+  - Progress: Omegga player sync now has a Windows log-fallback path that
+    populated `runtime/players.json` with a live player after restart.
   - Validation: `L2 Headless` returns an empty list safely; `L3 Live Player`
     returns at least one player.
 - [ ] `P1` Expose `BMF.players.find(query)`.
@@ -611,7 +667,7 @@ safe mutation points.
   - Validation: `L5 Negative` with a live player attempting an action.
   - Partial: `scripts/patch-role-permissions.ps1` can safely patch a copied
     `RoleSetup2.json` and set `BR.Permission.SpawnItems` to `Forbidden` while
-    keeping applicator permissions allowed. Runtime effect is not proven.
+    keeping applicator permissions allowed.
   - Progress: `BMF.permissions.evaluateNoSpawnItemApplicator()` proves whether
     a role expresses the intended no-spawn-item applicator policy after planning
     or patching.
@@ -638,24 +694,109 @@ safe mutation points.
 - [ ] `P1` Discover applicator permission surface.
   - Identify tool classes, component application methods, and permission checks.
   - Validation: discovery report with class/function/property names.
-- [ ] `P1` Block applicator `SpawnItem` component.
+  - Progress: live ProcessEvent tracing identified
+    `ABRTool_Applicator.ServerAddComponent` as the server RPC for adding
+    components through the applicator. The RPC has two parameters: an 8-byte
+    brick handle and an object pointer for component type.
+- [x] `P1` Block applicator `SpawnItem` component.
   - Highest-value policy item after chat/player basics.
   - Desired behavior: players may use applicator for allowed components while
     `SpawnItem` is denied.
   - Validation: `L3 Live Player`, `L5 Negative`.
-  - Current hypothesis: keep `BR.Permission.Building.Applicator*` allowed and
-    set `BR.Permission.SpawnItems` to `Forbidden` for the default role.
+  - Baseline path: keep `BR.Permission.Building.Applicator*` allowed and set
+    `BR.Permission.SpawnItems` to `Forbidden` for the default role.
   - Progress: the policy-shape canary
     `scripts/validate-bmf-permission-policy.ps1` proves an unsafe role is
     detected, the planned no-spawn-item patch evaluates as compliant, and
     duplicate permission entries fail the evaluator.
+  - Progress: `BMF.permissions.evaluateApplicatorComponentAccess()` now denies
+    `SpawnItem` and Brickadia's reflected `ItemSpawn` component names,
+    including class-like suffixes such as `BRSpawnItemComponent`, while
+    allowing other component names by default.
+  - Progress: `BMF.permissions.enforceNoSpawnItemApplicator()` and
+    `bmf.permissions.enforce-nospawnitem` now patch a `RoleSetup2.json` copy,
+    keeping applicator permissions allowed while setting
+    `BR.Permission.SpawnItems` to `Forbidden` on `defaultRole` and preventing
+    named roles from explicitly allowing it. Missing `SpawnItems` on named roles
+    is treated as inherited denial because Brickadia normalizes redundant
+    forbids after restart. `examples/NoSpawnItemApplicator` calls this enforcer
+    on load when `brickadiaSavedDir` is configured.
+  - Progress: `BMF.tools.onApplicatorComponentApply()` can register
+    `NoSpawnItemApplicator` policy handlers and cache reflected `ItemSpawn`
+    component objects, but the direct UE4SS Lua `ServerAddComponent` hook is
+    disabled by default. Live testing proved this hook crashes on
+    `UE4SS.dll!RC::LuaType::push_structproperty` while marshaling a struct
+    parameter before BMF's callback runs.
+  - Progress: live validation proved the role-backed
+    `BR.Permission.SpawnItems=Forbidden` path does not block Applicator
+    `ItemSpawn` placement.
+  - Progress: `native/applicator_blocker/applicator_func_blocker.cpp` blocks
+    `ItemSpawn` by wrapping `ServerAddComponent` at `UFunction::Func`
+    (`function + 0xD8`) and reading the component pointer from
+    `FFrame.Locals + 8`. A connected-player negative test blocked `ItemSpawn`
+    without crashing while allowing a non-denied component through.
+  - Progress: the native blocker emits TSV block events and
+    `NoSpawnItemApplicator` consumes them to send Omegga-backed feedback. Live
+    status showed `feedback_delivered=2` and
+    `feedback_last_delivery=whisper:<player uuid>`.
+  - Progress: the native blocker now accepts hot-reloaded `allowed_context=0x...`
+    lines in `applicator-func-blocker-control.txt`. `NoSpawnItemApplicator`
+    reads `RoleAssignments.json` through
+    `BMF.permissions.loadRoleAssignments()`, supports `allowedRoles`,
+    `allowedPlayers`, and explicit `allowedContexts` in plugin config, and
+    feeds allowed Applicator contexts back to the native hook. Default allowed
+    role is `Admin`.
+  - Remaining: package startup/auto-discovery for the native blocker instead of
+    manual control-file injection, and map native Applicator context back to the
+    exact player for multi-player allow decisions and whisper targeting. Current
+    role/player context learning is conservative and exact for a one-live-player
+    Omegga/BMF list.
+- [x] `P1` Whitelist Interactable Print-to-Console prefixes.
+  - Desired behavior: Owner/Admin roles may save any Interactable console tag,
+    while everyone else may only save configured prefixes such as `buyweapon:`.
+  - Validation: `L3 Live Player`, `L5 Negative`.
+  - Progress: `BMF.permissions.evaluateInteractConsolePrefixAccess()` denies
+    non-whitelisted prefixes such as `teleport:` for non-admin roles while
+    allowing Owner/Admin bypass and whitelisted prefixes.
+  - Progress: `examples/InteractConsolePrefixGuard` writes the native policy
+    control file, reads Brickadia/Omegga role assignments, primes one-player
+    Owner/Admin Applicator contexts, polls native TSV events, and sends
+    Omegga-backed whisper feedback on denied attempts.
+  - Progress: `native/interact_prefix_guard/interact_prefix_guard.cpp` wraps
+    `ABRTool_Applicator.ServerModifyComponent` at `UFunction::Func`
+    (`function + 0xD8`), reads `FFrame.Locals + 8` for the Interactable
+    component pointer, scans component data for the console tag, blocks denied
+    tags before save, and allows whitelisted prefixes or Owner/Admin contexts.
+  - Progress: live validation on June 5, 2026 proved Owner allow with
+    `teleport:codex-verify` (`reason=ContextAllowlisted`) and denied-role
+    simulation with `teleport:deny-sim` (`reason=prefix-denied`). BMF status
+    reported `native_blocked=2`, `feedback_delivered=2`, and
+    `feedback_missed=0` for the denied simulation.
+  - Progress: `scripts/sync-interact-prefix-guard-native-hook.ps1` refreshes
+    the per-process `ServerModifyComponent` pointer, writes prefixes/allowed
+    contexts to the control file, builds the native guard, and injects or
+    verifies the hook after restart.
+  - Remaining: validate with a real second non-admin player instead of the
+    one-player Owner-denied simulation, and avoid relying on one-player context
+    inference for exact multi-player allow decisions.
 - [ ] `P2` Implement component-level allow/deny lists.
   - Example: allow lights, signs, interactors; deny spawn item, weapon spawns,
     vehicle spawns, or expensive components.
   - Validation: `L3 Live Player`, `L5 Negative`.
+  - Partial: the framework has a headless policy evaluator with
+    `deniedComponents` and `allowedComponents`, plus an experimental live hook
+    path pending negative validation.
 - [ ] `P2` Audit component attempts.
   - Log player, component type, brick/entity target, allowed/denied, reason.
   - Validation: `L3 Live Player`.
+  - Partial: applicator hook attempts are recorded in
+    `runtime/logs/applicator.jsonl` with component candidates, addresses, hook
+    decision, and block mode.
+  - Partial: the native `UFunction::Func` blocker writes denied `ItemSpawn`
+    and allowed-context `ItemSpawn` events to
+    `artifacts/local/applicator-func-blocker-events.tsv`; player identity is
+    currently inferred by Omegga/BMF live player count or previously learned
+    context ownership rather than exact native ownership.
 - [ ] `P2` Add rollback for denied component changes.
   - If pre-hook prevention is impossible, detect and revert unauthorized
     component changes.
@@ -671,6 +812,14 @@ safe mutation points.
   - Control brick placement, deletion, paint, collision settings, component
     costs, and physics toggles.
   - Validation: `L3 Live Player`, `L5 Negative`.
+  - Partial: `scripts/list-brick-assets.js` can inventory `.brdb`/`.brz`
+    brick asset names and histograms. `BMF.permissions.evaluateBrickAssetAccess`
+    and `examples/BrickAssetPlacementGuard` provide role-aware allow/deny
+    policy for names such as `B_Joint_Wheel_Micro`, `B_Seat`, and
+    `B_1x1_Gate_WheelEngineSlim`.
+  - Remaining: wire a cancellable placement/paste hook that resolves the
+    incoming brick asset or uploaded prefab hash before Brickadia mutates the
+    world.
 - [ ] `P3` Add region/zone policy.
   - Protected spawn, arenas, plots, staff-only zones, temporary event zones.
   - Validation: `L3 Live Player`, `L5 Negative`.
@@ -820,9 +969,10 @@ Goal: BMF should make modded servers safer to run, not just easier to mutate.
     `bmf.apis` expose machine-readable stability, risk, validation,
     live-player requirement, and capability labels for the public Lua surface.
   - Progress: labels explicitly mark `BMF.server.exec` as `restricted` and
-    `unsafe-native`, player/private-message surfaces as `scaffold` and
-    `live-player`, file-backed settings/permission planners as `file-backed`,
-    and world/prefab/vehicle mutation helpers as `experimental`.
+    `unsafe-native`, live-player surfaces as `live-player`, `BMF.chat.whisper`
+    as `experimental`, file-backed settings/permission planners as
+    `file-backed`, and world/prefab/vehicle mutation helpers as
+    `experimental`.
   - Validation: `L2 Headless` via `scripts/validate-bmf-api-labels.ps1`.
 - [ ] `P1` Add watchdog and last-error reporting.
   - If plugin crashes, isolate it and keep BMF alive where possible.
@@ -1026,6 +1176,8 @@ The goal can be marked complete only when:
    - Validation: `L2 Headless`, then `L3 Live Player`.
 4. Public `BMF.chat.whisper`.
    - Outcome: private message API.
+   - Status: single-player live delivery is proven; exact multi-player
+     recipient isolation remains.
    - Validation: `L3 Live Player`, preferably `L4 Multiplayer`.
 5. Permission discovery report for applicator component policy.
    - Outcome: identify where to block `SpawnItem` without disabling the whole

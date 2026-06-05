@@ -6,6 +6,15 @@ Goal: make modded servers easier to build without every modder needing to
 reverse-engineer the game. Long term, BMF should extend Brickadia's existing
 mod support with more powerful server-side APIs.
 
+## Runtime Direction
+
+BMF currently supports a BMF-compatible Omegga runtime. In practice that means
+Omegga is part of the supported Windows server stack for launch, UE4SS
+compatibility setup, command transport, player identity sync, live helper calls,
+logs, and unattended validation. Upstream Omegga alone may not be sufficient
+until the BMF Windows/UE4SS compatibility work is packaged there or maintained
+as a supported fork.
+
 ## Status Legend
 
 | Status | Meaning |
@@ -20,6 +29,7 @@ mod support with more powerful server-side APIs.
 | Status | Capability | Notes |
 | --- | --- | --- |
 | Live tested, experimental | Server broadcast messages | Send chat messages to connected players. Confirmed visible in-game, but still experimental. |
+| Live tested, experimental | Private messages / whispers | `BMF.chat.whisper` can deliver to a live PlayerController with one joined player. Two-player exact targeting still needs safe identity binding validation. |
 | Coded, needs validation | Lua plugin loading | Load server-side Lua plugins through BMF. |
 | Coded, needs validation | Plugin permissions | Plugins can request access to features like chat, storage, world loading, and server commands. |
 | Coded, needs validation | Plugin storage | Plugins can save and read their own config/data files. |
@@ -28,10 +38,14 @@ mod support with more powerful server-side APIs.
 | Coded, needs validation | Rate limits | Basic protection against spammy plugin calls. |
 | Coded, needs validation | Server status commands | Basic server/framework status reporting. |
 | Coded, needs validation | World load/save helpers | Early helpers for loading and saving world/prefab data. |
-| Planned | Player data API | Expose username, display name, UUID, controller, pawn, health, and roles. |
-| Planned | Private messages / whispers | Send a message to one specific player. |
+| Coded, needs validation | Player data API | Safe normalized identity records, summary formatting, and Omegga sync exist. Health, pawn, role effects, and controller identity binding still need validation. |
 | Planned | Better permission controls | More detailed control over tools, roles, and restricted actions. |
-| Planned | Applicator component restrictions | Block risky components like spawn-item while still allowing safer applicator use. |
+| Live tested, experimental | Applicator SpawnItem restriction | `NoSpawnItemApplicator` keeps the file-backed role policy compliant, but live validation proved `BR.Permission.SpawnItems` does not block Applicator `ItemSpawn`. The working path is an experimental native `ServerAddComponent` `UFunction::Func` blocker that denies the `ItemSpawn` component pointer and emits events consumed by BMF/Omegga chat feedback. The direct UE4SS Lua hook remains disabled after a `push_structproperty` crash. |
+| Live tested, experimental | Interactable Print-to-Console prefix policy | `InteractConsolePrefixGuard` lets Owner/Admin use any prefix while everyone else is limited to whitelisted prefixes such as `buyweapon:`. Current enforcement uses an experimental native `ServerModifyComponent` `UFunction::Func` hook to block denied Interactable console tags at save time, with BMF/Omegga player identity and chat feedback where available. Live validation proved Owner allow for `teleport:` and denied-role block feedback for `teleport:deny-sim`. |
+| Policy-ready | Brick asset placement policy | `scripts/list-brick-assets.js` inventories `.brdb`/`.brz` brick assets. `BMF.permissions.evaluateBrickAssetAccess` and `BrickAssetPlacementGuard` can deny assets such as `B_Joint_Wheel_Micro`, `B_Seat`, and `B_1x1_Gate_WheelEngineSlim` for non-admin roles. Live placement/paste blocking still needs a cancellable native hook. |
 | Planned | Minigame API | Create, configure, reset, and manage minigames from Lua. |
 | Planned | Avatar/player appearance API | Read or modify player appearance from server-side Lua. |
+| Live tested, experimental | Omegga player sync adapter | Feeds safe Omegga player records into `BMF.players` cache after restart. On the current Windows runtime it uses a Brickadia-log fallback when Omegga's PlayerState matcher leaves the live player list empty. |
+| Planned | BMF-compatible Omegga runtime package | Make the required Omegga fork/build, UE4SS bridge, helper globals, and install shape explicit. |
+| Future research | BMF standalone supervisor | Possible long-term replacement for Omegga launch, logs, command injection, and canary orchestration. |
 | Planned | Stable release package | Drag-and-drop BMF install package for UE4SS-powered Brickadia servers. |

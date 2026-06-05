@@ -8,6 +8,16 @@
     "type": "UE4SS Lua",
     "entrypoint": "framework/ue4ss/Mods/BMF/Scripts/main.lua"
   },
+  "runtimeStrategy": {
+    "standalone": false,
+    "requiresOmegga": true,
+    "requiresBmfCompatibleOmegga": true,
+    "dependenciesManifest": "manifests/dependencies.json",
+    "supportedAdapters": [
+      "integrations/omegga/bmf-player-sync"
+    ],
+    "notes": "BMF currently targets a BMF-compatible Omegga runtime for Windows launch, UE4SS setup, command transport, player sync, helper globals, logs, and validation. Upstream Omegga alone may not satisfy these requirements until the BMF compatibility work is included."
+  },
   "supportedPlatforms": [
     "windows-dedicated-server"
   ],
@@ -57,7 +67,7 @@
     "timers.every.runtime-l2",
     "chat.broadcast.experimental",
     "chat.broadcast.command-l2",
-    "chat.whisper.scaffold-l2-negative",
+    "chat.whisper.live-player-l3",
     "chat.status-message.scaffold-l2-negative",
     "server.exec.restricted",
     "server.exec.config-opt-in",
@@ -77,7 +87,19 @@
     "permissions.role-assignment-readers.runtime-l2-negative",
     "permissions.command-access-policy.runtime-l2-negative",
     "permissions.no-spawn-item-policy.runtime-l2-negative",
+    "permissions.applicator-component-policy.runtime-l2-negative",
+    "permissions.no-spawn-item-role-enforcer.runtime-l2-negative",
     "permissions.no-spawn-item-applicator.experimental",
+    "permissions.no-spawn-item-applicator.native-func-l3-negative",
+    "permissions.no-spawn-item-applicator.feedback-omegga-l3",
+    "permissions.interact-console-prefix-policy.runtime-l2-negative",
+    "permissions.brick-asset-policy.runtime-l2-negative",
+    "archives.brick-asset-inventory.static",
+    "interact.console-event-forwarding.experimental",
+    "tools.applicator-policy-handler.experimental",
+    "tools.applicator-lua-hook.unsafe-disabled",
+    "tools.applicator-native-func-blocker.experimental",
+    "tools.applicator-native-func-blocker.sync-script",
     "archives.describe.static",
     "archives.vehicle-graph-snapshot.static",
     "archives.vehicle-inventory.static",

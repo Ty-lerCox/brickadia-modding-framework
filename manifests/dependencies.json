@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "generatedFor": "BMF 0.1.0-dev",
+  "dependencies": [
+    {
+      "id": "bmf-compatible-omegga-runtime",
+      "name": "BMF-compatible Omegga runtime",
+      "kind": "server-supervisor-and-ue4ss-bridge",
+      "required": true,
+      "status": "required-current-runtime",
+      "upstream": {
+        "name": "omegga",
+        "repository": "https://github.com/brickadia-community/omegga",
+        "license": "ISC"
+      },
+      "compatibility": {
+        "requiresBmfWindowsSupport": true,
+        "requiresBrickadiaBuild": "PC-Shipping-CL13530",
+        "requiresWindowsDedicatedServer": true
+      },
+      "provides": [
+        "brickadia-server-supervisor",
+        "managed-ue4ss-install",
+        "brickadia-ue4ss-compatibility-bundle",
+        "omegga-bridge-bmf-command-worker-route",
+        "ue4ss-console-execution-helpers",
+        "ue4ss-call-function-by-name-helper",
+        "player-identity-sync-adapter",
+        "brickadia-and-ue4ss-log-context",
+        "headless-canary-transport"
+      ],
+      "requiredSurfaces": [
+        "Omegga.Bridge.BMF",
+        "OmeggaExecuteConsoleManagerInput",
+        "OmeggaExecuteKismetConsoleCommand",
+        "OmeggaExecuteCachedConsoleExec",
+        "OmeggaCallFunctionByNameWithArguments",
+        "RegisterConsoleCommandGlobalHandler"
+      ],
+      "packaging": {
+        "acceptableSources": [
+          "bmf-maintained-omegga-fork-release",
+          "bmf-compatible-omegga-release-artifact",
+          "upstream-omegga-after-bmf-windows-support-is-included"
+        ],
+        "doNotVendor": [
+          "node_modules",
+          "runtime server data",
+          "server saves",
+          "logs"
+        ],
+        "licenseNoticeRequired": true
+      },
+      "notes": "BMF currently depends on a compatible Omegga runtime for Windows launch, bridge transport, helper globals, player sync, logs, and canaries. This dependency should be explicit rather than implied by local reverse-engineering setup."
+    }
+  ]
+}

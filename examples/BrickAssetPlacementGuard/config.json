@@ -1,0 +1,40 @@
+{
+  "policy": {
+    "adminRoles": [],
+    "allowedRoles": [],
+    "ownerIds": [],
+    "deniedAssets": [
+      "B_Vehicle_Engine",
+      "B_1x1_Gate_WheelEngineSlim",
+      "B_Joint_Wheel*",
+      "Entity_Wheel_*"
+    ],
+    "deniedAssetLabels": {
+      "B_Vehicle_Engine": "Vehicle Engine",
+      "B_1x1_Gate_WheelEngineSlim": "Wheel Engine",
+      "B_Joint_Wheel*": "Wheel Joint",
+      "Entity_Wheel_*": "Wheel / Tire"
+    },
+    "allowedAssets": [],
+    "denyUnknown": false,
+    "allowSinglePlayerContextLearning": true,
+    "policyWriteIntervalSeconds": 2,
+    "savedDir": "C:/Users/tycox/OneDrive/Documents/GitHub/Brickadia/omegga-master/omegga-master/data/Saved"
+  },
+  "native": {
+    "controlPath": "C:/Users/tycox/OneDrive/Documents/GitHub/bmf/artifacts/local/placement-asset-guard-control.txt",
+    "statusPath": "C:/Users/tycox/OneDrive/Documents/GitHub/bmf/artifacts/local/placement-asset-guard-status.txt",
+    "eventPath": "C:/Users/tycox/OneDrive/Documents/GitHub/bmf/artifacts/local/placement-asset-guard-events.tsv",
+    "trace": true
+  },
+  "prefabs": {
+    "enabled": true,
+    "indexPath": "prefab-index.json"
+  },
+  "feedback": {
+    "enabled": true,
+    "message": "BMF blocked that placement: your role cannot place that asset on this server.",
+    "prefabMessage": "BMF blocked that prefab: it contains an asset your role cannot place on this server.",
+    "adminRetryMessage": "BMF allowed that placement for your role. Try placing it again."
+  }
+}

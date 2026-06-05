@@ -12,6 +12,26 @@
       "description": "Debounce delay before writing a sync request after player list changes.",
       "default": 250,
       "type": "number"
+    },
+    "syncIntervalMs": {
+      "description": "Periodic fallback sync interval. Set to 0 to disable polling and rely only on Omegga join/leave/start/manual events.",
+      "default": 5000,
+      "type": "number"
+    },
+    "brickadiaLogPath": {
+      "description": "Optional explicit Brickadia.log path used when Omegga's live player list is empty.",
+      "default": "",
+      "type": "string"
+    },
+    "forwardInteract": {
+      "description": "Forward Omegga interact events into BMF as bmf.interact.console commands.",
+      "default": true,
+      "type": "boolean"
+    },
+    "interactCommand": {
+      "description": "BMF command used for forwarded interact messages.",
+      "default": "bmf.interact.console",
+      "type": "string"
     }
   },
   "commands": []

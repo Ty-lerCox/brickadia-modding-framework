@@ -1,0 +1,58 @@
+{
+  "feature": "brick-asset-prefab-index",
+  "status": "passed",
+  "generatedAt": "2026-06-05T00:00:00.000Z",
+  "data": {
+    "prefabCount": 2,
+    "deniedPrefabHashCount": 1,
+    "prefabs": [
+      {
+        "name": "canary-tire-prefab",
+        "hash": "1111111111111111111111111111111111111111111111111111111111111111",
+        "brPrefabHashCandidate": "1111111111111111111111111111111111111111111111111111111111111111",
+        "assetNames": [
+          "PB_DefaultMicroBrick",
+          "Entity_Wheel_Steelie1"
+        ],
+        "deniedAssets": [
+          "Entity_Wheel_Steelie1"
+        ]
+      },
+      {
+        "name": "canary-safe-prefab",
+        "hash": "2222222222222222222222222222222222222222222222222222222222222222",
+        "brPrefabHashCandidate": "2222222222222222222222222222222222222222222222222222222222222222",
+        "assetNames": [
+          "PB_DefaultMicroBrick"
+        ],
+        "deniedAssets": []
+      }
+    ],
+    "deniedPrefabHashes": [
+      {
+        "name": "canary-tire-prefab",
+        "hash": "1111111111111111111111111111111111111111111111111111111111111111",
+        "deniedAssets": [
+          "Entity_Wheel_Steelie1"
+        ]
+      }
+    ]
+  },
+  "prefabs": [
+    {
+      "name": "canary-tire-prefab",
+      "hash": "1111111111111111111111111111111111111111111111111111111111111111",
+      "assetNames": [
+        "PB_DefaultMicroBrick",
+        "Entity_Wheel_Steelie1"
+      ]
+    },
+    {
+      "name": "canary-safe-prefab",
+      "hash": "2222222222222222222222222222222222222222222222222222222222222222",
+      "assetNames": [
+        "PB_DefaultMicroBrick"
+      ]
+    }
+  ]
+}

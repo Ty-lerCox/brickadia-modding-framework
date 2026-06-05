@@ -39,8 +39,8 @@ Omegga.Bridge.BMF bmf.audit.tail limit=20
 Current built-in audit records include framework/plugin load and unload,
 command dispatch, command access grants/denials, unknown commands, command
 errors, plugin errors, capability denials, config opt-in denials, server exec,
-world load/save, server save, server shutdown, chat broadcast, and
-private-message scaffold failures.
+world load/save, server save, server shutdown, chat broadcast, private-message
+delivery, and private-message target/delivery failures.
 
 ## Validation
 

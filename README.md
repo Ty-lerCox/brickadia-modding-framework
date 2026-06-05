@@ -6,6 +6,12 @@ compatibility work.
 
 Current target: Brickadia EA2 `PC-Shipping-CL13530`.
 
+BMF currently targets a BMF-compatible Omegga runtime for Windows server
+launch, UE4SS compatibility setup, command transport, validation, and some live
+player helper surfaces. Upstream Omegga alone may not satisfy those requirements
+until the BMF compatibility work is packaged there or maintained as a supported
+fork.
+
 ## Status
 
 This repository is in early framework bring-up. The current package focuses on:
@@ -21,6 +27,25 @@ This repository is in early framework bring-up. The current package focuses on:
 - Server settings planning and file-backed `GameUserSettings.ini` patching.
 - Role permission patch planning and headless file-backed patch validation.
 - Player role assignment planning and copied `RoleAssignments.json` patching.
+- No-spawn-item applicator enforcement that preserves applicator access while
+  denying `SpawnItem`/`ItemSpawn`. The file-backed role policy is maintained,
+  but live testing proved Brickadia does not use `BR.Permission.SpawnItems` for
+  Applicator component placement; the working experimental path is a native
+  `ServerAddComponent` `UFunction::Func` blocker plus Omegga-backed feedback.
+  `scripts/sync-applicator-blocker-native-hook.ps1` refreshes the per-process
+  native pointers and injects the blocker after a server restart.
+- Interactable Print-to-Console prefix policy: Owner/Admin roles can use any
+  prefix, while other roles must match a configured whitelist. The current live
+  path wraps the native `ServerModifyComponent` `UFunction::Func`, blocks
+  denied Interactable console tags at save time, and uses BMF/Omegga player
+  identity plus chat feedback where available.
+  `scripts/sync-interact-prefix-guard-native-hook.ps1` refreshes the
+  per-process native pointer and injects/verifies the guard after restart.
+- Brick asset placement policy: `scripts/list-brick-assets.js` inventories
+  `.brdb`/`.brz` brick asset names, and `BrickAssetPlacementGuard` can evaluate
+  Owner/Admin bypass plus role-aware denial for assets such as
+  `B_Joint_Wheel_Micro`, `B_Seat`, and `B_1x1_Gate_WheelEngineSlim`. Live
+  placement/paste blocking still needs a cancellable native hook.
 - Offline BRDB archive description for saved-world vehicle/entity evidence.
 - Vehicle-like dynamic actor graph snapshots from saved `.brdb` worlds.
 - Vehicle inventory reports for saved-world or snapshot evidence.
@@ -36,6 +61,8 @@ This repository is in early framework bring-up. The current package focuses on:
   staged car copies from one captured single-car slice.
 - First Lua prefab facade for loading BRZ-derived staged world bundles.
 - First Lua vehicle spawn-set facade for loading staged remapped vehicle copies.
+- BMF-compatible Omegga runtime direction for server launch, command transport,
+  player-sync, live chat helper delivery, and validation.
 - Static package validation.
 - Headless validation artifacts for world/archive research.
 
@@ -62,6 +89,7 @@ framework/ue4ss/Mods/BMF/   UE4SS Lua mod package
 installer/                  Windows install and rollback scripts
 examples/                   Example BMF plugins
 docs/                       Install, API, and validation docs
+integrations/               Supported external adapters, currently Omegga
 manifests/                  Package and compatibility metadata
 scripts/                    Local validation helpers
 tests/fixtures/             Static fixtures for wrapper tests
@@ -84,3 +112,20 @@ Build and validate a release zip:
 
 Runtime validation is tracked through timestamped artifacts under
 `artifacts/overnight/`.
+
+## Native Applicator Hook Sync
+
+The experimental `NoSpawnItemApplicator` live blocker depends on Brickadia
+runtime pointers that move on every server restart. With a BMF-compatible
+Omegga server already running, refresh and install the blocker with:
+
+```powershell
+.\scripts\sync-applicator-blocker-native-hook.ps1
+```
+
+The script queries BMF for the current `ItemSpawn` component pointer, scans the
+running server for `BRTool_Applicator.ServerAddComponent`, updates
+`artifacts/local/applicator-func-blocker-control.txt`, builds/injects the native
+DLL if needed, and skips reinjection when the hook is already installed in that
+process. Player/role based `allowed_context` entries are still managed by the
+`NoSpawnItemApplicator` plugin.

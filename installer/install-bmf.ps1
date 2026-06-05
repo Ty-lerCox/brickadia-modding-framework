@@ -3,6 +3,7 @@ param(
   [Parameter(Mandatory = $true)]
   [string]$ServerWin64Dir,
   [string]$ModsDir = '',
+  [string]$BrickadiaSavedDir = '',
   [string]$BackupRoot = '',
   [string]$OutJson = '',
   [switch]$Force
@@ -61,7 +62,9 @@ $backupRootFull = Get-FullPath $BackupRoot
 $targetBmfDir = Join-Path $modsDirFull 'BMF'
 $serverExe = Join-Path $serverDir 'BrickadiaServer-Win64-Shipping.exe'
 $installManifestPath = Join-Path $targetBmfDir 'runtime/install-manifest.json'
+$targetConfigPath = Join-Path $targetBmfDir 'config.json'
 $backupDir = $null
+$brickadiaSavedDirFull = ''
 $installedFiles = New-Object System.Collections.Generic.List[object]
 
 try {
@@ -112,6 +115,22 @@ try {
   Copy-Item -LiteralPath $sourceBmfDir -Destination $targetBmfDir -Recurse -Force
   Add-Evidence $evidence 'directory' $targetBmfDir 'Installed BMF UE4SS mod directory'
 
+  if ($BrickadiaSavedDir) {
+    $brickadiaSavedDirFull = Get-FullPath $BrickadiaSavedDir
+    if (!(Test-Path -LiteralPath $brickadiaSavedDirFull)) {
+      throw "Brickadia Saved directory does not exist: $brickadiaSavedDirFull"
+    }
+    $serverConfigDir = Join-Path $brickadiaSavedDirFull 'Server'
+    if (!(Test-Path -LiteralPath $serverConfigDir)) {
+      throw "Brickadia Saved directory does not contain Server config directory: $serverConfigDir"
+    }
+
+    $config = Get-Content -Raw -LiteralPath $targetConfigPath | ConvertFrom-Json
+    $config.brickadiaSavedDir = $brickadiaSavedDirFull.Replace('\', '/')
+    $config | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $targetConfigPath -Encoding UTF8
+    Add-Evidence $evidence 'json' $targetConfigPath 'BMF config with Brickadia Saved directory'
+  }
+
   foreach ($file in Get-ChildItem -LiteralPath $targetBmfDir -Recurse -File) {
     $relative = Get-ChildRelativePath $targetBmfDir $file.FullName
     $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName
@@ -132,6 +151,7 @@ try {
     root = Get-FullPath $Root
     serverWin64Dir = $serverDir
     modsDir = $modsDirFull
+    brickadiaSavedDir = $brickadiaSavedDirFull
     sourceBmfDir = Get-FullPath $sourceBmfDir
     targetBmfDir = Get-FullPath $targetBmfDir
     backupDir = $backupDirForManifest
@@ -168,6 +188,7 @@ $result = [ordered]@{
   data = [ordered]@{
     serverWin64Dir = $serverDir
     modsDir = $modsDirFull
+    brickadiaSavedDir = $brickadiaSavedDirFull
     sourceBmfDir = Get-FullPath $sourceBmfDir
     targetBmfDir = Get-FullPath $targetBmfDir
     backupRoot = $backupRootFull

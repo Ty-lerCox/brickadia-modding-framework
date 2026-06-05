@@ -27,16 +27,25 @@ New-Item -ItemType Directory -Force -Path $caseRoot | Out-Null
 $startServerScript = Join-Path $BrickadiaRoot 'brickadia-ue4ss-re/scripts/start-bridge-test-server.ps1'
 $sendRpcScript = Join-Path $BrickadiaRoot 'brickadia-ue4ss-re/scripts/send-bridge-rpc.js'
 $sourceBmfDir = Join-Path $Root 'framework/ue4ss/Mods/BMF'
+$sourceNoSpawnItemPluginDir = Join-Path $Root 'examples/NoSpawnItemApplicator'
+$sourceInteractPrefixPluginDir = Join-Path $Root 'examples/InteractConsolePrefixGuard'
 $runtimeBmfDir = Join-Path $RuntimeModsDir 'BMF'
 $runtimePluginDir = Join-Path $runtimeBmfDir 'plugins/PermissionPolicyCanary'
+$runtimeNoSpawnItemPluginDir = Join-Path $runtimeBmfDir 'plugins/NoSpawnItemApplicator'
+$runtimeInteractPrefixPluginDir = Join-Path $runtimeBmfDir 'plugins/InteractConsolePrefixGuard'
 $runtimeLogPath = Join-Path $runtimeBmfDir 'runtime/bmf.log'
 $runtimePluginLogPath = Join-Path $runtimeBmfDir 'runtime/logs/plugins/PermissionPolicyCanary.log'
+$runtimeNoSpawnItemPluginLogPath = Join-Path $runtimeBmfDir 'runtime/logs/plugins/NoSpawnItemApplicator.log'
+$runtimeInteractPrefixPluginLogPath = Join-Path $runtimeBmfDir 'runtime/logs/plugins/InteractConsolePrefixGuard.log'
 $runtimeStatusPath = Join-Path $runtimeBmfDir 'runtime/status.json'
 $bridgeDir = Join-Path $caseRoot "bridge-$Port"
 $startPath = Join-Path $caseRoot 'server-start.json'
 $pluginStagePath = Join-Path $caseRoot 'permission-policy-plugin-stage.json'
+$roleSetupCanaryPath = Join-Path $caseRoot 'RoleSetup2.enforce.input.json'
 $bmfLogPath = Join-Path $caseRoot 'bmf.log'
 $pluginLogPath = Join-Path $caseRoot 'PermissionPolicyCanary.log'
+$noSpawnItemPluginLogPath = Join-Path $caseRoot 'NoSpawnItemApplicator.log'
+$interactPrefixPluginLogPath = Join-Path $caseRoot 'InteractConsolePrefixGuard.log'
 $statusPath = Join-Path $caseRoot 'status.json'
 $serverPid = $null
 
@@ -56,6 +65,44 @@ function Read-JsonFile([string]$Path) {
     $text = $text.Substring(1)
   }
   return $text | ConvertFrom-Json
+}
+
+function Get-PermissionEntries($Role, [string]$Name) {
+  if ($null -eq $Role -or !($Role.PSObject.Properties.Name -contains 'permissions')) {
+    return @()
+  }
+  return @($Role.permissions | Where-Object {
+    $null -ne $_ -and ($_.PSObject.Properties.Name -contains 'name') -and [string]$_.name -eq $Name
+  })
+}
+
+function Assert-NoSpawnItemRolePolicy($Role, [string]$RoleName, [bool]$AllowInheritedSpawnItems = $false) {
+  foreach ($permission in @(
+    'BR.Permission.Building',
+    'BR.Permission.Building.Applicator',
+    'BR.Permission.Building.Applicator.EditBricks',
+    'BR.Permission.Building.Applicator.EditEntities'
+  )) {
+    $entries = @(Get-PermissionEntries $Role $permission)
+    if ($entries.Count -ne 1 -or [string]$entries[0].state -ne 'Allowed') {
+      $script:errors.Add("${RoleName}: expected $permission exactly once with state Allowed.")
+    }
+  }
+
+  $spawnItems = @(Get-PermissionEntries $Role 'BR.Permission.SpawnItems')
+  if ($AllowInheritedSpawnItems) {
+    if ($spawnItems.Count -eq 0) {
+      return
+    }
+    if ($spawnItems.Count -ne 1 -or [string]$spawnItems[0].state -ne 'Forbidden') {
+      $script:errors.Add("${RoleName}: expected BR.Permission.SpawnItems to be inherited/missing or exactly once with state Forbidden.")
+    }
+    return
+  }
+
+  if ($spawnItems.Count -ne 1 -or [string]$spawnItems[0].state -ne 'Forbidden') {
+    $script:errors.Add("${RoleName}: expected BR.Permission.SpawnItems exactly once with state Forbidden.")
+  }
 }
 
 function Invoke-BmfConsoleCommand(
@@ -138,11 +185,12 @@ function Invoke-BmfConsoleCommand(
 }
 
 try {
-  foreach ($path in @($startServerScript, $sendRpcScript, $sourceBmfDir)) {
+  foreach ($path in @($startServerScript, $sendRpcScript, $sourceBmfDir, $sourceNoSpawnItemPluginDir, $sourceInteractPrefixPluginDir)) {
     if (!(Test-Path -LiteralPath $path)) {
       throw "Required path does not exist: $path"
     }
   }
+  Copy-Item -LiteralPath (Join-Path $Root 'tests/fixtures/roles/default-role.json') -Destination $roleSetupCanaryPath -Force
 
   if (Test-Path -LiteralPath $runtimeBmfDir) {
     Remove-Item -LiteralPath $runtimeBmfDir -Recurse -Force
@@ -150,6 +198,10 @@ try {
   New-Item -ItemType Directory -Force -Path $runtimeBmfDir | Out-Null
   Copy-Item -Path (Join-Path $sourceBmfDir '*') -Destination $runtimeBmfDir -Recurse -Force
   New-Item -ItemType Directory -Force -Path $runtimePluginDir | Out-Null
+  New-Item -ItemType Directory -Force -Path $runtimeNoSpawnItemPluginDir | Out-Null
+  New-Item -ItemType Directory -Force -Path $runtimeInteractPrefixPluginDir | Out-Null
+  Copy-Item -Path (Join-Path $sourceNoSpawnItemPluginDir '*') -Destination $runtimeNoSpawnItemPluginDir -Recurse -Force
+  Copy-Item -Path (Join-Path $sourceInteractPrefixPluginDir '*') -Destination $runtimeInteractPrefixPluginDir -Recurse -Force
 
   $manifestSource = @'
 {
@@ -195,12 +247,49 @@ return {
       local described = BMF.permissions.describeRole(planned.data and planned.data.role or {})
       local duplicate = BMF.permissions.evaluateNoSpawnItemApplicator(duplicate_role)
       local invalid = BMF.permissions.describeRole(nil)
+      local denied_component = BMF.permissions.evaluateApplicatorComponentAccess({ component = "SpawnItem" })
+      local denied_item_spawn_component = BMF.permissions.evaluateApplicatorComponentAccess({ component = "ItemSpawn" })
+      local denied_class_component = BMF.permissions.evaluateApplicatorComponentAccess({ component = "/Script/Brickadia.BRSpawnItemComponent" })
+      local allowed_component = BMF.permissions.evaluateApplicatorComponentAccess({ component = "Light" })
+      local interact_buyweapon = BMF.permissions.evaluateInteractConsolePrefixAccess({
+        tag = "buyweapon:ak",
+        actor = { uuid = "player-default", roles = { "Default" } },
+        allowedPrefixes = { "buyweapon:" },
+        adminRoles = { "Owner", "Admin" },
+      })
+      local interact_teleport_default = BMF.permissions.evaluateInteractConsolePrefixAccess({
+        tag = "teleport:spawn",
+        actor = { uuid = "player-default", roles = { "Default" } },
+        allowedPrefixes = { "buyweapon:" },
+        adminRoles = { "Owner", "Admin" },
+      })
+      local interact_teleport_admin = BMF.permissions.evaluateInteractConsolePrefixAccess({
+        tag = "teleport:spawn",
+        actor = { uuid = "player-admin", roles = { "Admin" } },
+        allowedPrefixes = { "buyweapon:" },
+        adminRoles = { "Owner", "Admin" },
+      })
+      local interact_empty = BMF.permissions.evaluateInteractConsolePrefixAccess({
+        tag = "",
+        actor = { uuid = "player-default", roles = { "Default" } },
+        allowedPrefixes = { "buyweapon:" },
+        adminRoles = { "Owner", "Admin" },
+      })
       local api = BMF.apis.get("BMF.permissions.evaluateNoSpawnItemApplicator")
       local api_label = api.data and api.data.api or {}
+      local component_api = BMF.apis.get("BMF.permissions.evaluateApplicatorComponentAccess")
+      local component_api_label = component_api.data and component_api.data.api or {}
+      local interact_api = BMF.apis.get("BMF.permissions.evaluateInteractConsolePrefixAccess")
+      local interact_api_label = interact_api.data and interact_api.data.api or {}
+      local live_hook_api = BMF.apis.get("BMF.tools.onApplicatorComponentApply")
+      local live_hook_api_label = live_hook_api.data and live_hook_api.data.api or {}
+      local live_status_api = BMF.apis.get("BMF.tools.applicator.status")
+      local live_status_api_label = live_status_api.data and live_status_api.data.api or {}
 
       BMF.logInfo("PermissionPolicyCanary handled", {
         before = before.data and before.data.compliant,
         after = after.data and after.data.compliant,
+        spawnItemAllowed = denied_component.data and denied_component.data.allowed,
       })
 
       return BMF.result(true, "OK", "Permission policy canary handled", {
@@ -220,8 +309,34 @@ return {
           "duplicate_compliant=" .. tostring(duplicate.data and duplicate.data.compliant or false),
           "duplicate_count=" .. tostring((duplicate.data and duplicate.data.duplicateCount) or 0),
           "invalid_code=" .. tostring(invalid.code or ""),
+          "component_spawn_item_allowed=" .. tostring(denied_component.data and denied_component.data.allowed),
+          "component_spawn_item_decision=" .. tostring(denied_component.data and denied_component.data.decision or ""),
+          "component_spawn_item_key=" .. tostring(denied_component.data and denied_component.data.componentKey or ""),
+          "component_item_spawn_allowed=" .. tostring(denied_item_spawn_component.data and denied_item_spawn_component.data.allowed),
+          "component_item_spawn_key=" .. tostring(denied_item_spawn_component.data and denied_item_spawn_component.data.componentKey or ""),
+          "component_class_allowed=" .. tostring(denied_class_component.data and denied_class_component.data.allowed),
+          "component_light_allowed=" .. tostring(allowed_component.data and allowed_component.data.allowed),
+          "component_light_decision=" .. tostring(allowed_component.data and allowed_component.data.decision or ""),
+          "interact_buyweapon_allowed=" .. tostring(interact_buyweapon.data and interact_buyweapon.data.allowed),
+          "interact_buyweapon_decision=" .. tostring(interact_buyweapon.data and interact_buyweapon.data.decision or ""),
+          "interact_buyweapon_matched_prefix=" .. tostring(interact_buyweapon.data and interact_buyweapon.data.matchedPrefix or ""),
+          "interact_teleport_default_allowed=" .. tostring(interact_teleport_default.data and interact_teleport_default.data.allowed),
+          "interact_teleport_default_decision=" .. tostring(interact_teleport_default.data and interact_teleport_default.data.decision or ""),
+          "interact_teleport_admin_allowed=" .. tostring(interact_teleport_admin.data and interact_teleport_admin.data.allowed),
+          "interact_teleport_admin_decision=" .. tostring(interact_teleport_admin.data and interact_teleport_admin.data.decision or ""),
+          "interact_teleport_admin_matched_role=" .. tostring(interact_teleport_admin.data and interact_teleport_admin.data.matchedRole or ""),
+          "interact_empty_allowed=" .. tostring(interact_empty.data and interact_empty.data.allowed),
+          "interact_empty_decision=" .. tostring(interact_empty.data and interact_empty.data.decision or ""),
           "api_stability=" .. tostring(api_label.stability or ""),
           "api_risk=" .. tostring(api_label.risk or ""),
+          "component_api_stability=" .. tostring(component_api_label.stability or ""),
+          "component_api_risk=" .. tostring(component_api_label.risk or ""),
+          "interact_api_stability=" .. tostring(interact_api_label.stability or ""),
+          "interact_api_risk=" .. tostring(interact_api_label.risk or ""),
+          "live_hook_api_stability=" .. tostring(live_hook_api_label.stability or ""),
+          "live_hook_api_risk=" .. tostring(live_hook_api_label.risk or ""),
+          "live_hook_api_capability=" .. tostring(live_hook_api_label.capability or ""),
+          "live_status_api_stability=" .. tostring(live_status_api_label.stability or ""),
         },
       })
     end)
@@ -234,7 +349,11 @@ return {
     pluginDir = [System.IO.Path]::GetFullPath($runtimePluginDir)
     manifest = [System.IO.Path]::GetFullPath((Join-Path $runtimePluginDir 'bmf.json'))
     plugin = [System.IO.Path]::GetFullPath((Join-Path $runtimePluginDir 'main.lua'))
+    noSpawnItemPluginDir = [System.IO.Path]::GetFullPath($runtimeNoSpawnItemPluginDir)
+    interactPrefixPluginDir = [System.IO.Path]::GetFullPath($runtimeInteractPrefixPluginDir)
+    roleSetupCanaryPath = [System.IO.Path]::GetFullPath($roleSetupCanaryPath)
     command = 'bmf.permission.policy.canary'
+    exampleCommands = @('bmf.nospawnitem.status', 'bmf.nospawnitem.check', 'bmf.interactprefix.status', 'bmf.interactprefix.check')
   } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $pluginStagePath -Encoding UTF8
   Add-Evidence 'json' $pluginStagePath 'Temporary PermissionPolicyCanary plugin staging result'
 
@@ -271,14 +390,222 @@ return {
       'duplicate_compliant=false',
       'duplicate_count=1',
       'invalid_code=INVALID_ROLE',
+      'component_spawn_item_allowed=false',
+      'component_spawn_item_decision=component-denied',
+      'component_spawn_item_key=spawnitem',
+      'component_item_spawn_allowed=false',
+      'component_item_spawn_key=itemspawn',
+      'component_class_allowed=false',
+      'component_light_allowed=true',
+      'component_light_decision=component-allowed',
+      'interact_buyweapon_allowed=true',
+      'interact_buyweapon_decision=prefix-allowed',
+      'interact_buyweapon_matched_prefix=buyweapon:',
+      'interact_teleport_default_allowed=false',
+      'interact_teleport_default_decision=prefix-denied',
+      'interact_teleport_admin_allowed=true',
+      'interact_teleport_admin_decision=admin-bypass',
+      'interact_teleport_admin_matched_role=Admin',
+      'interact_empty_allowed=true',
+      'interact_empty_decision=empty-allowed',
       'api_stability=stable',
-      'api_risk=medium'
+      'api_risk=medium',
+      'component_api_stability=stable',
+      'component_api_risk=low',
+      'interact_api_stability=stable',
+      'interact_api_risk=medium',
+      'live_hook_api_stability=experimental',
+      'live_hook_api_risk=unsafe-native',
+      'live_hook_api_capability=tools.applicator',
+      'live_status_api_stability=experimental'
     )
 
     Invoke-BmfConsoleCommand 'bmf.apis name=BMF.permissions.evaluateNoSpawnItemApplicator' 'bmf-apis-permission-policy' @(
       'BMF bmf.apis OK',
       'api_count=1',
       'api_1=BMF.permissions.evaluateNoSpawnItemApplicator|namespace=permissions|stability=stable|risk=medium'
+    )
+
+    Invoke-BmfConsoleCommand 'bmf.apis name=BMF.permissions.evaluateApplicatorComponentAccess' 'bmf-apis-applicator-component-policy' @(
+      'BMF bmf.apis OK',
+      'api_count=1',
+      'api_1=BMF.permissions.evaluateApplicatorComponentAccess|namespace=permissions|stability=stable|risk=low'
+    )
+
+    Invoke-BmfConsoleCommand 'bmf.apis name=BMF.permissions.evaluateInteractConsolePrefixAccess' 'bmf-apis-interact-console-prefix-policy' @(
+      'BMF bmf.apis OK',
+      'api_count=1',
+      'api_1=BMF.permissions.evaluateInteractConsolePrefixAccess|namespace=permissions|stability=stable|risk=medium'
+    )
+
+    Invoke-BmfConsoleCommand 'bmf.apis name=BMF.tools.onApplicatorComponentApply' 'bmf-apis-applicator-live-hook' @(
+      'BMF bmf.apis OK',
+      'api_count=1',
+      'api_1=BMF.tools.onApplicatorComponentApply|namespace=tools|stability=experimental|risk=unsafe-native',
+      'requires_player=true',
+      'capability=tools.applicator'
+    )
+
+    Invoke-BmfConsoleCommand 'bmf.tools.applicator.status refresh=true' 'bmf-tools-applicator-status' @(
+      'BMF bmf.tools.applicator.status OK',
+      'registered=',
+      'handler_count=1',
+      'denied_events=0',
+      'param_null_events=0',
+      'cache_count=',
+      'trace_path='
+    )
+
+    Invoke-BmfConsoleCommand 'bmf.nospawnitem.status' 'bmf-nospawnitem-status' @(
+      'BMF bmf.nospawnitem.status OK',
+      'policy=noSpawnItemApplicator',
+      'role_compliant=true',
+      'safe_applicator_allowed=true',
+      'spawn_items_permission_state=Forbidden',
+      'spawn_item_component_allowed=false',
+      'spawn_item_component_decision=component-denied',
+      'light_component_allowed=true',
+      'live_applicator_hook_available=true',
+      'live_hook_code=',
+      'applicator_hook_handler_count=1',
+      'applicator_hook_denied_events=0',
+      'enforcement_code=ROLE_SETUP_PATH_UNAVAILABLE',
+      'enforcement_ok=false',
+      'enforcement=role-setup-file'
+    )
+
+    Invoke-BmfConsoleCommand 'bmf.nospawnitem.check component=SpawnItem' 'bmf-nospawnitem-check-spawnitem' @(
+      'BMF bmf.nospawnitem.check OK',
+      'component=SpawnItem',
+      'allowed=false',
+      'decision=component-denied',
+      'matched_component=SpawnItem'
+    )
+
+    Invoke-BmfConsoleCommand 'bmf.nospawnitem.check component=ItemSpawn' 'bmf-nospawnitem-check-itemspawn' @(
+      'BMF bmf.nospawnitem.check OK',
+      'component=ItemSpawn',
+      'allowed=false',
+      'decision=component-denied',
+      'matched_component=ItemSpawn'
+    )
+
+    Invoke-BmfConsoleCommand 'bmf.nospawnitem.check component=Light' 'bmf-nospawnitem-check-light' @(
+      'BMF bmf.nospawnitem.check OK',
+      'component=Light',
+      'allowed=true',
+      'decision=component-allowed'
+    )
+
+    Invoke-BmfConsoleCommand 'bmf.interactprefix.status' 'bmf-interactprefix-status-initial' @(
+      'BMF bmf.interactprefix.status OK',
+      'code=OK',
+      'ok=true',
+      'policy=interactConsolePrefixGuard',
+      'enforcement=servermodifycomponent-native-prefix-policy',
+      'save_time_hook=ufunction-func-native',
+      'admin_roles=Admin|Owner',
+      'allowed_prefixes=buyweapon:',
+      'received=0',
+      'allowed=0',
+      'denied=0'
+    )
+
+    Invoke-BmfConsoleCommand 'bmf.interactprefix.check tag=buyweapon%3Aak roles=Default' 'bmf-interactprefix-check-buyweapon' @(
+      'BMF bmf.interactprefix.check OK',
+      'code=OK',
+      'ok=true',
+      'tag=buyweapon:ak',
+      'allowed=true',
+      'decision=prefix-allowed',
+      'matched_prefix=buyweapon:'
+    )
+
+    Invoke-BmfConsoleCommand 'bmf.interactprefix.check tag=teleport%3Aspawn roles=Default' 'bmf-interactprefix-check-teleport-default' @(
+      'BMF bmf.interactprefix.check OK',
+      'code=OK',
+      'ok=true',
+      'tag=teleport:spawn',
+      'allowed=false',
+      'decision=prefix-denied'
+    )
+
+    Invoke-BmfConsoleCommand 'bmf.interactprefix.check tag=teleport%3Aspawn roles=Admin' 'bmf-interactprefix-check-teleport-admin' @(
+      'BMF bmf.interactprefix.check OK',
+      'code=OK',
+      'ok=true',
+      'tag=teleport:spawn',
+      'allowed=true',
+      'decision=admin-bypass',
+      'matched_role=Admin'
+    )
+
+    Invoke-BmfConsoleCommand 'bmf.interact.console source=canary player=00000000-0000-0000-0000-000000000001 name=Canary message=buyweapon%3Aak' 'bmf-interact-console-buyweapon' @(
+      'BMF bmf.interact.console OK',
+      'event=interactConsole',
+      'source=canary',
+      'player_uuid=00000000-0000-0000-0000-000000000001',
+      'player_name=Canary',
+      'message=buyweapon:ak',
+      'handler_count=1',
+      'error_count=0',
+      'code=OK',
+      'ok=true'
+    )
+
+    Invoke-BmfConsoleCommand 'bmf.interact.console source=canary player=00000000-0000-0000-0000-000000000001 name=Canary message=teleport%3Aspawn' 'bmf-interact-console-teleport' @(
+      'BMF bmf.interact.console OK',
+      'event=interactConsole',
+      'source=canary',
+      'player_uuid=00000000-0000-0000-0000-000000000001',
+      'player_name=Canary',
+      'message=teleport:spawn',
+      'handler_count=1',
+      'error_count=0',
+      'code=OK',
+      'ok=true'
+    )
+
+    Invoke-BmfConsoleCommand 'bmf.interactprefix.status' 'bmf-interactprefix-status-after-events' @(
+      'BMF bmf.interactprefix.status OK',
+      'code=OK',
+      'ok=true',
+      'policy=interactConsolePrefixGuard',
+      'received=2',
+      'allowed=1',
+      'denied=1',
+      'last_decision=prefix-denied',
+      'last_player=00000000-0000-0000-0000-000000000001',
+      'last_tag=teleport:spawn'
+    )
+
+    $roleSetupCanaryCommandPath = ([System.IO.Path]::GetFullPath($roleSetupCanaryPath)).Replace('\', '/')
+    Invoke-BmfConsoleCommand "bmf.permissions.enforce-nospawnitem path=$roleSetupCanaryCommandPath" 'bmf-permissions-enforce-nospawnitem' @(
+      'BMF bmf.permissions.enforce-nospawnitem OK',
+      'code=OK',
+      'ok=true',
+      'dry_run=false',
+      'changed=true',
+      'written=true',
+      'patched_role_count=3',
+      'role_count=3',
+      'patched_roles=Default|Moderator|Admin',
+      'restart_required=true',
+      'live_hot_reload_supported=false'
+    )
+
+    Invoke-BmfConsoleCommand "bmf.permissions.enforce-nospawnitem path=$roleSetupCanaryCommandPath" 'bmf-permissions-enforce-nospawnitem-idempotent' @(
+      'BMF bmf.permissions.enforce-nospawnitem OK',
+      'code=OK',
+      'ok=true',
+      'dry_run=false',
+      'changed=false',
+      'written=false',
+      'patched_role_count=0',
+      'role_count=3',
+      'patched_roles=',
+      'restart_required=false',
+      'live_hot_reload_supported=false'
     )
   }
 } catch {
@@ -298,6 +625,13 @@ if (Test-Path -LiteralPath $runtimeLogPath) {
   $logText = Get-Content -Raw -LiteralPath $bmfLogPath
   foreach ($needle in @(
     'registered console command bmf.permission.policy.canary',
+    'registered console command bmf.nospawnitem.status',
+    'registered console command bmf.nospawnitem.check',
+    'registered console command bmf.interactprefix.status',
+    'registered console command bmf.interactprefix.check',
+    'registered console command bmf.interactprefix.handle',
+    'NoSpawnItemApplicator loaded',
+    'InteractConsolePrefixGuard loaded',
     'PermissionPolicyCanary handled'
   )) {
     if ($logText -notmatch [regex]::Escape($needle)) {
@@ -313,6 +647,42 @@ if (Test-Path -LiteralPath $runtimePluginLogPath) {
   Add-Evidence 'log' $pluginLogPath 'PermissionPolicyCanary per-plugin log'
 } else {
   $errors.Add("Plugin log was not written: $runtimePluginLogPath")
+}
+
+if (Test-Path -LiteralPath $runtimeNoSpawnItemPluginLogPath) {
+  Copy-Item -LiteralPath $runtimeNoSpawnItemPluginLogPath -Destination $noSpawnItemPluginLogPath -Force
+  Add-Evidence 'log' $noSpawnItemPluginLogPath 'NoSpawnItemApplicator per-plugin log'
+} else {
+  $errors.Add("Plugin log was not written: $runtimeNoSpawnItemPluginLogPath")
+}
+
+if (Test-Path -LiteralPath $runtimeInteractPrefixPluginLogPath) {
+  Copy-Item -LiteralPath $runtimeInteractPrefixPluginLogPath -Destination $interactPrefixPluginLogPath -Force
+  Add-Evidence 'log' $interactPrefixPluginLogPath 'InteractConsolePrefixGuard per-plugin log'
+} else {
+  $errors.Add("Plugin log was not written: $runtimeInteractPrefixPluginLogPath")
+}
+
+if (Test-Path -LiteralPath $roleSetupCanaryPath) {
+  Add-Evidence 'json' $roleSetupCanaryPath 'RoleSetup2 copy patched by bmf.permissions.enforce-nospawnitem'
+  try {
+    $roleSetup = Read-JsonFile $roleSetupCanaryPath
+    Assert-NoSpawnItemRolePolicy $roleSetup.defaultRole 'Default'
+    foreach ($role in @($roleSetup.roles)) {
+      Assert-NoSpawnItemRolePolicy $role ([string]$role.name) $true
+    }
+  } catch {
+    $errors.Add("Could not parse patched RoleSetup2 canary: $($_.Exception.Message)")
+  }
+
+  $backupFiles = @(Get-ChildItem -LiteralPath (Split-Path -Parent $roleSetupCanaryPath) -Filter 'RoleSetup2.enforce.input.json.bmf-backup-*.json' -File -ErrorAction SilentlyContinue)
+  if ($backupFiles.Count -lt 1) {
+    $errors.Add("Expected a RoleSetup2 backup file for enforce canary.")
+  } else {
+    Add-Evidence 'json' $backupFiles[0].FullName 'RoleSetup2 backup from no-spawn-item enforcer'
+  }
+} else {
+  $errors.Add("RoleSetup2 enforce canary file was not written: $roleSetupCanaryPath")
 }
 
 if (Test-Path -LiteralPath $runtimeStatusPath) {
@@ -339,7 +709,7 @@ if ($errors.Count -eq 0) {
 }
 
 $result = [ordered]@{
-  feature = 'bmf.permissions.no-spawn-item-policy'
+  feature = 'bmf.permissions.no-spawn-item-and-interact-prefix-policy'
   status = $resultStatus
   validationLevel = 'L2 Headless + L5 Negative'
   startedAt = $startedAt

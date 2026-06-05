@@ -47,6 +47,29 @@ load/save cycle.
 Runtime vehicle behavior, such as whether a player can drive the saved cars,
 still requires `L3 Live Player` validation.
 
+## `scripts/list-brick-assets.js`
+
+Summarize the brick asset names used by a `.brdb` world or `.brz` prefab:
+
+```powershell
+node .\scripts\list-brick-assets.js `
+  C:\path\to\BMF_ThreeCarsFixture.brdb `
+  --out-json .\artifacts\local\three-cars-brick-assets.json
+```
+
+The report includes:
+
+- `basicBrickAssetNames`, such as `B_Joint_Wheel_Micro`, `B_Seat`, and
+  `B_1x1_Gate_WheelEngineSlim`;
+- `proceduralBrickAssetNames`, such as `PB_DefaultMicroBrick`;
+- `assetHistogram`, grouped by normalized asset name;
+- `typeHistogram`, including procedural size keys where available;
+- `entityTypeNames` and `componentTypeNames` from the archive global data.
+
+This is the offline discovery path for brick-placement policy. It identifies
+which names should go into `BrickAssetPlacementGuard` `deniedAssets` or
+`allowedAssets` before any live native hook is wired.
+
 ## `scripts/summarize-vehicle-graphs.ps1`
 
 Summarize vehicle-like dynamic actor groups from a saved `.brdb`:

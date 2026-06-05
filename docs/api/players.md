@@ -1,10 +1,11 @@
 # Players API
 
-BMF player APIs use safe normalized records. The primary live identity path is
-BMF-native: configure `brickadiaSavedDir` and BMF will read Brickadia's own
-`Saved/Logs/Brickadia.log` plus `Saved/Server/PlayerNameCache.json`. The
-external `runtime/players.json` cache remains as an optional adapter path for
-Omegga or another launcher/test harness.
+BMF player APIs use safe normalized records. In the current supported Windows
+runtime, player identity should come from BMF-compatible Omegga player sync and
+Brickadia saved/log context, not direct live `PlayerState` property reads.
+Configure `brickadiaSavedDir` so BMF can read Brickadia's own
+`Saved/Logs/Brickadia.log` plus `Saved/Server/PlayerNameCache.json`, and run
+the Omegga player sync adapter so `runtime/players.json` stays populated.
 
 ## `BMF.players.list()`
 
@@ -17,11 +18,11 @@ if result.ok then
 end
 ```
 
-`BMF.players.list()` prefers native Brickadia saved/log identity when
-`brickadiaSavedDir` is configured. If no native players are found, it falls back
-to `runtime/players.json` when present. It also reports the live controller
-count discovered through the safe `FindFirstOf` controller route. With no native
-identity or cache, it safely returns an empty player list.
+`BMF.players.list()` combines safe identity records from the Brickadia saved/log
+adapter and `runtime/players.json` when available. It also reports the live
+controller count discovered through the safe `FindFirstOf` controller route.
+With no safe identity source, it returns an empty player list instead of reading
+crash-prone live player properties.
 
 Server-console command route:
 
@@ -36,11 +37,11 @@ per known player.
 
 ## `BMF.players.sync(records, options)`
 
-Syncs safe external records into `runtime/players.json`. This is an optional
-fallback/integration route for Omegga or another launcher-side adapter to feed
-BMF usernames, display names, UUIDs, controller paths, and player-state paths
-without reading live UE4SS properties. BMF core does not require this cache when
-the native Brickadia saved/log adapter is configured.
+Syncs safe external records into `runtime/players.json`. In the supported
+Omegga runtime this is the main launcher-side adapter path for usernames,
+display names, UUIDs, controller paths, and player-state paths without reading
+live UE4SS properties. The Brickadia saved/log adapter complements this cache
+and can recover identity fields when Omegga sync is stale or unavailable.
 
 Omegga raw player arrays are accepted:
 
@@ -59,10 +60,15 @@ Server-console command route:
 Omegga.Bridge.BMF bmf.players.sync players=[["OriginalBuilder","Build Lead","11111111-1111-4111-8111-111111111111","BP_PlayerController_C_1073741824","BP_PlayerState_C_2147483648"]]
 ```
 
-The optional Omegga feeder lives at
+The supported Omegga feeder lives at
 `integrations/omegga/bmf-player-sync/`. Configure its `commandDir` to the active
-`Mods/BMF/runtime/commands` directory, or set `OMEGGA_BMF_COMMAND_DIR`, and it
-will queue this sync automatically on Omegga player-list changes.
+`Mods/BMF/runtime/commands` directory, or set `OMEGGA_BMF_COMMAND_DIR`. It queues
+syncs on Omegga player-list changes and also runs a periodic fallback sync.
+On the current Windows UE4SS runtime, Omegga's live player list can stay empty
+when its PlayerState/PlayerController matcher cannot complete. The adapter then
+falls back to Omegga's Brickadia log path and syncs online `UserName`,
+`DisplayName`, and `UserId` records as
+`source=omegga.players.raw.<reason>.log-fallback`.
 
 ## `BMF.players.normalize(record)`
 
@@ -209,9 +215,10 @@ Omegga.Bridge.BMF bmf.players.summary target=OriginalBuilder whisper=true
 ## Validation Split
 
 - Empty player listing can be proven at `L2 Headless`.
-- Native Brickadia saved/log identity discovery is BMF core behavior and does
-  not require Omegga. It should be validated against `Brickadia.log` plus
-  `PlayerNameCache.json` fixtures and then confirmed with `L3 Live Player`.
+- Brickadia saved/log identity discovery is BMF core behavior inside the
+  supported Omegga data directory. It should be validated against
+  `Brickadia.log` plus `PlayerNameCache.json` fixtures and then confirmed with
+  `L3 Live Player`.
 - Cache sync, normalization, summary formatting, and lookup can be proven from
   `L0 Static` and `L2 Headless` command-worker tests.
 - Name normalization, query matching, missing-field handling, and permission map
@@ -219,11 +226,14 @@ Omegga.Bridge.BMF bmf.players.summary target=OriginalBuilder whisper=true
 - `scripts/validate-bmf-player-messaging.ps1` proves direct-record name
   resolution, exact lookup, UUID lookup, partial display-name lookup, and
   empty-server `PLAYER_NOT_FOUND` command behavior.
-- Real UUID, username, and display name can be supplied by native Brickadia logs
-  when `brickadiaSavedDir` is configured. Controller path and player-state path
-  mapping can still be supplied by optional adapters until BMF has native
+- Real UUID, username, and display name can be supplied by Brickadia logs when
+  `brickadiaSavedDir` is configured. Controller path and player-state path
+  mapping should come from the Omegga adapter until BMF has native
   controller-to-identity binding. Health, position, pawn, and role-effect reads
   still require separate `L3 Live Player` validation.
+- Omegga player sync was live-tested after a full Omegga restart on June 4,
+  2026. The active Windows runtime populated `runtime/players.json` with one
+  player from `source=omegga.players.raw.interval.log-fallback`.
 - Whisper delivery, join/leave events, health mutation, avatar mutation, and
   tool policy require `L3 Live Player` or higher.
 

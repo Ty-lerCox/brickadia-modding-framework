@@ -171,6 +171,12 @@ return {
       local server_exec = BMF.apis.get("BMF.server.exec")
       local world_load = BMF.apis.get("BMF.world.loadAdditive")
       local vehicles = BMF.apis.get("BMF.vehicles.spawnSet")
+      local component_policy = BMF.apis.get("BMF.permissions.evaluateApplicatorComponentAccess")
+      local interact_policy = BMF.apis.get("BMF.permissions.evaluateInteractConsolePrefixAccess")
+      local brick_asset_policy = BMF.apis.get("BMF.permissions.evaluateBrickAssetAccess")
+      local enforce_policy = BMF.apis.get("BMF.permissions.enforceNoSpawnItemApplicator")
+      local applicator_hook = BMF.apis.get("BMF.tools.onApplicatorComponentApply")
+      local applicator_status = BMF.apis.get("BMF.tools.applicator.status")
       local live = BMF.apis.list({ risk = "live-player" })
       local player_required = BMF.apis.list({ requiresPlayer = true })
       local summary = BMF.apis.summary()
@@ -179,6 +185,12 @@ return {
       local exec_api = server_exec.data and server_exec.data.api or {}
       local world_api = world_load.data and world_load.data.api or {}
       local vehicle_api = vehicles.data and vehicles.data.api or {}
+      local component_policy_api = component_policy.data and component_policy.data.api or {}
+      local interact_policy_api = interact_policy.data and interact_policy.data.api or {}
+      local brick_asset_policy_api = brick_asset_policy.data and brick_asset_policy.data.api or {}
+      local enforce_policy_api = enforce_policy.data and enforce_policy.data.api or {}
+      local applicator_hook_api = applicator_hook.data and applicator_hook.data.api or {}
+      local applicator_status_api = applicator_status.data and applicator_status.data.api or {}
       local total = summary.data and summary.data.total or 0
       local stable = summary.data and summary.data.stability and summary.data.stability.stable or 0
 
@@ -196,6 +208,18 @@ return {
           "server_exec_risk=" .. tostring(exec_api.risk or ""),
           "world_load_stability=" .. tostring(world_api.stability or ""),
           "vehicle_spawn_stability=" .. tostring(vehicle_api.stability or ""),
+          "component_policy_stability=" .. tostring(component_policy_api.stability or ""),
+          "component_policy_risk=" .. tostring(component_policy_api.risk or ""),
+          "interact_policy_stability=" .. tostring(interact_policy_api.stability or ""),
+          "interact_policy_risk=" .. tostring(interact_policy_api.risk or ""),
+          "brick_asset_policy_stability=" .. tostring(brick_asset_policy_api.stability or ""),
+          "brick_asset_policy_risk=" .. tostring(brick_asset_policy_api.risk or ""),
+          "enforce_policy_stability=" .. tostring(enforce_policy_api.stability or ""),
+          "enforce_policy_risk=" .. tostring(enforce_policy_api.risk or ""),
+          "applicator_hook_stability=" .. tostring(applicator_hook_api.stability or ""),
+          "applicator_hook_risk=" .. tostring(applicator_hook_api.risk or ""),
+          "applicator_hook_capability=" .. tostring(applicator_hook_api.capability or ""),
+          "applicator_status_stability=" .. tostring(applicator_status_api.stability or ""),
           "live_player_count_at_least_1=" .. tostring(((live.data and live.data.count) or 0) >= 1),
           "requires_player_count_at_least_1=" .. tostring(((player_required.data and player_required.data.count) or 0) >= 1),
           "summary_total_at_least_30=" .. tostring(total >= 30),
@@ -222,7 +246,7 @@ return {
     }
   }
 
-  $startOutput = & $startServerScript -BridgeDir $bridgeDir -Port $Port -VerifyWaitSeconds 30
+  $startOutput = & $startServerScript -RuntimeModsDir $RuntimeModsDir -BridgeDir $bridgeDir -Port $Port -VerifyWaitSeconds 30
   $startOutput | Set-Content -LiteralPath $startPath -Encoding UTF8
   $start = $startOutput | ConvertFrom-Json
   $serverPid = [int]$start.pid
@@ -234,13 +258,25 @@ return {
 
     Invoke-BmfConsoleCommand 'bmf.api.labels.canary' 'bmf-api-labels-canary' @(
       'BMF bmf.api.labels.canary OK',
-      'whisper_stability=scaffold',
+      'whisper_stability=experimental',
       'whisper_risk=live-player',
       'whisper_requires_player=true',
       'server_exec_stability=restricted',
       'server_exec_risk=unsafe-native',
       'world_load_stability=experimental',
       'vehicle_spawn_stability=experimental',
+      'component_policy_stability=stable',
+      'component_policy_risk=low',
+      'interact_policy_stability=stable',
+      'interact_policy_risk=medium',
+      'brick_asset_policy_stability=stable',
+      'brick_asset_policy_risk=low',
+      'enforce_policy_stability=file-backed',
+      'enforce_policy_risk=high',
+      'applicator_hook_stability=experimental',
+      'applicator_hook_risk=unsafe-native',
+      'applicator_hook_capability=tools.applicator',
+      'applicator_status_stability=experimental',
       'live_player_count_at_least_1=true',
       'requires_player_count_at_least_1=true',
       'summary_total_at_least_30=true',
@@ -250,7 +286,7 @@ return {
     Invoke-BmfConsoleCommand 'bmf.apis name=BMF.chat.whisper' 'bmf-apis-whisper' @(
       'BMF bmf.apis OK',
       'api_count=1',
-      'api_1=BMF.chat.whisper|namespace=chat|stability=scaffold|risk=live-player',
+      'api_1=BMF.chat.whisper|namespace=chat|stability=experimental|risk=live-player',
       'requires_player=true',
       'capability=chat.whisper'
     )
@@ -288,6 +324,42 @@ return {
       'api_count=1',
       'api_1=BMF.storage.readJson|namespace=storage|stability=stable|risk=low',
       'capability=plugins.storage'
+    )
+
+    Invoke-BmfConsoleCommand 'bmf.apis name=BMF.permissions.evaluateApplicatorComponentAccess' 'bmf-apis-applicator-component-access' @(
+      'BMF bmf.apis OK',
+      'api_count=1',
+      'api_1=BMF.permissions.evaluateApplicatorComponentAccess|namespace=permissions|stability=stable|risk=low',
+      'requires_player=false'
+    )
+
+    Invoke-BmfConsoleCommand 'bmf.apis name=BMF.permissions.evaluateInteractConsolePrefixAccess' 'bmf-apis-interact-console-prefix-access' @(
+      'BMF bmf.apis OK',
+      'api_count=1',
+      'api_1=BMF.permissions.evaluateInteractConsolePrefixAccess|namespace=permissions|stability=stable|risk=medium',
+      'requires_player=false'
+    )
+
+    Invoke-BmfConsoleCommand 'bmf.apis name=BMF.permissions.evaluateBrickAssetAccess' 'bmf-apis-brick-asset-access' @(
+      'BMF bmf.apis OK',
+      'api_count=1',
+      'api_1=BMF.permissions.evaluateBrickAssetAccess|namespace=permissions|stability=stable|risk=low',
+      'requires_player=false'
+    )
+
+    Invoke-BmfConsoleCommand 'bmf.apis name=BMF.permissions.enforceNoSpawnItemApplicator' 'bmf-apis-enforce-nospawnitem' @(
+      'BMF bmf.apis OK',
+      'api_count=1',
+      'api_1=BMF.permissions.enforceNoSpawnItemApplicator|namespace=permissions|stability=file-backed|risk=high',
+      'requires_player=false'
+    )
+
+    Invoke-BmfConsoleCommand 'bmf.apis name=BMF.tools.onApplicatorComponentApply' 'bmf-apis-applicator-live-hook' @(
+      'BMF bmf.apis OK',
+      'api_count=1',
+      'api_1=BMF.tools.onApplicatorComponentApply|namespace=tools|stability=experimental|risk=unsafe-native',
+      'requires_player=true',
+      'capability=tools.applicator'
     )
 
     Invoke-BmfConsoleCommand 'bmf.apis risk=live-player limit=20' 'bmf-apis-live-player' @(

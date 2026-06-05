@@ -1,5 +1,10 @@
 # Chat API
 
+BMF chat APIs are implemented inside BMF, but the supported Windows runtime is
+currently BMF-compatible Omegga plus UE4SS. Omegga supplies the server wrapper,
+command bridge, and helper globals BMF uses to reach live Brickadia
+`PlayerController` objects.
+
 ## `BMF.chat.broadcast(message)`
 
 Broadcasts a message by finding a live player controller and calling
@@ -36,6 +41,9 @@ Finds one live player controller and calls `ClientPushChatMessage(message)` on
 that controller. With exactly one live controller, any non-empty target string
 routes to that controller. Name/UUID matching remains pending because the
 validated route deliberately does not read `PlayerState` identity fields yet.
+The intended identity source for named targeting is the supported Omegga player
+sync adapter plus the Brickadia saved/log adapter, not unsafe live `PlayerState`
+reflection.
 
 With a single joined player, visible delivery is live-confirmed. Two-player
 negative targeting and live identity matching are still pending.
@@ -49,6 +57,11 @@ Server-console command route:
 ```text
 Omegga.Bridge.BMF bmf.chat.whisper target=<uuid-or-name> message=<text>
 ```
+
+The response includes `delivered`, `delivered_count`, `attempted_count`,
+`delivery_mode`, and `validation`. A successful live whisper reports
+`delivery_mode=player-controller-client-push-chat-message` and
+`validation=L3 Live Player UI confirmed`.
 
 ## `BMF.chat.statusMessage(player, message)`
 
@@ -67,8 +80,7 @@ Omegga.Bridge.BMF bmf.chat.statusmessage target=<uuid-or-name> message=<text>
 - `L3 Live Player`: `ClientPushChatMessage` visible UI delivery is confirmed
   for broadcast and one-target whisper-style delivery.
 - The validated route avoids live `PlayerState` reflection. Player names and
-  UUIDs can come from Omegga/log context externally, but BMF does not yet expose
-  them from a safe live adapter.
+  UUIDs should come from Omegga player sync and/or Brickadia saved/log context.
 - Two-player negative targeting still needs a safe identity adapter and a
   second joined player before we can claim only the intended recipient sees a
   whisper.

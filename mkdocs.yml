@@ -39,6 +39,9 @@ nav:
   - Getting Started:
       - First Plugin: getting-started/first-plugin.md
       - Windows Install: install/windows.md
+  - Architecture:
+      - Omegga-Supported Runtime: architecture/omegga-supported-runtime.md
+      - Standalone Runtime: architecture/standalone-runtime.md
   - API:
       - Overview: api/index.md
       - API Registry: api/apis.md

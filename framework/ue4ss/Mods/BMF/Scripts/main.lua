@@ -33,6 +33,8 @@ local state = {
   audit_max_records = 200,
   rate_limits = {},
   game_thread_callbacks = {},
+  game_thread_callback_order = {},
+  game_thread_callback_retention_limit = 8192,
   next_game_thread_callback_id = 1,
   commands = {},
   console_command_callbacks = {},
@@ -44,6 +46,29 @@ local state = {
   plugin_tick_timer_id = nil,
   plugin_tick_count = 0,
   plugin_tick_interval_ms = 1000,
+  tools = {
+    applicator = {
+      enabled = false,
+      registered = false,
+      registering = false,
+      hook_path = "",
+      pre_id = nil,
+      post_id = nil,
+      callback = nil,
+      handlers = {},
+      next_handler_id = 1,
+      events = {},
+      max_events = 50,
+      total_events = 0,
+      denied_events = 0,
+      param_null_events = 0,
+      allowed_events = 0,
+      component_cache = {},
+      component_cache_notes = {},
+      last_error = "",
+      last_event = nil,
+    },
+  },
   config = {
     allowPluginServerExec = false,
     allowPluginServerShutdown = false,
@@ -51,6 +76,7 @@ local state = {
     pluginWatchdogEnabled = true,
     pluginWatchdogMaxErrors = 3,
     allowPluginUnsafeGlobals = false,
+    allowUnsafeApplicatorLuaHook = false,
     brickadiaSavedDir = "",
   },
 }
@@ -225,7 +251,7 @@ local function json_encode(value, depth)
 end
 
 local function json_decode(raw)
-  local text = tostring(raw or "")
+  local text = tostring(raw or ""):gsub("^\239\187\191", "")
   local length = #text
   local pos = 1
 
@@ -845,12 +871,25 @@ local function normalize_integer(value, label)
 end
 
 local function trim_string(value)
-  return (tostring(value or ""):gsub("^%s+", ""):gsub("%s+$", ""))
+  local text = tostring(value or ""):gsub("^\239\187\191", "")
+  return (text:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+local function join_path(base, child)
+  local left = tostring(base or ""):gsub("\\", "/"):gsub("/+$", "")
+  local right = tostring(child or ""):gsub("\\", "/"):gsub("^/+", "")
+  if left == "" then
+    return right
+  end
+  if right == "" then
+    return left
+  end
+  return left .. "/" .. right
 end
 
 local function first_string(...)
-  local values = { ... }
-  for _, value in ipairs(values) do
+  for index = 1, select("#", ...) do
+    local value = select(index, ...)
     if type(value) == "string" and trim_string(value) ~= "" then
       return value
     end
@@ -928,9 +967,13 @@ local function run_on_game_thread(callback)
   if type(ExecuteInGameThread) == "function" and type(EGameThreadMethod) == "table" and EGameThreadMethod.EngineTick ~= nil then
     local id = state.next_game_thread_callback_id
     state.next_game_thread_callback_id = state.next_game_thread_callback_id + 1
+    state.game_thread_callback_order[#state.game_thread_callback_order + 1] = id
+    while #state.game_thread_callback_order > state.game_thread_callback_retention_limit do
+      local old_id = table.remove(state.game_thread_callback_order, 1)
+      state.game_thread_callbacks[old_id] = nil
+    end
     state.game_thread_callbacks[id] = function()
       local retained = state.game_thread_callbacks[id]
-      state.game_thread_callbacks[id] = nil
       if retained then
         callback()
       end
@@ -1027,7 +1070,18 @@ API_REGISTRY = {
   { name = "BMF.players.whisperSummary", namespace = "players", kind = "function", stability = "experimental", risk = "live-player", validation = "L0 Static + L3 Live Player for visible delivery", requiresPlayer = true, capability = "chat.whisper", summary = "Whisper a cached identity summary back to the selected player." },
   { name = "BMF.permissions.describeRole", namespace = "permissions", kind = "function", stability = "stable", risk = "low", validation = "L0 Fixture + L2 Headless", requiresPlayer = false, capability = "", summary = "Normalize a RoleSetup2-style role permission map." },
   { name = "BMF.permissions.evaluateNoSpawnItemApplicator", namespace = "permissions", kind = "function", stability = "stable", risk = "medium", validation = "L0 Fixture + L2 Headless; L3 Live Player + L5 Negative for runtime exploit denial", requiresPlayer = false, capability = "", summary = "Evaluate the default-role policy that keeps applicator access but forbids spawn items." },
+  { name = "BMF.permissions.evaluateApplicatorComponentAccess", namespace = "permissions", kind = "function", stability = "stable", risk = "low", validation = "L2 Headless + L5 Negative; L3 Live Player when wired into a live applicator hook", requiresPlayer = false, capability = "", summary = "Evaluate global allow/deny policy for an applicator component name." },
+  { name = "BMF.permissions.evaluateInteractConsolePrefixAccess", namespace = "permissions", kind = "function", stability = "stable", risk = "medium", validation = "L2 Headless + L5 Negative; L3 Live Player + native ServerModifyComponent hook for save-time Interactable prefix blocking", requiresPlayer = false, capability = "", summary = "Evaluate Interactable Print-to-Console prefix policy with Owner/Admin bypass and a whitelist for everyone else." },
+  { name = "BMF.permissions.evaluateBrickAssetAccess", namespace = "permissions", kind = "function", stability = "stable", risk = "low", validation = "L0 Archive Fixture + L2 Headless; L3 Live Player when wired into a live placement hook", requiresPlayer = false, capability = "", summary = "Evaluate role-aware allow/deny policy for Brickadia brick asset names such as B_Joint_Wheel_Micro." },
+  { name = "BMF.permissions.enforceNoSpawnItemApplicator", namespace = "permissions", kind = "function", stability = "file-backed", risk = "high", validation = "L2 Headless copied RoleSetup2 patching; L3 Live Player + L5 Negative for live tool denial", requiresPlayer = false, capability = "", summary = "Patch RoleSetup2 so applicator access stays allowed while SpawnItems is denied by default and named roles cannot override it." },
+  { name = "BMF.tools.onApplicatorComponentApply", namespace = "tools", kind = "function", stability = "experimental", risk = "unsafe-native", validation = "L2 Headless registration shape; L3 Live Player + L5 Negative for denied component mutation", requiresPlayer = true, capability = "tools.applicator", summary = "Register a Lua handler for live applicator ServerAddComponent attempts." },
+  { name = "BMF.tools.applicator.status", namespace = "tools", kind = "function", stability = "experimental", risk = "unsafe-native", validation = "L2 Headless command; L3 Live Player for native hook evidence", requiresPlayer = false, capability = "", summary = "Inspect the live applicator hook, handlers, recent events, and denied component cache." },
+  { name = "BMF.tools.applicator.nativeTargets", namespace = "tools", kind = "function", stability = "experimental", risk = "unsafe-native", validation = "L3 Live Server pre-injection target discovery", requiresPlayer = false, capability = "", summary = "Resolve native addresses used by the ServerAddComponent function-slot blocker." },
+  { name = "BMF.tools.applicator.scanObjects", namespace = "tools", kind = "function", stability = "experimental", risk = "low", validation = "L3 Live Server read-only reflection scan", requiresPlayer = false, capability = "", summary = "Scan live UE objects for applicator/component function discovery." },
+  { name = "BMF.tools.applicator.refreshComponentCache", namespace = "tools", kind = "function", stability = "experimental", risk = "unsafe-native", validation = "L2 Headless safe failure; L3 Live Player for reflected component type addresses", requiresPlayer = false, capability = "", summary = "Resolve denied Brickadia component type objects such as ItemSpawn for live applicator enforcement." },
+  { name = "BMF.interact.handleConsoleMessage", namespace = "interact", kind = "function", stability = "experimental", risk = "medium", validation = "L2 Headless command; L3 Live Player through Omegga interact forwarder", requiresPlayer = false, capability = "", summary = "Forward an Interactable Print-to-Console message into BMF's interactConsole event." },
   { name = "BMF.permissions.describeRoleAssignments", namespace = "permissions", kind = "function", stability = "stable", risk = "low", validation = "L0 Fixture + L2 Headless", requiresPlayer = false, capability = "", summary = "Normalize RoleAssignments.json-style player role records." },
+  { name = "BMF.permissions.loadRoleAssignments", namespace = "permissions", kind = "function", stability = "file-backed", risk = "low", validation = "L2 Headless + L3 Live Player policy lookup", requiresPlayer = false, capability = "", summary = "Read and normalize the configured Brickadia RoleAssignments.json file." },
   { name = "BMF.permissions.getPlayerRoles", namespace = "permissions", kind = "function", stability = "stable", risk = "low", validation = "L0 Fixture + L2 Headless", requiresPlayer = false, capability = "", summary = "Read assigned role names for a player UUID from RoleAssignments-style data." },
   { name = "BMF.permissions.playerHasRole", namespace = "permissions", kind = "function", stability = "stable", risk = "low", validation = "L0 Fixture + L2 Headless", requiresPlayer = false, capability = "", summary = "Case-insensitive role membership check over RoleAssignments-style data." },
   { name = "BMF.permissions.evaluateCommandAccess", namespace = "permissions", kind = "function", stability = "stable", risk = "medium", validation = "L2 Headless + L5 Negative; L3 Live Player for authenticated player command routing", requiresPlayer = false, capability = "", summary = "Evaluate role-based command access from file-shaped assignments or actor roles." },
@@ -2197,6 +2251,14 @@ local function parse_command_options(args)
   return options
 end
 
+local function percent_decode(value)
+  local text = tostring(value or "")
+  text = text:gsub("+", " ")
+  return (text:gsub("%%(%x%x)", function(hex)
+    return string.char(tonumber(hex, 16))
+  end))
+end
+
 local function option_number(options, key, default)
   local value = options[key]
   if value == nil or value == "" then
@@ -2819,6 +2881,54 @@ local function register_builtin_commands()
     return listed
   end)
 
+  BMF.commands.register("bmf.tools.applicator.status", "Show live applicator hook status.", function(args)
+    local options = parse_command_options(args)
+    local refresh = tostring(options.refresh or ""):lower()
+    local status = BMF.tools.applicator.status({
+      refresh = refresh == "1" or refresh == "true" or refresh == "yes",
+      limit = option_number(options, "limit", 10),
+    })
+    return status
+  end)
+
+  BMF.commands.register("bmf.tools.applicator.refresh", "Refresh denied applicator component type cache.", function()
+    local refreshed = BMF.tools.applicator.refreshComponentCache()
+    local data = refreshed.data or {}
+    local lines = {
+      "cached_count=" .. tostring(data.cachedCount or 0),
+    }
+    local index = 0
+    for address, cached in pairs(data.cache or {}) do
+      index = index + 1
+      lines[#lines + 1] =
+        "component_cache_" .. tostring(index) .. "=" ..
+        tostring(cached.name or "") .. "|" .. tostring(address) .. "|source=" .. tostring(cached.source or "")
+    end
+    refreshed.data.lines = lines
+    return refreshed
+  end)
+
+  BMF.commands.register("bmf.tools.applicator.native-targets", "Resolve native ServerAddComponent blocker targets.", function(args)
+    local options = parse_command_options(args)
+    local refresh = tostring(options.refresh or "true"):lower()
+    return BMF.tools.applicator.nativeTargets({
+      refresh = not (refresh == "0" or refresh == "false" or refresh == "no"),
+    })
+  end)
+
+  BMF.commands.register("bmf.tools.applicator.scan-objects", "Scan live UE objects for applicator target discovery.", function(args)
+    local options = parse_command_options(args)
+    return BMF.tools.applicator.scanObjects({
+      pattern = options.pattern or options.patterns or "",
+      name = options.name or options.fullname or "",
+      class = options.class or options.classname or "",
+      any = options.any or "",
+      unsafe = options.unsafe or "",
+      limit = option_number(options, "limit", 50),
+      max = option_number(options, "max", option_number(options, "maxscan", 250000)),
+    })
+  end)
+
   BMF.commands.register("bmf.unload", "Unload BMF plugins from memory.", function()
     local unloaded = BMF.unloadPlugins("command")
     return result(unloaded.ok, unloaded.code, unloaded.message, {
@@ -3031,6 +3141,31 @@ local function register_builtin_commands()
     return synced
   end)
 
+  BMF.commands.register("bmf.interact.console", "Forward an Interactable Print-to-Console event into BMF.", function(args)
+    local options = parse_command_options(args)
+    local forwarded = BMF.interact.handleConsoleMessage({
+      source = percent_decode(options.source or options.adapter or "command"),
+      message = percent_decode(options.message or options.tag or options.consoletag or options.value or ""),
+      player = {
+        uuid = tostring(options.player or options.uuid or options.id or options.playerid or ""),
+        username = percent_decode(options.username or options.name or options.playername or ""),
+        displayName = percent_decode(options.displayname or options.display or options.name or ""),
+        controller = percent_decode(options.controller or ""),
+        pawn = percent_decode(options.pawn or ""),
+      },
+      brickName = percent_decode(options.brick or options.brickname or ""),
+      brickAsset = percent_decode(options.asset or options.brickasset or ""),
+      x = options.x,
+      y = options.y,
+      z = options.z,
+    })
+    forwarded.data = forwarded.data or {}
+    forwarded.data.lines = forwarded.data.lines or {}
+    forwarded.data.lines[#forwarded.data.lines + 1] = "code=" .. tostring(forwarded.code or "")
+    forwarded.data.lines[#forwarded.data.lines + 1] = "ok=" .. tostring(forwarded.ok == true)
+    return forwarded
+  end)
+
   BMF.commands.register("bmf.players.find", "Find a known BMF player record.", function(args)
     local query = tostring(args or ""):match("query=(.*)$") or tostring(args or "")
     local found = BMF.players.find(trim_string(query))
@@ -3105,6 +3240,61 @@ local function register_builtin_commands()
     summarized.data = summarized.data or {}
     summarized.data.lines = lines
     return summarized
+  end)
+
+  BMF.commands.register("bmf.permissions.role-assignments", "Show configured player role assignments.", function(args)
+    local options = parse_command_options(args)
+    local loaded = BMF.permissions.loadRoleAssignments({
+      path = options.path or options.assignments or options.file,
+      savedDir = options.saveddir or options.saved,
+    })
+    local lines = {
+      "code=" .. tostring(loaded.code or ""),
+      "ok=" .. tostring(loaded.ok == true),
+    }
+    if loaded.data and type(loaded.data.lines) == "table" then
+      for _, line in ipairs(loaded.data.lines) do
+        lines[#lines + 1] = line
+      end
+    end
+    if loaded.data and type(loaded.data.players) == "table" then
+      local limit = tonumber(options.limit or 10) or 10
+      if limit < 0 then
+        limit = 0
+      end
+      for index, player in ipairs(loaded.data.players) do
+        if index > limit then
+          break
+        end
+        lines[#lines + 1] = "player_" .. tostring(index) .. "=" ..
+          tostring(player.uuid or "") .. "|roles=" .. table.concat(player.roles or {}, "|")
+      end
+    end
+    loaded.data = loaded.data or {}
+    loaded.data.lines = lines
+    return loaded
+  end)
+
+  BMF.commands.register("bmf.permissions.enforce-nospawnitem", "Patch RoleSetup2 so applicator remains allowed while spawn items are forbidden.", function(args)
+    local options = parse_command_options(args)
+    local enforced = BMF.permissions.enforceNoSpawnItemApplicator({
+      path = options.path or options.rolesetup or options.file,
+      savedDir = options.saveddir or options.saved,
+      dryRun = options.dryrun or options["dry-run"],
+      backup = options.backup,
+    })
+    local lines = {
+      "code=" .. tostring(enforced.code or ""),
+      "ok=" .. tostring(enforced.ok == true),
+    }
+    if enforced.data and type(enforced.data.lines) == "table" then
+      for _, line in ipairs(enforced.data.lines) do
+        lines[#lines + 1] = line
+      end
+    end
+    enforced.data = enforced.data or {}
+    enforced.data.lines = lines
+    return enforced
   end)
 
   BMF.commands.register("bmf.minigames.list", "List minigames through the server console.", function()
@@ -3493,6 +3683,20 @@ BMF.permissions.APPLICATOR_SAFE = {
   "BR.Permission.Building.Applicator.EditBricks",
   "BR.Permission.Building.Applicator.EditEntities",
 }
+BMF.permissions.APPLICATOR_DENIED_COMPONENTS = {
+  "SpawnItem",
+  "ItemSpawn",
+}
+BMF.permissions.INTERACT_CONSOLE_ADMIN_ROLES = {
+  "Owner",
+  "Admin",
+}
+BMF.permissions.INTERACT_CONSOLE_ALLOWED_PREFIXES = {}
+BMF.permissions.BRICK_ASSET_ADMIN_ROLES = {
+  "Owner",
+  "Admin",
+}
+BMF.permissions.BRICK_ASSET_DENIED_ASSETS = {}
 
 BMF.permissions.normalizeName = function(name)
   local value = trim_string(name)
@@ -3547,6 +3751,7 @@ BMF.permissions.toMap = function(permissions)
   return map
 end
 
+do
 local function permission_bool_to_state(value)
   if value == true then
     return "Allowed"
@@ -3635,7 +3840,8 @@ BMF.permissions.describeRole = function(role)
   })
 end
 
-BMF.permissions.evaluateNoSpawnItemApplicator = function(role)
+local function evaluate_no_spawn_item_role_policy(role, options)
+  options = type(options) == "table" and options or {}
   local described = BMF.permissions.describeRole(role)
   if not described.ok then
     return described
@@ -3643,6 +3849,7 @@ BMF.permissions.evaluateNoSpawnItemApplicator = function(role)
 
   local data = described.data or {}
   local permissions = data.permissions or {}
+  local allow_inherited_spawn_items = options.allowInheritedSpawnItems == true
   local required = {}
   local missing_allowed = {}
   for _, permission_name in ipairs(BMF.permissions.APPLICATOR_SAFE) do
@@ -3658,7 +3865,19 @@ BMF.permissions.evaluateNoSpawnItemApplicator = function(role)
   end
 
   local spawn_items_allowed = permissions[BMF.permissions.SPAWN_ITEMS]
+  local spawn_items_missing = spawn_items_allowed == nil
   local spawn_items_forbidden = spawn_items_allowed == false
+    or (allow_inherited_spawn_items and spawn_items_missing)
+  local spawn_items_state = permission_bool_to_state(spawn_items_allowed)
+  if allow_inherited_spawn_items and spawn_items_missing then
+    spawn_items_state = "Inherited"
+  end
+  local spawn_items_entry_count = 0
+  for _, entry in ipairs(data.entries or {}) do
+    if entry.name == BMF.permissions.SPAWN_ITEMS then
+      spawn_items_entry_count = spawn_items_entry_count + 1
+    end
+  end
   local compliant = #missing_allowed == 0 and spawn_items_forbidden and (data.duplicateCount or 0) == 0 and (data.invalidCount or 0) == 0
 
   return result(true, "OK", "No-spawn-item applicator policy evaluated", {
@@ -3667,7 +3886,11 @@ BMF.permissions.evaluateNoSpawnItemApplicator = function(role)
     roleName = data.roleName or "",
     safeApplicatorAllowed = #missing_allowed == 0,
     spawnItemsForbidden = spawn_items_forbidden,
-    spawnItemsState = permission_bool_to_state(spawn_items_allowed),
+    spawnItemsState = spawn_items_state,
+    spawnItemsInherited = allow_inherited_spawn_items and spawn_items_missing,
+    spawnItemsEntryCount = spawn_items_entry_count,
+    spawnItemsDuplicateCount = math.max(spawn_items_entry_count - 1, 0),
+    allowInheritedSpawnItems = allow_inherited_spawn_items,
     requiredAllowed = required,
     missingAllowed = missing_allowed,
     duplicateCount = data.duplicateCount or 0,
@@ -3676,6 +3899,940 @@ BMF.permissions.evaluateNoSpawnItemApplicator = function(role)
     invalid = data.invalid or {},
     permissionCount = data.permissionCount or 0,
   })
+end
+
+BMF.permissions.evaluateNoSpawnItemApplicator = function(role)
+  return evaluate_no_spawn_item_role_policy(role)
+end
+
+local function normalize_component_key(value)
+  local text = trim_string(value)
+  if text == "" then
+    return result(false, "INVALID_COMPONENT", "component name is required")
+  end
+  if text:match("[%c]") then
+    return result(false, "INVALID_COMPONENT", "component name contains unsupported characters")
+  end
+
+  local key = text:lower():gsub("[^a-z0-9]", "")
+  if key == "" then
+    return result(false, "INVALID_COMPONENT", "component name did not contain searchable characters")
+  end
+  if key:sub(-9) == "component" then
+    key = key:sub(1, #key - 9)
+  end
+
+  return result(true, "OK", "Component name normalized", {
+    name = text,
+    key = key,
+  })
+end
+
+local function component_rule_list(value, fallback)
+  if type(value) == "table" then
+    return value
+  end
+  if type(fallback) == "table" then
+    return fallback
+  end
+  return {}
+end
+
+BMF.permissions._normalizeComponentKey = normalize_component_key
+BMF.permissions._componentRuleList = component_rule_list
+
+local function normalize_component_rules(values)
+  local rules = {}
+  if type(values) ~= "table" then
+    return rules
+  end
+
+  for _, value in ipairs(values) do
+    local normalized = normalize_component_key(value)
+    if normalized.ok then
+      rules[#rules + 1] = normalized.data
+    end
+  end
+  return rules
+end
+
+local function component_matches_rule(component_key, rule_key)
+  if not component_key or not rule_key or rule_key == "" then
+    return false
+  end
+  if component_key == rule_key then
+    return true
+  end
+  return component_key:sub(0 - #rule_key) == rule_key
+end
+
+local function find_component_rule(component_key, rules)
+  for _, rule in ipairs(rules or {}) do
+    if component_matches_rule(component_key, rule.key) then
+      return rule
+    end
+  end
+  return nil
+end
+
+BMF.permissions.evaluateApplicatorComponentAccess = function(options)
+  if type(options) == "string" then
+    options = { component = options }
+  end
+  if type(options) ~= "table" then
+    return result(false, "INVALID_COMPONENT_POLICY", "options table or component string is required")
+  end
+
+  local component_source = options.component or options.componentName or options.name or options.type
+  local component = normalize_component_key(component_source)
+  if not component.ok then
+    return component
+  end
+
+  local policy = type(options.policy) == "table" and options.policy or {}
+  local denied_components = component_rule_list(
+    options.deniedComponents or options.denyComponents or options.blockedComponents or policy.deniedComponents or policy.denyComponents or policy.blockedComponents,
+    BMF.permissions.APPLICATOR_DENIED_COMPONENTS
+  )
+  local allowed_components = component_rule_list(
+    options.allowedComponents or options.allowComponents or policy.allowedComponents or policy.allowComponents,
+    nil
+  )
+
+  local denied_rules = normalize_component_rules(denied_components)
+  local allowed_rules = normalize_component_rules(allowed_components)
+  local denied_match = find_component_rule(component.data.key, denied_rules)
+  local allowed_match = find_component_rule(component.data.key, allowed_rules)
+
+  local actor = options.actor or options.player or {}
+  local actor_uuid = ""
+  local actor_name = ""
+  if type(actor) == "table" then
+    actor_uuid = first_string(actor.uuid, actor.id, actor.playerId, actor.playerID) or ""
+    actor_name = first_string(actor.username, actor.name, actor.displayName, actor.playerName) or ""
+  elseif type(actor) == "string" then
+    actor_uuid = actor
+  end
+
+  local allowed = true
+  local decision = "component-allowed"
+  local reason = "component is not denied"
+  local matched_component = ""
+
+  if denied_match then
+    allowed = false
+    decision = "component-denied"
+    reason = "component matched denied applicator component policy"
+    matched_component = denied_match.name
+  elseif #allowed_rules > 0 and not allowed_match then
+    allowed = false
+    decision = "component-not-allowlisted"
+    reason = "component did not match allowlisted applicator components"
+  elseif allowed_match then
+    matched_component = allowed_match.name
+    reason = "component matched allowlisted applicator component policy"
+  end
+
+  return result(true, "OK", "Applicator component access evaluated", {
+    policy = "applicatorComponentAccess",
+    allowed = allowed,
+    decision = decision,
+    reason = reason,
+    component = component.data.name,
+    componentKey = component.data.key,
+    matchedComponent = matched_component,
+    deniedComponentCount = #denied_rules,
+    allowedComponentCount = #allowed_rules,
+    actorUuid = actor_uuid,
+    actorName = actor_name,
+    global = true,
+  })
+end
+
+local function normalize_interact_prefix(value)
+  local text = trim_string(value)
+  if text == "" then
+    return nil
+  end
+  if text:match("[%c]") then
+    return nil
+  end
+  return {
+    name = text,
+    key = text:lower(),
+  }
+end
+
+local function normalize_interact_prefix_rules(values)
+  local rules = {}
+  if type(values) ~= "table" then
+    return rules
+  end
+  for _, value in ipairs(values) do
+    local rule = normalize_interact_prefix(value)
+    if rule then
+      rules[#rules + 1] = rule
+    end
+  end
+  return rules
+end
+
+local function normalize_role_list(value)
+  local roles = {}
+  local seen = {}
+  local function add(role)
+    local normalized = BMF.permissions.normalizeRoleName(role)
+    if normalized.ok then
+      local name = normalized.data.name
+      local key = name:lower()
+      if not seen[key] then
+        seen[key] = true
+        roles[#roles + 1] = name
+      end
+    end
+  end
+
+  if type(value) == "string" then
+    for role in value:gmatch("[^,|]+") do
+      add(role)
+    end
+  elseif type(value) == "table" then
+    for _, role in ipairs(value) do
+      add(role)
+    end
+  end
+  return roles
+end
+
+local function actor_role_list(actor, explicit_roles)
+  local roles = normalize_role_list(explicit_roles)
+  if #roles > 0 then
+    return roles
+  end
+  if type(actor) == "table" then
+    roles = normalize_role_list(actor.roles or actor.roleNames or actor.role)
+    if #roles > 0 then
+      return roles
+    end
+  end
+  return {}
+end
+
+local function find_role_match(roles, allowed_roles)
+  local map = {}
+  for _, role in ipairs(roles or {}) do
+    map[tostring(role):lower()] = tostring(role)
+  end
+  for _, allowed in ipairs(allowed_roles or {}) do
+    local matched = map[tostring(allowed):lower()]
+    if matched then
+      return matched
+    end
+  end
+  return ""
+end
+
+local function find_interact_prefix_match(tag_key, rules)
+  for _, rule in ipairs(rules or {}) do
+    if tag_key:sub(1, #rule.key) == rule.key then
+      return rule
+    end
+  end
+  return nil
+end
+
+BMF.permissions.evaluateInteractConsolePrefixAccess = function(options)
+  if type(options) == "string" then
+    options = { tag = options }
+  end
+  if type(options) ~= "table" then
+    return result(false, "INVALID_INTERACT_CONSOLE_POLICY", "options table or tag string is required")
+  end
+
+  local policy = type(options.policy) == "table" and options.policy or {}
+  local raw_tag = first_string(options.tag, options.consoleTag, options.message, options.value, policy.tag) or ""
+  local tag = trim_string(raw_tag)
+  if tag:match("[%c]") then
+    return result(false, "INVALID_INTERACT_CONSOLE_TAG", "Interact console tag contains unsupported characters", {
+      tag = tostring(raw_tag or ""),
+    })
+  end
+
+  local actor = options.actor or options.player or {}
+  local actor_uuid = ""
+  local actor_name = ""
+  if type(actor) == "table" then
+    actor_uuid = first_string(actor.uuid, actor.id, actor.playerId, actor.playerID) or ""
+    actor_name = first_string(actor.username, actor.name, actor.displayName, actor.playerName) or ""
+  elseif type(actor) == "string" then
+    actor_uuid = actor
+  end
+
+  local allowed_prefixes = component_rule_list(
+    options.allowedPrefixes or options.allowPrefixes or options.prefixes or policy.allowedPrefixes or policy.allowPrefixes or policy.prefixes,
+    BMF.permissions.INTERACT_CONSOLE_ALLOWED_PREFIXES
+  )
+  local admin_roles = component_rule_list(
+    options.adminRoles or options.bypassRoles or policy.adminRoles or policy.bypassRoles,
+    BMF.permissions.INTERACT_CONSOLE_ADMIN_ROLES
+  )
+  local prefix_rules = normalize_interact_prefix_rules(allowed_prefixes)
+  local bypass_roles = normalize_role_list(admin_roles)
+  local roles = actor_role_list(actor, options.roles or policy.roles)
+  local matched_role = find_role_match(roles, bypass_roles)
+  local allow_empty = options.allowEmpty
+  if allow_empty == nil then
+    allow_empty = policy.allowEmpty
+  end
+  allow_empty = allow_empty ~= false
+  local deny_unknown = options.denyUnknown
+  if deny_unknown == nil then
+    deny_unknown = policy.denyUnknown
+  end
+  deny_unknown = deny_unknown ~= false
+
+  local tag_key = tag:lower()
+  local matched_prefix = ""
+  local allowed = false
+  local decision = "prefix-denied"
+  local reason = "interact console tag did not match an allowed prefix"
+
+  if tag == "" and allow_empty then
+    allowed = true
+    decision = "empty-allowed"
+    reason = "empty interact console tag is allowed"
+  elseif matched_role ~= "" then
+    allowed = true
+    decision = "admin-bypass"
+    reason = "actor matched an interact console bypass role"
+  else
+    local rule = find_interact_prefix_match(tag_key, prefix_rules)
+    if rule then
+      allowed = true
+      decision = "prefix-allowed"
+      reason = "interact console tag matched an allowed prefix"
+      matched_prefix = rule.name
+    elseif not deny_unknown then
+      allowed = true
+      decision = "unknown-allowed"
+      reason = "unknown interact console prefixes are allowed by policy"
+    end
+  end
+
+  return result(true, "OK", "Interact console prefix access evaluated", {
+    policy = "interactConsolePrefixAccess",
+    allowed = allowed,
+    decision = decision,
+    reason = reason,
+    tag = tag,
+    normalizedTag = tag_key,
+    matchedPrefix = matched_prefix,
+    actorUuid = actor_uuid,
+    actorName = actor_name,
+    roles = roles,
+    matchedRole = matched_role,
+    allowedPrefixCount = #prefix_rules,
+    adminRoleCount = #bypass_roles,
+    denyUnknown = deny_unknown,
+    allowEmpty = allow_empty,
+  })
+end
+
+local function normalize_brick_asset_key(value)
+  local text = trim_string(value)
+  if text == "" then
+    return result(false, "INVALID_BRICK_ASSET", "brick asset name is required")
+  end
+  if text:match("[%c]") then
+    return result(false, "INVALID_BRICK_ASSET", "brick asset name contains unsupported characters")
+  end
+
+  local key = text:lower():gsub("[^a-z0-9]", "")
+  if key == "" then
+    return result(false, "INVALID_BRICK_ASSET", "brick asset name did not contain searchable characters")
+  end
+
+  return result(true, "OK", "Brick asset name normalized", {
+    name = text,
+    key = key,
+  })
+end
+
+local function brick_asset_rule_list(value, fallback)
+  if type(value) == "table" then
+    return value
+  end
+  if type(value) == "string" then
+    local items = {}
+    for item in value:gmatch("[^,|]+") do
+      items[#items + 1] = item
+    end
+    return items
+  end
+  if type(fallback) == "table" then
+    return fallback
+  end
+  return {}
+end
+
+local function normalize_brick_asset_rule(value)
+  local text = trim_string(value)
+  if text == "" or text:match("[%c]") then
+    return nil
+  end
+
+  local starts_wild = text:sub(1, 1) == "*"
+  local ends_wild = text:sub(-1) == "*"
+  local core = trim_string(text:gsub("%*", ""))
+  local normalized = normalize_brick_asset_key(core)
+  if not normalized.ok then
+    return nil
+  end
+
+  local mode = "contains"
+  if starts_wild and ends_wild then
+    mode = "contains"
+  elseif starts_wild then
+    mode = "suffix"
+  elseif ends_wild then
+    mode = "prefix"
+  end
+
+  return {
+    name = text,
+    key = normalized.data.key,
+    mode = mode,
+  }
+end
+
+local function normalize_brick_asset_rules(values)
+  local rules = {}
+  for _, value in ipairs(brick_asset_rule_list(values, nil)) do
+    local rule = normalize_brick_asset_rule(value)
+    if rule then
+      rules[#rules + 1] = rule
+    end
+  end
+  return rules
+end
+
+local function brick_asset_matches_rule(asset_key, rule)
+  if not asset_key or not rule or not rule.key or rule.key == "" then
+    return false
+  end
+  if rule.mode == "prefix" then
+    return asset_key:sub(1, #rule.key) == rule.key
+  end
+  if rule.mode == "suffix" then
+    return asset_key:sub(0 - #rule.key) == rule.key
+  end
+  return asset_key:find(rule.key, 1, true) ~= nil
+end
+
+local function find_brick_asset_rule(asset_key, rules)
+  for _, rule in ipairs(rules or {}) do
+    if brick_asset_matches_rule(asset_key, rule) then
+      return rule
+    end
+  end
+  return nil
+end
+
+local function normalize_plain_string_list(value)
+  local items = {}
+  local seen = {}
+  local function add(item)
+    local text = trim_string(item)
+    if text == "" or text:match("[%c]") then
+      return
+    end
+    local key = text:lower()
+    if seen[key] then
+      return
+    end
+    seen[key] = true
+    items[#items + 1] = text
+  end
+
+  if type(value) == "string" then
+    for item in value:gmatch("[^,|]+") do
+      add(item)
+    end
+  elseif type(value) == "table" then
+    for _, item in ipairs(value) do
+      add(item)
+    end
+  end
+  return items
+end
+
+local function find_plain_string_match(values, allowed)
+  local map = {}
+  for _, value in ipairs(values or {}) do
+    local key = trim_string(value):lower()
+    if key ~= "" then
+      map[key] = trim_string(value)
+    end
+  end
+  for _, value in ipairs(allowed or {}) do
+    local matched = map[trim_string(value):lower()]
+    if matched then
+      return matched
+    end
+  end
+  return ""
+end
+
+BMF.permissions.evaluateBrickAssetAccess = function(options)
+  if type(options) == "string" then
+    options = { asset = options }
+  end
+  if type(options) ~= "table" then
+    return result(false, "INVALID_BRICK_ASSET_POLICY", "options table or asset string is required")
+  end
+
+  local policy = type(options.policy) == "table" and options.policy or {}
+  local asset_source = first_string(
+    options.asset,
+    options.brickAsset,
+    options.brickName,
+    options.name,
+    options.type,
+    policy.asset
+  )
+  local asset = normalize_brick_asset_key(asset_source)
+  if not asset.ok then
+    return asset
+  end
+
+  local actor = options.actor or options.player or {}
+  local actor_uuid = ""
+  local actor_name = ""
+  if type(actor) == "table" then
+    actor_uuid = first_string(actor.uuid, actor.id, actor.playerId, actor.playerID, actor.userId) or ""
+    actor_name = first_string(actor.username, actor.name, actor.displayName, actor.playerName) or ""
+  elseif type(actor) == "string" then
+    actor_uuid = actor
+  end
+
+  local denied_assets = brick_asset_rule_list(
+    options.deniedAssets or options.denyAssets or options.blockedAssets or policy.deniedAssets or policy.denyAssets or policy.blockedAssets,
+    BMF.permissions.BRICK_ASSET_DENIED_ASSETS
+  )
+  local allowed_assets = brick_asset_rule_list(
+    options.allowedAssets or options.allowAssets or policy.allowedAssets or policy.allowAssets,
+    nil
+  )
+  local denied_rules = normalize_brick_asset_rules(denied_assets)
+  local allowed_rules = normalize_brick_asset_rules(allowed_assets)
+  local denied_match = find_brick_asset_rule(asset.data.key, denied_rules)
+  local allowed_match = find_brick_asset_rule(asset.data.key, allowed_rules)
+
+  local admin_roles = brick_asset_rule_list(
+    options.adminRoles or options.bypassRoles or policy.adminRoles or policy.bypassRoles,
+    BMF.permissions.BRICK_ASSET_ADMIN_ROLES
+  )
+  local allowed_roles = brick_asset_rule_list(
+    options.allowedRoles or options.allowRoles or policy.allowedRoles or policy.allowRoles,
+    nil
+  )
+  local roles = actor_role_list(actor, options.roles or policy.roles)
+  local bypass_roles = normalize_role_list(admin_roles)
+  local role_allowlist = normalize_role_list(allowed_roles)
+  local matched_admin_role = find_role_match(roles, bypass_roles)
+  local matched_allowed_role = find_role_match(roles, role_allowlist)
+  local matched_role = matched_admin_role ~= "" and matched_admin_role or matched_allowed_role
+
+  local bypass_ids = normalize_plain_string_list(
+    options.ownerIds or options.adminIds or options.bypassPlayerIds or options.allowedPlayers
+      or policy.ownerIds or policy.adminIds or policy.bypassPlayerIds or policy.allowedPlayers
+  )
+  local matched_player_id = find_plain_string_match({ actor_uuid }, bypass_ids)
+
+  local deny_unknown = options.denyUnknown
+  if deny_unknown == nil then
+    deny_unknown = policy.denyUnknown
+  end
+  deny_unknown = deny_unknown == true
+
+  local allowed = true
+  local decision = "asset-allowed"
+  local reason = "brick asset is not denied"
+  local matched_asset = ""
+
+  if matched_player_id ~= "" then
+    decision = "player-bypass"
+    reason = "actor matched a brick asset bypass player id"
+  elseif matched_admin_role ~= "" then
+    decision = "admin-bypass"
+    reason = "actor matched a brick asset admin role"
+  elseif matched_allowed_role ~= "" then
+    decision = "role-bypass"
+    reason = "actor matched a brick asset allowed role"
+  elseif denied_match then
+    allowed = false
+    decision = "asset-denied"
+    reason = "brick asset matched denied policy"
+    matched_asset = denied_match.name
+  elseif #allowed_rules > 0 and not allowed_match then
+    allowed = false
+    decision = "asset-not-allowlisted"
+    reason = "brick asset did not match allowlisted policy"
+  elseif deny_unknown and not allowed_match then
+    allowed = false
+    decision = "asset-unknown-denied"
+    reason = "unknown brick assets are denied by policy"
+  elseif allowed_match then
+    matched_asset = allowed_match.name
+    reason = "brick asset matched allowlisted policy"
+  end
+
+  return result(true, "OK", "Brick asset access evaluated", {
+    policy = "brickAssetAccess",
+    allowed = allowed,
+    decision = decision,
+    reason = reason,
+    asset = asset.data.name,
+    assetKey = asset.data.key,
+    assetKind = tostring(options.assetKind or options.kind or policy.assetKind or ""),
+    matchedAsset = matched_asset,
+    actorUuid = actor_uuid,
+    actorName = actor_name,
+    roles = roles,
+    matchedRole = matched_role,
+    matchedPlayerId = matched_player_id,
+    deniedAssetCount = #denied_rules,
+    allowedAssetCount = #allowed_rules,
+    adminRoleCount = #bypass_roles,
+    allowedRoleCount = #role_allowlist,
+    denyUnknown = deny_unknown,
+  })
+end
+
+local function role_assignments_path_from_options(options)
+  options = type(options) == "table" and options or {}
+  local explicit = first_string(options.path, options.roleAssignmentsPath, options.file)
+  if explicit then
+    return explicit:gsub("\\", "/"), nil
+  end
+
+  local saved_dir = first_string(options.savedDir, state.config.brickadiaSavedDir)
+  if not saved_dir then
+    return nil, "brickadiaSavedDir is not configured"
+  end
+
+  return join_path(saved_dir, "Server/RoleAssignments.json"), nil
+end
+
+BMF.permissions.loadRoleAssignments = function(options)
+  options = type(options) == "table" and options or {}
+  local path, path_error = role_assignments_path_from_options(options)
+  if not path then
+    return result(false, "ROLE_ASSIGNMENTS_PATH_UNAVAILABLE", path_error or "RoleAssignments path is unavailable", {
+      configuredSavedDir = tostring(state.config.brickadiaSavedDir or ""),
+      lines = {
+        "ok=false",
+        "code=ROLE_ASSIGNMENTS_PATH_UNAVAILABLE",
+        "configured_saved_dir=" .. tostring(state.config.brickadiaSavedDir or ""),
+      },
+    })
+  end
+
+  local raw = read_file(path)
+  if raw == nil or trim_string(raw) == "" then
+    return result(false, "ROLE_ASSIGNMENTS_NOT_FOUND", "RoleAssignments.json was not found or empty", {
+      path = path,
+      lines = {
+        "ok=false",
+        "code=ROLE_ASSIGNMENTS_NOT_FOUND",
+        "path=" .. tostring(path),
+      },
+    })
+  end
+
+  local decoded, err = json_decode(raw)
+  if err ~= nil or type(decoded) ~= "table" then
+    return result(false, "JSON_PARSE_FAILED", "RoleAssignments.json could not be parsed", {
+      path = path,
+      error = tostring(err or "decoded value was not an object"),
+      lines = {
+        "ok=false",
+        "code=JSON_PARSE_FAILED",
+        "path=" .. tostring(path),
+        "error=" .. tostring(err or "decoded value was not an object"),
+      },
+    })
+  end
+
+  local described = BMF.permissions.describeRoleAssignments(decoded)
+  if not described.ok then
+    return described
+  end
+
+  local lines = {
+    "path=" .. tostring(path),
+    "player_count=" .. tostring(described.data and described.data.playerCount or 0),
+    "invalid_player_count=" .. tostring(described.data and described.data.invalidPlayerCount or 0),
+    "invalid_role_count=" .. tostring(described.data and described.data.invalidRoleCount or 0),
+    "duplicate_role_count=" .. tostring(described.data and described.data.duplicateRoleCount or 0),
+  }
+
+  return result(true, "OK", "Role assignments loaded", {
+    path = path,
+    assignments = decoded,
+    players = described.data and described.data.players or {},
+    playerCount = described.data and described.data.playerCount or 0,
+    invalidPlayers = described.data and described.data.invalidPlayers or {},
+    invalidPlayerCount = described.data and described.data.invalidPlayerCount or 0,
+    invalidRoleCount = described.data and described.data.invalidRoleCount or 0,
+    duplicateRoleCount = described.data and described.data.duplicateRoleCount or 0,
+    lines = lines,
+  })
+end
+
+local function role_setup_path_from_options(options)
+  options = type(options) == "table" and options or {}
+  local explicit = first_string(options.path, options.roleSetupPath, options.file)
+  if explicit then
+    return explicit:gsub("\\", "/"), nil
+  end
+
+  local saved_dir = first_string(options.savedDir, state.config.brickadiaSavedDir)
+  if not saved_dir then
+    return nil, "brickadiaSavedDir is not configured"
+  end
+
+  return join_path(saved_dir, "Server/RoleSetup2.json"), nil
+end
+
+local function role_name_or_default(role, fallback)
+  if type(role) == "table" then
+    return first_string(role.name, role.roleName, role.displayName, fallback) or tostring(fallback or "")
+  end
+  return tostring(fallback or "")
+end
+
+local function patch_no_spawn_item_role(role, fallback_name, options)
+  options = type(options) == "table" and options or {}
+  if type(role) ~= "table" then
+    return nil, result(false, "INVALID_ROLE", "role table is required")
+  end
+
+  local allow_inherited_spawn_items = options.allowInheritedSpawnItems == true
+  local before = evaluate_no_spawn_item_role_policy(role, {
+    allowInheritedSpawnItems = allow_inherited_spawn_items,
+  })
+  local before_data = before.data or {}
+  local patch = nil
+  if allow_inherited_spawn_items then
+    patch = {
+      allow = BMF.permissions.APPLICATOR_SAFE,
+    }
+    if before_data.spawnItemsState == "Allowed" or (before_data.spawnItemsDuplicateCount or 0) > 0 then
+      patch.forbid = {
+        BMF.permissions.SPAWN_ITEMS,
+      }
+    end
+  else
+    patch = {
+      noSpawnItemApplicator = true,
+    }
+  end
+
+  local planned = BMF.permissions.planRolePatch(role, patch)
+  if not planned.ok then
+    return nil, planned
+  end
+
+  local after = evaluate_no_spawn_item_role_policy(planned.data and planned.data.role or {}, {
+    allowInheritedSpawnItems = allow_inherited_spawn_items,
+  })
+  local after_data = after.data or {}
+  local changed = before_data.compliant ~= true
+    or before_data.spawnItemsState ~= after_data.spawnItemsState
+    or before_data.safeApplicatorAllowed ~= after_data.safeApplicatorAllowed
+    or before_data.duplicateCount ~= after_data.duplicateCount
+    or before_data.invalidCount ~= after_data.invalidCount
+
+  return planned.data.role, result(true, "OK", "Role patched", {
+    roleName = role_name_or_default(role, fallback_name),
+    changed = changed,
+    beforeCompliant = before_data.compliant == true,
+    afterCompliant = after_data.compliant == true,
+    beforeSpawnItemsState = tostring(before_data.spawnItemsState or ""),
+    afterSpawnItemsState = tostring(after_data.spawnItemsState or ""),
+    allowInheritedSpawnItems = allow_inherited_spawn_items,
+    spawnItemsInherited = after_data.spawnItemsInherited == true,
+    safeApplicatorAllowed = after_data.safeApplicatorAllowed == true,
+  })
+end
+
+BMF.permissions.enforceNoSpawnItemApplicator = function(options)
+  options = type(options) == "table" and options or {}
+  local path, path_error = role_setup_path_from_options(options)
+  if not path then
+    return result(false, "ROLE_SETUP_PATH_UNAVAILABLE", path_error or "RoleSetup2 path is unavailable", {
+      configuredSavedDir = tostring(state.config.brickadiaSavedDir or ""),
+      lines = {
+        "ok=false",
+        "code=ROLE_SETUP_PATH_UNAVAILABLE",
+        "configured_saved_dir=" .. tostring(state.config.brickadiaSavedDir or ""),
+      },
+    })
+  end
+
+  local raw = read_file(path)
+  if raw == nil or trim_string(raw) == "" then
+    return result(false, "ROLE_SETUP_NOT_FOUND", "RoleSetup2.json was not found or empty", {
+      path = path,
+      lines = {
+        "ok=false",
+        "code=ROLE_SETUP_NOT_FOUND",
+        "path=" .. tostring(path),
+      },
+    })
+  end
+
+  local decoded, err = json_decode(raw)
+  if err ~= nil or type(decoded) ~= "table" then
+    return result(false, "JSON_PARSE_FAILED", "RoleSetup2.json could not be parsed", {
+      path = path,
+      error = tostring(err or "decoded value was not an object"),
+      lines = {
+        "ok=false",
+        "code=JSON_PARSE_FAILED",
+        "path=" .. tostring(path),
+        "error=" .. tostring(err or "decoded value was not an object"),
+      },
+    })
+  end
+
+  local role_reports = {}
+  local patched_roles = {}
+  local errors = {}
+  local changed_count = 0
+
+  if type(decoded.defaultRole) == "table" then
+    local patched, report = patch_no_spawn_item_role(decoded.defaultRole, "Default")
+    if patched then
+      role_reports[#role_reports + 1] = report.data
+      if report.data and report.data.changed then
+        decoded.defaultRole = patched
+        changed_count = changed_count + 1
+        patched_roles[#patched_roles + 1] = report.data.roleName
+      end
+    else
+      errors[#errors + 1] = tostring(report.code or "DEFAULT_ROLE_PATCH_FAILED")
+    end
+  else
+    errors[#errors + 1] = "defaultRole missing"
+  end
+
+  if type(decoded.roles) == "table" then
+    for index, role in ipairs(decoded.roles) do
+      if type(role) == "table" then
+        local patched, report = patch_no_spawn_item_role(role, "role_" .. tostring(index), {
+          allowInheritedSpawnItems = true,
+        })
+        if patched then
+          role_reports[#role_reports + 1] = report.data
+          if report.data and report.data.changed then
+            decoded.roles[index] = patched
+            changed_count = changed_count + 1
+            patched_roles[#patched_roles + 1] = report.data.roleName
+          end
+        else
+          errors[#errors + 1] = tostring(report.code or "ROLE_PATCH_FAILED") .. ":" .. tostring(index)
+        end
+      end
+    end
+  end
+
+  if #errors > 0 then
+    return result(false, "ROLE_PATCH_FAILED", "One or more roles could not be patched", {
+      path = path,
+      errors = errors,
+      lines = {
+        "ok=false",
+        "code=ROLE_PATCH_FAILED",
+        "path=" .. tostring(path),
+        "errors=" .. table.concat(errors, "|"),
+      },
+    })
+  end
+
+  local dry_run = options.dryRun == true or options.dryrun == true
+    or tostring(options.dryRun or options.dryrun or ""):lower() == "true"
+    or tostring(options.write or ""):lower() == "false"
+  local backup_enabled = not (
+    options.backup == false
+      or tostring(options.backup or ""):lower() == "false"
+      or tostring(options.backup or "") == "0"
+  )
+  local backup_path = ""
+  local written = false
+
+  if not dry_run and changed_count > 0 then
+    if backup_enabled then
+      backup_path = path .. ".bmf-backup-" .. os.date("!%Y%m%d%H%M%S") .. ".json"
+      if not write_file(backup_path, raw) then
+        return result(false, "ROLE_SETUP_BACKUP_FAILED", "Could not write RoleSetup2 backup", {
+          path = path,
+          backupPath = backup_path,
+          lines = {
+            "ok=false",
+            "code=ROLE_SETUP_BACKUP_FAILED",
+            "path=" .. tostring(path),
+            "backup_path=" .. tostring(backup_path),
+          },
+        })
+      end
+    end
+
+    if not write_file(path, json_encode(decoded) .. "\n") then
+      return result(false, "ROLE_SETUP_WRITE_FAILED", "Could not write patched RoleSetup2.json", {
+        path = path,
+        backupPath = backup_path,
+        lines = {
+          "ok=false",
+          "code=ROLE_SETUP_WRITE_FAILED",
+          "path=" .. tostring(path),
+          "backup_path=" .. tostring(backup_path),
+        },
+      })
+    end
+    written = true
+  end
+
+  local lines = {
+    "path=" .. tostring(path),
+    "dry_run=" .. tostring(dry_run),
+    "changed=" .. tostring(changed_count > 0),
+    "written=" .. tostring(written),
+    "patched_role_count=" .. tostring(changed_count),
+    "role_count=" .. tostring(#role_reports),
+    "patched_roles=" .. table.concat(patched_roles, "|"),
+    "backup_path=" .. tostring(backup_path),
+    "restart_required=" .. tostring(changed_count > 0),
+    "live_hot_reload_supported=false",
+  }
+
+  return result(true, "OK", "No-spawn-item applicator role policy enforced", {
+    path = path,
+    dryRun = dry_run,
+    changed = changed_count > 0,
+    written = written,
+    backupPath = backup_path,
+    roleCount = #role_reports,
+    patchedRoleCount = changed_count,
+    patchedRoles = patched_roles,
+    roles = role_reports,
+    restartRequired = changed_count > 0,
+    liveHotReloadSupported = false,
+    lines = lines,
+  })
+end
+
 end
 
 BMF.permissions.planRolePatch = function(role, patch)
@@ -3775,6 +4932,7 @@ BMF.permissions.planRolePatch = function(role, patch)
   })
 end
 
+do
 local function normalize_role_list(value)
   local roles = {}
   local seen = {}
@@ -4336,6 +5494,1127 @@ BMF.permissions.planPlayerRoleAssignment = function(assignments, patch)
     added = added,
     removed = removed,
   })
+end
+
+end
+
+local remove_tool_handlers_for_owner
+
+BMF.tools = {}
+BMF.tools.applicator = {}
+
+do
+
+local APPLICATOR_TRACE_PATH = RUNTIME_DIR .. "/logs/applicator.jsonl"
+local APPLICATOR_HOOK_CANDIDATES = {
+  "Function /Script/Brickadia.BRTool_Applicator.ServerAddComponent",
+  "Function /Script/Brickadia.BRTool_Applicator:ServerAddComponent",
+  "/Script/Brickadia.BRTool_Applicator:ServerAddComponent",
+  "/Script/Brickadia.BRTool_Applicator.ServerAddComponent",
+  "ServerAddComponent",
+}
+
+local APPLICATOR_MODIFY_HOOK_CANDIDATES = {
+  "Function /Script/Brickadia.BRTool_Applicator.ServerModifyComponent",
+  "Function /Script/Brickadia.BRTool_Applicator:ServerModifyComponent",
+  "/Script/Brickadia.BRTool_Applicator:ServerModifyComponent",
+  "/Script/Brickadia.BRTool_Applicator.ServerModifyComponent",
+  "ServerModifyComponent",
+}
+
+local APPLICATOR_CONTEXT_CANDIDATES = {
+  "BRTool_Applicator",
+  "Tool_Applicator_C",
+}
+
+local function tool_object_valid(object)
+  if object == nil or type(object) ~= "userdata" then
+    return false
+  end
+  if type(object.IsValid) ~= "function" then
+    return true
+  end
+  local ok, is_valid = pcall(function()
+    return object:IsValid()
+  end)
+  return ok and is_valid == true
+end
+
+local function tool_object_address_from_string(object)
+  local hex = tostring(object or ""):match("UObject:%s*([0-9A-Fa-f]+)")
+  if hex and hex ~= "" then
+    return "0x" .. hex
+  end
+  return ""
+end
+
+local function tool_object_address(object)
+  if object == nil or type(object) ~= "userdata" then
+    return ""
+  end
+  if type(object.GetAddress) == "function" then
+    local ok, address = pcall(function()
+      return object:GetAddress()
+    end)
+    if ok and type(address) == "number" then
+      return string.format("0x%X", address)
+    end
+    if ok and type(address) == "string" then
+      local hex = address:match("0x[0-9A-Fa-f]+") or address:match("([0-9A-Fa-f]+)")
+      if hex and hex ~= "" then
+        if hex:match("^0x") then
+          return hex
+        end
+        return "0x" .. hex
+      end
+    end
+  end
+  return tool_object_address_from_string(object)
+end
+
+local function tool_object_full_name(object)
+  if not tool_object_valid(object) or type(object.GetFullName) ~= "function" then
+    return ""
+  end
+  local ok, full_name = pcall(function()
+    return object:GetFullName()
+  end)
+  if ok and full_name ~= nil then
+    local text = trim_string(full_name)
+    if text ~= "." and text ~= "" then
+      return text
+    end
+  end
+  return ""
+end
+
+local function tool_object_class_full_name(object)
+  if not tool_object_valid(object) or type(object.GetClass) ~= "function" then
+    return ""
+  end
+  local ok, class_object = pcall(function()
+    return object:GetClass()
+  end)
+  if ok and tool_object_valid(class_object) then
+    return tool_object_full_name(class_object)
+  end
+  return ""
+end
+
+local function tool_param_get(value)
+  if value ~= nil and type(value.get) == "function" then
+    local ok, unwrapped = pcall(function()
+      return value:get()
+    end)
+    if ok then
+      return unwrapped, true
+    end
+  end
+  if value ~= nil and type(value.Get) == "function" then
+    local ok, unwrapped = pcall(function()
+      return value:Get()
+    end)
+    if ok then
+      return unwrapped, true
+    end
+  end
+  return value, false
+end
+
+local function tool_param_set(value, replacement)
+  if value ~= nil and type(value.set) == "function" then
+    local ok = pcall(function()
+      value:set(replacement)
+    end)
+    if ok then
+      return true
+    end
+  end
+  if value ~= nil and type(value.Set) == "function" then
+    local ok = pcall(function()
+      value:Set(replacement)
+    end)
+    if ok then
+      return true
+    end
+  end
+  return false
+end
+
+local function tool_try_property(object, name)
+  if not tool_object_valid(object) then
+    return nil
+  end
+  if type(object.GetPropertyValue) == "function" then
+    local ok, value = pcall(function()
+      return object:GetPropertyValue(name)
+    end)
+    if ok and value ~= nil then
+      return value
+    end
+  end
+  local ok, value = pcall(function()
+    return object[name]
+  end)
+  if ok and value ~= nil then
+    return value
+  end
+  return nil
+end
+
+local function applicator_add_candidate(candidates, seen, value, source)
+  local text = trim_string(value or "")
+  if text == "" or text == "." then
+    return
+  end
+  local key = source .. ":" .. text
+  if seen[key] then
+    return
+  end
+  seen[key] = true
+  candidates[#candidates + 1] = {
+    value = text,
+    source = source,
+  }
+end
+
+local function applicator_component_aliases(name)
+  local aliases = {}
+  local seen = {}
+  local function add(value)
+    local text = trim_string(value or "")
+    if text == "" then
+      return
+    end
+    local normalized = BMF.permissions._normalizeComponentKey(text)
+    local key = normalized.ok and normalized.data.key or text:lower()
+    if seen[key] then
+      return
+    end
+    seen[key] = true
+    aliases[#aliases + 1] = text:gsub("[^A-Za-z0-9_]", "")
+  end
+
+  add(name)
+  local normalized = BMF.permissions._normalizeComponentKey(name)
+  local key = normalized.ok and normalized.data.key or ""
+  if key == "spawnitem" then
+    add("ItemSpawn")
+  elseif key == "itemspawn" then
+    add("SpawnItem")
+  end
+  return aliases
+end
+
+local function applicator_component_class_candidates(name)
+  local candidates = {}
+  local seen = {}
+  local function add(value)
+    local text = trim_string(value or "")
+    if text == "" or seen[text] then
+      return
+    end
+    seen[text] = true
+    candidates[#candidates + 1] = text
+  end
+
+  for _, alias in ipairs(applicator_component_aliases(name)) do
+    add("BrickComponentType_" .. alias)
+    add("UBrickComponentType_" .. alias)
+    add("BrickComponentData_" .. alias)
+    add("UBrickComponentData_" .. alias)
+  end
+  return candidates
+end
+
+local function applicator_cache_component_address(name, object, source)
+  local address = tool_object_address(object)
+  if address == "" then
+    return false
+  end
+  local cache = state.tools.applicator.component_cache
+  cache[address] = {
+    name = tostring(name or ""),
+    address = address,
+    source = tostring(source or ""),
+    fullName = tool_object_full_name(object),
+    className = tool_object_class_full_name(object),
+  }
+  return true
+end
+
+local function applicator_find_first_of(class_name)
+  if type(FindFirstOf) ~= "function" then
+    return nil, "FindFirstOf unavailable"
+  end
+  local ok, object = pcall(FindFirstOf, class_name)
+  if ok and (tool_object_valid(object) or tool_object_address_from_string(object) ~= "") then
+    return object, nil
+  end
+  return nil, tostring(object or "not found")
+end
+
+local function applicator_static_find(name)
+  if type(StaticFindObject) ~= "function" then
+    return nil, "StaticFindObject unavailable"
+  end
+  for _, candidate in ipairs({
+    name,
+    "/Script/Brickadia." .. tostring(name or ""),
+    "/Script/Brickadia:" .. tostring(name or ""),
+  }) do
+    local ok, object = pcall(StaticFindObject, candidate)
+    if ok and tool_object_valid(object) then
+      return object, candidate
+    end
+  end
+  return nil, "not found"
+end
+
+function BMF.tools.applicator.refreshComponentCache(options)
+  options = type(options) == "table" and options or {}
+  local denied = BMF.permissions._componentRuleList(options.deniedComponents, BMF.permissions.APPLICATOR_DENIED_COMPONENTS)
+  local cached = 0
+  local notes = {}
+
+  for _, component in ipairs(denied) do
+    for _, class_name in ipairs(applicator_component_class_candidates(component)) do
+      local object, find_error = applicator_find_first_of(class_name)
+      if object then
+        if applicator_cache_component_address(component, object, "FindFirstOf(" .. class_name .. ")") then
+          cached = cached + 1
+        end
+      else
+        notes[#notes + 1] = class_name .. ":" .. tostring(find_error)
+      end
+
+      local static_object, static_source = applicator_static_find(class_name)
+      if static_object then
+        if applicator_cache_component_address(component, static_object, "StaticFindObject(" .. static_source .. ")") then
+          cached = cached + 1
+        end
+      end
+    end
+  end
+
+  state.tools.applicator.component_cache_notes = notes
+  return result(true, "OK", "Applicator component cache refreshed", {
+    cachedCount = cached,
+    cache = copy_table(state.tools.applicator.component_cache),
+    notes = notes,
+  })
+end
+
+local function applicator_resolve_component_type(name)
+  local notes = {}
+  for _, class_name in ipairs(applicator_component_class_candidates(name)) do
+    local object, find_error = applicator_find_first_of(class_name)
+    if object then
+      local cached = {
+        name = tostring(name or ""),
+        address = tool_object_address(object),
+        source = "FindFirstOf(" .. class_name .. ")",
+        fullName = tool_object_full_name(object),
+        className = tool_object_class_full_name(object),
+      }
+      if cached.address ~= "" then
+        return cached, notes
+      end
+    else
+      notes[#notes + 1] = class_name .. ":" .. tostring(find_error or "not found")
+    end
+
+    local static_object, static_source = applicator_static_find(class_name)
+    if static_object then
+      local cached = {
+        name = tostring(name or ""),
+        address = tool_object_address(static_object),
+        source = "StaticFindObject(" .. tostring(static_source or class_name) .. ")",
+        fullName = tool_object_full_name(static_object),
+        className = tool_object_class_full_name(static_object),
+      }
+      if cached.address ~= "" then
+        return cached, notes
+      end
+    end
+  end
+  return nil, notes
+end
+
+local applicator_scan_uobjects_raw
+
+local function applicator_find_server_function(function_name, candidates)
+  local errors = {}
+  local lowered_function_name = tostring(function_name or ""):lower()
+  for _, hook_path in ipairs(candidates or {}) do
+    local object, source = applicator_static_find(hook_path)
+    if object then
+      return object, "StaticFindObject(" .. tostring(source or hook_path) .. ")", errors
+    end
+    errors[#errors + 1] = hook_path .. ":" .. tostring(source or "not found")
+  end
+
+  if type(FindAllOf) == "function" then
+    for _, class_name in ipairs({ "Function", "UFunction" }) do
+      local ok, objects = pcall(FindAllOf, class_name)
+      if ok and type(objects) == "table" then
+        for _, object in pairs(objects) do
+          local full_name = tool_object_full_name(object)
+          local lowered = full_name:lower()
+          if lowered:find(lowered_function_name, 1, true)
+            and lowered:find("applicator", 1, true) then
+            return object, "FindAllOf(" .. class_name .. "):" .. full_name, errors
+          end
+        end
+        errors[#errors + 1] = "FindAllOf(" .. class_name .. "):no applicator " .. tostring(function_name or "")
+      else
+        errors[#errors + 1] = "FindAllOf(" .. class_name .. "):" .. tostring(objects or "failed")
+      end
+    end
+  else
+    errors[#errors + 1] = "FindAllOf unavailable"
+  end
+
+  errors[#errors + 1] = "ForEachUObject scanner disabled; it aborts UE4SS simple-action cleanup on this dedicated server build"
+
+  return nil, "", errors
+end
+
+local function applicator_find_server_add_component_function()
+  return applicator_find_server_function("ServerAddComponent", APPLICATOR_HOOK_CANDIDATES)
+end
+
+local function applicator_find_server_modify_component_function()
+  return applicator_find_server_function("ServerModifyComponent", APPLICATOR_MODIFY_HOOK_CANDIDATES)
+end
+
+local function applicator_scan_tokens(value)
+  local tokens = {}
+  local raw = trim_string(value or "")
+  if raw == "" then
+    return tokens
+  end
+  for token in raw:gmatch("[^,|]+") do
+    local text = trim_string(token):lower()
+    if text ~= "" then
+      tokens[#tokens + 1] = text
+    end
+  end
+  return tokens
+end
+
+local function applicator_tokens_match(value, tokens, any)
+  if #tokens == 0 then
+    return true
+  end
+  local text = tostring(value or ""):lower()
+  if any then
+    for _, token in ipairs(tokens) do
+      if text:find(token, 1, true) then
+        return true
+      end
+    end
+    return false
+  end
+  for _, token in ipairs(tokens) do
+    if not text:find(token, 1, true) then
+      return false
+    end
+  end
+  return true
+end
+
+applicator_scan_uobjects_raw = function(options)
+  options = type(options) == "table" and options or {}
+  if type(ForEachUObject) ~= "function" then
+    return {
+      ok = false,
+      code = "FOREACHUOBJECT_UNAVAILABLE",
+      message = "ForEachUObject is unavailable",
+      data = {
+        matches = {},
+        lines = { "ok=false", "code=FOREACHUOBJECT_UNAVAILABLE" },
+      },
+    }
+end
+
+  local limit = tonumber(options.limit) or 50
+  if limit < 1 then
+    limit = 1
+  elseif limit > 250 then
+    limit = 250
+  end
+
+  local max_scan = tonumber(options.max or options.maxScan) or 250000
+  if max_scan < 1 then
+    max_scan = 1
+  elseif max_scan > 1000000 then
+    max_scan = 1000000
+  end
+
+  local any = tostring(options.any or ""):lower()
+  local match_any = any == "1" or any == "true" or any == "yes"
+  local patterns = applicator_scan_tokens(options.patterns or options.pattern or "")
+  local name_patterns = applicator_scan_tokens(options.name or options.fullName or "")
+  local class_patterns = applicator_scan_tokens(options.class or options.className or "")
+  local matches = {}
+  local visited = 0
+  local scanned = 0
+  local matched = 0
+  local errors = 0
+  local truncated = false
+
+  local ok, err = pcall(ForEachUObject, function(object, chunk_index, object_index)
+    visited = visited + 1
+    if visited > max_scan then
+      truncated = true
+      return
+    end
+    scanned = scanned + 1
+
+    local inspect_ok, include = pcall(function()
+      local full_name = tool_object_full_name(object)
+      local class_name = tool_object_class_full_name(object)
+      local combined = full_name .. " " .. class_name
+      if not applicator_tokens_match(combined, patterns, match_any) then
+        return false
+      end
+      if not applicator_tokens_match(full_name, name_patterns, match_any) then
+        return false
+      end
+      if not applicator_tokens_match(class_name, class_patterns, match_any) then
+        return false
+      end
+      matched = matched + 1
+      if #matches < limit then
+        matches[#matches + 1] = {
+          object = object,
+          address = tool_object_address(object),
+          fullName = full_name,
+          className = class_name,
+          chunkIndex = chunk_index,
+          objectIndex = object_index,
+        }
+      end
+      return true
+    end)
+
+    if not inspect_ok then
+      errors = errors + 1
+    end
+  end)
+
+  if not ok then
+    return {
+      ok = false,
+      code = "UOBJECT_SCAN_FAILED",
+      message = tostring(err or "ForEachUObject failed"),
+      data = {
+        matches = matches,
+        visited = visited,
+        scanned = scanned,
+        matched = matched,
+        errors = errors,
+        truncated = truncated,
+      },
+    }
+  end
+
+  return {
+    ok = true,
+    code = "OK",
+    message = "UE object scan completed",
+    data = {
+      matches = matches,
+      visited = visited,
+      scanned = scanned,
+      matched = matched,
+      errors = errors,
+      truncated = truncated,
+      limit = limit,
+      maxScan = max_scan,
+      pattern = tostring(options.patterns or options.pattern or ""),
+      name = tostring(options.name or options.fullName or ""),
+      class = tostring(options.class or options.className or ""),
+      any = match_any,
+    },
+  }
+end
+
+local function applicator_scan_public_data(data)
+  data = type(data) == "table" and data or {}
+  local public_matches = {}
+  for index, match in ipairs(data.matches or {}) do
+    public_matches[#public_matches + 1] = {
+      address = tostring(match.address or ""),
+      fullName = tostring(match.fullName or ""),
+      className = tostring(match.className or ""),
+      chunkIndex = match.chunkIndex,
+      objectIndex = match.objectIndex,
+    }
+  end
+
+  local lines = {
+    "ok=true",
+    "visited=" .. tostring(data.visited or 0),
+    "scanned=" .. tostring(data.scanned or 0),
+    "matched=" .. tostring(data.matched or 0),
+    "returned=" .. tostring(#public_matches),
+    "errors=" .. tostring(data.errors or 0),
+    "truncated=" .. tostring(data.truncated == true),
+    "pattern=" .. tostring(data.pattern or ""),
+    "name=" .. tostring(data.name or ""),
+    "class=" .. tostring(data.class or ""),
+    "any=" .. tostring(data.any == true),
+  }
+  for index, match in ipairs(public_matches) do
+    lines[#lines + 1] =
+      "match_" .. tostring(index) .. "=" ..
+      tostring(match.address or "") ..
+      "|class=" .. tostring(match.className or "") ..
+      "|name=" .. tostring(match.fullName or "") ..
+      "|chunk=" .. tostring(match.chunkIndex or "") ..
+      "|index=" .. tostring(match.objectIndex or "")
+  end
+
+  return {
+    matches = public_matches,
+    visited = data.visited or 0,
+    scanned = data.scanned or 0,
+    matched = data.matched or 0,
+    errors = data.errors or 0,
+    truncated = data.truncated == true,
+    limit = data.limit,
+    maxScan = data.maxScan,
+    pattern = tostring(data.pattern or ""),
+    name = tostring(data.name or ""),
+    class = tostring(data.class or ""),
+    any = data.any == true,
+    lines = lines,
+  }
+end
+
+function BMF.tools.applicator.scanObjects(options)
+  options = type(options) == "table" and options or {}
+  local unsafe = tostring(options.unsafe or ""):lower()
+  if not (unsafe == "1" or unsafe == "true" or unsafe == "yes") then
+    return result(false, "UOBJECT_SCAN_UNSAFE", "ForEachUObject scan is disabled unless unsafe=1 is explicitly set", {
+      lines = {
+        "ok=false",
+        "code=UOBJECT_SCAN_UNSAFE",
+        "reason=ForEachUObject aborts UE4SS simple-action cleanup on this dedicated server build",
+      },
+    })
+  end
+  local scanned = applicator_scan_uobjects_raw(options)
+  local public_data = applicator_scan_public_data(scanned.data or {})
+  if not scanned.ok then
+    public_data.lines[1] = "ok=false"
+    public_data.lines[#public_data.lines + 1] = "code=" .. tostring(scanned.code or "")
+    public_data.lines[#public_data.lines + 1] = "message=" .. tostring(scanned.message or "")
+  end
+  return result(scanned.ok, scanned.code, scanned.message, public_data)
+end
+
+local function applicator_denied_component_target()
+  for address, cached in pairs(state.tools.applicator.component_cache or {}) do
+    local normalized = BMF.permissions._normalizeComponentKey(cached and cached.name or "")
+    local key = normalized.ok and normalized.data.key or ""
+    if key == "itemspawn" or key == "spawnitem" then
+      return tostring(address), cached
+    end
+  end
+  return "", nil
+end
+
+local function applicator_process_event_context_candidates()
+  local candidates = {}
+  for _, class_name in ipairs(APPLICATOR_CONTEXT_CANDIDATES) do
+    local object, error_text = applicator_find_first_of(class_name)
+    if object then
+      candidates[#candidates + 1] = {
+        className = class_name,
+        address = tool_object_address(object),
+        fullName = tool_object_full_name(object),
+        objectClassName = tool_object_class_full_name(object),
+        source = "FindFirstOf(" .. class_name .. ")",
+      }
+    else
+      candidates[#candidates + 1] = {
+        className = class_name,
+        address = "",
+        fullName = "",
+        objectClassName = "",
+        source = "FindFirstOf(" .. class_name .. ")",
+        error = tostring(error_text or "not found"),
+      }
+    end
+  end
+  return candidates
+end
+
+function BMF.tools.applicator.nativeTargets(options)
+  options = type(options) == "table" and options or {}
+  if options.refresh ~= false then
+    BMF.tools.applicator.refreshComponentCache(options)
+  end
+
+  local function_object, function_source, function_errors = applicator_find_server_add_component_function()
+  local function_address = tool_object_address(function_object)
+  local modify_function_object, modify_function_source, modify_function_errors = applicator_find_server_modify_component_function()
+  local modify_function_address = tool_object_address(modify_function_object)
+  local denied_component_address, denied_component = applicator_denied_component_target()
+  local interact_component, interact_component_errors = applicator_resolve_component_type("Interact")
+  local context_candidates = applicator_process_event_context_candidates()
+  local process_event_context_address = ""
+  local process_event_context_source = ""
+  for _, candidate in ipairs(context_candidates) do
+    if candidate.address ~= "" and process_event_context_address == "" then
+      process_event_context_address = candidate.address
+      process_event_context_source = candidate.source
+    end
+  end
+  local ok = function_address ~= "" and denied_component_address ~= ""
+  local lines = {
+    "ok=" .. tostring(ok),
+    "function=" .. tostring(function_address),
+    "function_source=" .. tostring(function_source or ""),
+    "modify_function=" .. tostring(modify_function_address),
+    "modify_function_source=" .. tostring(modify_function_source or ""),
+    "denied_component=" .. tostring(denied_component_address),
+    "denied_component_name=" .. tostring(denied_component and denied_component.name or ""),
+    "denied_component_source=" .. tostring(denied_component and denied_component.source or ""),
+    "interact_component=" .. tostring(interact_component and interact_component.address or ""),
+    "interact_component_name=" .. tostring(interact_component and interact_component.name or ""),
+    "interact_component_source=" .. tostring(interact_component and interact_component.source or ""),
+    "process_event_context=" .. tostring(process_event_context_address),
+    "process_event_context_source=" .. tostring(process_event_context_source),
+    "func_offset=0xD8",
+    "locals_offset=0x28",
+  }
+  for index, candidate in ipairs(context_candidates) do
+    lines[#lines + 1] =
+      "process_event_context_candidate_" .. tostring(index) .. "=" ..
+      tostring(candidate.address or "") ..
+      "|source=" .. tostring(candidate.source or "") ..
+      "|class=" .. tostring(candidate.objectClassName or "") ..
+      "|name=" .. tostring(candidate.fullName or "") ..
+      "|error=" .. tostring(candidate.error or "")
+  end
+  for index, item in ipairs(function_errors or {}) do
+    lines[#lines + 1] = "function_error_" .. tostring(index) .. "=" .. tostring(item)
+  end
+  for index, item in ipairs(modify_function_errors or {}) do
+    lines[#lines + 1] = "modify_function_error_" .. tostring(index) .. "=" .. tostring(item)
+  end
+  for index, item in ipairs(interact_component_errors or {}) do
+    lines[#lines + 1] = "interact_component_error_" .. tostring(index) .. "=" .. tostring(item)
+  end
+
+  return result(ok, ok and "OK" or "NATIVE_TARGETS_INCOMPLETE", "Applicator native targets resolved", {
+    functionAddress = function_address,
+    functionSource = function_source or "",
+    modifyFunctionAddress = modify_function_address,
+    modifyFunctionSource = modify_function_source or "",
+    deniedComponentAddress = denied_component_address,
+    deniedComponent = copy_table(denied_component or {}),
+    interactComponentAddress = tostring(interact_component and interact_component.address or ""),
+    interactComponent = copy_table(interact_component or {}),
+    processEventContextAddress = process_event_context_address,
+    processEventContextSource = process_event_context_source,
+    processEventContextCandidates = context_candidates,
+    funcOffset = "0xD8",
+    localsOffset = "0x28",
+    functionErrors = function_errors or {},
+    modifyFunctionErrors = modify_function_errors or {},
+    interactComponentErrors = interact_component_errors or {},
+    lines = lines,
+  })
+end
+
+local function applicator_recent_events(limit)
+  limit = tonumber(limit) or 10
+  if limit < 1 then
+    limit = 1
+  end
+  if limit > state.tools.applicator.max_events then
+    limit = state.tools.applicator.max_events
+  end
+  local events = {}
+  local source = state.tools.applicator.events
+  local start_index = math.max(1, #source - limit + 1)
+  for index = start_index, #source do
+    events[#events + 1] = copy_table(source[index])
+  end
+  return events
+end
+
+local function applicator_record_event(event)
+  local app = state.tools.applicator
+  app.total_events = app.total_events + 1
+  event.sequence = app.total_events
+  event.timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ")
+  app.last_event = copy_table(event)
+  app.events[#app.events + 1] = copy_table(event)
+  while #app.events > app.max_events do
+    table.remove(app.events, 1)
+  end
+  append_file(APPLICATOR_TRACE_PATH, json_encode(event) .. "\n")
+end
+
+local function applicator_build_event(context_param, brick_handle_param, component_type_param)
+  local context, context_unwrapped = tool_param_get(context_param)
+  local component_object, component_unwrapped = tool_param_get(component_type_param)
+  local data_struct = tool_try_property(component_object, "DataStruct")
+    or tool_try_property(component_object, "ComponentDataStruct")
+    or tool_try_property(component_object, "Data")
+
+  local candidates = {}
+  local seen = {}
+  local component_address = tool_object_address(component_object)
+  local data_struct_address = tool_object_address(data_struct)
+  local cached = state.tools.applicator.component_cache[component_address]
+    or state.tools.applicator.component_cache[data_struct_address]
+
+  if cached then
+    applicator_add_candidate(candidates, seen, cached.name, "cache")
+  end
+  applicator_add_candidate(candidates, seen, tool_object_full_name(component_object), "component.fullName")
+  applicator_add_candidate(candidates, seen, tool_object_class_full_name(component_object), "component.className")
+  applicator_add_candidate(candidates, seen, tool_object_full_name(data_struct), "dataStruct.fullName")
+  applicator_add_candidate(candidates, seen, tool_object_class_full_name(data_struct), "dataStruct.className")
+
+  local component_name = ""
+  if candidates[1] then
+    component_name = candidates[1].value
+  elseif component_address ~= "" then
+    component_name = component_address
+  end
+
+  return {
+    kind = "applicator.component.apply",
+    functionName = "ServerAddComponent",
+    component = component_name,
+    componentAddress = component_address,
+    componentFullName = tool_object_full_name(component_object),
+    componentClassName = tool_object_class_full_name(component_object),
+    componentDataStructAddress = data_struct_address,
+    componentDataStructName = tool_object_full_name(data_struct),
+    componentCandidates = candidates,
+    contextAddress = tool_object_address(context),
+    contextFullName = tool_object_full_name(context),
+    contextClassName = tool_object_class_full_name(context),
+    contextUnwrapped = context_unwrapped == true,
+    componentUnwrapped = component_unwrapped == true,
+    hasBrickHandleParam = brick_handle_param ~= nil,
+    decision = "pending",
+    denied = false,
+    paramNulled = false,
+    blockMode = "",
+  }
+end
+
+local function applicator_evaluate_candidate(event)
+  for _, candidate in ipairs(event.componentCandidates or {}) do
+    local access = BMF.permissions.evaluateApplicatorComponentAccess({
+      component = candidate.value,
+    })
+    if access.ok and access.data and access.data.allowed == false then
+      return access, candidate
+    end
+  end
+  if event.component and event.component ~= "" and not tostring(event.component):match("^0x") then
+    local access = BMF.permissions.evaluateApplicatorComponentAccess({
+      component = event.component,
+    })
+    if access.ok and access.data and access.data.allowed == false then
+      return access, { value = event.component, source = "event.component" }
+    end
+  end
+  return nil, nil
+end
+
+local function applicator_run_handlers(event)
+  local handler_results = {}
+  local denied = false
+  local denial = nil
+
+  local access, candidate = applicator_evaluate_candidate(event)
+  if access then
+    denied = true
+    denial = {
+      owner = "core-policy",
+      code = tostring(access.code or "APPLICATOR_COMPONENT_DENIED"),
+      message = tostring(access.message or "Applicator component denied"),
+      candidate = candidate,
+      access = access.data or {},
+    }
+  end
+
+  for id, registered in pairs(state.tools.applicator.handlers or {}) do
+    local ok, response = pcall(registered.handler, copy_table(event))
+    if not ok then
+      record_plugin_error(registered.owner or "unknown", "onApplicatorComponentApply", response, event)
+      handler_results[#handler_results + 1] = {
+        id = id,
+        owner = registered.owner or "",
+        ok = false,
+        error = tostring(response),
+      }
+    else
+      local response_denied = false
+      if response == false then
+        response_denied = true
+      elseif type(response) == "table" then
+        response_denied = response.ok == false
+          or (type(response.data) == "table" and response.data.allowed == false)
+      end
+      handler_results[#handler_results + 1] = {
+        id = id,
+        owner = registered.owner or "",
+        ok = true,
+        denied = response_denied,
+        code = type(response) == "table" and tostring(response.code or "") or "",
+      }
+      if response_denied and not denied then
+        denied = true
+        denial = {
+          owner = registered.owner or "",
+          code = type(response) == "table" and tostring(response.code or "APPLICATOR_COMPONENT_DENIED") or "APPLICATOR_COMPONENT_DENIED",
+          message = type(response) == "table" and tostring(response.message or "Applicator component denied") or "Applicator component denied",
+          access = type(response) == "table" and type(response.data) == "table" and response.data or {},
+        }
+      end
+    end
+  end
+
+  return denied, denial, handler_results
+end
+
+local function applicator_handle_server_add_component(context_param, brick_handle_param, component_type_param)
+  local event = applicator_build_event(context_param, brick_handle_param, component_type_param)
+  local denied, denial, handler_results = applicator_run_handlers(event)
+
+  event.handlerResults = handler_results
+  event.denied = denied == true
+  if denial then
+    event.decision = tostring(denial.code or "APPLICATOR_COMPONENT_DENIED")
+    event.deniedBy = tostring(denial.owner or "")
+    event.denialMessage = tostring(denial.message or "")
+    if type(denial.candidate) == "table" then
+      event.deniedCandidate = tostring(denial.candidate.value or "")
+      event.deniedCandidateSource = tostring(denial.candidate.source or "")
+    end
+  else
+    event.decision = "allowed"
+  end
+
+  if denied then
+    state.tools.applicator.denied_events = state.tools.applicator.denied_events + 1
+    if tool_param_set(component_type_param, nil) then
+      event.paramNulled = true
+      event.blockMode = "component-param-nulled"
+      state.tools.applicator.param_null_events = state.tools.applicator.param_null_events + 1
+    else
+      event.blockMode = "deny-recorded-param-set-unavailable"
+    end
+    audit_record("applicator.component.denied", event, {
+      source = "framework",
+      severity = "warn",
+      ok = event.paramNulled == true,
+      code = event.decision,
+    })
+  else
+    state.tools.applicator.allowed_events = state.tools.applicator.allowed_events + 1
+  end
+
+  applicator_record_event(event)
+  return nil
+end
+
+local function ensure_applicator_component_hook()
+  local app = state.tools.applicator
+  if app.registered then
+    return result(true, "OK", "Applicator component hook already registered", {
+      hookPath = app.hook_path,
+      preId = app.pre_id,
+      postId = app.post_id,
+    })
+  end
+  if app.registering then
+    return result(false, "HOOK_REGISTERING", "Applicator component hook registration is already in progress")
+  end
+  if state.config.allowUnsafeApplicatorLuaHook ~= true then
+    app.enabled = false
+    app.last_error = "Unsafe UE4SS Lua RegisterHook path is disabled; ServerAddComponent struct parameters crash while being marshaled to Lua on Brickadia CL13530"
+    return result(false, "APPLICATOR_LUA_HOOK_UNSAFE", app.last_error, {
+      hookMode = "unsafe-lua-registerhook-disabled",
+      optInConfig = "allowUnsafeApplicatorLuaHook",
+      crashSignature = "UE4SS.dll!RC::LuaType::push_structproperty",
+    })
+  end
+  if type(RegisterHook) ~= "function" then
+    app.last_error = "RegisterHook is unavailable"
+    return result(false, "REGISTER_HOOK_UNAVAILABLE", app.last_error)
+  end
+
+  app.registering = true
+  BMF.tools.applicator.refreshComponentCache()
+  local errors = {}
+  for _, hook_path in ipairs(APPLICATOR_HOOK_CANDIDATES) do
+    local callback = function(Context, BrickHandle, ComponentType)
+      return applicator_handle_server_add_component(Context, BrickHandle, ComponentType)
+    end
+    local ok, pre_id, post_id = pcall(RegisterHook, hook_path, callback)
+    if ok and type(pre_id) == "number" and type(post_id) == "number" then
+      app.callback = callback
+      app.hook_path = hook_path
+      app.pre_id = pre_id
+      app.post_id = post_id
+      app.registered = true
+      app.enabled = true
+      app.registering = false
+      app.last_error = ""
+      log("info", "registered applicator component hook path=" .. hook_path)
+      return result(true, "OK", "Applicator component hook registered", {
+        hookPath = hook_path,
+        preId = pre_id,
+        postId = post_id,
+      })
+    end
+    errors[#errors + 1] = hook_path .. ":" .. tostring(pre_id or "unknown")
+  end
+
+  app.registering = false
+  app.last_error = table.concat(errors, " | ")
+  return result(false, "APPLICATOR_HOOK_REGISTER_FAILED", app.last_error, {
+    errors = errors,
+  })
+end
+
+function BMF.tools.onApplicatorComponentApply(handler, options)
+  if type(handler) ~= "function" then
+    return result(false, "INVALID_HANDLER", "handler function is required")
+  end
+  options = type(options) == "table" and options or {}
+  local app = state.tools.applicator
+  local id = app.next_handler_id
+  app.next_handler_id = id + 1
+  app.handlers[id] = {
+    id = id,
+    owner = tostring(options.owner or options.plugin or "anonymous"),
+    handler = handler,
+  }
+  local hook = ensure_applicator_component_hook()
+  return result(hook.ok, hook.code, hook.message, {
+    handlerId = id,
+    owner = app.handlers[id].owner,
+    hookRegistered = app.registered == true,
+    unsafeLuaHookAllowed = state.config.allowUnsafeApplicatorLuaHook == true,
+    hookPath = app.hook_path,
+    hook = hook.data or {},
+    lines = {
+      "handler_id=" .. tostring(id),
+      "owner=" .. tostring(app.handlers[id].owner),
+      "hook_registered=" .. tostring(app.registered == true),
+      "unsafe_lua_hook_allowed=" .. tostring(state.config.allowUnsafeApplicatorLuaHook == true),
+      "hook_path=" .. tostring(app.hook_path or ""),
+      "code=" .. tostring(hook.code or ""),
+    },
+  })
+end
+
+remove_tool_handlers_for_owner = function(owner)
+  local removed = 0
+  local owner_name = tostring(owner or "")
+  for id, registered in pairs(state.tools.applicator.handlers or {}) do
+    if tostring(registered.owner or "") == owner_name then
+      state.tools.applicator.handlers[id] = nil
+      removed = removed + 1
+    end
+  end
+  return removed
+end
+
+function BMF.tools.applicator.status(options)
+  options = type(options) == "table" and options or {}
+  if options.refresh == true then
+    BMF.tools.applicator.refreshComponentCache()
+  end
+
+  local app = state.tools.applicator
+  local handler_count = 0
+  local handlers = {}
+  for id, registered in pairs(app.handlers or {}) do
+    handler_count = handler_count + 1
+    handlers[#handlers + 1] = {
+      id = id,
+      owner = tostring(registered.owner or ""),
+    }
+  end
+  table.sort(handlers, function(a, b)
+    return tostring(a.id) < tostring(b.id)
+  end)
+
+  local cache_count = 0
+  local cache_lines = {}
+  for address, cached in pairs(app.component_cache or {}) do
+    cache_count = cache_count + 1
+    cache_lines[#cache_lines + 1] =
+      "component_cache_" .. tostring(cache_count) .. "=" ..
+      tostring(cached.name or "") .. "|" .. tostring(address) .. "|source=" .. tostring(cached.source or "")
+  end
+  table.sort(cache_lines)
+
+  local last = app.last_event or {}
+  local lines = {
+    "registered=" .. tostring(app.registered == true),
+    "enabled=" .. tostring(app.enabled == true),
+    "unsafe_lua_hook_allowed=" .. tostring(state.config.allowUnsafeApplicatorLuaHook == true),
+    "hook_path=" .. tostring(app.hook_path or ""),
+    "pre_id=" .. tostring(app.pre_id or ""),
+    "post_id=" .. tostring(app.post_id or ""),
+    "handler_count=" .. tostring(handler_count),
+    "total_events=" .. tostring(app.total_events or 0),
+    "allowed_events=" .. tostring(app.allowed_events or 0),
+    "denied_events=" .. tostring(app.denied_events or 0),
+    "param_null_events=" .. tostring(app.param_null_events or 0),
+    "last_component=" .. tostring(last.component or ""),
+    "last_component_address=" .. tostring(last.componentAddress or ""),
+    "last_denied=" .. tostring(last.denied == true),
+    "last_decision=" .. tostring(last.decision or ""),
+    "last_block_mode=" .. tostring(last.blockMode or ""),
+    "cache_count=" .. tostring(cache_count),
+    "trace_path=" .. tostring(APPLICATOR_TRACE_PATH),
+    "last_error=" .. tostring(app.last_error or ""),
+  }
+  for _, cache_line in ipairs(cache_lines) do
+    lines[#lines + 1] = cache_line
+  end
+
+  return result(true, "OK", "Applicator hook status collected", {
+    registered = app.registered == true,
+    enabled = app.enabled == true,
+    unsafeLuaHookAllowed = state.config.allowUnsafeApplicatorLuaHook == true,
+    hookPath = app.hook_path,
+    preId = app.pre_id,
+    postId = app.post_id,
+    handlerCount = handler_count,
+    handlers = handlers,
+    totalEvents = app.total_events or 0,
+    allowedEvents = app.allowed_events or 0,
+    deniedEvents = app.denied_events or 0,
+    paramNullEvents = app.param_null_events or 0,
+    recentEvents = applicator_recent_events(options.limit or 10),
+    lastEvent = copy_table(last),
+    componentCache = copy_table(app.component_cache or {}),
+    componentCacheNotes = copy_table(app.component_cache_notes or {}),
+    tracePath = APPLICATOR_TRACE_PATH,
+    lastError = app.last_error or "",
+    lines = lines,
+  })
+end
+
 end
 
 BMF.minigames = {}
@@ -5172,18 +7451,6 @@ local function write_player_cache(cache)
   return ok
 end
 
-local function join_path(base, child)
-  local left = tostring(base or ""):gsub("\\", "/"):gsub("/+$", "")
-  local right = tostring(child or ""):gsub("\\", "/"):gsub("^/+", "")
-  if left == "" then
-    return right
-  end
-  if right == "" then
-    return left
-  end
-  return left .. "/" .. right
-end
-
 local function configured_saved_dir()
   local saved_dir = trim_string(state.config.brickadiaSavedDir or "")
   if saved_dir == "" then
@@ -5798,6 +8065,89 @@ BMF.players.whisperSummary = function(player)
   return response
 end
 
+BMF.interact = {}
+
+local function interact_event_player(event)
+  local player = event.player
+  if type(player) == "table" then
+    return {
+      uuid = first_string(player.uuid, player.id, player.playerId, player.playerID) or "",
+      username = first_string(player.username, player.playerName, player.originalName, player.name) or "",
+      displayName = first_string(player.displayName, player.name, player.username) or "",
+      controller = first_string(player.controller, player.controllerName) or "",
+      pawn = first_string(player.pawn, player.pawnName) or "",
+    }
+  end
+  return {
+    uuid = first_string(event.playerUuid, event.playerId, event.uuid, event.id, event.player) or "",
+    username = first_string(event.username, event.playerName, event.name) or "",
+    displayName = first_string(event.displayName, event.name, event.username) or "",
+    controller = first_string(event.controller, event.controllerName) or "",
+    pawn = first_string(event.pawn, event.pawnName) or "",
+  }
+end
+
+BMF.interact.handleConsoleMessage = function(event)
+  if type(event) ~= "table" then
+    return result(false, "INVALID_INTERACT_EVENT", "interact event table is required")
+  end
+
+  local message = first_string(event.message, event.consoleTag, event.tag, event.value) or ""
+  local player = interact_event_player(event)
+  local position = event.position
+  if type(position) ~= "table" then
+    position = {
+      tonumber(event.x) or 0,
+      tonumber(event.y) or 0,
+      tonumber(event.z) or 0,
+    }
+  end
+
+  local payload = {
+    source = first_string(event.source, event.adapter) or "unknown",
+    message = tostring(message or ""),
+    player = player,
+    brickName = first_string(event.brickName, event.brick) or "",
+    brickAsset = first_string(event.brickAsset, event.asset) or "",
+    position = position,
+  }
+
+  local emitted = BMF.events.emit("interactConsole", payload)
+  audit_record("interact.console", {
+    source = payload.source,
+    playerUuid = player.uuid,
+    playerName = player.username,
+    message = payload.message,
+    brickName = payload.brickName,
+    brickAsset = payload.brickAsset,
+    handlerCount = emitted.data and emitted.data.handlers or 0,
+    errorCount = emitted.data and #(emitted.data.errors or {}) or 0,
+  }, {
+    source = "framework",
+    actor = player.uuid,
+    severity = emitted.ok and "info" or "warn",
+    ok = emitted.ok,
+    code = emitted.code,
+  })
+
+  local lines = {
+    "event=interactConsole",
+    "source=" .. tostring(payload.source or ""),
+    "player_uuid=" .. tostring(player.uuid or ""),
+    "player_name=" .. tostring(player.username or ""),
+    "message=" .. tostring(payload.message or ""),
+    "handler_count=" .. tostring(emitted.data and emitted.data.handlers or 0),
+    "error_count=" .. tostring(emitted.data and #(emitted.data.errors or {}) or 0),
+  }
+
+  return result(emitted.ok, emitted.code, "Interact console message forwarded", {
+    event = payload,
+    handlerCount = emitted.data and emitted.data.handlers or 0,
+    errors = emitted.data and emitted.data.errors or {},
+    lines = lines,
+  })
+end
+
 local function private_chat_result(kind, player, message)
   local text = tostring(message or "")
   if trim_string(text) == "" then
@@ -5915,9 +8265,7 @@ BMF.timers.after = function(ms, callback)
   end
 
   if type(ExecuteWithDelay) == "function" then
-    ExecuteWithDelay(tonumber(ms) or 0, function()
-      run_on_game_thread(wrapped)
-    end)
+    ExecuteWithDelay(tonumber(ms) or 0, wrapped)
   elseif type(ExecuteInGameThreadWithDelay) == "function" then
     ExecuteInGameThreadWithDelay(tonumber(ms) or 0, wrapped)
   else
@@ -5940,26 +8288,24 @@ BMF.timers.every = function(ms, callback)
   local function schedule()
     if type(ExecuteWithDelay) == "function" then
       ExecuteWithDelay(interval, function()
-        run_on_game_thread(function()
-          local timer = state.timers[id]
-          if not timer or timer.cancelled then
-            state.timers[id] = nil
-            return
-          end
-          timer.count = timer.count + 1
-          local ok, err = pcall(callback, id, timer.count)
-          if not ok then
-            log("error", "timer callback failed: " .. tostring(err))
-            state.timers[id] = nil
-            return
-          end
-          timer = state.timers[id]
-          if timer and not timer.cancelled then
-            schedule()
-          else
-            state.timers[id] = nil
-          end
-        end)
+        local timer = state.timers[id]
+        if not timer or timer.cancelled then
+          state.timers[id] = nil
+          return
+        end
+        timer.count = timer.count + 1
+        local ok, err = pcall(callback, id, timer.count)
+        if not ok then
+          log("error", "timer callback failed: " .. tostring(err))
+          state.timers[id] = nil
+          return
+        end
+        timer = state.timers[id]
+        if timer and not timer.cancelled then
+          schedule()
+        else
+          state.timers[id] = nil
+        end
       end)
       return true
     end
@@ -6261,6 +8607,7 @@ local function read_framework_config()
     pluginWatchdogEnabled = watchdog_enabled,
     pluginWatchdogMaxErrors = math.floor(watchdog_max_errors),
     allowPluginUnsafeGlobals = parse_json_boolean_field(raw, "allowPluginUnsafeGlobals") == true,
+    allowUnsafeApplicatorLuaHook = parse_json_boolean_field(raw, "allowUnsafeApplicatorLuaHook") == true,
     brickadiaSavedDir = parse_json_string_field(raw, "brickadiaSavedDir") or "",
   }
 end
@@ -6481,6 +8828,22 @@ local function create_plugin_api(plugin_name, manifest)
     return register_command(name, description, handler, plugin_name)
   end
 
+  api.tools = {}
+  for key, value in pairs(BMF.tools) do
+    api.tools[key] = value
+  end
+  api.tools.applicator = {}
+  for key, value in pairs(BMF.tools.applicator) do
+    api.tools.applicator[key] = value
+  end
+  api.tools.onApplicatorComponentApply = function(handler, options)
+    return require_capability(plugin_name, manifest, "tools.applicator", function()
+      local opts = type(options) == "table" and copy_table(options) or {}
+      opts.owner = plugin_name
+      return BMF.tools.onApplicatorComponentApply(handler, opts)
+    end)
+  end
+
   api.server = {}
   for key, value in pairs(BMF.server) do
     api.server[key] = value
@@ -6537,6 +8900,11 @@ local function create_plugin_api(plugin_name, manifest)
         return BMF.chat.statusMessage(player, message)
       end)
     end)
+  end
+
+  api.players = {}
+  for key, value in pairs(BMF.players) do
+    api.players[key] = value
   end
 
   api.world = {}
@@ -6727,6 +9095,7 @@ local function unload_plugin(name, plugin, reason)
       record_plugin_error(name, "onUnload", err, { reason = reason or "unload" }, plugin)
       remove_event_handlers_for_owner(name)
       remove_commands_for_owner(name)
+      remove_tool_handlers_for_owner(name)
       return false, err
     end
   end
@@ -6736,11 +9105,13 @@ local function unload_plugin(name, plugin, reason)
   })
   local removed_handlers = remove_event_handlers_for_owner(name)
   local removed_commands = remove_commands_for_owner(name)
+  local removed_tool_handlers = remove_tool_handlers_for_owner(name)
   audit_record("plugin.unloaded", {
     plugin = name,
     reason = reason or "unload",
     eventHandlersRemoved = removed_handlers,
     commandsRemoved = removed_commands,
+    toolHandlersRemoved = removed_tool_handlers,
   }, {
     source = "framework",
     plugin = name,
@@ -6752,7 +9123,8 @@ local function unload_plugin(name, plugin, reason)
     "info",
     "unloaded plugin " .. name ..
       " event_handlers_removed=" .. tostring(removed_handlers) ..
-      " commands_removed=" .. tostring(removed_commands)
+      " commands_removed=" .. tostring(removed_commands) ..
+      " tool_handlers_removed=" .. tostring(removed_tool_handlers)
   )
   return true, nil
 end

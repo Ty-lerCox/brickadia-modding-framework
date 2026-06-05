@@ -1,0 +1,6 @@
+{
+  "name": "BrickAssetPlacementGuard",
+  "version": "0.1.0",
+  "description": "Blocks configured Brickadia placement assets and indexed prefabs that contain restricted assets.",
+  "capabilities": ["chat.whisper", "chat.broadcast", "plugins.storage"]
+}

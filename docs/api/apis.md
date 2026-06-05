@@ -66,7 +66,7 @@ level so automation can choose appropriate work:
 
 - plugin Lua can call `BMF.apis.get`, `BMF.apis.list`, and
   `BMF.apis.summary`;
-- `BMF.chat.whisper` is labeled as `scaffold`, `live-player`, and
+- `BMF.chat.whisper` is labeled as `experimental`, `live-player`, and
   `requiresPlayer=true`;
 - `BMF.version` is labeled as a stable low-risk framework string;
 - `BMF.loadPlugins` and `BMF.unloadPlugins` are labeled as stable
@@ -76,6 +76,21 @@ level so automation can choose appropriate work:
 - `BMF.server.shutdown` is labeled as restricted, high-risk,
   `server.shutdown` capability gated, and currently safe-failure validated on
   CL13530;
+- `BMF.permissions.evaluateApplicatorComponentAccess` is labeled stable,
+  low-risk, and headless/negative validated for policy decisions;
+- `BMF.permissions.evaluateInteractConsolePrefixAccess` is labeled stable,
+  medium-risk, and headless/negative validated for Interactable
+  Print-to-Console prefix decisions;
+- `BMF.permissions.evaluateBrickAssetAccess` is labeled stable, low-risk, and
+  headless/negative validated for brick asset placement policy decisions;
+- `BMF.permissions.enforceNoSpawnItemApplicator` is labeled file-backed,
+  high-risk, and copied-file validated for `RoleSetup2.json` mutation;
+- `BMF.tools.onApplicatorComponentApply` is labeled experimental,
+  `unsafe-native`, `tools.applicator` capability gated, and player-effect
+  validation dependent; the direct Lua hook path is disabled by default on
+  CL13530 because it crashes while marshaling a struct parameter;
+- `BMF.tools.applicator.status` is labeled experimental and reports the live
+  applicator handler/cache state plus the unsafe Lua hook opt-in state;
 - `BMF.server.exec` is labeled `restricted` and `unsafe-native`;
 - `BMF.world.loadAdditive` and `BMF.vehicles.spawnSet` remain experimental;
 - `bmf.apis` can filter by name, risk, stability, and player requirement.

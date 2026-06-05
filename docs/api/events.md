@@ -38,6 +38,10 @@ Returns the number of currently registered handlers for an event.
 - `pluginUnloaded`: emitted after a plugin unload succeeds.
 - `worldLoaded`: emitted after `BMF.world.loadAdditive` succeeds.
 - `worldSaved`: emitted after `BMF.world.saveAs` succeeds.
+- `interactConsole`: emitted by `BMF.interact.handleConsoleMessage()` and the
+  `bmf.interact.console` command when Omegga forwards an Interactable
+  Print-to-Console event. The payload includes `message`, `player`,
+  `brickName`, `brickAsset`, and `position`.
 - `shutdownRequested`: reserved for a future proven shutdown executor; the
   current CL13530 `BMF.server.shutdown` path reports `SHUTDOWN_UNAVAILABLE`
   before emitting lifecycle shutdown events.

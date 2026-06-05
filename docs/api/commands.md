@@ -36,14 +36,42 @@ console-style output.
   it returns `CONFIRMATION_REQUIRED`; on CL13530 the confirmed path currently
   returns `SHUTDOWN_UNAVAILABLE` with `executor_code=CONSOLE_EXEC_FAILED`.
 - `bmf.chat.broadcast message=<text>`: broadcasts a server chat message through
-  `BMF.chat.broadcast`. Headless validation proves command acceptance only.
+  `BMF.chat.broadcast`. Live validation proves visible delivery through
+  `ClientPushChatMessage`; headless validation proves command acceptance only.
+- `bmf.chat.whisper target=<uuid-or-name> message=<text>`: sends a private
+  message through `BMF.chat.whisper`. With one live controller this is
+  live-confirmed; exact UUID/name targeting depends on safe identity records
+  from Omegga player sync or Brickadia saved/log context.
 - `bmf.players.list`: prints the current BMF player adapter count. On a
   no-player headless server this should safely report `players_count=0`.
 - `bmf.players.sync players=<json>`: syncs safe external/Omegga player identity
   records into `runtime/players.json`.
+- `bmf.interact.console message=<percent-encoded-tag> player=<uuid>
+  name=<percent-encoded-name>`: forwards an Omegga Interactable
+  Print-to-Console event into the BMF `interactConsole` event bus. This is the
+  audit/feedback event path used by `examples/InteractConsolePrefixGuard`; the
+  live save-time blocker is the experimental native `ServerModifyComponent`
+  hook driven by that plugin's control file.
 - `bmf.players.summary target=<uuid-or-name> [whisper=true]`: resolves one
   cached player, prints username/display/id plus known-player and live-controller
   counts, and optionally whispers that summary to the target.
+- `bmf.permissions.enforce-nospawnitem [path=<RoleSetup2.json>]`: patches
+  `RoleSetup2.json` so the applicator permissions stay allowed while
+  `BR.Permission.SpawnItems` is forbidden on the default role and named roles
+  cannot explicitly allow it. If `path` is omitted, BMF uses
+  `brickadiaSavedDir` from config. Changed files require a server restart for
+  reliable live enforcement.
+- `bmf.tools.applicator.status [refresh=true]`: prints the applicator policy
+  handler state, unsafe Lua hook opt-in state, registered handler count, recent
+  event counters, denied component cache, trace path, and last error.
+- `bmf.tools.applicator.refresh`: refreshes the denied applicator component
+  type cache used by applicator policy experiments.
+- `bmf.brickassetguard.status`: prints `BrickAssetPlacementGuard` policy
+  status, including denied brick assets, bypass roles, and current enforcement
+  level.
+- `bmf.brickassetguard.check asset=<brick-asset> roles=<role>`: evaluates one
+  brick asset against the configured placement policy. This is policy-only until
+  a live placement/paste hook calls the evaluator before world mutation.
 - `bmf.minigames.list`: runs the safe minigame list command through
   `BMF.minigames.list`.
 - `bmf.minigames.loadpreset name=<preset> [owner=<name>]`: runs
@@ -104,6 +132,10 @@ The handler receives the raw argument text when UE4SS provides it. Return the
 standard BMF result shape and include optional `data.lines` for console output.
 The BMF command worker writes those lines to the response file and to
 `runtime/bmf.log`.
+
+When writing request files directly from Windows PowerShell, use a no-BOM
+encoding. Omegga's bridge and the bundled Omegga adapter already write no-BOM
+request files.
 
 Commands registered through a plugin's scoped `BMF` facade are owned by that
 plugin and are automatically removed when the plugin unloads or reloads.

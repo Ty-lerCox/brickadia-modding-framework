@@ -9,8 +9,15 @@ dedicated server.
 
 - Brickadia dedicated server for the supported build.
 - Brickadia-compatible UE4SS runtime.
+- BMF-compatible Omegga runtime for Windows server launch, command transport,
+  bridge helpers, logs, and validation.
 - BMF release package.
 - File-system access to the server `Binaries\Win64` directory.
+
+Do not assume an arbitrary upstream Omegga install is enough. The supported
+target is an Omegga build or fork that includes the BMF Windows/UE4SS
+compatibility work, including the command bridge and helper globals used by the
+current canaries.
 
 ## Release Package
 
@@ -31,7 +38,8 @@ the expanded copy:
 ```
 
 Release zips include the framework, installer, docs, examples, manifests,
-scripts, and tests. They intentionally exclude generated `artifacts/`.
+scripts, tests, and Omegga integration files. They intentionally exclude
+generated `artifacts/` and do not vendor Omegga `node_modules`.
 
 ## Scripted Install
 
@@ -41,6 +49,7 @@ directory when `BrickadiaServer-Win64-Shipping.exe` is running from that path.
 ```powershell
 .\installer\install-bmf.ps1 `
   -ServerWin64Dir "C:\Path\To\Brickadia\Binaries\Win64" `
+  -BrickadiaSavedDir "C:\Path\To\BrickadiaServerData\Saved" `
   -Force `
   -OutJson .\artifacts\local\install-bmf.json
 ```
@@ -56,6 +65,11 @@ The installer copies `framework/ue4ss/Mods/BMF` to `Mods/BMF`. If a previous
 `<ServerWin64Dir>\BMF-Backups\BMF-<timestamp>` before replacing it. The new
 install writes `Mods/BMF/runtime/install-manifest.json` with copied file hashes
 and backup metadata.
+
+`-BrickadiaSavedDir` is optional for framework boot, but required for file-backed
+server policy enforcers such as `NoSpawnItemApplicator`. It should point at the
+server's `Saved` directory, not `Saved\Server`; the installer writes that path
+to `Mods/BMF/config.json` as `brickadiaSavedDir`.
 
 ## Rollback or Remove
 
@@ -95,11 +109,17 @@ uninstall.
 ## Manual Install Shape
 
 1. Stop the dedicated server.
-2. Install UE4SS for the Brickadia server build.
-3. Copy `framework/ue4ss/Mods/BMF` into the UE4SS `Mods` folder.
-4. Confirm `Mods/BMF/enabled.txt` exists.
-5. Start the server.
-6. Check `Mods/BMF/runtime/status.json`.
+2. Install or select the BMF-compatible Omegga runtime.
+3. Install UE4SS for the Brickadia server build through that runtime or the BMF
+   installer path.
+4. Copy `framework/ue4ss/Mods/BMF` into the UE4SS `Mods` folder.
+5. Set `brickadiaSavedDir` in `Mods/BMF/config.json` when BMF should patch
+   server files such as `Saved/Server/RoleSetup2.json`.
+6. Install `integrations/omegga/bmf-player-sync` when Omegga-fed player records
+   are desired.
+7. Confirm `Mods/BMF/enabled.txt` exists.
+8. Start the server.
+9. Check `Mods/BMF/runtime/status.json`.
 
 Do not install BMF into a running server. Runtime DLLs and mod files can be
 locked or partially loaded.

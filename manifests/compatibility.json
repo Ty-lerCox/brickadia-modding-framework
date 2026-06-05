@@ -10,6 +10,12 @@
     "status": "patched-runtime-required",
     "notes": "BMF assumes the Brickadia-compatible UE4SS runtime and custom game configuration from the Brickadia reverse-engineering workspace."
   },
+  "runtimeStrategy": {
+    "requiresOmegga": true,
+    "requiresBmfCompatibleOmegga": true,
+    "status": "omegga-supported-runtime",
+    "notes": "Current BMF Windows operation expects a BMF-compatible Omegga runtime for launch, UE4SS compatibility setup, command bridge transport, helper globals, player sync, logs, and canaries. Standalone BMF is a future replacement track, not the first-package requirement."
+  },
   "features": {
     "installer.windows": {
       "status": "tempdir-proven",
@@ -79,7 +85,7 @@
     "audit.runtime": {
       "status": "headless-proven",
       "minimumValidation": "L2 Headless for custom plugin audit records, capability denials, command dispatch, private-message target-not-found records, audit tail command output, and audit.jsonl parsing",
-      "notes": "BMF writes runtime/audit.jsonl and exposes BMF.audit.record, BMF.audit.recent, and bmf.audit.tail. Built-in audit records cover framework/plugin lifecycle, command dispatch/errors, capability/config denials, plugin errors, server exec, world load/save, server save, chat broadcast, and private-message scaffold failures."
+      "notes": "BMF writes runtime/audit.jsonl and exposes BMF.audit.record, BMF.audit.recent, and bmf.audit.tail. Built-in audit records cover framework/plugin lifecycle, command dispatch/errors, capability/config denials, plugin errors, server exec, world load/save, server save, chat broadcast, private-message delivery, and private-message target/delivery failures."
     },
     "rateLimits.runtime": {
       "status": "headless-negative-proven",
@@ -198,13 +204,23 @@
       "notes": "BMF.permissions.describeRoleAssignments, getPlayerRoles, and playerHasRole now read file-shaped role assignments from Lua. This proves assignment semantics and malformed-record handling, not live player role state."
     },
     "permissions.noSpawnItemPolicy": {
-      "status": "headless-negative-proven",
-      "minimumValidation": "L2 Headless + L5 Negative for RoleSetup2-style role description, unsafe role detection, no-spawn-item applicator patch evaluation, duplicate permission rejection, and API labels; L3 Live Player + L5 Negative for actual applicator spawn-item exploit denial",
-      "notes": "BMF.permissions.describeRole and BMF.permissions.evaluateNoSpawnItemApplicator now let Lua validate that safe applicator permissions remain allowed while BR.Permission.SpawnItems is forbidden. This proves policy shape and duplicate-entry rejection, not live tool behavior."
+      "status": "live-negative-proven-experimental",
+      "minimumValidation": "L2 Headless + L5 Negative for RoleSetup2-style role description, unsafe role detection, no-spawn-item applicator patch evaluation, duplicate permission rejection, SpawnItem/ItemSpawn component policy denial, normal component allow, RoleSetup2 copied-file enforcement with backup, live hook API labels, and hook status command shape; L3 Live Player + L5 Negative for actual applicator ItemSpawn denial; L3 Live Player for Omegga-backed feedback delivery",
+      "notes": "BMF.permissions.describeRole, BMF.permissions.evaluateNoSpawnItemApplicator, BMF.permissions.evaluateApplicatorComponentAccess, BMF.permissions.enforceNoSpawnItemApplicator, and BMF.tools.onApplicatorComponentApply validate file-backed policy and stage applicator policy handlers. Live testing proved BR.Permission.SpawnItems=Forbidden does not block Applicator ItemSpawn, and the direct UE4SS Lua ABRTool_Applicator.ServerAddComponent hook is disabled after a push_structproperty crash while marshaling a struct parameter. The current working experimental path is native/applicator_blocker/applicator_func_blocker.cpp: it wraps ServerAddComponent UFunction::Func, denies the ItemSpawn component pointer, writes block events, and NoSpawnItemApplicator uses BMF/Omegga chat delivery to tell the player why the component was blocked."
+    },
+    "permissions.brickAssetPolicy": {
+      "status": "policy-ready",
+      "minimumValidation": "L0 Archive Fixture + L2 Headless + L5 Negative for BMF.permissions.evaluateBrickAssetAccess and BrickAssetPlacementGuard command decisions; L3 Live Player + L5 Negative for future live placement/paste enforcement",
+      "notes": "BMF.permissions.evaluateBrickAssetAccess can deny named Brickadia brick assets for non-admin roles while allowing Owner/Admin or configured bypass roles. Current scope is policy and plugin commands; a cancellable placement/paste hook still needs to resolve the incoming brick asset or uploaded prefab hash before Brickadia mutates the world."
     },
     "archives.describe": {
       "status": "fixture-backed",
       "minimumValidation": "L0 Static for BRDB parser output, L3 Live Player for vehicle behavior"
+    },
+    "archives.brickAssetInventory": {
+      "status": "fixture-backed",
+      "minimumValidation": "L0 Static for .brdb/.brz global data and brick chunk decoding",
+      "notes": "scripts/list-brick-assets.js extracts archive global data and brick chunks, then reports basic/procedural asset names plus histograms for placement policy authoring."
     },
     "archives.vehicleInventory": {
       "status": "snapshot-backed",
@@ -260,8 +276,8 @@
       "minimumValidation": "L0 Static for archive graph parsing, L3 Live Player for true vehicle behavior"
     },
     "applicator.spawnItemPolicy": {
-      "status": "research",
-      "minimumValidation": "L3 Live Player plus L5 Negative"
+      "status": "role-backed-pending-live-negative",
+      "minimumValidation": "L2 Headless + L5 Negative for RoleSetup2 enforcement, component policy evaluation, and safe handler/status shape; L3 Live Player plus L5 Negative for live ItemSpawn denial without the unsafe Lua hook"
     }
   }
 }

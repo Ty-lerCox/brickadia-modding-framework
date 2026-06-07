@@ -17,6 +17,7 @@ local TARGET_SERVER_EXECUTABLE = "BrickadiaServer-Win64-Shipping.exe"
 local TARGET_PLATFORM = "windows-dedicated-server"
 local BUILD_DETECTION_MODE = "declared-target-only"
 local UNSUPPORTED_BUILD_POLICY = "report-only"
+local COMMAND_EMPTY_READ_RETRY_LIMIT = 5
 
 local state = {
   started_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
@@ -59,6 +60,7 @@ local state = {
   commands = {},
   console_command_callbacks = {},
   command_worker_started = false,
+  command_empty_reads = {},
   player_cache = nil,
   player_cache_error = "",
   server_ready = false,
@@ -1138,7 +1140,9 @@ API_REGISTRY = {
   { name = "BMF.minigames.getPlayer", namespace = "minigames", kind = "function", stability = "experimental", risk = "low", validation = "L0 Static + L2 Headless; L3 Live Player for gameplay producers", requiresPlayer = false, capability = "", summary = "Find one event-fed minigame player and return membership, team, and leaderboard context." },
   { name = "BMF.minigames.players", namespace = "minigames", kind = "function", stability = "experimental", risk = "low", validation = "L0 Static + L2 Headless; L3 Live Player for gameplay producers", requiresPlayer = false, capability = "", summary = "List known event-fed minigame players, optionally filtered by minigame." },
   { name = "BMF.minigames.teams", namespace = "minigames", kind = "function", stability = "experimental", risk = "low", validation = "L0 Static + L2 Headless; L3 Live Player for gameplay producers", requiresPlayer = false, capability = "", summary = "List known event-fed minigame teams, optionally filtered by minigame." },
+  { name = "BMF.minigames.leaderboard", namespace = "minigames", kind = "function", stability = "experimental", risk = "low", validation = "L0 Static + L2 Headless; L3 Live Player for gameplay producers", requiresPlayer = false, capability = "", summary = "List event-fed leaderboard rows with minigame and player filters." },
   { name = "BMF.minigames.membership", namespace = "minigames", kind = "function", stability = "experimental", risk = "low", validation = "L0 Static + L2 Headless; L3 Live Player for gameplay producers", requiresPlayer = false, capability = "", summary = "Resolve one player's current event-fed minigame membership." },
+  { name = "BMF.minigames.playerState", namespace = "minigames", kind = "function", stability = "experimental", risk = "low", validation = "L0 Static + L2 Headless; L3 Live Player for gameplay producers", requiresPlayer = false, capability = "", summary = "Resolve whether one known player is currently in a minigame without confusing historical leaderboard context for membership." },
   { name = "BMF.minigames.recentEvents", namespace = "minigames", kind = "function", stability = "experimental", risk = "low", validation = "L0 Static + L2 Headless; L3 Live Player for gameplay producers", requiresPlayer = false, capability = "", summary = "List recent accepted minigame events with optional event/minigame/player filters." },
   { name = "BMF.minigames.clearData", namespace = "minigames", kind = "function", stability = "experimental", risk = "low", validation = "L2 Headless validation reset only", requiresPlayer = false, capability = "", summary = "Explicitly clear BMF-owned minigame cache data for validation and troubleshooting." },
   { name = "BMF.minigames.objectSnapshot", namespace = "minigames", kind = "function", stability = "experimental", risk = "high", validation = "L3 Live Server fail-closed; unsafe opt-in required due UE4SS crash risk", requiresPlayer = false, capability = "ue4ss-object-read", summary = "BP_Ruleset_C and BP_Team_C object snapshot disabled by default due dedicated-server crash risk." },
@@ -3887,6 +3891,40 @@ local function register_builtin_commands()
     return listed
   end)
 
+  BMF.commands.register("bmf.minigames.data.leaderboard", "List known BMF-owned minigame leaderboard rows.", function(args)
+    local options = parse_command_options(args)
+    local query = minigame_data_query_from_options(options, "player")
+    local listed = BMF.minigames.leaderboard(query)
+    local data = listed.data or {}
+    local leaderboards = data.leaderboards or {}
+    local json_payload = copy_table(data)
+    json_payload.lines = nil
+    local lines = {
+      "code=" .. tostring(listed.code or ""),
+      "leaderboards=" .. tostring((data.counts and data.counts.leaderboards) or data.total or 0),
+      "returned=" .. tostring(data.count or #leaderboards),
+      "minigame_key=" .. tostring(data.minigameKey or ""),
+    }
+    for index, item in ipairs(leaderboards) do
+      if index > 10 then
+        break
+      end
+      local player = item.player or {}
+      lines[#lines + 1] =
+        "leaderboard_" .. tostring(index) ..
+        "=" .. tostring(item.playerKey or "") ..
+        "|name=" .. tostring(player.name or player.displayName or player.username or "") ..
+        "|score=" .. tostring(item.score or 0) ..
+        "|values=" .. tostring(item.valueCount or 0) ..
+        "|minigame=" .. tostring(item.minigameKey or "") ..
+        "|team=" .. tostring(item.teamKey or "")
+    end
+    lines[#lines + 1] = "leaderboards_json=" .. json_encode(json_payload)
+    data.lines = lines
+    listed.data = data
+    return listed
+  end)
+
   BMF.commands.register("bmf.minigames.data.player", "Find one BMF-owned minigame player data record.", function(args)
     local options = parse_command_options(args)
     local query = minigame_data_query_from_options(options, "player")
@@ -3904,6 +3942,28 @@ local function register_builtin_commands()
       "team_key=" .. tostring(data.teamKey or ""),
       "leaderboard_values=" .. tostring(#leaderboard_values),
       "player_json=" .. json_encode(data),
+    }
+    found.data = data
+    return found
+  end)
+
+  BMF.commands.register("bmf.minigames.data.playerstate", "Resolve one player's current BMF-owned minigame membership state.", function(args)
+    local options = parse_command_options(args)
+    local query = minigame_data_query_from_options(options, "player")
+    local found = BMF.minigames.playerState(query)
+    local data = found.data or {}
+    local player = data.player or {}
+    data.lines = {
+      "code=" .. tostring(found.code or ""),
+      "player_key=" .. tostring(data.playerKey or ""),
+      "player_name=" .. tostring(player.name or player.displayName or player.username or ""),
+      "in_minigame=" .. tostring(data.inMinigame == true),
+      "minigame_key=" .. tostring(data.minigameKey or ""),
+      "team_key=" .. tostring(data.teamKey or ""),
+      "activity_minigame_key=" .. tostring(data.activityMinigameKey or ""),
+      "has_leaderboard=" .. tostring(data.hasLeaderboard == true),
+      "reason=" .. tostring(data.reason or ""),
+      "player_state_json=" .. json_encode(data),
     }
     found.data = data
     return found
@@ -8541,6 +8601,122 @@ BMF.minigames.teams = function(query)
   })
 end
 
+local function minigame_leaderboard_score(row)
+  row = type(row) == "table" and row or {}
+  local values = type(row.leaderboard) == "table" and row.leaderboard or {}
+  if tonumber(values[1]) ~= nil then
+    return tonumber(values[1])
+  end
+  if tonumber(values.score) ~= nil then
+    return tonumber(values.score)
+  end
+  if tonumber(values.points) ~= nil then
+    return tonumber(values.points)
+  end
+  return 0
+end
+
+BMF.minigames.leaderboard = function(query)
+  local data = state.minigame_data
+  local normalized = normalize_minigame_lookup_query(query, "player")
+  local limit = minigame_query_limit(normalized, 50, 100)
+  local minigame_key_name = ""
+  local lookup_error = nil
+  if minigame_query_has_minigame_filter(normalized) and minigame_query_value(normalized, "player", "playerid", "uuid", "state", "controller", "username") == nil then
+    local found_key, _, err = minigame_query_minigame_key(data, normalized)
+    if err ~= nil then
+      lookup_error = err
+    else
+      minigame_key_name = found_key
+    end
+  elseif minigame_query_value(normalized, "minigameKey", "minigamekey", "ruleset", "minigame") ~= nil then
+    local found_key, _, err = minigame_query_minigame_key(data, normalized)
+    if err ~= nil then
+      lookup_error = err
+    else
+      minigame_key_name = found_key
+    end
+  end
+  if lookup_error ~= nil then
+    return result(false, "MINIGAME_NOT_FOUND", lookup_error, {
+      query = normalized,
+      counts = minigame_data_counts(data),
+    })
+  end
+
+  local player_filter = minigame_query_has_player_filter(normalized)
+  local team_filter = normalize_api_filter_value(minigame_query_value(normalized, "team", "teamKey", "teamkey") or "")
+  local collected = {}
+  for _, player_key_name in ipairs(minigame_sorted_keys(data.leaderboards_by_player)) do
+    local leaderboard = data.leaderboards_by_player[player_key_name]
+    if type(leaderboard) == "table" then
+      local player = type(leaderboard.player) == "table" and leaderboard.player or data.players_by_key[player_key_name] or {}
+      local team_membership = type(data.team_memberships_by_player[player_key_name]) == "table" and data.team_memberships_by_player[player_key_name] or nil
+      local ok = true
+      if minigame_key_name ~= "" and leaderboard.minigameKey ~= minigame_key_name then
+        ok = false
+      end
+      if ok and player_filter and not player_matches_query(player_key_name, player, normalized) then
+        ok = false
+      end
+      if ok and team_filter ~= "" then
+        if not team_membership then
+          ok = false
+        else
+          local team = type(team_membership.team) == "table" and team_membership.team or {}
+          ok = normalize_api_filter_value(team_membership.teamKey) == team_filter
+            or normalize_api_filter_value(team.key) == team_filter
+            or normalize_api_filter_value(team.team or team.id or team.name) == team_filter
+        end
+      end
+      if ok then
+        local item = copy_table(leaderboard)
+        item.playerKey = player_key_name
+        item.player = copy_table(player)
+        item.minigame = copy_table(item.minigame or data.minigames_by_key[item.minigameKey] or {})
+        item.teamKey = team_membership and tostring(team_membership.teamKey or "") or ""
+        item.team = team_membership and copy_table(team_membership.team or data.teams_by_key[item.teamKey] or {}) or nil
+        item.values = copy_table(type(item.leaderboard) == "table" and item.leaderboard or {})
+        item.oldValues = copy_table(type(item.oldLeaderboard) == "table" and item.oldLeaderboard or {})
+        item.valueCount = #(item.values or {})
+        item.score = minigame_leaderboard_score(item)
+        collected[#collected + 1] = item
+      end
+    end
+  end
+
+  table.sort(collected, function(a, b)
+    local a_score = tonumber(a.score) or 0
+    local b_score = tonumber(b.score) or 0
+    if a_score ~= b_score then
+      return a_score > b_score
+    end
+    return tostring(a.playerKey or "") < tostring(b.playerKey or "")
+  end)
+
+  local items = {}
+  for index, item in ipairs(collected) do
+    if #items >= limit then
+      break
+    end
+    item.rank = index
+    items[#items + 1] = item
+  end
+
+  return result(true, "OK", "Minigame leaderboard listed", {
+    leaderboards = items,
+    count = #items,
+    total = #collected,
+    minigameKey = minigame_key_name,
+    query = normalized,
+    counts = minigame_data_counts(data),
+    updatedAt = data.updated_at or "",
+    source = data.source or "",
+    totalUpdates = data.total_updates or 0,
+    lastEvent = type(data.last_event) == "table" and copy_table(data.last_event) or nil,
+  })
+end
+
 BMF.minigames.membership = function(query)
   local found = BMF.minigames.getPlayer(query)
   if not found.ok then
@@ -8651,6 +8827,64 @@ BMF.minigames.getPlayer = function(query)
     })
   end
   return result(true, "OK", "Minigame player data found", minigame_player_context(data, key, player))
+end
+
+BMF.minigames.playerState = function(query)
+  local data = state.minigame_data
+  local key, player, lookup_error, normalized = minigame_find_player_by_query(data, query)
+  if not player then
+    return result(false, "MINIGAME_PLAYER_NOT_FOUND", lookup_error or "Minigame player not found", {
+      query = normalized,
+      inMinigame = false,
+      reason = "player-not-found",
+      counts = minigame_data_counts(data),
+    })
+  end
+
+  local context = minigame_player_context(data, key, player)
+  local membership = type(context.membership) == "table" and context.membership or nil
+  local team_membership = type(context.teamMembership) == "table" and context.teamMembership or nil
+  local leaderboard = type(context.leaderboard) == "table" and context.leaderboard or nil
+  local current_minigame_key = membership and tostring(membership.minigameKey or "") or ""
+  local current_team_key = ""
+  if current_minigame_key ~= "" and team_membership and team_membership.minigameKey == current_minigame_key then
+    current_team_key = tostring(team_membership.teamKey or "")
+  end
+  local activity_minigame_key = tostring(context.minigameKey or "")
+
+  local current_minigame = nil
+  if current_minigame_key ~= "" then
+    current_minigame = copy_table(data.minigames_by_key[current_minigame_key] or membership.minigame or {})
+  end
+
+  local current_team = nil
+  if current_team_key ~= "" then
+    current_team = copy_table(data.teams_by_key[current_team_key] or team_membership.team or {})
+  end
+
+  return result(true, "OK", "Minigame player state resolved", {
+    playerKey = key,
+    player = copy_table(player or {}),
+    inMinigame = membership ~= nil,
+    minigameKey = current_minigame_key,
+    minigame = current_minigame,
+    teamKey = current_team_key,
+    team = current_team,
+    membership = membership,
+    teamMembership = team_membership,
+    leaderboard = leaderboard,
+    activityMinigameKey = activity_minigame_key,
+    activityMinigame = activity_minigame_key ~= "" and copy_table(data.minigames_by_key[activity_minigame_key] or context.minigame or {}) or nil,
+    hasTeam = current_team_key ~= "",
+    hasLeaderboard = leaderboard ~= nil,
+    reason = membership and "membership" or "known-player-no-membership",
+    query = normalized,
+    updatedAt = data.updated_at or "",
+    source = data.source or "",
+    totalUpdates = data.total_updates or 0,
+    lastEvent = type(data.last_event) == "table" and copy_table(data.last_event) or nil,
+    counts = minigame_data_counts(data),
+  })
 end
 
 BMF.minigames.clearData = function(confirm)
@@ -10587,7 +10821,19 @@ local function process_command_request(file_name)
   local request_path = COMMAND_DIR .. "/" .. file_name
   local response_path = COMMAND_DIR .. "/" .. request_id .. ".response.txt"
   local command_text = trim_string(read_file(request_path) or "")
+
+  if command_text == "" then
+    local empty_reads = tonumber(state.command_empty_reads[request_id] or 0) + 1
+    state.command_empty_reads[request_id] = empty_reads
+    if empty_reads < COMMAND_EMPTY_READ_RETRY_LIMIT then
+      return
+    end
+  else
+    state.command_empty_reads[request_id] = nil
+  end
+
   os.remove(request_path)
+  state.command_empty_reads[request_id] = nil
 
   local lines = {}
   local output_device = {

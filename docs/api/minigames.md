@@ -212,6 +212,9 @@ writes BMF command files for `BMF.minigames.emitEvent`. Snapshot/team and
 leaderboard polling are disabled by default because direct object/console
 enumeration has crashed CL13530 dedicated servers. Those producers remain unsafe
 opt-ins until BMF has a proven native hook or a safer Brickadia data source.
+In safe mode, the adapter can still seed its local join/leave cache from
+`bmf.minigames.data.snapshot` at startup and from `/bmfminigamesync`; that seed
+reads BMF-owned data only and does not poll Brickadia objects.
 
 ## Data Snapshot
 
@@ -223,9 +226,11 @@ local status = BMF.minigames.dataStatus()
 local minigames = BMF.minigames.dataList({ limit = 25 })
 local city = BMF.minigames.get({ name = "CityRPG", index = 0 })
 local player = BMF.minigames.getPlayer({ player = "EventKiller" })
+local state = BMF.minigames.playerState({ player = "EventKiller" })
 local membership = BMF.minigames.membership({ player = "EventKiller" })
 local players = BMF.minigames.players({ minigame = "CityRPG", index = 0 })
 local teams = BMF.minigames.teams({ minigame = "CityRPG", index = 0 })
+local leaderboard = BMF.minigames.leaderboard({ minigame = "CityRPG", index = 0 })
 local events = BMF.minigames.recentEvents({ event = "kill", limit = 10 })
 ```
 
@@ -238,7 +243,9 @@ Omegga.Bridge.BMF bmf.minigames.data.list
 Omegga.Bridge.BMF bmf.minigames.data.get name=CityRPG index=0
 Omegga.Bridge.BMF bmf.minigames.data.players minigame=CityRPG index=0
 Omegga.Bridge.BMF bmf.minigames.data.teams minigame=CityRPG index=0
+Omegga.Bridge.BMF bmf.minigames.data.leaderboard minigame=CityRPG index=0
 Omegga.Bridge.BMF bmf.minigames.data.player player=EventKiller
+Omegga.Bridge.BMF bmf.minigames.data.playerstate player=EventKiller
 Omegga.Bridge.BMF bmf.minigames.data.membership player=EventKiller
 Omegga.Bridge.BMF bmf.minigames.events.recent event=kill limit=10
 ```
@@ -265,10 +272,17 @@ round, and leaderboard events. It does not require CityRPG to subscribe to
 `BMF.minigames.get(query)` accepts `key`, `ruleset`, `name`, `minigame`, or
 `index` and returns one matched minigame plus its known members, teams, team
 memberships, leaderboard records, and round state. `BMF.minigames.players`,
-`BMF.minigames.teams`, and `BMF.minigames.membership` expose player/team views
-over the same cache. `BMF.minigames.getPlayer` accepts `player`, `playerid`,
-`uuid`, `id`, `name`, `state`, or `controller` and returns the player's known
-membership, team, leaderboard, and minigame context.
+`BMF.minigames.teams`, `BMF.minigames.leaderboard`, and
+`BMF.minigames.membership` expose player/team/scoreboard views over the same
+cache. Leaderboard rows are sorted by their first numeric value as `score` and
+also include the raw `leaderboard` values for game-specific scoring.
+`BMF.minigames.getPlayer` accepts `player`, `playerid`, `uuid`, `id`, `name`,
+`state`, or `controller` and returns the player's known membership, team,
+leaderboard, and minigame context.
+`BMF.minigames.playerState` answers the current-membership question directly:
+`inMinigame=true` only when a membership exists. Its `minigameKey` is the
+current membership key, while `activityMinigameKey` can still point at historical
+leaderboard context after a leave event.
 
 `BMF.minigames.recentEvents(filter)` returns accepted events from BMF's recent
 minigame event ring buffer. Use `event`, `player`, `minigame`, and `limit`
@@ -281,6 +295,24 @@ For validation and troubleshooting only, the cache can be cleared explicitly:
 ```text
 Omegga.Bridge.BMF bmf.minigames.data.clear confirm=CLEAR_MINIGAME_DATA
 ```
+
+## Object Snapshot
+
+`BMF.minigames.objectSnapshot({ limit = 64 })` is a direct UE4SS object probe
+for live `BP_Ruleset_C` and `BP_Team_C` objects. It does not use Brickadia
+console `GetAll`, but it is still disabled by default because raw UE4SS object
+enumeration is high risk on the current dedicated-server runtime.
+
+Server-console command route:
+
+```text
+Omegga.Bridge.BMF bmf.minigames.objects.snapshot limit=64
+```
+
+By default the command returns `UNSAFE_MINIGAME_OBJECT_SNAPSHOT_DISABLED` with
+`allowUnsafeMinigameObjectSnapshot=false`. Only enable
+`allowUnsafeMinigameObjectSnapshot` during isolated live tracing when a crash is
+acceptable and the server can be restarted.
 
 ## Validation
 
@@ -296,9 +328,11 @@ Omegga.Bridge.BMF bmf.minigames.data.clear confirm=CLEAR_MINIGAME_DATA
 - `L2 Headless data-query`: the same canaries prove
   `bmf.minigames.data.snapshot`, `bmf.minigames.data.list`,
   `bmf.minigames.data.get`, `bmf.minigames.data.players`,
-  `bmf.minigames.data.teams`, `bmf.minigames.data.player`,
+  `bmf.minigames.data.teams`, `bmf.minigames.data.leaderboard`,
+  `bmf.minigames.data.player`, `bmf.minigames.data.playerstate`,
   `bmf.minigames.data.membership`, and `bmf.minigames.events.recent` return
-  stable JSON context without unsafe Brickadia minigame console calls.
+  stable JSON context without unsafe
+  Brickadia minigame console calls.
 - `L2 Headless leave-reducer`: `scripts/validate-bmf-events.ps1` emits
   `leaveminigame` after a join and proves the player's membership is removed.
 - `L2 Headless synthetic-flow`: `scripts/validate-bmf-events.ps1` runs
@@ -309,7 +343,8 @@ Omegga.Bridge.BMF bmf.minigames.data.clear confirm=CLEAR_MINIGAME_DATA
   normalized `_bmf` metadata.
 - `L2 Headless + L5 Negative`: `scripts/validate-bmf-minigame-commands.ps1`
   proves command-worker transport, fail-closed behavior for unsafe minigame
-  console wrappers, and invalid preset-name/index rejection.
+  console wrappers, fail-closed behavior for the unsafe object snapshot probe,
+  and invalid preset-name/index rejection.
 - `L3 Live Player`: joining, membership, teams, scoring, and gameplay effects.
 - `L5 Negative`: permission or policy enforcement around minigame edits.
 

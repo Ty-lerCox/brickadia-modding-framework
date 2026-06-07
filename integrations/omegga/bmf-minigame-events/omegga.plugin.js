@@ -24,6 +24,18 @@ function unsafeConsoleSnapshotsEnabled(config) {
   return asBoolean(config?.allowUnsafeConsoleSnapshots, false);
 }
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function responseLineValue(text, key) {
+  const prefix = `${key}=`;
+  for (const line of String(text || '').split(/\r?\n/)) {
+    if (line.startsWith(prefix)) return line.slice(prefix.length);
+  }
+  return '';
+}
+
 function compactObject(value) {
   const result = {};
   for (const [key, next] of Object.entries(value || {})) {
@@ -76,6 +88,29 @@ function teamKey(team, minigame) {
 
 function playerKey(player) {
   return String(player?.id || player?.state || player?.controller || player?.name || player?.displayName || '');
+}
+
+function minigameFromKey(key) {
+  const text = String(key || '');
+  if (text.startsWith('ruleset:')) return { key: text, ruleset: text.slice('ruleset:'.length) };
+
+  const nameMatch = text.match(/^name:(.*)#(-?\d+)$/);
+  if (nameMatch) {
+    return {
+      key: text,
+      name: nameMatch[1],
+      index: Number(nameMatch[2]),
+    };
+  }
+
+  return text ? { key: text } : {};
+}
+
+function snapshotEntries(value) {
+  if (Array.isArray(value)) {
+    return value.map((item, index) => [String(item?.key || index), item]);
+  }
+  return Object.entries(value || {});
 }
 
 function colorFromGroups(groups) {
@@ -137,6 +172,13 @@ module.exports = class BmfMinigameEvents {
       leaveSameMinigame: 0,
       leaveSwitches: 0,
       leaveDisconnects: 0,
+      seedAttempts: 0,
+      seedSuccesses: 0,
+      seedFailures: 0,
+      seedPlayers: 0,
+      seedMemberships: 0,
+      seedTeamMemberships: 0,
+      lastSeed: null,
       lastLeaveCheck: null,
       lastEvent: null,
       lastError: null,
@@ -302,6 +344,9 @@ module.exports = class BmfMinigameEvents {
         polling: 'log-events-only',
         allowUnsafeConsoleSnapshots,
       });
+      this.seedCacheFromBmfData('start').catch(error => {
+        console.warn(`[bmf-minigame-events] BMF data seed failed: ${error.message || error}`);
+      });
       return;
     }
 
@@ -371,6 +416,7 @@ module.exports = class BmfMinigameEvents {
       `cached: minigames=${this.minigameCache.size} playerStates=${this.playerStateCache.size} players=${this.playerMinigameCache.size} teamMemberships=${this.teamMembershipCache.size}`,
       `checks: minigames=${this.counters.minigameChecks} leaderboards=${this.counters.leaderboardChecks} snapshots=${this.counters.snapshotChanges} teamChanges=${this.counters.teamChanges}`,
       `leaves: checks=${this.counters.leaveChecks} queued=${this.counters.leaveQueued} misses=${this.counters.leaveCacheMisses} noPlayer=${this.counters.leaveNoPlayer} same=${this.counters.leaveSameMinigame} switches=${this.counters.leaveSwitches} disconnects=${this.counters.leaveDisconnects}`,
+      `seed: attempts=${this.counters.seedAttempts} successes=${this.counters.seedSuccesses} failures=${this.counters.seedFailures} players=${this.counters.seedPlayers} memberships=${this.counters.seedMemberships} teamMemberships=${this.counters.seedTeamMemberships}`,
       `unsafeConsoleSnapshots=${this.unsafeConsoleSnapshotsEnabled() ? 'enabled' : 'disabled'}`,
       `commandDir=${this.commandDir || '(not configured)'}`,
       `statusPath=${this.statusPath || '(not configured)'}`,
@@ -381,6 +427,10 @@ module.exports = class BmfMinigameEvents {
     if (this.counters.lastLeaveCheck) {
       const last = this.counters.lastLeaveCheck;
       lines.push(`lastLeave=${last.outcome} reason=${last.reason} player=${last.player || ''} minigame=${last.minigame || ''}`);
+    }
+    if (this.counters.lastSeed) {
+      const last = this.counters.lastSeed;
+      lines.push(`lastSeed=${last.outcome} reason=${last.reason} memberships=${last.memberships || 0} at=${last.finishedAt || last.startedAt || ''}`);
     }
     if (this.counters.lastError) {
       lines.push(`lastError=${this.counters.lastError}`);
@@ -396,11 +446,17 @@ module.exports = class BmfMinigameEvents {
     }
 
     if (!this.unsafeConsoleSnapshotsEnabled()) {
-      this.sayToSpeaker(speaker, [
-        'BMF minigame snapshots are disabled because Brickadia GetAll polling is unsafe in this runtime.',
-        'Log-derived join/leave events are still active.',
-      ]);
-      this.writeStatusFile({ manualSyncSkipped: 'unsafe-console-snapshots-disabled' });
+      this.seedCacheFromBmfData('manual')
+        .then(summary => {
+          this.sayToSpeaker(speaker, [
+            `BMF minigame cache seed read ${summary.memberships} memberships from BMF data.`,
+            'Log-derived join/leave events are still active.',
+          ]);
+        })
+        .catch(error => {
+          const message = error.message || String(error);
+          this.sayToSpeaker(speaker, [`BMF minigame cache seed failed: ${message}`]);
+        });
       return;
     }
 
@@ -576,6 +632,181 @@ module.exports = class BmfMinigameEvents {
 
     this.writeStatusFile({ lastLeaveCheck: summary });
     return summary.outcome === 'queued';
+  }
+
+  normalizeSeedPlayer(player, fallbackKey) {
+    const normalized = normalizePlayer(player) || {};
+    const key = String(fallbackKey || '');
+    if (!normalized.id && /^[0-9a-fA-F-]{36}$/.test(key)) normalized.id = key;
+    if (!normalized.name && typeof player === 'string') normalized.name = player;
+    return compactObject(normalized);
+  }
+
+  normalizeSeedMinigame(minigame, fallbackKey) {
+    const source = typeof minigame === 'object' && minigame ? minigame : {};
+    const parsed = minigameFromKey(fallbackKey || source.key);
+    const normalized = compactObject({
+      ...parsed,
+      ...source,
+      key: source.key || parsed.key || fallbackKey,
+    });
+    if (normalized.index !== undefined) normalized.index = asNumber(normalized.index, 0);
+    return normalized;
+  }
+
+  cacheSeedMinigame(minigame, fallbackKey) {
+    const normalized = this.normalizeSeedMinigame(minigame, fallbackKey);
+    const key =
+      String(normalized.ruleset || '') ||
+      String(normalized.key || '') ||
+      String(fallbackKey || '') ||
+      (normalized.name ? `name:${normalized.name}#${asNumber(normalized.index, 0)}` : '');
+    if (!key) return null;
+    this.minigameCache.set(key, normalized);
+    return normalized;
+  }
+
+  seedCachesFromSnapshot(snapshot, reason = 'manual') {
+    const data = typeof snapshot === 'object' && snapshot ? snapshot : {};
+    const players = data.players || {};
+    const minigames = data.minigames || {};
+    const memberships = data.memberships || {};
+    const teamMemberships = data.teamMemberships || {};
+    const summary = {
+      reason,
+      outcome: 'success',
+      minigames: 0,
+      players: 0,
+      memberships: 0,
+      teamMemberships: 0,
+      updatedAt: data.updatedAt || '',
+      source: data.source || '',
+      totalUpdates: data.totalUpdates || 0,
+      finishedAt: new Date().toISOString(),
+    };
+
+    for (const [key, minigame] of snapshotEntries(minigames)) {
+      if (this.cacheSeedMinigame(minigame, key)) summary.minigames += 1;
+    }
+
+    for (const [key, player] of snapshotEntries(players)) {
+      const normalized = this.normalizeSeedPlayer(player, key);
+      const nextKey = this.playerKey(normalized) || String(key || '');
+      if (!nextKey) continue;
+      if (normalized.state) {
+        const previous = this.playerStateCache.get(normalized.state) || {};
+        this.playerStateCache.set(normalized.state, {
+          ...previous,
+          player: normalized,
+        });
+      }
+      summary.players += 1;
+    }
+
+    for (const [key, membership] of snapshotEntries(memberships)) {
+      if (!membership || typeof membership !== 'object') continue;
+      const player = this.normalizeSeedPlayer(membership.player || players[key], key);
+      const playerCacheKey = this.playerKey(player) || String(key || '');
+      if (!playerCacheKey) continue;
+
+      const minigameKey = String(membership.minigameKey || membership.key || '');
+      const minigame = this.cacheSeedMinigame(
+        membership.minigame || (minigameKey ? minigames[minigameKey] : null),
+        minigameKey
+      );
+      if (!minigame) continue;
+
+      this.playerMinigameCache.set(playerCacheKey, minigame);
+      if (player.state) {
+        this.playerStateCache.set(player.state, {
+          ...(this.playerStateCache.get(player.state) || {}),
+          player,
+          ruleset: minigame.ruleset || minigame.key || minigameKey,
+        });
+      }
+      summary.memberships += 1;
+    }
+
+    for (const [key, membership] of snapshotEntries(teamMemberships)) {
+      if (!membership || typeof membership !== 'object') continue;
+      const player = this.normalizeSeedPlayer(membership.player || players[key], key);
+      const playerCacheKey = this.playerKey(player) || String(key || '');
+      if (!playerCacheKey) continue;
+
+      const minigameKey = String(membership.minigameKey || '');
+      const minigame = this.cacheSeedMinigame(
+        membership.minigame || (minigameKey ? minigames[minigameKey] : null),
+        minigameKey
+      );
+      if (!minigame) continue;
+
+      this.teamMembershipCache.set(playerCacheKey, {
+        player,
+        minigame,
+        team: compactObject(membership.team || {}),
+      });
+      summary.teamMemberships += 1;
+    }
+
+    this.counters.seedPlayers = summary.players;
+    this.counters.seedMemberships = summary.memberships;
+    this.counters.seedTeamMemberships = summary.teamMemberships;
+    this.counters.lastSeed = summary;
+    this.writeStatusFile({ lastSeed: summary });
+    return summary;
+  }
+
+  async seedCacheFromBmfData(reason = 'manual') {
+    if (!asBoolean(this.config.seedCacheFromBmfData, true)) {
+      const summary = {
+        reason,
+        outcome: 'disabled',
+        memberships: 0,
+        finishedAt: new Date().toISOString(),
+      };
+      this.counters.lastSeed = summary;
+      this.writeStatusFile({ lastSeed: summary });
+      return summary;
+    }
+
+    this.counters.seedAttempts += 1;
+    const startedAt = new Date().toISOString();
+    this.counters.lastSeed = { reason, outcome: 'started', startedAt };
+    this.writeStatusFile({ lastSeed: this.counters.lastSeed });
+
+    try {
+      const timeoutMs = Math.max(1000, asNumber(this.config.seedCacheTimeoutMs, 5000));
+      const response = await this.invokeBmfCommand(
+        'bmf.minigames.data.snapshot',
+        'minigame_seed',
+        timeoutMs
+      );
+      const snapshotJson = responseLineValue(response.text, 'snapshot_json');
+      if (!snapshotJson) {
+        throw new Error('snapshot_json was missing from BMF response');
+      }
+      const snapshot = JSON.parse(snapshotJson);
+      const summary = this.seedCachesFromSnapshot(snapshot, reason);
+      summary.startedAt = startedAt;
+      this.counters.seedSuccesses += 1;
+      this.counters.lastSeed = summary;
+      this.writeStatusFile({ lastSeed: summary });
+      return summary;
+    } catch (error) {
+      const message = error.message || String(error);
+      const summary = {
+        reason,
+        outcome: 'failed',
+        startedAt,
+        finishedAt: new Date().toISOString(),
+        error: message,
+      };
+      this.counters.seedFailures += 1;
+      this.counters.lastSeed = summary;
+      this.counters.lastError = `BMF minigame data seed failed: ${message}`;
+      this.writeStatusFile({ lastSeed: summary });
+      throw error;
+    }
   }
 
   async minigameCheck(reason) {
@@ -981,32 +1212,69 @@ module.exports = class BmfMinigameEvents {
   }
 
   playerKey(player) {
-    return String(player?.id || player?.state || player?.name || '');
+    return String(player?.id || player?.uuid || player?.state || player?.controller || player?.name || player?.displayName || '');
   }
 
-  queueEvent(eventName, payload) {
+  writeCommandRequest(command, idPrefix) {
     const commandDir = this.commandDir;
     if (!commandDir) {
-      this.counters.failed += 1;
-      this.counters.lastError = 'commandDir is not configured';
-      console.warn('[bmf-minigame-events] commandDir is not configured');
-      this.writeStatusFile({ failedEvent: eventName });
-      return false;
+      throw new Error('commandDir is not configured');
     }
 
-    const command = [
-      'bmf.minigames.events.emit',
-      `event=${encodeURIComponent(eventName)}`,
-      `payload=${encodeURIComponent(JSON.stringify(payload || {}))}`,
-    ].join(' ');
-    const id = `minigame_${eventName}_${Date.now()}_${Math.floor(Math.random() * 1000000)}`;
+    const safePrefix = String(idPrefix || 'bmf_command').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const id = `${safePrefix}_${Date.now()}_${Math.floor(Math.random() * 1000000)}`;
     const tmpPath = path.join(commandDir, `${id}.request.tmp`);
     const requestPath = path.join(commandDir, `${id}.request.txt`);
+    const responsePath = path.join(commandDir, `${id}.response.txt`);
 
     try {
       fs.mkdirSync(commandDir, { recursive: true });
       fs.writeFileSync(tmpPath, command, 'utf8');
       fs.renameSync(tmpPath, requestPath);
+      return { id, requestPath, responsePath };
+    } catch (error) {
+      try {
+        if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+      } catch (_cleanupError) {}
+      throw error;
+    }
+  }
+
+  async invokeBmfCommand(command, idPrefix, timeoutMs) {
+    const request = this.writeCommandRequest(command, idPrefix);
+    const deadline = Date.now() + Math.max(100, timeoutMs || 5000);
+
+    while (Date.now() <= deadline) {
+      if (fs.existsSync(request.responsePath)) {
+        const text = fs.readFileSync(request.responsePath, 'utf8');
+        try {
+          fs.unlinkSync(request.responsePath);
+        } catch (_cleanupError) {}
+
+        const ok = responseLineValue(text, 'ok').trim().toLowerCase();
+        if (ok === 'false') {
+          throw new Error(responseLineValue(text, 'detail') || 'BMF command failed');
+        }
+        return {
+          ...request,
+          text,
+        };
+      }
+      await sleep(Math.min(100, Math.max(1, deadline - Date.now())));
+    }
+
+    throw new Error(`timed out waiting for BMF command response: ${command}`);
+  }
+
+  queueEvent(eventName, payload) {
+    const command = [
+      'bmf.minigames.events.emit',
+      `event=${encodeURIComponent(eventName)}`,
+      `payload=${encodeURIComponent(JSON.stringify(payload || {}))}`,
+    ].join(' ');
+
+    try {
+      this.writeCommandRequest(command, `minigame_${eventName}`);
       this.counters.queued += 1;
       this.counters.byEvent[eventName] = (this.counters.byEvent[eventName] || 0) + 1;
       this.counters.lastEvent = {
@@ -1020,9 +1288,6 @@ module.exports = class BmfMinigameEvents {
       this.writeStatusFile({ lastQueuedEvent: eventName });
       return true;
     } catch (error) {
-      try {
-        if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
-      } catch (_cleanupError) {}
       this.counters.failed += 1;
       this.counters.lastError = error.message || String(error);
       console.warn(`[bmf-minigame-events] failed to queue ${eventName}: ${this.counters.lastError}`);

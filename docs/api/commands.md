@@ -105,12 +105,23 @@ console-style output.
   lists known minigame player contexts.
 - `bmf.minigames.data.teams [team=<id-or-name>] [minigame=<name>]`: lists
   known minigame teams.
+- `bmf.minigames.data.leaderboard [player=<id-or-name>] [minigame=<name>]`:
+  lists known event-fed leaderboard rows with derived rank/score and raw
+  leaderboard JSON values.
 - `bmf.minigames.data.player player=<id-or-name>`: returns one player's known
   minigame membership, team, leaderboard, and minigame context.
+- `bmf.minigames.data.playerstate player=<id-or-name>`: resolves whether one
+  known player is currently in a minigame. `minigame_key` is current
+  membership; `activity_minigame_key` can reflect historical leaderboard
+  context after the player leaves.
 - `bmf.minigames.data.membership player=<id-or-name>`: returns one player's
   current known minigame membership or `MINIGAME_MEMBERSHIP_NOT_FOUND`.
 - `bmf.minigames.data.clear confirm=CLEAR_MINIGAME_DATA`: clears the in-memory
   minigame data cache for validation and troubleshooting.
+- `bmf.minigames.objects.snapshot [limit=<n>]`: fail-closed live
+  `BP_Ruleset_C`/`BP_Team_C` object probe. It returns
+  `UNSAFE_MINIGAME_OBJECT_SNAPSHOT_DISABLED` unless the explicit unsafe object
+  snapshot opt-in is enabled.
 - `bmf.world.saveas name=<world>`: saves the current running world as a named
   `.brdb`.
 - `bmf.prefabs.loadbrz source=<file.brz> name=<staged-world> x=<x> y=<y>

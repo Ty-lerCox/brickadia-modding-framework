@@ -139,7 +139,10 @@
     "minigames.data.status-l2",
     "minigames.data.snapshot-team-adapter.experimental",
     "minigames.data.query-api-l2",
+    "minigames.data.player-state-l2",
+    "minigames.data.leaderboard-l2",
     "minigames.events.omegga-adapter.experimental",
+    "minigames.objects.snapshot.failclosed-l2-negative",
     "world.loadAdditive.experimental",
     "world.saveAs.experimental"
   ],

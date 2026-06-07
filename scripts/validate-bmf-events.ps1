@@ -80,7 +80,7 @@ function Assert-SafeRuntimeMutation {
     [System.StringComparison]::OrdinalIgnoreCase
   )
 
-  if (!$AllowSharedRuntimeMutation -and $isSharedOmeggaRuntime) {
+  if ($isSharedOmeggaRuntime) {
     $conflicts = @(
       Get-CimInstance Win32_Process |
         Where-Object {
@@ -95,6 +95,13 @@ function Assert-SafeRuntimeMutation {
             if ($_.CommandLine -match '-port=\\?"?([0-9]+)') { $Matches[1] } else { "pid:$($_.ProcessId)" }
           }
       )
+      if ($AllowSharedRuntimeMutation) {
+        throw (
+          "Refusing to run shared-runtime validation while another Brickadia server is active " +
+          "(ports/processes: $($ports -join ', ')). BMF runtime command files are shared across " +
+          "those processes, so the live server can consume validation requests. Stop the live server first."
+        )
+      }
       throw (
         "Refusing to replace the shared Omegga BMF runtime while another Brickadia server is active " +
         "(ports/processes: $($ports -join ', ')). Stop the live server first or pass -AllowSharedRuntimeMutation."
@@ -467,6 +474,14 @@ return {
       'teams_json='
     )
 
+    Invoke-BmfConsoleCommand 'bmf.minigames.data.leaderboard minigame=CityRPG index=0' 'bmf-minigame-data-leaderboard' @(
+      'BMF bmf.minigames.data.leaderboard OK',
+      'leaderboards=1',
+      'returned=1',
+      'leaderboard_1=11111111-1111-4111-8111-111111111111|name=EventKiller|score=0|values=3|minigame=name:CityRPG#0',
+      'leaderboards_json='
+    )
+
     Invoke-BmfConsoleCommand 'bmf.minigames.data.player player=EventKiller' 'bmf-minigame-data-player' @(
       'BMF bmf.minigames.data.player OK',
       'player_key=11111111-1111-4111-8111-111111111111',
@@ -474,6 +489,18 @@ return {
       'minigame_key=name:CityRPG#0',
       'leaderboard_values=3',
       'player_json='
+    )
+
+    Invoke-BmfConsoleCommand 'bmf.minigames.data.playerstate player=EventKiller' 'bmf-minigame-data-playerstate' @(
+      'BMF bmf.minigames.data.playerstate OK',
+      'player_key=11111111-1111-4111-8111-111111111111',
+      'player_name=EventKiller',
+      'in_minigame=true',
+      'minigame_key=name:CityRPG#0',
+      'activity_minigame_key=name:CityRPG#0',
+      'has_leaderboard=true',
+      'reason=membership',
+      'player_state_json='
     )
 
     Invoke-BmfConsoleCommand 'bmf.minigames.data.membership player=EventKiller' 'bmf-minigame-data-membership' @(
@@ -506,6 +533,17 @@ return {
       'membership_json='
     )
 
+    Invoke-BmfConsoleCommand 'bmf.minigames.data.playerstate player=EventKiller' 'bmf-minigame-data-playerstate-after-leave' @(
+      'BMF bmf.minigames.data.playerstate OK',
+      'player_key=11111111-1111-4111-8111-111111111111',
+      'in_minigame=false',
+      'minigame_key=',
+      'activity_minigame_key=name:CityRPG#0',
+      'has_leaderboard=true',
+      'reason=known-player-no-membership',
+      'player_state_json='
+    )
+
     Invoke-BmfConsoleCommand 'bmf.minigames.events.synthetic-flow source=validator-flow' 'bmf-minigame-events-synthetic-flow' @(
       'BMF bmf.minigames.events.synthetic-flow OK',
       'code=OK',
@@ -525,10 +563,10 @@ return {
       'after_delete_team=false',
       'after_delete_round=false',
       'after_delete_leaderboard=false',
-      'flow_minigames=0',
+      'flow_minigames=1',
       'flow_memberships=0',
       'flow_teams=0',
-      'flow_leaderboards=0',
+      'flow_leaderboards=1',
       'flow_rounds=0',
       'event_1=minigames.created',
       'event_8=minigames.deleted'

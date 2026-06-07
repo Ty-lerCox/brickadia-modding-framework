@@ -23,6 +23,16 @@
       "default": false,
       "type": "boolean"
     },
+    "seedCacheFromBmfData": {
+      "description": "Seed the adapter's join/leave caches from BMF.minigames.data.snapshot at startup and during safe manual syncs.",
+      "default": true,
+      "type": "boolean"
+    },
+    "seedCacheTimeoutMs": {
+      "description": "Timeout while waiting for BMF.minigames.data.snapshot command-worker responses used for cache seeding.",
+      "default": 5000,
+      "type": "number"
+    },
     "emitRoundEvents": {
       "description": "Emit roundchange and roundend events from BP_Ruleset_C snapshots when allowUnsafeConsoleSnapshots is enabled.",
       "default": false,

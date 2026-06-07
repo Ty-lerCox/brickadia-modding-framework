@@ -311,6 +311,36 @@ try {
       'persistent=true',
       'definition_json='
     )
+    Invoke-BmfConsoleCommand 'bmf.minigames.definitions.reconcile name=CityRPG index=0' 'bmf-minigames-definitions-reconcile-missing' @(
+      'BMF bmf.minigames.definitions.reconcile OK',
+      'code=OK',
+      'definitions=1',
+      'checked=1',
+      'present=0',
+      'missing=1',
+      'team_mismatches=0',
+      'data_minigames=0',
+      'definition_1=name:CityRPG#0|status=missing|observed=|expected_teams=2|observed_teams=0'
+    )
+    $snapshotPayload = [System.Uri]::EscapeDataString('{"source":"validator","minigames":[{"name":"CityRPG","index":0,"teams":[{"name":"Police","members":[]},{"name":"Criminal","members":[]}]}]}')
+    Invoke-BmfConsoleCommand "bmf.minigames.events.emit event=snapshot payload=$snapshotPayload" 'bmf-minigames-events-emit-snapshot' @(
+      'BMF bmf.minigames.events.emit OK',
+      'event=minigames.snapshot',
+      'legacy_event=snapshot',
+      'code=OK'
+    )
+    Invoke-BmfConsoleCommand 'bmf.minigames.definitions.reconcile name=CityRPG index=0' 'bmf-minigames-definitions-reconcile-present' @(
+      'BMF bmf.minigames.definitions.reconcile OK',
+      'code=OK',
+      'definitions=1',
+      'checked=1',
+      'present=1',
+      'missing=0',
+      'team_mismatches=0',
+      'data_minigames=1',
+      'data_teams=2',
+      'definition_1=name:CityRPG#0|status=present|observed=name:CityRPG#0|expected_teams=2|observed_teams=2'
+    )
     Invoke-BmfConsoleCommand 'bmf.minigames.definitions.delete name=CityRPG index=0' 'bmf-minigames-definitions-delete-confirm-required' @(
       'BMF bmf.minigames.definitions.delete CONFIRMATION_REQUIRED',
       'code=CONFIRMATION_REQUIRED',
@@ -323,6 +353,12 @@ try {
       'key=name:CityRPG#0',
       'deleted=true',
       'definition_json='
+    )
+    Invoke-BmfConsoleCommand 'bmf.minigames.data.clear confirm=CLEAR_MINIGAME_DATA' 'bmf-minigames-data-clear' @(
+      'BMF bmf.minigames.data.clear OK',
+      'code=OK',
+      'source=manual-clear',
+      'confirm_required=CLEAR_MINIGAME_DATA'
     )
     Invoke-BmfConsoleCommand 'bmf.minigames.definitions.status' 'bmf-minigames-definitions-status-after' @(
       'BMF bmf.minigames.definitions.status OK',
@@ -395,6 +431,8 @@ if ($validationStarted -and (Test-Path -LiteralPath $runtimeLogPath)) {
     'registered console command bmf.minigames.definitions.list',
     'registered console command bmf.minigames.definitions.get',
     'registered console command bmf.minigames.definitions.delete',
+    'registered console command bmf.minigames.definitions.reconcile',
+    'registered console command bmf.minigames.events.emit',
     'registered console command bmf.minigames.events.canary',
     'registered console command bmf.minigames.events.recent',
     'registered console command bmf.minigames.data.list',
@@ -410,7 +448,10 @@ if ($validationStarted -and (Test-Path -LiteralPath $runtimeLogPath)) {
     'registered console command bmf.minigames.objects.snapshot',
     'BMF bmf.minigames.loadpreset UNSAFE_MINIGAME_COMMAND_DISABLED',
     'BMF bmf.minigames.definitions.set OK',
+    'BMF bmf.minigames.definitions.reconcile OK',
+    'BMF bmf.minigames.events.emit OK',
     'BMF bmf.minigames.definitions.delete CONFIRMATION_REQUIRED',
+    'BMF bmf.minigames.data.clear OK',
     'BMF bmf.minigames.objects.snapshot UNSAFE_MINIGAME_OBJECT_SNAPSHOT_DISABLED',
     'BMF bmf.minigames.reset INVALID_MINIGAME_INDEX'
   )) {

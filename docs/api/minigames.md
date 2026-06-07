@@ -116,6 +116,7 @@ BMF.minigames.define({
 local definitions = BMF.minigames.definitions()
 local cityDefinition = BMF.minigames.definition({ name = "CityRPG", index = 0 })
 local status = BMF.minigames.definitionStatus()
+local reconcile = BMF.minigames.reconcileDefinitions({ name = "CityRPG", index = 0 })
 ```
 
 Server-console command routes:
@@ -126,6 +127,7 @@ Omegga.Bridge.BMF bmf.minigames.definitions.set name=CityRPG index=0 teams=Polic
 Omegga.Bridge.BMF bmf.minigames.definitions.list
 Omegga.Bridge.BMF bmf.minigames.definitions.get name=CityRPG index=0
 Omegga.Bridge.BMF bmf.minigames.definitions.delete name=CityRPG index=0 confirm=DELETE_MINIGAME_DEFINITION
+Omegga.Bridge.BMF bmf.minigames.definitions.reconcile name=CityRPG index=0
 ```
 
 Definitions persist at `ue4ss/main/Mods/BMF/runtime/minigames/definitions.json`
@@ -133,6 +135,14 @@ and expose `liveEnforcement="definition-only"` until a validated producer maps
 that desired state into live minigame behavior. Supported fields currently
 include `name`, `index`, `ruleset`, `owner`, `mode`, `teams`, `persistent`,
 `ownerOnly`, `includedBrickMode`, `includedBricks`, and `maxPlayers`.
+
+`BMF.minigames.reconcileDefinitions(query)` compares those desired records with
+the current BMF-owned observed minigame data snapshot. A definition is `present`
+when an observed minigame matches by key, ruleset, or name/index and all desired
+team labels are present. It is `missing` when no observed minigame matches, and
+`team-mismatch` when the minigame exists but one or more desired teams are not
+in the observed team snapshot. Reconciliation is read-only and does not call
+Brickadia `Server.Minigames.*` commands.
 
 ## Events
 

@@ -92,6 +92,9 @@ console-style output.
   one desired minigame definition.
 - `bmf.minigames.definitions.delete key=<key>|name=<name> [index=<n>]
   confirm=DELETE_MINIGAME_DEFINITION`: deletes one desired definition.
+- `bmf.minigames.definitions.reconcile [name=<name>] [index=<n>]`: compares
+  desired definitions with the BMF-owned observed minigame data snapshot and
+  reports `present`, `missing`, and team mismatch counts.
 - `bmf.minigames.events.emit event=<name> ...`: emits one namespaced
   `minigames.<name>` event into the BMF event bus and event-fed data cache.
 - `bmf.minigames.events.status`: prints event relay counters and last-event

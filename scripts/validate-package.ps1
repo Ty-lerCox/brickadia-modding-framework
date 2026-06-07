@@ -264,6 +264,11 @@ if (Test-Path -LiteralPath $mainLua) {
       $errors.Add("main.lua does not contain expected API marker: $needle")
     }
   }
+  foreach ($needle in @('BMF.minigames.reconcileDefinitions', 'bmf.minigames.definitions.reconcile')) {
+    if ($source -notmatch [regex]::Escape($needle)) {
+      $errors.Add("main.lua does not contain expected minigame reconcile marker: $needle")
+    }
+  }
   foreach ($needle in @('BMF.players.sync', 'BMF.players.summary', 'BMF.players.whisperSummary', 'bmf.players.sync', 'bmf.players.summary', 'PLAYER_CACHE_PATH')) {
     if ($source -notmatch [regex]::Escape($needle)) {
       $errors.Add("main.lua does not contain expected player-cache marker: $needle")

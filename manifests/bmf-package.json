@@ -135,6 +135,7 @@
     "minigames.lifecycle.experimental",
     "minigames.lifecycle.command-l2-negative",
     "minigames.definitions.command-l2",
+    "minigames.definitions.reconcile-l2",
     "minigames.events.event-log-l2",
     "minigames.events.subscription-l2",
     "minigames.data.status-l2",

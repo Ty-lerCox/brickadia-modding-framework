@@ -201,9 +201,18 @@ cache by default. Pass `persist=true` only when intentionally leaving the
 synthetic records in the current process.
 
 Every emitted event is also appended to `runtime/events.jsonl` through
-`BMF.events.emit`. CityRPG can tail that JSONL stream and map
-`minigames.kill` back to its existing `kill` listener without enabling the
-legacy `omegga-minigameevents` polling plugin.
+`BMF.events.emit`. When the BMF socket bridge is active, the same event record
+is also sent to Omegga plugin clients over loopback TCP. CityRPG should consume
+the socket stream first and map `minigames.kill`, `minigames.joinminigame`, and
+other namespaced records back to its existing handlers without enabling the
+legacy `omegga-minigameevents` polling plugin. The JSONL stream remains the
+fallback and audit trail.
+
+The socket path is important for gameplay feel. Live validation on June 7,
+2026 proved a CityRPG `joinminigame` event followed by
+`bmf.minigames.live.assign-team` returned over the socket with
+`bmf_command_transport=socket` and about 51ms command response time. The older
+file-polling path could make team assignment feel delayed by several seconds.
 
 The supported Omegga producer is packaged at
 `integrations/omegga/bmf-minigame-events/`. Its safe default is log-events-only:

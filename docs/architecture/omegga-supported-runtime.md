@@ -26,11 +26,47 @@ contract until BMF validates a newer fork or upstream release.
 | Server supervisor | Starts and monitors the Brickadia dedicated server. |
 | UE4SS compatibility setup | Installs the pinned UE4SS payload, Brickadia config, signatures, and bridge mod. |
 | Command bridge | Routes `Omegga.Bridge.BMF ...` into the BMF command worker for canaries and admin commands. |
+| BMF socket broker | Provides an authenticated loopback TCP broker for low-latency BMF command responses and event delivery between UE4SS and Omegga plugins. |
 | Console execution helpers | Provides the proven CL13530 console manager and Kismet fallback paths used by world/save APIs. |
 | Live call-by-name helper | Enables the validated `ClientPushChatMessage` fanout to live `PlayerController` objects. |
 | Player sync adapter | Feeds safe player identity records into `BMF.players` without direct crash-prone `PlayerState` reads. |
 | Minigame data/event adapter | Feeds safe Omegga-observed minigame log events into `BMF.minigames.emitEvent` and `BMF.minigames.data()`; snapshot, team, and leaderboard polling stay unsafe opt-ins until replaced by a proven BMF producer. |
 | Log context | Gives the supervisor and canaries access to Brickadia and UE4SS logs. |
+
+## Low-Latency Socket Bridge
+
+The supported Omegga fork now starts a local BMF socket broker during UE4SS
+server launches. The broker binds to loopback, generates a per-run token, and
+passes connection details through `OMEGGA_BMF_SOCKET_*` environment variables.
+BMF also writes the same non-public connection metadata to
+`Mods/BMF/runtime/socket.json` so plugin processes that start after Omegga can
+discover the live broker without inheriting the original launch environment.
+
+The bridge has two authenticated client roles:
+
+- `bmf-native`: the optional `BMFSocket` UE4SS C++ mod loaded inside the
+  Brickadia server process. It never calls Lua from its worker thread; it only
+  moves newline-delimited JSON messages between UE4SS Lua and the broker.
+- `cityrpg` or `plugin`: Omegga plugin clients that subscribe to BMF event
+  records and send BMF command requests.
+
+When the socket bridge is available, BMF writes every framework event to
+`runtime/events.jsonl` and also sends an event envelope over the broker.
+Commands from plugins use the socket first and fall back to the existing
+file-backed `runtime/commands` worker when the socket is unavailable. This
+keeps older validation and repair workflows working while making latency
+sensitive gameplay paths independent of multi-second file polling.
+
+Live validation on June 7, 2026 proved the CityRPG minigame team-assignment
+path using the socket bridge: a `joinminigame` event reached CityRPG and the
+follow-up `bmf.minigames.live.assign-team` command returned over the socket in
+about 51ms. The previous workflow could feel like roughly five seconds because
+events and responses were gated by polling intervals and plugin retry loops.
+
+Use `bmf.socket.status` to inspect the active transport. Useful fields include
+`started`, `host`, `port`, `poll_interval_ms`, `sent_events`,
+`received_commands`, `sent_responses`, `last_error`, and the native
+`BMFSocketStatus()` snapshot.
 
 ## What Omegga Should Fill
 
@@ -72,6 +108,10 @@ surfaces until BMF replaces them with equivalent names:
 - `OmeggaExecuteCachedConsoleExec`
 - `OmeggaCallFunctionByNameWithArguments`
 - `RegisterConsoleCommandGlobalHandler`
+- `BMFSocketStart`
+- `BMFSocketSend`
+- `BMFSocketReceive`
+- `BMFSocketStatus`
 
 ## Packaging Rule
 

@@ -11,6 +11,13 @@ operation, UE4SS setup, command transport, live helper calls, and validation:
 <https://github.com/Ty-lerCox/bmf-omegga-fork>. Stock upstream Omegga is not
 the supported Windows runtime for BMF.
 
+The current Omegga-supported runtime includes an optional `BMFSocket` native
+UE4SS transport and authenticated loopback broker. Plugins can receive BMF
+events and command responses over sockets, with `runtime/events.jsonl` and the
+file-backed command worker retained as fallback. Live CityRPG validation reduced
+minigame team assignment from a multi-second polling path to about 51ms command
+response time.
+
 ## What BMF Provides
 
 - A UE4SS-loadable Lua framework package.

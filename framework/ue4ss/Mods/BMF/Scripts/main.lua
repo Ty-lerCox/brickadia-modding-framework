@@ -18,6 +18,7 @@ local TARGET_PLATFORM = "windows-dedicated-server"
 local BUILD_DETECTION_MODE = "declared-target-only"
 local UNSUPPORTED_BUILD_POLICY = "report-only"
 local COMMAND_EMPTY_READ_RETRY_LIMIT = 5
+local SOCKET_DEFAULT_POLL_MS = 25
 
 local state = {
   started_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
@@ -60,7 +61,24 @@ local state = {
   commands = {},
   console_command_callbacks = {},
   command_worker_started = false,
+  socket_worker_started = false,
   command_empty_reads = {},
+  socket = {
+    enabled = false,
+    available = false,
+    started = false,
+    host = "",
+    port = 0,
+    token = "",
+    poll_interval_ms = SOCKET_DEFAULT_POLL_MS,
+    sent_events = 0,
+    sent_responses = 0,
+    received_commands = 0,
+    received_messages = 0,
+    last_error = "",
+    last_status = "",
+    last_started_at = "",
+  },
   player_cache = nil,
   player_cache_error = "",
   server_ready = false,
@@ -537,7 +555,11 @@ local function write_log_event(timestamp, level, message, context)
   if type(context.data) == "table" then
     event.data = context.data
   end
-  return append_file(EVENT_LOG_PATH, json_encode(event) .. "\n")
+  local encoded = json_encode(event)
+  if BMF_socket_send_event_record then
+    BMF_socket_send_event_record(event, encoded)
+  end
+  return append_file(EVENT_LOG_PATH, encoded .. "\n")
 end
 
 local function log(level, message, data)
@@ -949,6 +971,101 @@ local function table_count(values)
   return count
 end
 
+function BMF_socket_env(name)
+  if type(os.getenv) ~= "function" then
+    return ""
+  end
+  return trim_string(os.getenv(name) or "")
+end
+
+function BMF_socket_enabled_from_env()
+  local explicit = BMF_socket_env("OMEGGA_BMF_SOCKET_ENABLED")
+  if explicit == "0" or explicit:lower() == "false" then
+    return false
+  end
+  return explicit == "1" or explicit:lower() == "true" or BMF_socket_env("OMEGGA_BMF_SOCKET_PORT") ~= ""
+end
+
+function BMF_socket_native_available()
+  return type(BMFSocketStart) == "function"
+    and type(BMFSocketSend) == "function"
+    and type(BMFSocketReceive) == "function"
+end
+
+function BMF_socket_configure_from_env()
+  state.socket.enabled = BMF_socket_enabled_from_env()
+  state.socket.available = BMF_socket_native_available()
+  state.socket.host = BMF_socket_env("OMEGGA_BMF_SOCKET_HOST")
+  if state.socket.host == "" then
+    state.socket.host = "127.0.0.1"
+  end
+  state.socket.port = tonumber(BMF_socket_env("OMEGGA_BMF_SOCKET_PORT")) or 0
+  state.socket.token = BMF_socket_env("OMEGGA_BMF_SOCKET_TOKEN")
+  state.socket.poll_interval_ms = math.max(5, tonumber(BMF_socket_env("OMEGGA_BMF_SOCKET_POLL_MS")) or SOCKET_DEFAULT_POLL_MS)
+  write_file(RUNTIME_DIR .. "/socket.json", json_encode({
+    enabled = state.socket.enabled,
+    available = state.socket.available,
+    host = state.socket.host,
+    port = state.socket.port,
+    token = state.socket.token,
+    pollIntervalMs = state.socket.poll_interval_ms,
+    updatedAt = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+  }))
+end
+
+function BMF_socket_send_json(record)
+  if not state.socket.started or type(BMFSocketSend) ~= "function" then
+    return false
+  end
+  local ok, sent_or_error = pcall(BMFSocketSend, json_encode(record or {}))
+  if ok and sent_or_error ~= false then
+    return true
+  end
+  state.socket.last_error = tostring(sent_or_error or "BMFSocketSend failed")
+  return false
+end
+
+function BMF_socket_send_event_record(event, encoded)
+  if not state.socket.started then
+    return false
+  end
+  local sent = BMF_socket_send_json({
+    type = "event",
+    source = "bmf",
+    ts = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    record = event,
+    record_json = encoded,
+  })
+  if sent then
+    state.socket.sent_events = state.socket.sent_events + 1
+  end
+  return sent
+end
+
+function BMF_socket_status_snapshot()
+  local native_status = ""
+  if type(BMFSocketStatus) == "function" then
+    local ok, value = pcall(BMFSocketStatus)
+    native_status = ok and tostring(value or "") or ("status error: " .. tostring(value))
+  end
+  return {
+    enabled = state.socket.enabled,
+    available = state.socket.available,
+    started = state.socket.started,
+    host = state.socket.host,
+    port = state.socket.port,
+    pollIntervalMs = state.socket.poll_interval_ms,
+    sentEvents = state.socket.sent_events,
+    sentResponses = state.socket.sent_responses,
+    receivedCommands = state.socket.received_commands,
+    receivedMessages = state.socket.received_messages,
+    lastError = state.socket.last_error,
+    lastStatus = state.socket.last_status,
+    lastStartedAt = state.socket.last_started_at,
+    nativeStatus = native_status,
+  }
+end
+
 local function permission_state_to_bool(value)
   if type(value) == "boolean" then
     return value
@@ -1145,6 +1262,8 @@ API_REGISTRY = {
   { name = "BMF.minigames.playerState", namespace = "minigames", kind = "function", stability = "experimental", risk = "low", validation = "L0 Static + L2 Headless; L3 Live Player for gameplay producers", requiresPlayer = false, capability = "", summary = "Resolve whether one known player is currently in a minigame without confusing historical leaderboard context for membership." },
   { name = "BMF.minigames.recentEvents", namespace = "minigames", kind = "function", stability = "experimental", risk = "low", validation = "L0 Static + L2 Headless; L3 Live Player for gameplay producers", requiresPlayer = false, capability = "", summary = "List recent accepted minigame events with optional event/minigame/player filters." },
   { name = "BMF.minigames.clearData", namespace = "minigames", kind = "function", stability = "experimental", risk = "low", validation = "L2 Headless validation reset only", requiresPlayer = false, capability = "", summary = "Explicitly clear BMF-owned minigame cache data for validation and troubleshooting." },
+  { name = "BMF.minigames.livePlayerSnapshot", namespace = "minigames", kind = "function", stability = "experimental", risk = "medium", validation = "L3 Live Server read-only PlayerArray diagnostics", requiresPlayer = false, capability = "ue4ss-player-state-read", summary = "Read live PlayerState team/minigame candidate fields without console GetAll." },
+  { name = "BMF.minigames.assignTeam", namespace = "minigames", kind = "function", stability = "experimental", risk = "high", validation = "L3 Live Server CallFunctionByNameWithArguments; native ProcessEvent fallback", requiresPlayer = true, capability = "ue4ss-minigame-team-native", summary = "Assign a live player to a minigame team through the native minigame team API." },
   { name = "BMF.minigames.objectSnapshot", namespace = "minigames", kind = "function", stability = "experimental", risk = "high", validation = "L3 Live Server fail-closed; unsafe opt-in required due UE4SS crash risk", requiresPlayer = false, capability = "ue4ss-object-read", summary = "BP_Ruleset_C and BP_Team_C object snapshot disabled by default due dedicated-server crash risk." },
   { name = "BMF.world.loadAdditive", namespace = "world", kind = "function", stability = "experimental", risk = "high", validation = "L2 Headless; L3 Live Player for visual behavior", requiresPlayer = false, capability = "world.loadAdditive", summary = "Load staged world additively through proven console path." },
   { name = "BMF.world.saveAs", namespace = "world", kind = "function", stability = "experimental", risk = "medium", validation = "L2 Headless", requiresPlayer = false, capability = "world.saveAs", summary = "Save current world for offline BRDB parsing." },
@@ -2271,7 +2390,9 @@ local function command_output(ar, line)
   if ar and ar.Log then
     ar:Log(text)
   end
-  log("command", text)
+  if not (ar and (ar.NoEventLog == true or ar.suppressEventLog == true)) then
+    log("command", text)
+  end
 end
 
 local function command_args_to_text(params)
@@ -2943,6 +3064,27 @@ local function register_builtin_commands()
     end
     listed.data.lines = lines
     return listed
+  end)
+
+  BMF.commands.register("bmf.socket.status", "Show BMF socket transport status.", function()
+    local status = BMF_socket_status_snapshot()
+    return result(true, "OK", "BMF socket status", {
+      socket = status,
+      lines = {
+        "enabled=" .. tostring(status.enabled),
+        "available=" .. tostring(status.available),
+        "started=" .. tostring(status.started),
+        "host=" .. tostring(status.host),
+        "port=" .. tostring(status.port),
+        "poll_interval_ms=" .. tostring(status.pollIntervalMs),
+        "sent_events=" .. tostring(status.sentEvents),
+        "sent_responses=" .. tostring(status.sentResponses),
+        "received_commands=" .. tostring(status.receivedCommands),
+        "received_messages=" .. tostring(status.receivedMessages),
+        "last_error=" .. tostring(status.lastError),
+        "native_status=" .. tostring(status.nativeStatus),
+      },
+    })
   end)
 
   BMF.commands.register("bmf.tools.applicator.status", "Show live applicator hook status.", function(args)
@@ -4005,6 +4147,8 @@ local function register_builtin_commands()
     local options = parse_command_options(args)
     local snapshot = BMF.minigames.objectSnapshot({
       limit = option_number(options, "limit", 64),
+      includeProperties = option_boolean(options, "includeproperties", false),
+      targeted = option_boolean(options, "targeted", false),
     })
     local data = snapshot.data or {}
     data.lines = data.lines or {
@@ -4015,6 +4159,75 @@ local function register_builtin_commands()
     snapshot.data = data
     return snapshot
   end)
+
+  BMF.commands.register("bmf.minigames.live.team-state", "Read a live player's referenced minigame team and ruleset objects.", function(args)
+    local options = parse_command_options(args)
+    local positional = type(options._positional) == "table" and options._positional or {}
+    local player_query = options.player or options.query or options.name or positional[1] or ""
+    local snapshot = BMF.minigames.liveTeamState({
+      player = player_query,
+      includeMissing = option_boolean(options, "includemissing", false),
+    })
+    local data = snapshot.data or {}
+    data.lines = data.lines or {
+      "source=bmf.liveTeamState",
+      "teams=0",
+      "rulesets=0",
+    }
+    snapshot.data = data
+    return snapshot
+  end)
+
+  BMF.commands.register("bmf.minigames.live.players", "Read live PlayerState team/minigame candidate fields without console GetAll.", function(args)
+    local options = parse_command_options(args)
+    local positional = type(options._positional) == "table" and options._positional or {}
+    local player_query = options.player or options.query or options.name or positional[1] or ""
+    local snapshot = BMF.minigames.livePlayerSnapshot({
+      player = player_query,
+      limit = option_number(options, "limit", 16),
+      arrayLimit = option_number(options, "arraylimit", 6),
+      includeMissing = option_boolean(options, "includemissing", false),
+      reflect = option_boolean(options, "reflect", false),
+      reflectValues = option_boolean(options, "reflectvalues", false),
+      reflectLimit = option_number(options, "reflectlimit", 32),
+      functions = option_boolean(options, "functions", false),
+      functionLimit = option_number(options, "functionlimit", 32),
+      fallbackFindAll = option_boolean(options, "fallbackfindall", true),
+      verbose = option_boolean(options, "verbose", false),
+    })
+    local data = snapshot.data or {}
+    data.lines = data.lines or {
+      "source=bmf.livePlayerSnapshot",
+      "players=0",
+      "returned=0",
+    }
+    snapshot.data = data
+    return snapshot
+  end)
+
+  local function minigame_assign_team_command(args)
+    local options = parse_command_options(args)
+    local positional = type(options._positional) == "table" and options._positional or {}
+    local player_query = options.player or options.query or options.name or positional[1] or ""
+    local team_index = options.teamindex or options.team or options.index or positional[2] or ""
+    local assigned = BMF.minigames.assignTeam(player_query, team_index, {
+      dryRun = option_boolean(options, "dryrun", false),
+      method = options.method or options.assignmethod or options.nativemethod,
+      flag1 = option_boolean(options, "flag1", true),
+      flag2 = option_boolean(options, "flag2", true),
+    })
+    local data = assigned.data or {}
+    data.lines = data.lines or {
+      "code=" .. tostring(assigned.code or ""),
+      "player=" .. tostring(player_query or ""),
+      "team_index=" .. tostring(team_index or ""),
+    }
+    assigned.data = data
+    return assigned
+  end
+
+  BMF.commands.register("bmf.minigames.live.assign-team", "Assign a live player to a minigame team through the native minigame team API.", minigame_assign_team_command)
+  BMF.commands.register("bmf.minigames.assign-team", "Assign a live player to a minigame team through the native minigame team API.", minigame_assign_team_command)
 
   BMF.commands.register("bmf.minigames.events.emit", "Emit a BMF minigame event for relay validation.", function(args)
     local options = parse_command_options(args)
@@ -7544,29 +7757,1477 @@ local function minigame_find_objects(class_name, limit)
   return objects
 end
 
+MINIGAME_LIVE_PLAYER_PROPERTIES = {
+  "UserName",
+  "PlayerNamePrivate",
+  "PlayerName",
+  "DisplayName",
+  "Owner",
+  "PawnPrivate",
+  "Pawn",
+  "CurrentRuleset",
+  "CurrentMinigame",
+  "CurrentTeam",
+  "CurrentRulesetTeam",
+  "Ruleset",
+  "RulesetTeam",
+  "Minigame",
+  "MinigameIndex",
+  "Team",
+  "TeamIndex",
+  "TeamState",
+  "ActiveTeam",
+  "SelectedTeam",
+  "MemberRuleset",
+  "PlayerRuleset",
+  "BRRuleset",
+  "BRTeam",
+}
+
+MINIGAME_LIVE_OWNER_PROPERTIES = {
+  "PlayerState",
+  "AcknowledgedPawn",
+  "Pawn",
+  "CurrentRuleset",
+  "CurrentMinigame",
+  "CurrentTeam",
+  "CurrentRulesetTeam",
+  "Ruleset",
+  "RulesetTeam",
+  "Minigame",
+  "Team",
+  "TeamIndex",
+}
+
+MINIGAME_LIVE_REFLECTION_HINTS = {
+  "team",
+  "ruleset",
+  "minigame",
+  "member",
+  "owner",
+  "player",
+  "state",
+}
+
+MINIGAME_LIVE_FUNCTION_HINTS = {
+  "team",
+  "ruleset",
+  "minigame",
+}
+
+function minigame_terminal_name(value)
+  local text = trim_string(value or "")
+  if text == "" then
+    return ""
+  end
+  text = text:gsub("^Function%s+", ""):gsub("^Class%s+", ""):gsub("^ObjectProperty%s+", "")
+  return text:match("([^%.:/%s]+)$") or text
+end
+
+function minigame_get_fname_string(object)
+  if object == nil or type(object.GetFName) ~= "function" then
+    return ""
+  end
+  local ok, fname = pcall(function()
+    return object:GetFName()
+  end)
+  if not ok or fname == nil then
+    return ""
+  end
+  if type(fname.ToString) == "function" then
+    local string_ok, rendered = pcall(function()
+      return fname:ToString()
+    end)
+    if string_ok and rendered ~= nil and tostring(rendered) ~= "" then
+      return tostring(rendered)
+    end
+  end
+  return ""
+end
+
+function minigame_property_name(property)
+  if property == nil then
+    return "unknown"
+  end
+  if type(property.GetName) == "function" then
+    local ok, name = pcall(function()
+      return property:GetName()
+    end)
+    if ok and name ~= nil and tostring(name) ~= "" then
+      return tostring(name)
+    end
+  end
+  local fname = minigame_get_fname_string(property)
+  if fname ~= "" and not fname:match("^FName#%d+$") then
+    return fname
+  end
+  local full_name = minigame_object_full_name(property)
+  local terminal = minigame_terminal_name(full_name)
+  if terminal ~= "" then
+    return terminal
+  end
+  return "unknown"
+end
+
+function minigame_object_class_name(object)
+  if not minigame_object_valid(object) or type(object.GetClass) ~= "function" then
+    return ""
+  end
+  local ok, class_object = pcall(function()
+    return object:GetClass()
+  end)
+  if not ok or not minigame_object_valid(class_object) then
+    return ""
+  end
+  local fname = minigame_get_fname_string(class_object)
+  if fname ~= "" and not fname:match("^FName#%d+$") then
+    return fname
+  end
+  return minigame_terminal_name(minigame_object_full_name(class_object))
+end
+
+function minigame_property_type(property)
+  return minigame_object_class_name(property)
+end
+
+function minigame_try_property_detail(object, name)
+  if not minigame_object_valid(object) then
+    return nil, "", "invalid object"
+  end
+  local last_error = ""
+  if type(object.GetPropertyValue) == "function" then
+    local ok, value = pcall(function()
+      return object:GetPropertyValue(name)
+    end)
+    if ok and value ~= nil then
+      return value, "GetPropertyValue", ""
+    end
+    if not ok then
+      last_error = tostring(value)
+    end
+  end
+  local ok, value = pcall(function()
+    return object[name]
+  end)
+  if ok and value ~= nil then
+    return value, "index", ""
+  end
+  if not ok and last_error == "" then
+    last_error = tostring(value)
+  end
+  return nil, "", last_error
+end
+
+function minigame_value_debug_record(value, array_limit)
+  local value_type = type(value)
+  local record = {
+    type = value_type,
+    text = minigame_compact_value(minigame_value_to_string(value)),
+  }
+
+  if value_type == "userdata" then
+    record.fullName = minigame_object_full_name(value)
+    record.objectName = minigame_object_name(value)
+    record.address = minigame_object_address(value)
+    record.className = minigame_object_class_name(value)
+
+    local count_ok, count = pcall(function()
+      return #value
+    end)
+    if count_ok and type(count) == "number" and count > 0 then
+      record.arrayCount = count
+      record.items = {}
+      local max_items = math.min(count, tonumber(array_limit) or 6)
+      for index = 1, max_items do
+        local item_ok, item = pcall(function()
+          return value[index]
+        end)
+        if item_ok then
+          record.items[#record.items + 1] = minigame_value_debug_record(item, 0)
+        end
+      end
+    end
+  end
+
+  return record
+end
+
+function minigame_live_collect_property_values(object, property_names, array_limit, include_missing)
+  local values = {}
+  local missing = {}
+  for _, property_name in ipairs(property_names or {}) do
+    local value, source, err = minigame_try_property_detail(object, property_name)
+    if value ~= nil then
+      local record = minigame_value_debug_record(value, array_limit)
+      record.source = source
+      values[property_name] = record
+    elseif include_missing == true then
+      missing[property_name] = tostring(err or "")
+    end
+  end
+  return values, missing
+end
+
+function minigame_live_name_matches_hints(name, hints)
+  local lower = tostring(name or ""):lower()
+  if lower == "" then
+    return false
+  end
+  for _, hint in ipairs(hints or {}) do
+    if lower:find(tostring(hint):lower(), 1, true) then
+      return true
+    end
+  end
+  return false
+end
+
+function minigame_live_reflected_properties(object, hints, limit, include_values, array_limit)
+  local items = {}
+  if not minigame_object_valid(object) or type(object.GetClass) ~= "function" then
+    return items
+  end
+  local ok, class_object = pcall(function()
+    return object:GetClass()
+  end)
+  if not ok or not minigame_object_valid(class_object) or type(class_object.ForEachProperty) ~= "function" then
+    return items
+  end
+
+  local seen = {}
+  local max_count = tonumber(limit) or 32
+  local iter_ok, iter_err = pcall(function()
+    class_object:ForEachProperty(function(property)
+      local property_name = minigame_property_name(property)
+      if seen[property_name] or not minigame_live_name_matches_hints(property_name, hints) then
+        return false
+      end
+      seen[property_name] = true
+      local item = {
+        name = property_name,
+        type = minigame_property_type(property),
+      }
+      if include_values == true then
+        local value, source, err = minigame_try_property_detail(object, property_name)
+        if value ~= nil then
+          item.value = minigame_value_debug_record(value, array_limit)
+          item.value.source = source
+        elseif err ~= "" then
+          item.error = tostring(err)
+        end
+      end
+      items[#items + 1] = item
+      return #items >= max_count
+    end)
+  end)
+  if not iter_ok then
+    items[#items + 1] = {
+      name = "<reflection-error>",
+      error = tostring(iter_err),
+    }
+  end
+  return items
+end
+
+function minigame_live_reflected_functions(object, hints, limit)
+  local items = {}
+  if not minigame_object_valid(object) or type(object.GetClass) ~= "function" then
+    return items
+  end
+  local ok, class_object = pcall(function()
+    return object:GetClass()
+  end)
+  if not ok or not minigame_object_valid(class_object) or type(class_object.ForEachFunction) ~= "function" then
+    return items
+  end
+
+  local seen = {}
+  local max_count = tonumber(limit) or 32
+  local iter_ok, iter_err = pcall(function()
+    class_object:ForEachFunction(function(func)
+      local function_name = minigame_property_name(func)
+      if seen[function_name] or not minigame_live_name_matches_hints(function_name, hints) then
+        return false
+      end
+      seen[function_name] = true
+      items[#items + 1] = {
+        name = function_name,
+        fullName = minigame_object_full_name(func),
+      }
+      return #items >= max_count
+    end)
+  end)
+  if not iter_ok then
+    items[#items + 1] = {
+      name = "<reflection-error>",
+      error = tostring(iter_err),
+    }
+  end
+  return items
+end
+
+function minigame_live_uehelpers()
+  local ok, helpers = pcall(require, "UEHelpers")
+  if ok and type(helpers) == "table" then
+    return helpers, ""
+  end
+  if type(UEHelpers) == "table" then
+    return UEHelpers, ""
+  end
+  return nil, tostring(helpers or "UEHelpers unavailable")
+end
+
+function minigame_live_game_state()
+  local helpers, helper_error = minigame_live_uehelpers()
+  if type(helpers) ~= "table" or type(helpers.GetGameStateBase) ~= "function" then
+    return nil, helper_error ~= "" and helper_error or "UEHelpers.GetGameStateBase unavailable"
+  end
+  local ok, game_state = pcall(helpers.GetGameStateBase)
+  if ok and minigame_object_valid(game_state) then
+    return game_state, ""
+  end
+  return nil, ok and "game state unavailable" or tostring(game_state)
+end
+
+function minigame_live_player_states(options)
+  local opts = type(options) == "table" and options or {}
+  local game_state, game_state_error = minigame_live_game_state()
+  local records = {}
+  local seen = {}
+  local source = "game_state.PlayerArray"
+  local player_array_count = 0
+  local errors = {}
+
+  local function add_player_state(player_state, index, item_source)
+    if not minigame_object_valid(player_state) then
+      return
+    end
+    local key = minigame_object_address(player_state)
+    if key == "" then
+      key = minigame_object_full_name(player_state)
+    end
+    if key == "" or seen[key] then
+      return
+    end
+    seen[key] = true
+    records[#records + 1] = {
+      object = player_state,
+      index = index or #records + 1,
+      source = item_source or source,
+    }
+  end
+
+  if minigame_object_valid(game_state) then
+    local ok_array, player_array = pcall(function()
+      return game_state.PlayerArray
+    end)
+    if ok_array and player_array ~= nil then
+      local ok_count, count = pcall(function()
+        return #player_array
+      end)
+      if ok_count and type(count) == "number" then
+        player_array_count = count
+        for index = 1, count do
+          local ok_player, player_state = pcall(function()
+            return player_array[index]
+          end)
+          if ok_player then
+            add_player_state(player_state, index, source)
+          else
+            errors[#errors + 1] = "PlayerArray[" .. tostring(index) .. "]=" .. tostring(player_state)
+          end
+        end
+      else
+        errors[#errors + 1] = "PlayerArray count failed: " .. tostring(count)
+      end
+    else
+      errors[#errors + 1] = "PlayerArray unavailable: " .. tostring(player_array)
+    end
+  end
+
+  if #records == 0 and opts.fallbackFindAll == true and type(FindAllOf) == "function" then
+    source = "FindAllOf"
+    for _, class_name in ipairs({ "BP_PlayerState_C", "BRPlayerState", "PlayerState" }) do
+      local ok, found = pcall(FindAllOf, class_name)
+      if ok and type(found) == "table" then
+        for index, player_state in ipairs(found) do
+          add_player_state(player_state, index, "FindAllOf(" .. class_name .. ")")
+        end
+      elseif not ok then
+        errors[#errors + 1] = "FindAllOf(" .. class_name .. ")=" .. tostring(found)
+      end
+    end
+  end
+
+  if #records == 0 and game_state_error ~= "" then
+    errors[#errors + 1] = game_state_error
+  end
+
+  return records, {
+    gameState = game_state,
+    gameStateFullName = minigame_object_full_name(game_state),
+    playerArrayCount = player_array_count,
+    source = source,
+    errors = errors,
+  }
+end
+
+function minigame_live_first_property_text(values, names)
+  for _, name in ipairs(names or {}) do
+    local value = values[name]
+    if type(value) == "table" and tostring(value.text or "") ~= "" then
+      return tostring(value.text or ""), name
+    end
+  end
+  return "", ""
+end
+
+function minigame_live_collect_candidates(values, pattern)
+  local candidates = {}
+  local lower_pattern = tostring(pattern or ""):lower()
+  for name, value in pairs(values or {}) do
+    local lower = tostring(name or ""):lower()
+    if lower:find(lower_pattern, 1, true) and type(value) == "table" and tostring(value.text or "") ~= "" then
+      candidates[#candidates + 1] = {
+        property = name,
+        text = tostring(value.text or ""),
+        fullName = tostring(value.fullName or ""),
+        objectName = tostring(value.objectName or ""),
+        className = tostring(value.className or ""),
+      }
+    end
+  end
+  table.sort(candidates, function(a, b)
+    return tostring(a.property or "") < tostring(b.property or "")
+  end)
+  return candidates
+end
+
+function minigame_live_player_matches(record, query)
+  local needle = trim_string(query or ""):lower()
+  if needle == "" then
+    return true
+  end
+  local haystacks = {
+    record.playerName,
+    record.playerStateFullName,
+    record.playerStateObjectName,
+    record.playerStateAddress,
+    record.ownerFullName,
+    record.ownerObjectName,
+  }
+  for _, candidate in ipairs(record.teamCandidates or {}) do
+    haystacks[#haystacks + 1] = candidate.text
+    haystacks[#haystacks + 1] = candidate.fullName
+    haystacks[#haystacks + 1] = candidate.objectName
+  end
+  for _, candidate in ipairs(record.rulesetCandidates or {}) do
+    haystacks[#haystacks + 1] = candidate.text
+    haystacks[#haystacks + 1] = candidate.fullName
+    haystacks[#haystacks + 1] = candidate.objectName
+  end
+  for _, value in ipairs(haystacks) do
+    local text = trim_string(value or ""):lower()
+    if text ~= "" and (text == needle or text:find(needle, 1, true) ~= nil) then
+      return true
+    end
+  end
+  return false
+end
+
+MINIGAME_LIVE_TEAM_STATE_TEAM_PROPERTIES = {
+  "TeamName",
+  "TeamId",
+  "TeamID",
+  "Id",
+  "TeamIndex",
+  "Name",
+  "DisplayName",
+  "bIsUnaffiliatedTeam",
+  "bGameTypeTeam",
+}
+
+MINIGAME_LIVE_TEAM_STATE_RULESET_PROPERTIES = {
+  "RulesetName",
+  "Name",
+  "DisplayName",
+  "bInSession",
+  "bRoundInProgress",
+}
+
+MINIGAME_LIVE_TEAM_STATE_PLAYER_TEAM_PROPERTIES = {
+  "Team",
+  "CurrentTeam",
+  "CurrentRulesetTeam",
+  "RulesetTeam",
+  "ActiveTeam",
+  "SelectedTeam",
+  "BRTeam",
+  "TeamState",
+}
+
+MINIGAME_LIVE_TEAM_STATE_PLAYER_RULESET_PROPERTIES = {
+  "Ruleset",
+  "CurrentRuleset",
+  "BRRuleset",
+  "MemberRuleset",
+  "PlayerRuleset",
+}
+
+MINIGAME_LIVE_TEAM_STATE_OWNER_TEAM_PROPERTIES = {
+  "Team",
+  "CurrentTeam",
+  "CurrentRulesetTeam",
+  "RulesetTeam",
+}
+
+MINIGAME_LIVE_TEAM_STATE_OWNER_RULESET_PROPERTIES = {
+  "Ruleset",
+  "CurrentRuleset",
+}
+
+function minigame_live_add_referenced_object(list, seen, object, source)
+  if not minigame_object_valid(object) then
+    return
+  end
+  local key = minigame_object_address(object)
+  if key == "" then
+    key = minigame_object_full_name(object)
+  end
+  if key == "" then
+    key = tostring(object or "")
+  end
+  if key == "" or seen[key] then
+    return
+  end
+  seen[key] = true
+  list[#list + 1] = {
+    object = object,
+    source = tostring(source or ""),
+  }
+end
+
+function minigame_live_collect_references_from_properties(targets, seen, source_prefix, object, property_names)
+  if not minigame_object_valid(object) then
+    return
+  end
+  for _, property_name in ipairs(property_names or {}) do
+    local value = minigame_try_property(object, property_name)
+    minigame_live_add_referenced_object(targets, seen, value, tostring(source_prefix or "") .. "." .. tostring(property_name))
+  end
+end
+
+function minigame_live_describe_referenced_object(reference, property_names, include_missing)
+  local object = reference and reference.object or nil
+  local values, missing = minigame_live_collect_property_values(object, property_names, 0, include_missing == true)
+  return {
+    source = tostring(reference and reference.source or ""),
+    address = minigame_object_address(object),
+    fullName = minigame_object_full_name(object),
+    objectName = minigame_object_name(object),
+    className = minigame_object_class_name(object),
+    properties = values,
+    missing = missing,
+  }
+end
+
+function minigame_live_scalar_property_text(record, property_name)
+  local value = record and record.properties and record.properties[property_name] or nil
+  if type(value) == "table" then
+    return tostring(value.text or "")
+  end
+  return ""
+end
+
+BMF.minigames.liveTeamState = function(options)
+  local opts = type(options) == "table" and options or {}
+  local query = trim_string(opts.player or opts.query or opts.name or "")
+  local include_missing = opts.includeMissing == true
+  local player_item, candidates, meta = minigame_live_resolve_player_state_for_assignment(query)
+  if not player_item or not minigame_object_valid(player_item.object) then
+    return result(false, "PLAYER_NOT_FOUND", "live player state was not found", {
+      player = query,
+      candidates = candidates or {},
+      sourceMode = meta and meta.source or "",
+      lines = {
+        "code=PLAYER_NOT_FOUND",
+        "source=bmf.liveTeamState",
+        "player=" .. query,
+        "source_mode=" .. tostring(meta and meta.source or ""),
+        "candidates=" .. table.concat(candidates or {}, "|"),
+      },
+    })
+  end
+
+  local player_state = player_item.object
+  local owner = minigame_try_property(player_state, "Owner")
+  local team_refs = {}
+  local team_seen = {}
+  local ruleset_refs = {}
+  local ruleset_seen = {}
+
+  minigame_live_collect_references_from_properties(
+    team_refs,
+    team_seen,
+    "player",
+    player_state,
+    MINIGAME_LIVE_TEAM_STATE_PLAYER_TEAM_PROPERTIES
+  )
+  minigame_live_collect_references_from_properties(
+    ruleset_refs,
+    ruleset_seen,
+    "player",
+    player_state,
+    MINIGAME_LIVE_TEAM_STATE_PLAYER_RULESET_PROPERTIES
+  )
+
+  if minigame_object_valid(owner) then
+    minigame_live_collect_references_from_properties(
+      team_refs,
+      team_seen,
+      "owner",
+      owner,
+      MINIGAME_LIVE_TEAM_STATE_OWNER_TEAM_PROPERTIES
+    )
+    minigame_live_collect_references_from_properties(
+      ruleset_refs,
+      ruleset_seen,
+      "owner",
+      owner,
+      MINIGAME_LIVE_TEAM_STATE_OWNER_RULESET_PROPERTIES
+    )
+  end
+
+  local teams = {}
+  for _, reference in ipairs(team_refs) do
+    teams[#teams + 1] = minigame_live_describe_referenced_object(
+      reference,
+      MINIGAME_LIVE_TEAM_STATE_TEAM_PROPERTIES,
+      include_missing
+    )
+  end
+
+  local rulesets = {}
+  for _, reference in ipairs(ruleset_refs) do
+    rulesets[#rulesets + 1] = minigame_live_describe_referenced_object(
+      reference,
+      MINIGAME_LIVE_TEAM_STATE_RULESET_PROPERTIES,
+      include_missing
+    )
+  end
+
+  local lines = {
+    "code=OK",
+    "source=bmf.liveTeamState",
+    "player=" .. query,
+    "source_mode=" .. tostring(meta and meta.source or ""),
+    "player_state=" .. minigame_object_address(player_state),
+    "controller=" .. minigame_object_address(owner),
+    "teams=" .. tostring(#teams),
+    "rulesets=" .. tostring(#rulesets),
+  }
+
+  for index, team in ipairs(teams) do
+    lines[#lines + 1] = "team_" .. tostring(index) .. "_source=" .. tostring(team.source or "")
+    lines[#lines + 1] = "team_" .. tostring(index) .. "_address=" .. tostring(team.address or "")
+    lines[#lines + 1] = "team_" .. tostring(index) .. "_class=" .. tostring(team.className or "")
+    lines[#lines + 1] = "team_" .. tostring(index) .. "_object=" .. tostring(team.objectName or "")
+    lines[#lines + 1] = "team_" .. tostring(index) .. "_full=" .. tostring(team.fullName or "")
+    for _, property_name in ipairs(MINIGAME_LIVE_TEAM_STATE_TEAM_PROPERTIES) do
+      local text = minigame_live_scalar_property_text(team, property_name)
+      if text ~= "" then
+        lines[#lines + 1] = "team_" .. tostring(index) .. "_property_" .. tostring(property_name) .. "=" .. text
+      end
+    end
+  end
+
+  for index, ruleset in ipairs(rulesets) do
+    lines[#lines + 1] = "ruleset_" .. tostring(index) .. "_source=" .. tostring(ruleset.source or "")
+    lines[#lines + 1] = "ruleset_" .. tostring(index) .. "_address=" .. tostring(ruleset.address or "")
+    lines[#lines + 1] = "ruleset_" .. tostring(index) .. "_class=" .. tostring(ruleset.className or "")
+    lines[#lines + 1] = "ruleset_" .. tostring(index) .. "_object=" .. tostring(ruleset.objectName or "")
+    lines[#lines + 1] = "ruleset_" .. tostring(index) .. "_full=" .. tostring(ruleset.fullName or "")
+    for _, property_name in ipairs(MINIGAME_LIVE_TEAM_STATE_RULESET_PROPERTIES) do
+      local text = minigame_live_scalar_property_text(ruleset, property_name)
+      if text ~= "" then
+        lines[#lines + 1] = "ruleset_" .. tostring(index) .. "_property_" .. tostring(property_name) .. "=" .. text
+      end
+    end
+  end
+
+  local data = {
+    source = "bmf.liveTeamState",
+    checkedAt = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    query = query,
+    sourceMode = tostring(meta and meta.source or ""),
+    playerState = minigame_object_address(player_state),
+    controller = minigame_object_address(owner),
+    teams = teams,
+    rulesets = rulesets,
+    counts = {
+      teams = #teams,
+      rulesets = #rulesets,
+    },
+    lines = lines,
+  }
+  lines[#lines + 1] = "snapshot_json=" .. json_encode(data)
+
+  return result(true, "OK", "Live minigame team state collected", data)
+end
+
+function minigame_int32_le_hex(value)
+  local number = tonumber(value) or 0
+  if number < 0 then
+    number = 0
+  end
+  number = math.floor(number)
+  local b1 = number % 256
+  local b2 = math.floor(number / 256) % 256
+  local b3 = math.floor(number / 65536) % 256
+  local b4 = math.floor(number / 16777216) % 256
+  return string.format("%02X%02X%02X%02X", b1, b2, b3, b4)
+end
+
+function minigame_bool_byte_hex(value)
+  return value == true and "01" or "00"
+end
+
+function minigame_uint64_le_hex(value)
+  local number = tonumber(value) or 0
+  if number < 0 then
+    number = 0
+  end
+  number = math.floor(number)
+  local bytes = {}
+  for index = 1, 8 do
+    bytes[index] = string.format("%02X", number % 256)
+    number = math.floor(number / 256)
+  end
+  return table.concat(bytes, "")
+end
+
+function minigame_object_pointer_le_hex(object)
+  local address = minigame_object_address(object)
+  local number = nil
+  if address ~= "" then
+    number = tonumber(address)
+    if number == nil and address:match("^0x") then
+      number = tonumber(address:sub(3), 16)
+    elseif number == nil then
+      number = tonumber(address, 16)
+    end
+  end
+  if number == nil or number <= 0 then
+    return nil, "object address is unavailable"
+  end
+  return minigame_uint64_le_hex(number), ""
+end
+
+function minigame_live_resolve_ruleset_for_assignment(player_state)
+  for _, property_name in ipairs({
+    "Ruleset",
+    "CurrentRuleset",
+    "BRRuleset",
+    "MemberRuleset",
+    "PlayerRuleset",
+  }) do
+    local value = minigame_try_property(player_state, property_name)
+    if minigame_object_valid(value) then
+      return value, property_name
+    end
+  end
+  return nil, ""
+end
+
+function minigame_native_assign_team_param_hex(team, method, first_flag, second_flag, player_state)
+  if method == "serverrpc" then
+    return minigame_int32_le_hex(team), 4, "ServerJoinRulesetTeam", ""
+  end
+
+  if method == "handleplayerswitchteam" then
+    local pointer_hex, pointer_error = minigame_object_pointer_le_hex(player_state)
+    if not pointer_hex then
+      return nil, 0, "HandlePlayerSwitchTeam", pointer_error
+    end
+    return
+      pointer_hex
+        .. minigame_int32_le_hex(team)
+        .. minigame_bool_byte_hex(first_flag)
+        .. minigame_bool_byte_hex(second_flag),
+      14,
+      "HandlePlayerSwitchTeam",
+      ""
+  end
+
+  return
+    minigame_int32_le_hex(team)
+      .. minigame_bool_byte_hex(first_flag)
+      .. minigame_bool_byte_hex(second_flag),
+    6,
+    "JoinRulesetTeam",
+    ""
+end
+
+function minigame_live_player_assignment_candidates(player_state)
+  local candidates = {}
+
+  local function add(value)
+    local text = trim_string(value)
+    if text ~= "" then
+      candidates[#candidates + 1] = text
+    end
+  end
+
+  add(minigame_object_address(player_state))
+  add(minigame_object_name(player_state))
+  add(minigame_object_full_name(player_state))
+
+  for _, property_name in ipairs({
+    "UserName",
+    "PlayerNamePrivate",
+    "PlayerName",
+    "DisplayName",
+  }) do
+    add(minigame_value_to_string(minigame_try_property(player_state, property_name)))
+  end
+
+  local owner = minigame_try_property(player_state, "Owner")
+  if minigame_object_valid(owner) then
+    add(minigame_object_address(owner))
+    add(minigame_object_name(owner))
+    add(minigame_object_full_name(owner))
+  end
+
+  return candidates
+end
+
+function minigame_cached_single_player_match(query)
+  local needle = trim_string(query or ""):lower()
+  if needle == "" then
+    return false, "player_cache.empty_query"
+  end
+  if type(read_file) ~= "function" or type(json_decode) ~= "function" then
+    return false, "player_cache.unavailable"
+  end
+
+  local raw = read_file(PLAYER_CACHE_PATH)
+  if not raw or trim_string(raw) == "" then
+    return false, "player_cache.missing"
+  end
+
+  local ok, decoded = pcall(json_decode, raw)
+  if not ok or type(decoded) ~= "table" then
+    return false, "player_cache.invalid"
+  end
+
+  local players = decoded.players
+  if type(players) ~= "table" then
+    players = decoded
+  end
+  if type(players) ~= "table" or #players ~= 1 then
+    return false, "player_cache.count=" .. tostring(type(players) == "table" and #players or 0)
+  end
+
+  local player = players[1]
+  if type(player) ~= "table" then
+    return false, "player_cache.invalid_player"
+  end
+
+  for _, field in ipairs({
+    "uuid",
+    "id",
+    "playerId",
+    "playerID",
+    "username",
+    "userName",
+    "displayName",
+    "playerName",
+    "originalName",
+    "name",
+  }) do
+    local text = trim_string(tostring(player[field] or "")):lower()
+    if text ~= "" and (text == needle or text:find(needle, 1, true) ~= nil) then
+      return true, "player_cache.single." .. field
+    end
+  end
+
+  return false, "player_cache.single_no_match"
+end
+
+function minigame_live_first_player_state_for_assignment(source_hint)
+  local errors = {}
+  local source = "FindFirstOf"
+  if type(FindFirstOf) ~= "function" then
+    return nil, {
+      source = source,
+      fastPath = tostring(source_hint or ""),
+      errors = { "FindFirstOf unavailable" },
+    }
+  end
+
+  for _, class_name in ipairs({ "BP_PlayerState_C", "BRPlayerState", "PlayerState" }) do
+    local ok, player_state = pcall(FindFirstOf, class_name)
+    if ok and minigame_object_valid(player_state) then
+      local item_source = "FindFirstOf(" .. class_name .. ")"
+      return {
+        object = player_state,
+        index = 1,
+        source = item_source,
+      }, {
+        source = item_source,
+        fastPath = tostring(source_hint or ""),
+        errors = errors,
+      }
+    elseif not ok then
+      errors[#errors + 1] = "FindFirstOf(" .. class_name .. ")=" .. tostring(player_state)
+    end
+  end
+
+  return nil, {
+    source = source,
+    fastPath = tostring(source_hint or ""),
+    errors = errors,
+  }
+end
+
+function minigame_live_resolve_player_state_for_assignment(query)
+  local needle = trim_string(query or ""):lower()
+  local single_cached_player, cache_source = minigame_cached_single_player_match(query)
+  if single_cached_player then
+    local first_item, first_meta = minigame_live_first_player_state_for_assignment(cache_source)
+    if first_item and minigame_object_valid(first_item.object) then
+      return first_item, { cache_source }, first_meta
+    end
+  end
+
+  local player_states, meta = minigame_live_player_states({
+    fallbackFindAll = true,
+  })
+  local first = nil
+  local first_candidates = {}
+
+  for _, item in ipairs(player_states or {}) do
+    local player_state = item.object
+    local candidates = minigame_live_player_assignment_candidates(player_state)
+    if not first then
+      first = item
+      first_candidates = candidates
+    end
+
+    if needle == "" then
+      return item, candidates, meta
+    end
+
+    for _, candidate in ipairs(candidates) do
+      local lower = trim_string(candidate):lower()
+      if lower ~= "" and (lower == needle or lower:find(needle, 1, true) ~= nil) then
+        return item, candidates, meta
+      end
+    end
+  end
+
+  return nil, first_candidates, meta
+end
+
+BMF.minigames.assignTeam = function(player_query, team_index, options)
+  local assign_started_clock = os.clock()
+  local opts = type(options) == "table" and options or {}
+  local query = trim_string(player_query or "")
+  if query == "" then
+    return result(false, "INVALID_PLAYER", "player query is required", {
+      lines = {
+        "code=INVALID_PLAYER",
+        "player=",
+      },
+    })
+  end
+
+  local team, team_error = normalize_integer(team_index, "team index")
+  if team == nil then
+    return result(false, "INVALID_TEAM_INDEX", team_error, {
+      player = query,
+      teamIndex = tostring(team_index or ""),
+      lines = {
+        "code=INVALID_TEAM_INDEX",
+        "player=" .. query,
+        "team_index=" .. tostring(team_index or ""),
+        "error=" .. tostring(team_error or ""),
+      },
+    })
+  end
+
+  local resolve_started_clock = os.clock()
+  local player_item, candidates, meta = minigame_live_resolve_player_state_for_assignment(query)
+  local resolve_duration_ms = math.floor(((os.clock() - resolve_started_clock) * 1000) + 0.5)
+  if not player_item or not minigame_object_valid(player_item.object) then
+    return result(false, "PLAYER_NOT_FOUND", "live player state was not found", {
+      player = query,
+      teamIndex = team,
+      candidates = candidates or {},
+      sourceMode = meta and meta.source or "",
+      lines = {
+        "code=PLAYER_NOT_FOUND",
+        "player=" .. query,
+        "team_index=" .. tostring(team),
+        "source_mode=" .. tostring(meta and meta.source or ""),
+        "assign_resolve_ms=" .. tostring(resolve_duration_ms),
+        "candidates=" .. table.concat(candidates or {}, "|"),
+      },
+    })
+  end
+
+  local player_state = player_item.object
+  local controller = minigame_try_property(player_state, "Owner")
+  local ruleset, ruleset_source = minigame_live_resolve_ruleset_for_assignment(player_state)
+  local requested_method = trim_string(opts.method or opts.assignMethod or opts.nativeMethod or ""):lower()
+  local method = requested_method
+  if method == "" or method == "local" or method == "join" or method == "joinrulesetteam" or method == "join-ruleset-team" then
+    method = "joinrulesetteam"
+  elseif method == "server" or method == "rpc" or method == "server-rpc" or method == "serverjoinrulesetteam" or method == "server-join-ruleset-team" then
+    method = "serverrpc"
+  elseif method == "handle" or method == "switch" or method == "ruleset" or method == "handleplayerswitchteam" or method == "handle-player-switch-team" then
+    method = "handleplayerswitchteam"
+  elseif method == "call" or method == "callbyname" or method == "servercall" or method == "servercallbyname" or method == "server-call-by-name" then
+    method = "servercallbyname"
+  elseif method == "joincall" or method == "joincallbyname" or method == "join-call-by-name" then
+    method = "joincallbyname"
+  else
+    return result(false, "INVALID_ASSIGN_METHOD", "unsupported minigame team assignment method", {
+      player = query,
+      teamIndex = team,
+      method = requested_method,
+      lines = {
+        "code=INVALID_ASSIGN_METHOD",
+        "player=" .. query,
+        "team_index=" .. tostring(team),
+        "method=" .. tostring(requested_method),
+        "supported_methods=joinrulesetteam|serverrpc|handleplayerswitchteam|servercallbyname|joincallbyname",
+      },
+    })
+  end
+
+  local flag1 = opts.flag1
+  if flag1 == nil then
+    flag1 = true
+  end
+  local flag2 = opts.flag2
+  if flag2 == nil then
+    flag2 = true
+  end
+  local call_context = controller
+  local call_context_kind = "controller"
+  if method == "handleplayerswitchteam" then
+    call_context = ruleset
+    call_context_kind = "ruleset"
+  end
+  local is_call_by_name = method == "servercallbyname" or method == "joincallbyname"
+  local call_by_name_command = ""
+  local buffer_hex, param_bytes, function_name, param_error = nil, 0, "", ""
+  if is_call_by_name then
+    function_name = "CallFunctionByNameWithArguments"
+    if method == "joincallbyname" then
+      call_by_name_command = "JoinRulesetTeam "
+        .. tostring(team)
+        .. " "
+        .. tostring(flag1 == true)
+        .. " "
+        .. tostring(flag2 == true)
+    else
+      call_by_name_command = "ServerJoinRulesetTeam " .. tostring(team)
+    end
+    buffer_hex = ""
+  else
+    buffer_hex, param_bytes, function_name, param_error = minigame_native_assign_team_param_hex(team, method, flag1 == true, flag2 == true, player_state)
+  end
+  local dry_run = opts.dryRun == true
+  local lines = {
+    "code=OK",
+    "player=" .. query,
+    "team_index=" .. tostring(team),
+    "method=" .. method,
+    "function=" .. function_name,
+    "param_bytes=" .. tostring(param_bytes),
+    "param_hex=" .. tostring(buffer_hex or ""),
+    "flag1=" .. tostring(flag1 == true),
+    "flag2=" .. tostring(flag2 == true),
+    "dry_run=" .. tostring(dry_run),
+    "source=" .. tostring(player_item.source or ""),
+    "source_mode=" .. tostring(meta and meta.source or ""),
+    "fast_path=" .. tostring(meta and meta.fastPath or ""),
+    "assign_resolve_ms=" .. tostring(resolve_duration_ms),
+    "player_state=" .. minigame_object_address(player_state),
+    "player_state_name=" .. minigame_object_name(player_state),
+    "controller=" .. minigame_object_address(controller),
+    "controller_name=" .. minigame_object_name(controller),
+    "ruleset=" .. minigame_object_address(ruleset),
+    "ruleset_name=" .. minigame_object_name(ruleset),
+    "ruleset_source=" .. tostring(ruleset_source or ""),
+    "context_kind=" .. tostring(call_context_kind),
+    "context=" .. minigame_object_address(call_context),
+    "call_command=" .. tostring(call_by_name_command or ""),
+  }
+
+  if buffer_hex == nil then
+    lines[1] = "code=INVALID_NATIVE_PARAMS"
+    lines[#lines + 1] = "error=" .. tostring(param_error or "")
+    return result(false, "INVALID_NATIVE_PARAMS", tostring(param_error or "native parameter packing failed"), {
+      player = query,
+      teamIndex = team,
+      method = method,
+      lines = lines,
+    })
+  end
+
+  if not minigame_object_valid(call_context) then
+    local code = method == "handleplayerswitchteam" and "RULESET_NOT_FOUND" or "PLAYER_CONTROLLER_NOT_FOUND"
+    lines[1] = "code=" .. code
+    lines[#lines + 1] = "candidates=" .. table.concat(candidates or {}, "|")
+    return result(false, code, method == "handleplayerswitchteam" and "live player ruleset was not found" or "live player controller was not found", {
+      player = query,
+      teamIndex = team,
+      playerState = minigame_object_address(player_state),
+      method = method,
+      lines = lines,
+    })
+  end
+
+  if dry_run then
+    lines[#lines + 1] = "ok=true"
+    lines[#lines + 1] = "result=dry-run"
+    lines[#lines + 1] = "assign_call_ms=0"
+    lines[#lines + 1] = "assign_total_ms=" .. tostring(math.floor(((os.clock() - assign_started_clock) * 1000) + 0.5))
+    return result(true, "OK", "Minigame team assignment dry run completed", {
+      player = query,
+      teamIndex = team,
+      playerState = minigame_object_address(player_state),
+      controller = minigame_object_address(controller),
+      ruleset = minigame_object_address(ruleset),
+      context = minigame_object_address(call_context),
+      contextKind = call_context_kind,
+      method = method,
+      functionName = function_name,
+      paramHex = buffer_hex,
+      paramBytes = param_bytes,
+      flag1 = flag1 == true,
+      flag2 = flag2 == true,
+      dryRun = true,
+      lines = lines,
+    })
+  end
+
+  if is_call_by_name then
+    if type(OmeggaCallFunctionByNameWithArguments) ~= "function" then
+      lines[1] = "code=CALL_BY_NAME_HELPER_UNAVAILABLE"
+      lines[#lines + 1] = "helper_available=false"
+      return result(false, "CALL_BY_NAME_HELPER_UNAVAILABLE", "native CallFunctionByNameWithArguments helper is unavailable", {
+        player = query,
+        teamIndex = team,
+        method = method,
+        lines = lines,
+      })
+    end
+
+    local call_started_clock = os.clock()
+    local ok, call_result, detail = pcall(
+      OmeggaCallFunctionByNameWithArguments,
+      call_context,
+      call_by_name_command,
+      call_context
+    )
+    local call_duration_ms = math.floor(((os.clock() - call_started_clock) * 1000) + 0.5)
+    local assigned = ok and call_result ~= false
+    lines[1] = "code=" .. tostring(assigned and "OK" or "CALL_BY_NAME_FAILED")
+    lines[#lines + 1] = "ok=" .. tostring(ok)
+    lines[#lines + 1] = "result=" .. tostring(call_result)
+    lines[#lines + 1] = "assign_call_ms=" .. tostring(call_duration_ms)
+    lines[#lines + 1] = "assign_total_ms=" .. tostring(math.floor(((os.clock() - assign_started_clock) * 1000) + 0.5))
+    if detail ~= nil then
+      lines[#lines + 1] = "detail=" .. tostring(detail)
+    end
+
+    return result(assigned, assigned and "OK" or "CALL_BY_NAME_FAILED", assigned and "Minigame team assignment invoked" or "Minigame team assignment failed", {
+      player = query,
+      teamIndex = team,
+      playerState = minigame_object_address(player_state),
+      controller = minigame_object_address(controller),
+      ruleset = minigame_object_address(ruleset),
+      context = minigame_object_address(call_context),
+      contextKind = call_context_kind,
+      method = method,
+      functionName = function_name,
+      callCommand = call_by_name_command,
+      flag1 = flag1 == true,
+      flag2 = flag2 == true,
+      callByNameOk = ok,
+      callByNameResult = call_result,
+      callByNameDetail = detail,
+      lines = lines,
+    })
+  end
+
+  if type(OmeggaUnsafeProcessEventWithParamBytes) ~= "function" then
+    lines[1] = "code=PROCESS_EVENT_HELPER_UNAVAILABLE"
+    lines[#lines + 1] = "helper_available=false"
+    return result(false, "PROCESS_EVENT_HELPER_UNAVAILABLE", "native ProcessEvent helper is unavailable", {
+      player = query,
+      teamIndex = team,
+      lines = lines,
+    })
+  end
+
+  local call_started_clock = os.clock()
+  local ok, call_result, detail = pcall(
+    OmeggaUnsafeProcessEventWithParamBytes,
+    call_context,
+    function_name,
+    buffer_hex
+  )
+  local call_duration_ms = math.floor(((os.clock() - call_started_clock) * 1000) + 0.5)
+  local assigned = ok and call_result ~= false
+  lines[1] = "code=" .. tostring(assigned and "OK" or "PROCESS_EVENT_FAILED")
+  lines[#lines + 1] = "ok=" .. tostring(ok)
+  lines[#lines + 1] = "result=" .. tostring(call_result)
+  lines[#lines + 1] = "assign_call_ms=" .. tostring(call_duration_ms)
+  lines[#lines + 1] = "assign_total_ms=" .. tostring(math.floor(((os.clock() - assign_started_clock) * 1000) + 0.5))
+  if detail ~= nil then
+    lines[#lines + 1] = "detail=" .. tostring(detail)
+  end
+
+  return result(assigned, assigned and "OK" or "PROCESS_EVENT_FAILED", assigned and "Minigame team assignment invoked" or "Minigame team assignment failed", {
+    player = query,
+    teamIndex = team,
+    playerState = minigame_object_address(player_state),
+    controller = minigame_object_address(controller),
+    ruleset = minigame_object_address(ruleset),
+    context = minigame_object_address(call_context),
+    contextKind = call_context_kind,
+    method = method,
+    functionName = function_name,
+    paramHex = buffer_hex,
+    paramBytes = param_bytes,
+    flag1 = flag1 == true,
+    flag2 = flag2 == true,
+    processEventOk = ok,
+    processEventResult = call_result,
+    processEventDetail = detail,
+    lines = lines,
+  })
+end
+
+BMF.minigames.livePlayerSnapshot = function(options)
+  local opts = type(options) == "table" and options or {}
+  local query = trim_string(opts.player or opts.query or opts.name or "")
+  local limit = tonumber(opts.limit) or 16
+  local array_limit = tonumber(opts.arrayLimit) or 6
+  local include_missing = opts.includeMissing == true
+  local include_reflection = opts.reflect == true
+  local include_reflection_values = opts.reflectValues == true
+  local include_functions = opts.functions == true
+  local verbose = opts.verbose == true
+  local player_states, meta = minigame_live_player_states({
+    fallbackFindAll = opts.fallbackFindAll ~= false,
+  })
+
+  local players = {}
+  for _, item in ipairs(player_states) do
+    if #players >= limit then
+      break
+    end
+    local player_state = item.object
+    local property_values, missing = minigame_live_collect_property_values(
+      player_state,
+      MINIGAME_LIVE_PLAYER_PROPERTIES,
+      array_limit,
+      include_missing
+    )
+    local player_name = minigame_live_first_property_text(property_values, {
+      "UserName",
+      "PlayerNamePrivate",
+      "PlayerName",
+      "DisplayName",
+    })
+    local owner_value = property_values.Owner
+    local owner = nil
+    if type(owner_value) == "table" and owner_value.type == "userdata" then
+      local raw_owner = minigame_try_property(player_state, "Owner")
+      if minigame_object_valid(raw_owner) then
+        owner = raw_owner
+      end
+    end
+
+    local owner_properties = {}
+    local owner_missing = {}
+    if minigame_object_valid(owner) then
+      owner_properties, owner_missing = minigame_live_collect_property_values(
+        owner,
+        MINIGAME_LIVE_OWNER_PROPERTIES,
+        array_limit,
+        include_missing
+      )
+    end
+
+    local record = {
+      index = item.index,
+      source = item.source,
+      playerName = player_name,
+      playerStateFullName = minigame_object_full_name(player_state),
+      playerStateObjectName = minigame_object_name(player_state),
+      playerStateAddress = minigame_object_address(player_state),
+      playerStateClass = minigame_object_class_name(player_state),
+      ownerFullName = minigame_object_full_name(owner),
+      ownerObjectName = minigame_object_name(owner),
+      ownerAddress = minigame_object_address(owner),
+      ownerClass = minigame_object_class_name(owner),
+      properties = property_values,
+      teamCandidates = minigame_live_collect_candidates(property_values, "team"),
+      rulesetCandidates = minigame_live_collect_candidates(property_values, "ruleset"),
+      minigameCandidates = minigame_live_collect_candidates(property_values, "minigame"),
+    }
+    if include_missing then
+      record.missing = missing
+      record.ownerMissing = owner_missing
+    end
+    if next(owner_properties) ~= nil then
+      record.ownerProperties = owner_properties
+      record.ownerTeamCandidates = minigame_live_collect_candidates(owner_properties, "team")
+      record.ownerRulesetCandidates = minigame_live_collect_candidates(owner_properties, "ruleset")
+      record.ownerMinigameCandidates = minigame_live_collect_candidates(owner_properties, "minigame")
+    end
+    if include_reflection then
+      record.reflectedProperties = minigame_live_reflected_properties(
+        player_state,
+        MINIGAME_LIVE_REFLECTION_HINTS,
+        tonumber(opts.reflectLimit) or 32,
+        include_reflection_values,
+        array_limit
+      )
+      if minigame_object_valid(owner) then
+        record.ownerReflectedProperties = minigame_live_reflected_properties(
+          owner,
+          MINIGAME_LIVE_REFLECTION_HINTS,
+          tonumber(opts.reflectLimit) or 32,
+          include_reflection_values,
+          array_limit
+        )
+      end
+    end
+    if include_functions then
+      record.reflectedFunctions = minigame_live_reflected_functions(
+        player_state,
+        MINIGAME_LIVE_FUNCTION_HINTS,
+        tonumber(opts.functionLimit) or 32
+      )
+      if minigame_object_valid(owner) then
+        record.ownerReflectedFunctions = minigame_live_reflected_functions(
+          owner,
+          MINIGAME_LIVE_FUNCTION_HINTS,
+          tonumber(opts.functionLimit) or 32
+        )
+      end
+    end
+
+    if minigame_live_player_matches(record, query) then
+      players[#players + 1] = record
+    end
+  end
+
+  local lines = {
+    "source=bmf.livePlayerSnapshot",
+    "query=" .. query,
+    "game_state=" .. tostring(meta.gameStateFullName or ""),
+    "source_mode=" .. tostring(meta.source or ""),
+    "player_array_count=" .. tostring(meta.playerArrayCount or 0),
+    "players=" .. tostring(#player_states),
+    "returned=" .. tostring(#players),
+    "reflect=" .. tostring(include_reflection),
+    "reflect_values=" .. tostring(include_reflection_values),
+    "functions=" .. tostring(include_functions),
+  }
+
+  for index, error_text in ipairs(meta.errors or {}) do
+    lines[#lines + 1] = "error_" .. tostring(index) .. "=" .. tostring(error_text)
+  end
+
+  for index, player in ipairs(players) do
+    local team = player.teamCandidates[1] or {}
+    local ruleset = player.rulesetCandidates[1] or player.minigameCandidates[1] or {}
+    lines[#lines + 1] =
+      "player_" .. tostring(index) ..
+      "=" .. tostring(player.playerName or "") ..
+      "|state=" .. tostring(player.playerStateObjectName or "") ..
+      "|team_candidate=" .. tostring(team.property or "") .. ":" .. tostring(team.text or "") ..
+      "|ruleset_candidate=" .. tostring(ruleset.property or "") .. ":" .. tostring(ruleset.text or "") ..
+      "|owner=" .. tostring(player.ownerObjectName or "")
+
+    if verbose then
+      for name, value in pairs(player.properties or {}) do
+        lines[#lines + 1] = "player_" .. tostring(index) .. "_property_" .. tostring(name) .. "=" .. tostring(value.text or "")
+      end
+      for name, value in pairs(player.ownerProperties or {}) do
+        lines[#lines + 1] = "player_" .. tostring(index) .. "_owner_property_" .. tostring(name) .. "=" .. tostring(value.text or "")
+      end
+    end
+  end
+
+  local data = {
+    source = "bmf.livePlayerSnapshot",
+    checkedAt = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    query = query,
+    gameState = tostring(meta.gameStateFullName or ""),
+    playerArrayCount = tonumber(meta.playerArrayCount) or 0,
+    sourceMode = tostring(meta.source or ""),
+    players = players,
+    counts = {
+      observed = #player_states,
+      returned = #players,
+    },
+    options = {
+      fallbackFindAll = opts.fallbackFindAll == true,
+      reflect = include_reflection,
+      reflectValues = include_reflection_values,
+      functions = include_functions,
+      includeMissing = include_missing,
+      verbose = verbose,
+      limit = limit,
+    },
+    errors = meta.errors or {},
+    lines = lines,
+  }
+  lines[#lines + 1] = "snapshot_json=" .. json_encode(data)
+
+  return result(true, "OK", "Live minigame player snapshot collected", data)
+end
+
 BMF.minigames.objectSnapshot = function(options)
+  local opts = type(options) == "table" and options or {}
+  local targeted_read = opts.targeted == true or option_boolean(opts, "targeted", false)
   if state.config.allowUnsafeMinigameObjectSnapshot ~= true then
     return result(false, "UNSAFE_MINIGAME_OBJECT_SNAPSHOT_DISABLED", "Direct UE4SS minigame object snapshots are disabled by default.", {
       allowUnsafeMinigameObjectSnapshot = false,
       lines = {
         "code=UNSAFE_MINIGAME_OBJECT_SNAPSHOT_DISABLED",
         "allowUnsafeMinigameObjectSnapshot=false",
+        "targeted=" .. tostring(targeted_read),
+        "reason=global BP_Ruleset_C/BP_Team_C enumeration can abort the dedicated server",
+        "use=bmf.minigames.live.team-state",
       },
     })
   end
 
-  local opts = type(options) == "table" and options or {}
   local limit = tonumber(opts.limit) or 64
+  local include_properties = opts.includeProperties == true or option_boolean(opts, "includeproperties", false)
   local rulesets = minigame_find_objects("BP_Ruleset_C", limit)
   local teams = minigame_find_objects("BP_Team_C", limit)
   local snapshot = {
     source = "bmf.objectSnapshot",
     checkedAt = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    unsafePropertiesIncluded = include_properties,
     rulesets = {},
     teams = {},
   }
   local lines = {
     "source=bmf.objectSnapshot",
+    "targeted=" .. tostring(targeted_read),
+    "unsafe_properties_included=" .. tostring(include_properties),
     "rulesets=" .. tostring(#rulesets),
     "teams=" .. tostring(#teams),
   }
@@ -7574,31 +9235,61 @@ BMF.minigames.objectSnapshot = function(options)
   for index, object in ipairs(rulesets) do
     local item = {
       fullName = minigame_object_full_name(object),
+      objectName = minigame_object_name(object),
       address = minigame_object_address(object),
-      name = minigame_object_property(object, "RulesetName"),
-      inSession = minigame_object_property(object, "bInSession"),
-      memberStates = minigame_object_property(object, "MemberStates"),
     }
+    if include_properties then
+      item.name = minigame_object_property(object, "RulesetName")
+      item.inSession = minigame_object_property(object, "bInSession")
+      item.memberStates = minigame_object_property(object, "MemberStates")
+      item.customTeams = minigame_object_property(object, "CustomTeams")
+      item.unaffiliatedTeam = minigame_object_property(object, "UnaffiliatedTeam")
+    end
     snapshot.rulesets[#snapshot.rulesets + 1] = item
     lines[#lines + 1] = "ruleset_" .. tostring(index) .. "_full=" .. item.fullName
-    lines[#lines + 1] = "ruleset_" .. tostring(index) .. "_name=" .. item.name
-    lines[#lines + 1] = "ruleset_" .. tostring(index) .. "_in_session=" .. item.inSession
-    lines[#lines + 1] = "ruleset_" .. tostring(index) .. "_members=" .. item.memberStates
+    lines[#lines + 1] = "ruleset_" .. tostring(index) .. "_object=" .. item.objectName
+    if include_properties then
+      lines[#lines + 1] = "ruleset_" .. tostring(index) .. "_name=" .. tostring(item.name or "")
+      lines[#lines + 1] = "ruleset_" .. tostring(index) .. "_in_session=" .. tostring(item.inSession or "")
+      lines[#lines + 1] = "ruleset_" .. tostring(index) .. "_members=" .. tostring(item.memberStates or "")
+      lines[#lines + 1] = "ruleset_" .. tostring(index) .. "_custom_teams=" .. tostring(item.customTeams or "")
+      lines[#lines + 1] = "ruleset_" .. tostring(index) .. "_unaffiliated_team=" .. tostring(item.unaffiliatedTeam or "")
+    end
   end
 
   for index, object in ipairs(teams) do
     local item = {
       fullName = minigame_object_full_name(object),
+      objectName = minigame_object_name(object),
       address = minigame_object_address(object),
-      name = minigame_object_property(object, "TeamName"),
-      color = minigame_object_property(object, "TeamColor"),
-      memberStates = minigame_object_property(object, "MemberStates"),
     }
+    if include_properties then
+      item.name = minigame_object_property(object, "TeamName")
+      item.teamId = minigame_object_property(object, "TeamId")
+      item.teamID = minigame_object_property(object, "TeamID")
+      item.id = minigame_object_property(object, "Id")
+      item.index = minigame_object_property(object, "TeamIndex")
+      item.color = minigame_object_property(object, "TeamColor")
+      item.memberStates = minigame_object_property(object, "MemberStates")
+      item.ruleset = minigame_object_property(object, "Ruleset")
+      item.isUnaffiliated = minigame_object_property(object, "bIsUnaffiliatedTeam")
+      item.isGameTypeTeam = minigame_object_property(object, "bGameTypeTeam")
+    end
     snapshot.teams[#snapshot.teams + 1] = item
     lines[#lines + 1] = "team_" .. tostring(index) .. "_full=" .. item.fullName
-    lines[#lines + 1] = "team_" .. tostring(index) .. "_name=" .. item.name
-    lines[#lines + 1] = "team_" .. tostring(index) .. "_color=" .. item.color
-    lines[#lines + 1] = "team_" .. tostring(index) .. "_members=" .. item.memberStates
+    lines[#lines + 1] = "team_" .. tostring(index) .. "_object=" .. item.objectName
+    if include_properties then
+      lines[#lines + 1] = "team_" .. tostring(index) .. "_name=" .. tostring(item.name or "")
+      lines[#lines + 1] = "team_" .. tostring(index) .. "_team_id=" .. tostring(item.teamId or "")
+      lines[#lines + 1] = "team_" .. tostring(index) .. "_team_ID=" .. tostring(item.teamID or "")
+      lines[#lines + 1] = "team_" .. tostring(index) .. "_id=" .. tostring(item.id or "")
+      lines[#lines + 1] = "team_" .. tostring(index) .. "_index=" .. tostring(item.index or "")
+      lines[#lines + 1] = "team_" .. tostring(index) .. "_color=" .. tostring(item.color or "")
+      lines[#lines + 1] = "team_" .. tostring(index) .. "_members=" .. tostring(item.memberStates or "")
+      lines[#lines + 1] = "team_" .. tostring(index) .. "_ruleset=" .. tostring(item.ruleset or "")
+      lines[#lines + 1] = "team_" .. tostring(index) .. "_unaffiliated=" .. tostring(item.isUnaffiliated or "")
+      lines[#lines + 1] = "team_" .. tostring(index) .. "_gametype=" .. tostring(item.isGameTypeTeam or "")
+    end
   end
 
   lines[#lines + 1] = "snapshot_json=" .. json_encode(snapshot)
@@ -7606,6 +9297,8 @@ BMF.minigames.objectSnapshot = function(options)
   return result(true, "OK", "Minigame object snapshot collected", {
     source = snapshot.source,
     checkedAt = snapshot.checkedAt,
+    targeted = targeted_read,
+    unsafePropertiesIncluded = include_properties,
     rulesets = snapshot.rulesets,
     teams = snapshot.teams,
     counts = {
@@ -10812,6 +12505,58 @@ local function list_command_request_files()
   return files
 end
 
+function BMF_dispatch_bmf_command_text(request_id, command_text, transport)
+  local process_started_clock = os.clock()
+  local process_started_epoch = os.time()
+  local lines = {}
+  local output_device = {
+    suppressEventLog = true,
+    Log = function(_, line)
+      lines[#lines + 1] = tostring(line or "")
+    end,
+  }
+
+  local command_name, args = command_text:match("^(%S+)%s*(.*)$")
+  local ok = false
+  local detail = ""
+  local dispatch_started_clock = os.clock()
+  if not command_name or command_name == "" then
+    detail = "command name is required"
+  else
+    local dispatch_ok, handled_or_error = pcall(BMF.commands.dispatch, command_name, args or "", output_device)
+    ok = dispatch_ok and handled_or_error and true or false
+    if not dispatch_ok then
+      detail = "dispatch crashed: " .. tostring(handled_or_error)
+      lines[#lines + 1] = "BMF " .. tostring(command_name) .. " ERROR " .. detail
+    elseif not handled_or_error then
+      detail = "command was not handled"
+    else
+      detail = "ok"
+    end
+  end
+  local dispatch_duration_ms = math.floor(((os.clock() - dispatch_started_clock) * 1000) + 0.5)
+  local total_duration_ms = math.floor(((os.clock() - process_started_clock) * 1000) + 0.5)
+  local request_created_ms = tonumber(tostring(request_id):match("_(%d%d%d%d%d%d%d%d%d%d%d%d%d)_"))
+  local processed_at_ms = tonumber(process_started_epoch) and (tonumber(process_started_epoch) * 1000) or nil
+  local request_age_ms = request_created_ms and processed_at_ms and (processed_at_ms - request_created_ms) or nil
+
+  local response = {
+    "ok=" .. tostring(ok),
+    "detail=" .. tostring(detail),
+    "command=" .. tostring(command_text),
+    "bmf_command_request_id=" .. tostring(request_id),
+    "bmf_command_transport=" .. tostring(transport or "file"),
+    "bmf_command_processed_at=" .. tostring(os.date("!%Y-%m-%dT%H:%M:%SZ", process_started_epoch)),
+    "bmf_command_request_age_ms=" .. tostring(request_age_ms or ""),
+    "bmf_command_dispatch_ms=" .. tostring(dispatch_duration_ms),
+    "bmf_command_total_ms=" .. tostring(total_duration_ms),
+  }
+  for _, line in ipairs(lines) do
+    response[#response + 1] = tostring(line)
+  end
+  return table.concat(response, "\n") .. "\n", ok, detail
+end
+
 local function process_command_request(file_name)
   local request_id = tostring(file_name or ""):match("^(.*)%.request%.txt$")
   if not request_id or request_id == "" then
@@ -10835,40 +12580,8 @@ local function process_command_request(file_name)
   os.remove(request_path)
   state.command_empty_reads[request_id] = nil
 
-  local lines = {}
-  local output_device = {
-    Log = function(_, line)
-      lines[#lines + 1] = tostring(line or "")
-    end,
-  }
-
-  local command_name, args = command_text:match("^(%S+)%s*(.*)$")
-  local ok = false
-  local detail = ""
-  if not command_name or command_name == "" then
-    detail = "command name is required"
-  else
-    local dispatch_ok, handled_or_error = pcall(BMF.commands.dispatch, command_name, args or "", output_device)
-    ok = dispatch_ok and handled_or_error and true or false
-    if not dispatch_ok then
-      detail = "dispatch crashed: " .. tostring(handled_or_error)
-      lines[#lines + 1] = "BMF " .. tostring(command_name) .. " ERROR " .. detail
-    elseif not handled_or_error then
-      detail = "command was not handled"
-    else
-      detail = "ok"
-    end
-  end
-
-  local response = {
-    "ok=" .. tostring(ok),
-    "detail=" .. tostring(detail),
-    "command=" .. tostring(command_text),
-  }
-  for _, line in ipairs(lines) do
-    response[#response + 1] = tostring(line)
-  end
-  write_file(response_path, table.concat(response, "\n") .. "\n")
+  local response = BMF_dispatch_bmf_command_text(request_id, command_text, "file")
+  write_file(response_path, response)
 end
 
 local poll_command_requests
@@ -10921,6 +12634,144 @@ local function start_command_worker()
   if not schedule_command_worker_poll(250) then
     state.command_worker_started = false
     log("error", "command worker unavailable: no game-thread scheduler available")
+  end
+end
+
+function BMF_process_socket_message(line)
+  local trimmed = trim_string(line)
+  if trimmed == "" then
+    return
+  end
+
+  state.socket.received_messages = state.socket.received_messages + 1
+  local decoded, err = json_decode(trimmed)
+  if type(decoded) ~= "table" then
+    state.socket.last_error = "socket decode failed: " .. tostring(err or "invalid JSON")
+    return
+  end
+
+  local message_type = tostring(decoded.type or "")
+  if message_type == "ping" then
+    BMF_socket_send_json({
+      type = "pong",
+      source = "bmf",
+      ts = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+      id = decoded.id,
+    })
+    return
+  end
+
+  if message_type ~= "command" then
+    return
+  end
+
+  local request_id = trim_string(decoded.id or "")
+  local command_text = trim_string(decoded.command or "")
+  if request_id == "" or command_text == "" then
+    state.socket.last_error = "socket command missing id or command"
+    return
+  end
+
+  state.socket.received_commands = state.socket.received_commands + 1
+  local response, ok, detail = BMF_dispatch_bmf_command_text(request_id, command_text, "socket")
+  local sent = BMF_socket_send_json({
+    type = "response",
+    source = "bmf",
+    ts = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    id = request_id,
+    ok = ok == true,
+    detail = tostring(detail or ""),
+    response = response,
+  })
+  if sent then
+    state.socket.sent_responses = state.socket.sent_responses + 1
+  end
+end
+
+function BMF_schedule_socket_worker_poll(delay_ms)
+  local delay = tonumber(delay_ms) or state.socket.poll_interval_ms or SOCKET_DEFAULT_POLL_MS
+  if type(ExecuteWithDelay) == "function" then
+    ExecuteWithDelay(delay, function()
+      run_on_game_thread(function()
+        if BMF_poll_socket_messages then
+          BMF_poll_socket_messages()
+        end
+      end)
+    end)
+    return true
+  end
+  if type(ExecuteInGameThreadWithDelay) == "function" then
+    ExecuteInGameThreadWithDelay(delay, function()
+      if BMF_poll_socket_messages then
+        BMF_poll_socket_messages()
+      end
+    end)
+    return true
+  end
+  return false
+end
+
+function BMF_poll_socket_messages()
+  if not state.socket.started or type(BMFSocketReceive) ~= "function" then
+    state.socket_worker_started = false
+    return
+  end
+
+  local ok, messages_or_error = pcall(BMFSocketReceive, 64)
+  if ok and type(messages_or_error) == "table" then
+    for _, line in ipairs(messages_or_error) do
+      local processed, err = pcall(BMF_process_socket_message, line)
+      if not processed then
+        state.socket.last_error = "socket message failed: " .. tostring(err)
+      end
+    end
+  elseif not ok then
+    state.socket.last_error = "BMFSocketReceive failed: " .. tostring(messages_or_error)
+  end
+
+  if state.socket_worker_started then
+    if not BMF_schedule_socket_worker_poll(state.socket.poll_interval_ms) then
+      state.socket_worker_started = false
+      log("error", "socket worker stopped: no game-thread scheduler available")
+    end
+  end
+end
+
+function BMF_start_socket_transport()
+  BMF_socket_configure_from_env()
+  if not state.socket.enabled then
+    return
+  end
+  if state.socket.started then
+    return
+  end
+  if not state.socket.available then
+    state.socket.last_error = "BMFSocket native functions are unavailable"
+    log("warn", "socket transport disabled: " .. state.socket.last_error)
+    return
+  end
+  if state.socket.port <= 0 then
+    state.socket.last_error = "OMEGGA_BMF_SOCKET_PORT is required"
+    log("warn", "socket transport disabled: " .. state.socket.last_error)
+    return
+  end
+
+  local ok, started_or_error, status = pcall(BMFSocketStart, state.socket.host, state.socket.port, state.socket.token)
+  if not ok or started_or_error == false then
+    state.socket.last_error = tostring(status or started_or_error or "BMFSocketStart failed")
+    log("error", "socket transport failed: " .. state.socket.last_error)
+    return
+  end
+
+  state.socket.started = true
+  state.socket.last_error = ""
+  state.socket.last_status = tostring(status or "")
+  state.socket.last_started_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+  state.socket_worker_started = true
+  log("info", "socket transport started host=" .. tostring(state.socket.host) .. " port=" .. tostring(state.socket.port) .. " poll_ms=" .. tostring(state.socket.poll_interval_ms))
+  if not BMF_schedule_socket_worker_poll(state.socket.poll_interval_ms) then
+    state.socket_worker_started = false
+    log("error", "socket worker unavailable: no game-thread scheduler available")
   end
 end
 
@@ -11749,6 +13600,7 @@ audit_record("framework.loaded", {
 })
 write_status()
 BMF.loadPlugins()
+BMF_start_socket_transport()
 start_command_worker()
 mark_server_ready({
   version = VERSION,

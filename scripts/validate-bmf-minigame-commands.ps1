@@ -272,6 +272,65 @@ try {
       "command=Server.Minigames.SavePreset 0 `"$presetName`"",
       'allowUnsafeMinigameConsoleCommands=false'
     )
+    Invoke-BmfConsoleCommand 'bmf.minigames.definitions.status' 'bmf-minigames-definitions-status-before' @(
+      'BMF bmf.minigames.definitions.status OK',
+      'code=OK',
+      'definitions=0',
+      'teams=0',
+      'last_error='
+    )
+    Invoke-BmfConsoleCommand 'bmf.minigames.definitions.set name=CityRPG index=0 teams=Police,Criminal persistent=true owneronly=false includedbrickmode=all maxplayers=16 source=validator' 'bmf-minigames-definitions-set' @(
+      'BMF bmf.minigames.definitions.set OK',
+      'code=OK',
+      'key=name:CityRPG#0',
+      'name=CityRPG',
+      'index=0',
+      'teams=2',
+      'persistent=true',
+      'owner_only=false',
+      'included_brick_mode=all',
+      'live_enforcement=definition-only',
+      'updated=false',
+      'definition_json='
+    )
+    Invoke-BmfConsoleCommand 'bmf.minigames.definitions.list' 'bmf-minigames-definitions-list' @(
+      'BMF bmf.minigames.definitions.list OK',
+      'code=OK',
+      'definitions=1',
+      'returned=1',
+      'definition_1=name:CityRPG#0|name=CityRPG|index=0|teams=2|persistent=true',
+      'definitions_json='
+    )
+    Invoke-BmfConsoleCommand 'bmf.minigames.definitions.get name=CityRPG index=0' 'bmf-minigames-definitions-get' @(
+      'BMF bmf.minigames.definitions.get OK',
+      'code=OK',
+      'key=name:CityRPG#0',
+      'name=CityRPG',
+      'index=0',
+      'teams=2',
+      'persistent=true',
+      'definition_json='
+    )
+    Invoke-BmfConsoleCommand 'bmf.minigames.definitions.delete name=CityRPG index=0' 'bmf-minigames-definitions-delete-confirm-required' @(
+      'BMF bmf.minigames.definitions.delete CONFIRMATION_REQUIRED',
+      'code=CONFIRMATION_REQUIRED',
+      'confirm_required=DELETE_MINIGAME_DEFINITION',
+      'deleted=false'
+    )
+    Invoke-BmfConsoleCommand 'bmf.minigames.definitions.delete name=CityRPG index=0 confirm=DELETE_MINIGAME_DEFINITION' 'bmf-minigames-definitions-delete' @(
+      'BMF bmf.minigames.definitions.delete OK',
+      'code=OK',
+      'key=name:CityRPG#0',
+      'deleted=true',
+      'definition_json='
+    )
+    Invoke-BmfConsoleCommand 'bmf.minigames.definitions.status' 'bmf-minigames-definitions-status-after' @(
+      'BMF bmf.minigames.definitions.status OK',
+      'code=OK',
+      'definitions=0',
+      'teams=0',
+      'last_error='
+    )
     Invoke-BmfConsoleCommand 'bmf.minigames.nextround index=0' 'bmf-minigames-nextround' @(
       'BMF bmf.minigames.nextround UNSAFE_MINIGAME_COMMAND_DISABLED',
       'action=nextRound',
@@ -331,6 +390,11 @@ if ($validationStarted -and (Test-Path -LiteralPath $runtimeLogPath)) {
     'registered console command bmf.minigames.nextround',
     'registered console command bmf.minigames.reset',
     'registered console command bmf.minigames.delete',
+    'registered console command bmf.minigames.definitions.status',
+    'registered console command bmf.minigames.definitions.set',
+    'registered console command bmf.minigames.definitions.list',
+    'registered console command bmf.minigames.definitions.get',
+    'registered console command bmf.minigames.definitions.delete',
     'registered console command bmf.minigames.events.canary',
     'registered console command bmf.minigames.events.recent',
     'registered console command bmf.minigames.data.list',
@@ -345,6 +409,8 @@ if ($validationStarted -and (Test-Path -LiteralPath $runtimeLogPath)) {
     'registered console command bmf.minigames.data.clear',
     'registered console command bmf.minigames.objects.snapshot',
     'BMF bmf.minigames.loadpreset UNSAFE_MINIGAME_COMMAND_DISABLED',
+    'BMF bmf.minigames.definitions.set OK',
+    'BMF bmf.minigames.definitions.delete CONFIRMATION_REQUIRED',
     'BMF bmf.minigames.objects.snapshot UNSAFE_MINIGAME_OBJECT_SNAPSHOT_DISABLED',
     'BMF bmf.minigames.reset INVALID_MINIGAME_INDEX'
   )) {

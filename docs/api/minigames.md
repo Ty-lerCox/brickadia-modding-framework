@@ -96,6 +96,44 @@ These would wrap, when explicitly enabled:
 Indexes must be zero or greater. By default, valid lifecycle calls return
 `UNSAFE_MINIGAME_COMMAND_DISABLED` before reaching Brickadia.
 
+## Desired Definitions
+
+BMF can store desired minigame definitions without calling Brickadia's unsafe
+minigame console commands. These records are BMF-owned target state for plugins
+such as CityRPG and future BMF minigame producers; they do not create, delete,
+or mutate live Brickadia minigames by themselves.
+
+```lua
+BMF.minigames.define({
+  name = "CityRPG",
+  index = 0,
+  teams = { "Police", "Criminal" },
+  persistent = true,
+  ownerOnly = false,
+  includedBrickMode = "all",
+})
+
+local definitions = BMF.minigames.definitions()
+local cityDefinition = BMF.minigames.definition({ name = "CityRPG", index = 0 })
+local status = BMF.minigames.definitionStatus()
+```
+
+Server-console command routes:
+
+```text
+Omegga.Bridge.BMF bmf.minigames.definitions.status
+Omegga.Bridge.BMF bmf.minigames.definitions.set name=CityRPG index=0 teams=Police,Criminal persistent=true owneronly=false includedbrickmode=all
+Omegga.Bridge.BMF bmf.minigames.definitions.list
+Omegga.Bridge.BMF bmf.minigames.definitions.get name=CityRPG index=0
+Omegga.Bridge.BMF bmf.minigames.definitions.delete name=CityRPG index=0 confirm=DELETE_MINIGAME_DEFINITION
+```
+
+Definitions persist at `ue4ss/main/Mods/BMF/runtime/minigames/definitions.json`
+and expose `liveEnforcement="definition-only"` until a validated producer maps
+that desired state into live minigame behavior. Supported fields currently
+include `name`, `index`, `ruleset`, `owner`, `mode`, `teams`, `persistent`,
+`ownerOnly`, `includedBrickMode`, `includedBricks`, and `maxPlayers`.
+
 ## Events
 
 BMF exposes a namespaced minigame event surface for external relays:
@@ -344,7 +382,8 @@ acceptable and the server can be restarted.
 - `L2 Headless + L5 Negative`: `scripts/validate-bmf-minigame-commands.ps1`
   proves command-worker transport, fail-closed behavior for unsafe minigame
   console wrappers, fail-closed behavior for the unsafe object snapshot probe,
-  and invalid preset-name/index rejection.
+  desired-definition set/list/get/delete, and invalid preset-name/index
+  rejection.
 - `L3 Live Player`: joining, membership, teams, scoring, and gameplay effects.
 - `L5 Negative`: permission or policy enforcement around minigame edits.
 

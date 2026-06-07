@@ -81,6 +81,17 @@ console-style output.
 - `bmf.minigames.nextround index=<n>`: runs `BMF.minigames.nextRound`.
 - `bmf.minigames.reset index=<n>`: runs `BMF.minigames.reset`.
 - `bmf.minigames.delete index=<n>`: runs `BMF.minigames.delete`.
+- `bmf.minigames.definitions.status`: prints BMF-owned desired-definition
+  registry counts and persistence path.
+- `bmf.minigames.definitions.set name=<name> [index=<n>] [teams=A,B]
+  [persistent=true|false] [owneronly=true|false] [includedbrickmode=<mode>]`:
+  upserts a BMF-owned desired minigame definition without mutating Brickadia.
+- `bmf.minigames.definitions.list [name=<name>] [index=<n>]`: lists desired
+  minigame definitions.
+- `bmf.minigames.definitions.get key=<key>|name=<name> [index=<n>]`: returns
+  one desired minigame definition.
+- `bmf.minigames.definitions.delete key=<key>|name=<name> [index=<n>]
+  confirm=DELETE_MINIGAME_DEFINITION`: deletes one desired definition.
 - `bmf.minigames.events.emit event=<name> ...`: emits one namespaced
   `minigames.<name>` event into the BMF event bus and event-fed data cache.
 - `bmf.minigames.events.status`: prints event relay counters and last-event
@@ -222,8 +233,9 @@ player actor is available.
   `bmf.minigames.list` command through the same command worker.
 - `L2 Headless + L5 Negative`:
   `scripts/validate-bmf-minigame-commands.ps1` invokes minigame lifecycle
-  command routes, proves they fail closed by default, and proves invalid
-  preset/index rejection.
+  command routes, proves they fail closed by default, proves BMF-owned
+  desired-definition set/list/get/delete, and proves invalid preset/index
+  rejection.
 - `L2 Headless`: `scripts/validate-bmf-vehicle-spawn-set-command.ps1` stages
   vehicle worlds, invokes `bmf.vehicles.spawnset`, invokes `bmf.world.saveas`,
   then parses the saved world and exports a matched vehicle inventory.

@@ -110,6 +110,9 @@ console-style output.
 - `bmf.minigames.data.status`: prints compact BMF-owned minigame cache counts.
 - `bmf.minigames.data.snapshot`: prints the full BMF-owned minigame cache as
   `snapshot_json=<json>`.
+- `bmf.minigames.data.apply-snapshot payload=<json>|name=<name> [index=<n>]
+  [teams=A,B]`: applies a BMF-owned observed minigame snapshot without emitting
+  a framework event.
 - `bmf.minigames.data.list [key=<key>|name=<name>] [index=<n>]`: lists
   BMF-owned event-fed minigame records.
 - `bmf.minigames.data.get key=<key>|name=<name> [index=<n>]`: returns one

@@ -139,6 +139,7 @@
     "minigames.events.event-log-l2",
     "minigames.events.subscription-l2",
     "minigames.data.status-l2",
+    "minigames.data.apply-snapshot-l2",
     "minigames.data.snapshot-team-adapter.experimental",
     "minigames.data.query-api-l2",
     "minigames.data.player-state-l2",

@@ -322,11 +322,19 @@ try {
       'data_minigames=0',
       'definition_1=name:CityRPG#0|status=missing|observed=|expected_teams=2|observed_teams=0'
     )
-    $snapshotPayload = [System.Uri]::EscapeDataString('{"source":"validator","minigames":[{"name":"CityRPG","index":0,"teams":[{"name":"Police","members":[]},{"name":"Criminal","members":[]}]}]}')
-    Invoke-BmfConsoleCommand "bmf.minigames.events.emit event=snapshot payload=$snapshotPayload" 'bmf-minigames-events-emit-snapshot' @(
+    Invoke-BmfConsoleCommand 'bmf.minigames.data.apply-snapshot name=CityRPG index=0 teams=Police,Criminal source=validator' 'bmf-minigames-data-apply-snapshot' @(
+      'BMF bmf.minigames.data.apply-snapshot OK',
+      'code=OK',
+      'source=validator',
+      'snapshot_minigames=1',
+      'minigames=1',
+      'teams=2',
+      'data_json='
+    )
+    Invoke-BmfConsoleCommand 'bmf.minigames.events.emit event=kill player=EventKiller playerid=11111111-1111-4111-8111-111111111111 minigame=CityRPG index=0 leaderboard=0,1,0 oldleaderboard=0,0,0 source=validator' 'bmf-minigames-events-emit-kill' @(
       'BMF bmf.minigames.events.emit OK',
-      'event=minigames.snapshot',
-      'legacy_event=snapshot',
+      'event=minigames.kill',
+      'legacy_event=kill',
       'code=OK'
     )
     Invoke-BmfConsoleCommand 'bmf.minigames.definitions.reconcile name=CityRPG index=0' 'bmf-minigames-definitions-reconcile-present' @(
@@ -437,6 +445,7 @@ if ($validationStarted -and (Test-Path -LiteralPath $runtimeLogPath)) {
     'registered console command bmf.minigames.events.recent',
     'registered console command bmf.minigames.data.list',
     'registered console command bmf.minigames.data.snapshot',
+    'registered console command bmf.minigames.data.apply-snapshot',
     'registered console command bmf.minigames.data.get',
     'registered console command bmf.minigames.data.players',
     'registered console command bmf.minigames.data.teams',
@@ -449,6 +458,7 @@ if ($validationStarted -and (Test-Path -LiteralPath $runtimeLogPath)) {
     'BMF bmf.minigames.loadpreset UNSAFE_MINIGAME_COMMAND_DISABLED',
     'BMF bmf.minigames.definitions.set OK',
     'BMF bmf.minigames.definitions.reconcile OK',
+    'BMF bmf.minigames.data.apply-snapshot OK',
     'BMF bmf.minigames.events.emit OK',
     'BMF bmf.minigames.definitions.delete CONFIRMATION_REQUIRED',
     'BMF bmf.minigames.data.clear OK',

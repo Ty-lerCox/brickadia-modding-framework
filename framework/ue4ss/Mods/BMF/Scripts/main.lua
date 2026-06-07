@@ -1148,6 +1148,7 @@ API_REGISTRY = {
   { name = "BMF.minigames.deleteDefinition", namespace = "minigames", kind = "function", stability = "experimental", risk = "low", validation = "L0 Static + L2 Headless", requiresPlayer = false, capability = "", summary = "Delete one BMF-owned desired minigame definition with confirmation." },
   { name = "BMF.minigames.definitionStatus", namespace = "minigames", kind = "function", stability = "experimental", risk = "low", validation = "L0 Static + L2 Headless", requiresPlayer = false, capability = "", summary = "Inspect BMF-owned minigame definition registry counts and persistence path." },
   { name = "BMF.minigames.reconcileDefinitions", namespace = "minigames", kind = "function", stability = "experimental", risk = "low", validation = "L0 Static + L2 Headless", requiresPlayer = false, capability = "", summary = "Compare BMF-owned desired minigame definitions with observed BMF minigame data." },
+  { name = "BMF.minigames.applySnapshot", namespace = "minigames", kind = "function", stability = "experimental", risk = "low", validation = "L0 Static + L2 Headless", requiresPlayer = false, capability = "", summary = "Apply a BMF-owned observed minigame data snapshot without emitting an event." },
   { name = "BMF.minigames.data", namespace = "minigames", kind = "function", stability = "experimental", risk = "low", validation = "L0 Static + L2 Headless; L3 Live Player for gameplay producers", requiresPlayer = false, capability = "", summary = "Read BMF-owned minigame data learned from observed gameplay events and snapshots." },
   { name = "BMF.minigames.dataStatus", namespace = "minigames", kind = "function", stability = "experimental", risk = "low", validation = "L0 Static + L2 Headless; L3 Live Player for gameplay producers", requiresPlayer = false, capability = "", summary = "Inspect compact counts for the BMF-owned minigame data snapshot." },
   { name = "BMF.minigames.dataList", namespace = "minigames", kind = "function", stability = "experimental", risk = "low", validation = "L0 Static + L2 Headless; L3 Live Player for gameplay producers", requiresPlayer = false, capability = "", summary = "List BMF-owned event-fed minigames without unsafe Brickadia console calls." },
@@ -3766,6 +3767,70 @@ local function register_builtin_commands()
     return query
   end
 
+  local function minigame_snapshot_payload_from_options(options)
+    local raw = ""
+    local source = percent_decode(options.source or "bmf-command")
+    if options.file and trim_string(options.file) ~= "" then
+      local file_path = percent_decode(options.file)
+      raw = read_file(file_path) or ""
+      source = "file:" .. file_path
+    elseif options.payload and trim_string(options.payload) ~= "" then
+      raw = percent_decode(options.payload)
+    elseif options.json and trim_string(options.json) ~= "" then
+      raw = percent_decode(options.json)
+    elseif options.snapshot and trim_string(options.snapshot) ~= "" then
+      raw = percent_decode(options.snapshot)
+    end
+
+    if trim_string(raw) ~= "" then
+      local decoded, err = json_decode(raw)
+      if err then
+        return nil, "snapshot JSON could not be parsed: " .. tostring(err)
+      end
+      if type(decoded) ~= "table" then
+        return nil, "snapshot JSON must decode to an object"
+      end
+      if trim_string(decoded.source or "") == "" then
+        decoded.source = source
+      end
+      return decoded, nil
+    end
+
+    local positional_name = options._positional and options._positional[1] or ""
+    local name = percent_decode(options.name or options.minigame or positional_name or "")
+    local ruleset = percent_decode(options.ruleset or options.id or "")
+    if name == "" and ruleset == "" then
+      return nil, "snapshot payload, file, name, or ruleset is required"
+    end
+
+    local minigame = {
+      name = name,
+      index = tonumber(options.index) or 0,
+      teams = {},
+    }
+    if ruleset ~= "" then
+      minigame.ruleset = ruleset
+    end
+    for _, team in ipairs(minigame_definition_text_list(percent_decode(options.teams or options.teamnames or ""))) do
+      local team_record = {}
+      if type(team) == "table" then
+        team_record = copy_table(team)
+        team_record.name = trim_string(team_record.name or team_record.team or team_record.id or team_record.key or "")
+      else
+        team_record.name = trim_string(team)
+      end
+      if team_record.name ~= "" then
+        team_record.members = type(team_record.members) == "table" and team_record.members or {}
+        minigame.teams[#minigame.teams + 1] = team_record
+      end
+    end
+
+    return {
+      source = source,
+      minigames = { minigame },
+    }, nil
+  end
+
   BMF.commands.register("bmf.minigames.events.status", "Show BMF minigame event relay status.", function()
     local status = BMF.minigames.eventStatus()
     local data = status.data or {}
@@ -3950,6 +4015,41 @@ local function register_builtin_commands()
     }
     snapshot.data = data
     return snapshot
+  end)
+
+  BMF.commands.register("bmf.minigames.data.apply-snapshot", "Apply a BMF-owned observed minigame data snapshot without emitting an event.", function(args)
+    local options = parse_command_options(args)
+    local payload, payload_error = minigame_snapshot_payload_from_options(options)
+    if not payload then
+      return result(false, "INVALID_MINIGAME_SNAPSHOT", payload_error, {
+        lines = {
+          "code=INVALID_MINIGAME_SNAPSHOT",
+          "error=" .. tostring(payload_error or ""),
+        },
+      })
+    end
+
+    local applied = BMF.minigames.applySnapshot(payload)
+    local data = applied.data or {}
+    local counts = data.counts or {}
+    local json_payload = copy_table(data)
+    json_payload.lines = nil
+    data.lines = {
+      "code=" .. tostring(applied.code or ""),
+      "applied_at=" .. tostring(data.appliedAt or ""),
+      "source=" .. tostring(data.source or ""),
+      "snapshot_minigames=" .. tostring(data.snapshotMinigames or 0),
+      "minigames=" .. tostring(counts.minigames or 0),
+      "players=" .. tostring(counts.players or 0),
+      "memberships=" .. tostring(counts.memberships or 0),
+      "teams=" .. tostring(counts.teams or 0),
+      "team_memberships=" .. tostring(counts.teamMemberships or 0),
+      "leaderboards=" .. tostring(counts.leaderboards or 0),
+      "rounds=" .. tostring(counts.rounds or 0),
+      "data_json=" .. json_encode(json_payload),
+    }
+    applied.data = data
+    return applied
   end)
 
   BMF.commands.register("bmf.minigames.data.list", "List BMF-owned minigame data records.", function(args)
@@ -8566,12 +8666,35 @@ local function forget_membership(data, player, minigame)
   end
 end
 
-local function remember_minigame_snapshot(data, payload)
+function minigame_snapshot_records(payload)
+  payload = type(payload) == "table" and payload or {}
   local minigames = payload.minigames
   if type(minigames) ~= "table" and type(payload.snapshot) == "table" then
     minigames = payload.snapshot.minigames
   end
+  local records = {}
   if type(minigames) ~= "table" then
+    return records
+  end
+
+  for _, minigame in ipairs(minigames) do
+    if type(minigame) == "table" then
+      records[#records + 1] = minigame
+    end
+  end
+  if #records == 0 then
+    for _, minigame in pairs(minigames) do
+      if type(minigame) == "table" then
+        records[#records + 1] = minigame
+      end
+    end
+  end
+  return records
+end
+
+local function remember_minigame_snapshot(data, payload)
+  local minigames = minigame_snapshot_records(payload)
+  if #minigames == 0 then
     return
   end
 
@@ -9567,6 +9690,43 @@ BMF.minigames.data = function()
     teamMemberships = copy_table(data.team_memberships_by_player or {}),
     leaderboards = copy_table(data.leaderboards_by_player or {}),
     rounds = copy_table(data.rounds_by_key or {}),
+    counts = minigame_data_counts(data),
+  })
+end
+
+BMF.minigames.applySnapshot = function(payload)
+  if type(payload) ~= "table" then
+    return result(false, "INVALID_MINIGAME_SNAPSHOT", "snapshot payload table is required", {
+      counts = minigame_data_counts(state.minigame_data or new_minigame_data_state()),
+    })
+  end
+
+  local snapshot_payload = copy_table(payload)
+  local minigames = minigame_snapshot_records(snapshot_payload)
+  if #minigames == 0 then
+    return result(false, "INVALID_MINIGAME_SNAPSHOT", "snapshot must include at least one minigame", {
+      counts = minigame_data_counts(state.minigame_data or new_minigame_data_state()),
+    })
+  end
+
+  if trim_string(snapshot_payload.source or "") == "" then
+    snapshot_payload.source = "bmf-snapshot-import"
+  end
+  state.minigame_data = state.minigame_data or new_minigame_data_state()
+  local applied_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+  remember_minigame_data("snapshot", snapshot_payload, applied_at)
+  if write_status then
+    write_status()
+  end
+
+  local data = state.minigame_data
+  return result(true, "OK", "Minigame data snapshot applied", {
+    appliedAt = applied_at,
+    source = data.source or "",
+    snapshotMinigames = #minigames,
+    updatedAt = data.updated_at or "",
+    totalUpdates = data.total_updates or 0,
+    lastEvent = type(data.last_event) == "table" and copy_table(data.last_event) or nil,
     counts = minigame_data_counts(data),
   })
 end

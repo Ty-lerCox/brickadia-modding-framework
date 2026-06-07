@@ -271,6 +271,12 @@ BMF keeps an in-memory minigame data snapshot from accepted minigame events:
 ```lua
 local snapshot = BMF.minigames.data()
 local status = BMF.minigames.dataStatus()
+local applied = BMF.minigames.applySnapshot({
+  source = "adapter",
+  minigames = {
+    { name = "CityRPG", index = 0, teams = { { name = "Police" } } },
+  },
+})
 local minigames = BMF.minigames.dataList({ limit = 25 })
 local city = BMF.minigames.get({ name = "CityRPG", index = 0 })
 local player = BMF.minigames.getPlayer({ player = "EventKiller" })
@@ -287,6 +293,7 @@ Server-console command routes:
 ```text
 Omegga.Bridge.BMF bmf.minigames.data.status
 Omegga.Bridge.BMF bmf.minigames.data.snapshot
+Omegga.Bridge.BMF bmf.minigames.data.apply-snapshot name=CityRPG index=0 teams=Police,Criminal
 Omegga.Bridge.BMF bmf.minigames.data.list
 Omegga.Bridge.BMF bmf.minigames.data.get name=CityRPG index=0
 Omegga.Bridge.BMF bmf.minigames.data.players minigame=CityRPG index=0
@@ -311,10 +318,13 @@ leaderboards=0
 rounds=0
 ```
 
-This cache is event-fed. It becomes useful for BMF consumers after a supported
-producer emits a `snapshot` event, then stays current through membership, team,
-round, and leaderboard events. It does not require CityRPG to subscribe to
-`omegga-minigameevents`.
+This cache is fed by accepted minigame events and by explicit BMF-owned snapshot
+imports. `BMF.minigames.applySnapshot(payload)` and
+`bmf.minigames.data.apply-snapshot` apply the same observed snapshot shape as a
+`snapshot` event without emitting a framework event. That gives Omegga adapters
+and validators a direct import path for known minigames and teams; later
+membership, team, round, and leaderboard events can keep it current. It does not
+require CityRPG to subscribe to `omegga-minigameevents`.
 
 `BMF.minigames.dataList(query)` lists known minigames with member/team counts.
 `BMF.minigames.get(query)` accepts `key`, `ruleset`, `name`, `minigame`, or

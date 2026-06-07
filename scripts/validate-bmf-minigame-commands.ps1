@@ -146,7 +146,7 @@ try {
     }
   }
 
-  $startOutput = & $startServerScript -BridgeDir $bridgeDir -Port $Port -VerifyWaitSeconds 30
+  $startOutput = & $startServerScript -RuntimeModsDir $RuntimeModsDir -BridgeDir $bridgeDir -Port $Port -VerifyWaitSeconds 30
   $startOutput | Set-Content -LiteralPath $startPath -Encoding UTF8
   $start = $startOutput | ConvertFrom-Json
   $serverPid = [int]$start.pid
@@ -157,44 +157,50 @@ try {
     Start-Sleep -Seconds 4
 
     Invoke-BmfConsoleCommand 'bmf.minigames.list' 'bmf-minigames-list' @(
-      'BMF bmf.minigames.list OK',
-      'command=Server.Minigames.List'
+      'BMF bmf.minigames.list UNSAFE_MINIGAME_COMMAND_DISABLED',
+      'command=Server.Minigames.List',
+      'allowUnsafeMinigameConsoleCommands=false'
     )
     Invoke-BmfConsoleCommand "bmf.minigames.loadpreset name=$presetName" 'bmf-minigames-loadpreset' @(
-      'BMF bmf.minigames.loadpreset OK',
+      'BMF bmf.minigames.loadpreset UNSAFE_MINIGAME_COMMAND_DISABLED',
       'action=loadPreset',
       "preset=$presetName",
-      'code=OK',
-      "command=Server.Minigames.LoadPreset `"$presetName`""
+      'code=UNSAFE_MINIGAME_COMMAND_DISABLED',
+      "command=Server.Minigames.LoadPreset `"$presetName`"",
+      'allowUnsafeMinigameConsoleCommands=false'
     )
     Invoke-BmfConsoleCommand "bmf.minigames.savepreset index=0 name=$presetName" 'bmf-minigames-savepreset' @(
-      'BMF bmf.minigames.savepreset OK',
+      'BMF bmf.minigames.savepreset UNSAFE_MINIGAME_COMMAND_DISABLED',
       'action=savePreset',
       'index=0',
       "preset=$presetName",
-      'code=OK',
-      "command=Server.Minigames.SavePreset 0 `"$presetName`""
+      'code=UNSAFE_MINIGAME_COMMAND_DISABLED',
+      "command=Server.Minigames.SavePreset 0 `"$presetName`"",
+      'allowUnsafeMinigameConsoleCommands=false'
     )
     Invoke-BmfConsoleCommand 'bmf.minigames.nextround index=0' 'bmf-minigames-nextround' @(
-      'BMF bmf.minigames.nextround OK',
+      'BMF bmf.minigames.nextround UNSAFE_MINIGAME_COMMAND_DISABLED',
       'action=nextRound',
       'index=0',
-      'code=OK',
-      'command=Server.Minigames.NextRound 0'
+      'code=UNSAFE_MINIGAME_COMMAND_DISABLED',
+      'command=Server.Minigames.NextRound 0',
+      'allowUnsafeMinigameConsoleCommands=false'
     )
     Invoke-BmfConsoleCommand 'bmf.minigames.reset index=0' 'bmf-minigames-reset' @(
-      'BMF bmf.minigames.reset OK',
+      'BMF bmf.minigames.reset UNSAFE_MINIGAME_COMMAND_DISABLED',
       'action=reset',
       'index=0',
-      'code=OK',
-      'command=Server.Minigames.Reset 0'
+      'code=UNSAFE_MINIGAME_COMMAND_DISABLED',
+      'command=Server.Minigames.Reset 0',
+      'allowUnsafeMinigameConsoleCommands=false'
     )
     Invoke-BmfConsoleCommand 'bmf.minigames.delete index=0' 'bmf-minigames-delete' @(
-      'BMF bmf.minigames.delete OK',
+      'BMF bmf.minigames.delete UNSAFE_MINIGAME_COMMAND_DISABLED',
       'action=delete',
       'index=0',
-      'code=OK',
-      'command=Server.Minigames.Delete 0'
+      'code=UNSAFE_MINIGAME_COMMAND_DISABLED',
+      'command=Server.Minigames.Delete 0',
+      'allowUnsafeMinigameConsoleCommands=false'
     )
     Invoke-BmfConsoleCommand 'bmf.minigames.loadpreset name=../Escape' 'bmf-minigames-loadpreset-invalid' @(
       'BMF bmf.minigames.loadpreset INVALID_PRESET_NAME',
@@ -231,7 +237,17 @@ if (Test-Path -LiteralPath $runtimeLogPath) {
     'registered console command bmf.minigames.nextround',
     'registered console command bmf.minigames.reset',
     'registered console command bmf.minigames.delete',
-    'BMF bmf.minigames.loadpreset OK',
+    'registered console command bmf.minigames.events.canary',
+    'registered console command bmf.minigames.events.recent',
+    'registered console command bmf.minigames.data.list',
+    'registered console command bmf.minigames.data.snapshot',
+    'registered console command bmf.minigames.data.get',
+    'registered console command bmf.minigames.data.players',
+    'registered console command bmf.minigames.data.teams',
+    'registered console command bmf.minigames.data.player',
+    'registered console command bmf.minigames.data.membership',
+    'registered console command bmf.minigames.data.clear',
+    'BMF bmf.minigames.loadpreset UNSAFE_MINIGAME_COMMAND_DISABLED',
     'BMF bmf.minigames.reset INVALID_MINIGAME_INDEX'
   )) {
     if ($logText -notmatch [regex]::Escape($needle)) {

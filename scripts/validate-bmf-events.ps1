@@ -4,7 +4,8 @@ param(
   [string]$RuntimeModsDir = 'C:\Users\tycox\AppData\Roaming\omegga\steam_installs\main\Brickadia\Binaries\Win64\ue4ss\main\Mods',
   [string]$OutJson = '',
   [int]$Port = 7839,
-  [int]$WaitAfterSaveSeconds = 8
+  [int]$WaitAfterSaveSeconds = 8,
+  [switch]$AllowSharedRuntimeMutation
 )
 
 $ErrorActionPreference = 'Stop'
@@ -31,6 +32,7 @@ $sourceBmfDir = Join-Path $Root 'framework/ue4ss/Mods/BMF'
 $runtimeBmfDir = Join-Path $RuntimeModsDir 'BMF'
 $runtimePluginDir = Join-Path $runtimeBmfDir 'plugins/EventCanary'
 $runtimeLogPath = Join-Path $runtimeBmfDir 'runtime/bmf.log'
+$runtimeEventPath = Join-Path $runtimeBmfDir 'runtime/events.jsonl'
 $runtimePluginLogPath = Join-Path $runtimeBmfDir 'runtime/logs/plugins/EventCanary.log'
 $runtimeStatusPath = Join-Path $runtimeBmfDir 'runtime/status.json'
 $worldsDir = Join-Path $BrickadiaRoot 'omegga-master/omegga-master/data/Saved/Worlds'
@@ -40,9 +42,14 @@ $bridgeDir = Join-Path $caseRoot "bridge-$Port"
 $startPath = Join-Path $caseRoot 'server-start.json'
 $pluginStagePath = Join-Path $caseRoot 'event-plugin-stage.json'
 $bmfLogPath = Join-Path $caseRoot 'bmf.log'
+$eventLogPath = Join-Path $caseRoot 'events.jsonl'
 $pluginLogPath = Join-Path $caseRoot 'EventCanary.log'
 $statusPath = Join-Path $caseRoot 'status.json'
+$runtimeBackupDir = Join-Path $caseRoot 'runtime-bmf-before-test'
 $serverPid = $null
+$runtimeHadExistingBmf = $false
+$runtimeBackupReady = $false
+$validationStarted = $false
 
 function Add-Evidence([string]$Kind, [string]$Path, [string]$Summary) {
   if ($Path -and (Test-Path -LiteralPath $Path)) {
@@ -62,7 +69,80 @@ function Read-JsonFile([string]$Path) {
   return $text | ConvertFrom-Json
 }
 
-function Invoke-BmfConsoleCommand([string]$Command, [string]$Slug, [string[]]$ExpectedLines) {
+function Assert-SafeRuntimeMutation {
+  $runtimeModsFullPath = [System.IO.Path]::GetFullPath($RuntimeModsDir)
+  $standardRuntimeModsDir = Join-Path (
+    Join-Path $env:APPDATA 'omegga\steam_installs\main\Brickadia\Binaries\Win64'
+  ) 'ue4ss\main\Mods'
+  $standardRuntimeModsFullPath = [System.IO.Path]::GetFullPath($standardRuntimeModsDir)
+  $isSharedOmeggaRuntime = $runtimeModsFullPath.Equals(
+    $standardRuntimeModsFullPath,
+    [System.StringComparison]::OrdinalIgnoreCase
+  )
+
+  if (!$AllowSharedRuntimeMutation -and $isSharedOmeggaRuntime) {
+    $conflicts = @(
+      Get-CimInstance Win32_Process |
+        Where-Object {
+          $_.Name -eq 'BrickadiaServer-Win64-Shipping.exe' -and
+          $_.CommandLine -notlike "*-port=*$Port*"
+        }
+    )
+    if ($conflicts.Count -gt 0) {
+      $ports = @(
+        $conflicts |
+          ForEach-Object {
+            if ($_.CommandLine -match '-port=\\?"?([0-9]+)') { $Matches[1] } else { "pid:$($_.ProcessId)" }
+          }
+      )
+      throw (
+        "Refusing to replace the shared Omegga BMF runtime while another Brickadia server is active " +
+        "(ports/processes: $($ports -join ', ')). Stop the live server first or pass -AllowSharedRuntimeMutation."
+      )
+    }
+  }
+}
+
+function Backup-RuntimeBmf {
+  $caseRootFullPath = [System.IO.Path]::GetFullPath($caseRoot)
+  $backupFullPath = [System.IO.Path]::GetFullPath($runtimeBackupDir)
+  if (!$backupFullPath.StartsWith($caseRootFullPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "Refusing to write runtime backup outside case root: $backupFullPath"
+  }
+
+  if (Test-Path -LiteralPath $runtimeBackupDir) {
+    Remove-Item -LiteralPath $runtimeBackupDir -Recurse -Force
+  }
+
+  if (Test-Path -LiteralPath $runtimeBmfDir) {
+    $script:runtimeHadExistingBmf = $true
+    Copy-Item -LiteralPath $runtimeBmfDir -Destination $runtimeBackupDir -Recurse -Force
+  } else {
+    $script:runtimeHadExistingBmf = $false
+  }
+  $script:runtimeBackupReady = $true
+}
+
+function Restore-RuntimeBmf {
+  if (!$script:runtimeBackupReady) {
+    return
+  }
+
+  $runtimeBmfFullPath = [System.IO.Path]::GetFullPath($runtimeBmfDir)
+  $runtimeModsFullPath = [System.IO.Path]::GetFullPath($RuntimeModsDir)
+  if (!$runtimeBmfFullPath.StartsWith($runtimeModsFullPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "Refusing to restore unexpected BMF runtime path: $runtimeBmfFullPath"
+  }
+
+  if (Test-Path -LiteralPath $runtimeBmfDir) {
+    Remove-Item -LiteralPath $runtimeBmfDir -Recurse -Force
+  }
+  if ($script:runtimeHadExistingBmf) {
+    Copy-Item -LiteralPath $runtimeBackupDir -Destination $runtimeBmfDir -Recurse -Force
+  }
+}
+
+function Invoke-BmfConsoleCommand([string]$Command, [string]$Slug, [string[]]$ExpectedLines, [bool]$ExpectOk = $true) {
   $rpcPath = Join-Path $caseRoot "$Slug-rpc.json"
   $bridgeCommand = "Omegga.Bridge.BMF $Command"
   $responseArtifactPath = Join-Path $caseRoot "$Slug-response.txt"
@@ -124,8 +204,11 @@ function Invoke-BmfConsoleCommand([string]$Command, [string]$Slug, [string[]]$Ex
   }
 
   $joined = ($responseLines -join "`n")
-  if ($joined -notmatch '^ok=true') {
+  if ($ExpectOk -and $joined -notmatch '^ok=true') {
     $script:errors.Add("BMF response did not report ok=true for command: $Command")
+  }
+  if (!$ExpectOk -and $joined -notmatch '^ok=false') {
+    $script:errors.Add("BMF response did not report ok=false for command: $Command")
   }
   foreach ($expected in $ExpectedLines) {
     if ($joined -notmatch [regex]::Escape($expected)) {
@@ -140,6 +223,10 @@ try {
       throw "Required path does not exist: $path"
     }
   }
+
+  Assert-SafeRuntimeMutation
+  Backup-RuntimeBmf
+  $validationStarted = $true
 
   if (Test-Path -LiteralPath $runtimeBmfDir) {
     Remove-Item -LiteralPath $runtimeBmfDir -Recurse -Force
@@ -244,6 +331,9 @@ return {
   if (Test-Path -LiteralPath $runtimeLogPath) {
     Remove-Item -LiteralPath $runtimeLogPath -Force
   }
+  if (Test-Path -LiteralPath $runtimeEventPath) {
+    Remove-Item -LiteralPath $runtimeEventPath -Force
+  }
   if (Test-Path -LiteralPath $runtimeStatusPath) {
     Remove-Item -LiteralPath $runtimeStatusPath -Force
   }
@@ -251,7 +341,7 @@ return {
     Remove-Item -LiteralPath $savedWorldPath -Force
   }
 
-  $startOutput = & $startServerScript -BridgeDir $bridgeDir -Port $Port -VerifyWaitSeconds 30
+  $startOutput = & $startServerScript -RuntimeModsDir $RuntimeModsDir -BridgeDir $bridgeDir -Port $Port -VerifyWaitSeconds 30
   $startOutput | Set-Content -LiteralPath $startPath -Encoding UTF8
   $start = $startOutput | ConvertFrom-Json
   $serverPid = [int]$start.pid
@@ -275,6 +365,180 @@ return {
       'plugin_loaded_listeners=1',
       'plugin_unloaded_listeners=1',
       'world_saved_listeners=1'
+    )
+
+    Invoke-BmfConsoleCommand 'bmf.minigames.events.emit event=joinminigame player=EventKiller playerid=11111111-1111-4111-8111-111111111111 minigame=CityRPG index=0 source=validator' 'bmf-minigame-event-join-emit' @(
+      'BMF bmf.minigames.events.emit OK',
+      'event=minigames.joinminigame',
+      'legacy_event=joinminigame',
+      'code=OK'
+    )
+
+    Invoke-BmfConsoleCommand 'bmf.minigames.events.emit event=kill player=EventKiller playerid=11111111-1111-4111-8111-111111111111 minigame=CityRPG index=0 leaderboard=0,1,0 oldleaderboard=0,0,0 source=validator' 'bmf-minigame-event-emit' @(
+      'BMF bmf.minigames.events.emit OK',
+      'event=minigames.kill',
+      'legacy_event=kill',
+      'count=1',
+      'code=OK'
+    )
+
+    Invoke-BmfConsoleCommand 'bmf.minigames.events.status' 'bmf-minigame-event-status' @(
+      'BMF bmf.minigames.events.status OK',
+      'total=',
+      'joinminigame=',
+      'kill=',
+      'last_event=minigames.'
+    )
+
+    Invoke-BmfConsoleCommand 'bmf.minigames.events.recent event=kill limit=5' 'bmf-minigame-events-recent' @(
+      'BMF bmf.minigames.events.recent OK',
+      'total=',
+      'returned=',
+      'events_json='
+    )
+
+    Invoke-BmfConsoleCommand 'bmf.minigames.events.canary event=join' 'bmf-minigame-events-canary' @(
+      'BMF bmf.minigames.events.canary OK',
+      'event=minigames.joinminigame',
+      'legacy_event=joinminigame',
+      'handler_calls=1',
+      'handler_legacy=joinminigame',
+      'listener_removed=true',
+      'data_restored=true',
+      'metadata_legacy_event=joinminigame',
+      'metadata_player_key=33333333-3333-4333-8333-333333333333',
+      'metadata_minigame_key=name:CanaryArena#0',
+      'handler_metadata_event_id=',
+      'handler_metadata_player_key=33333333-3333-4333-8333-333333333333',
+      'handler_metadata_minigame_key=name:CanaryArena#0'
+    )
+
+    Invoke-BmfConsoleCommand 'bmf.minigames.data.status' 'bmf-minigame-data-status' @(
+      'BMF bmf.minigames.data.status OK',
+      'total_updates=',
+      'minigames=',
+      'players=',
+      'memberships=',
+      'leaderboards=',
+      'last_event=minigames.'
+    )
+
+    Invoke-BmfConsoleCommand 'bmf.minigames.data.snapshot' 'bmf-minigame-data-snapshot' @(
+      'BMF bmf.minigames.data.snapshot OK',
+      'total_updates=',
+      'minigames=',
+      'players=',
+      'memberships=',
+      'leaderboards=',
+      'snapshot_json='
+    )
+
+    Invoke-BmfConsoleCommand 'bmf.minigames.data.list name=CityRPG index=0' 'bmf-minigame-data-list' @(
+      'BMF bmf.minigames.data.list OK',
+      'minigames=1',
+      'returned=1',
+      'minigame_1=name:CityRPG#0',
+      'list_json='
+    )
+
+    Invoke-BmfConsoleCommand 'bmf.minigames.data.get name=CityRPG index=0' 'bmf-minigame-data-get' @(
+      'BMF bmf.minigames.data.get OK',
+      'key=name:CityRPG#0',
+      'name=CityRPG',
+      'index=0',
+      'members=',
+      'leaderboards=1',
+      'matches=1',
+      'minigame_json='
+    )
+
+    Invoke-BmfConsoleCommand 'bmf.minigames.data.players minigame=CityRPG index=0' 'bmf-minigame-data-players' @(
+      'BMF bmf.minigames.data.players OK',
+      'players=1',
+      'returned=1',
+      'player_1=11111111-1111-4111-8111-111111111111',
+      'players_json='
+    )
+
+    Invoke-BmfConsoleCommand 'bmf.minigames.data.teams minigame=CityRPG index=0' 'bmf-minigame-data-teams' @(
+      'BMF bmf.minigames.data.teams OK',
+      'teams=0',
+      'returned=0',
+      'teams_json='
+    )
+
+    Invoke-BmfConsoleCommand 'bmf.minigames.data.player player=EventKiller' 'bmf-minigame-data-player' @(
+      'BMF bmf.minigames.data.player OK',
+      'player_key=11111111-1111-4111-8111-111111111111',
+      'player_name=EventKiller',
+      'minigame_key=name:CityRPG#0',
+      'leaderboard_values=3',
+      'player_json='
+    )
+
+    Invoke-BmfConsoleCommand 'bmf.minigames.data.membership player=EventKiller' 'bmf-minigame-data-membership' @(
+      'BMF bmf.minigames.data.membership OK',
+      'player_key=11111111-1111-4111-8111-111111111111',
+      'minigame_key=name:CityRPG#0',
+      'membership_found=true',
+      'membership_json='
+    )
+
+    Invoke-BmfConsoleCommand 'bmf.minigames.events.emit event=leaveminigame player=EventKiller playerid=11111111-1111-4111-8111-111111111111 minigame=CityRPG index=0 source=validator' 'bmf-minigame-event-leave-emit' @(
+      'BMF bmf.minigames.events.emit OK',
+      'event=minigames.leaveminigame',
+      'legacy_event=leaveminigame',
+      'code=OK'
+    )
+
+    Invoke-BmfConsoleCommand 'bmf.minigames.events.recent event=leave limit=5' 'bmf-minigame-events-recent-leave' @(
+      'BMF bmf.minigames.events.recent OK',
+      'returned=1',
+      'event_1=minigames.leaveminigame',
+      'events_json='
+    )
+
+    Invoke-BmfConsoleCommand 'bmf.minigames.data.membership player=EventKiller' 'bmf-minigame-data-membership-after-leave' @(
+      'BMF bmf.minigames.data.membership MINIGAME_MEMBERSHIP_NOT_FOUND',
+      'player_key=11111111-1111-4111-8111-111111111111',
+      'minigame_key=',
+      'membership_found=false',
+      'membership_json='
+    )
+
+    Invoke-BmfConsoleCommand 'bmf.minigames.events.synthetic-flow source=validator-flow' 'bmf-minigame-events-synthetic-flow' @(
+      'BMF bmf.minigames.events.synthetic-flow OK',
+      'code=OK',
+      'source=validator-flow',
+      'emitted=8',
+      'handler_calls=8',
+      'listeners_removed=true',
+      'data_restored=true',
+      'after_created_minigame=true',
+      'after_join_membership=true',
+      'after_team_membership=true',
+      'after_round_found=true',
+      'after_leaderboard_found=true',
+      'after_kill_leaderboard=true',
+      'after_leave_membership=false',
+      'after_delete_minigame=false',
+      'after_delete_team=false',
+      'after_delete_round=false',
+      'after_delete_leaderboard=false',
+      'flow_minigames=0',
+      'flow_memberships=0',
+      'flow_teams=0',
+      'flow_leaderboards=0',
+      'flow_rounds=0',
+      'event_1=minigames.created',
+      'event_8=minigames.deleted'
+    )
+
+    Invoke-BmfConsoleCommand 'bmf.minigames.data.clear confirm=CLEAR_MINIGAME_DATA' 'bmf-minigame-data-clear' @(
+      'BMF bmf.minigames.data.clear OK',
+      'code=OK',
+      'source=manual-clear',
+      'confirm_required=CLEAR_MINIGAME_DATA'
     )
 
     Invoke-BmfConsoleCommand "bmf.server.save name=$saveName" 'bmf-server-save' @(
@@ -339,7 +603,7 @@ return {
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 }
 
-if (Test-Path -LiteralPath $runtimeLogPath) {
+if ($validationStarted -and (Test-Path -LiteralPath $runtimeLogPath)) {
   Copy-Item -LiteralPath $runtimeLogPath -Destination $bmfLogPath -Force
   Add-Evidence 'log' $bmfLogPath 'BMF runtime log with event evidence'
   $logText = Get-Content -Raw -LiteralPath $bmfLogPath
@@ -355,18 +619,43 @@ if (Test-Path -LiteralPath $runtimeLogPath) {
       $errors.Add("BMF log missing expected line: $needle")
     }
   }
-} else {
+} elseif ($validationStarted) {
   $errors.Add("BMF runtime log was not written: $runtimeLogPath")
 }
 
-if (Test-Path -LiteralPath $runtimePluginLogPath) {
+if ($validationStarted -and (Test-Path -LiteralPath $runtimeEventPath)) {
+  Copy-Item -LiteralPath $runtimeEventPath -Destination $eventLogPath -Force
+  Add-Evidence 'jsonl' $eventLogPath 'BMF external event stream with emitted event records'
+  $eventText = Get-Content -Raw -LiteralPath $eventLogPath
+  foreach ($needle in @(
+    '"source":"event"',
+    '"message":"event emitted: EventCanary.custom"',
+    '"event":"EventCanary.custom"',
+    '"message":"event emitted: minigames.kill"',
+    '"event":"minigames.kill"',
+    '"legacyEvent":"kill"',
+    '"message":"event emitted: minigames.leaveminigame"',
+    '"event":"minigames.leaveminigame"',
+    '"legacyEvent":"leaveminigame"',
+    '"message":"event emitted: worldSaved"',
+    '"event":"worldSaved"'
+  )) {
+    if ($eventText -notmatch [regex]::Escape($needle)) {
+      $errors.Add("BMF event stream missing expected record text: $needle")
+    }
+  }
+} elseif ($validationStarted) {
+  $errors.Add("BMF event stream was not written: $runtimeEventPath")
+}
+
+if ($validationStarted -and (Test-Path -LiteralPath $runtimePluginLogPath)) {
   Copy-Item -LiteralPath $runtimePluginLogPath -Destination $pluginLogPath -Force
   Add-Evidence 'log' $pluginLogPath 'EventCanary per-plugin log'
-} else {
+} elseif ($validationStarted) {
   $errors.Add("Plugin log was not written: $runtimePluginLogPath")
 }
 
-if (Test-Path -LiteralPath $runtimeStatusPath) {
+if ($validationStarted -and (Test-Path -LiteralPath $runtimeStatusPath)) {
   Copy-Item -LiteralPath $runtimeStatusPath -Destination $statusPath -Force
   Add-Evidence 'json' $statusPath 'BMF runtime status after event canary'
   try {
@@ -377,8 +666,14 @@ if (Test-Path -LiteralPath $runtimeStatusPath) {
   } catch {
     $errors.Add("Could not parse BMF status: $($_.Exception.Message)")
   }
-} else {
+} elseif ($validationStarted) {
   $errors.Add("BMF runtime status was not written: $runtimeStatusPath")
+}
+
+try {
+  Restore-RuntimeBmf
+} catch {
+  $errors.Add("Could not restore pre-validation BMF runtime: $($_.Exception.Message)")
 }
 
 $resultStatus = 'failed'

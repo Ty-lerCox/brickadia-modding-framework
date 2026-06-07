@@ -73,6 +73,8 @@ try {
   foreach ($required in @(
     'README.md',
     'framework/ue4ss/Mods/BMF/Scripts/main.lua',
+    'cli/bin/bmfctl.js',
+    'cli/package.json',
     'installer/install-bmf.ps1',
     'installer/uninstall-bmf.ps1',
     'scripts/validate-package.ps1',

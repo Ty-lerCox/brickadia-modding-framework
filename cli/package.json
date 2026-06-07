@@ -1,0 +1,17 @@
+{
+  "name": "@bmf/bmfctl",
+  "version": "0.1.0-dev",
+  "private": true,
+  "description": "CLI doctor, repair, and snapshot tool for BMF environments.",
+  "bin": {
+    "bmfctl": "./bin/bmfctl.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "doctor": "node ./bin/bmfctl.js doctor",
+    "test": "node --test test/*.test.js"
+  },
+  "license": "UNLICENSED"
+}

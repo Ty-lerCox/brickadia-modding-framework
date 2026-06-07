@@ -90,7 +90,7 @@ try {
   }
 
   $topLevelFiles = @('README.md', 'TODO.md', 'OVERNIGHT_STRATEGY.md')
-  $topLevelDirs = @('framework', 'installer', 'examples', 'docs', 'manifests', 'scripts', 'tests', 'integrations')
+  $topLevelDirs = @('framework', 'installer', 'examples', 'docs', 'manifests', 'scripts', 'tests', 'integrations', 'native', 'cli')
 
   foreach ($relative in $topLevelFiles) {
     $source = Join-Path $rootFull $relative

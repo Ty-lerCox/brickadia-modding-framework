@@ -72,8 +72,8 @@ console-style output.
 - `bmf.brickassetguard.check asset=<brick-asset> roles=<role>`: evaluates one
   brick asset against the configured placement policy. This is policy-only until
   a live placement/paste hook calls the evaluator before world mutation.
-- `bmf.minigames.list`: runs the safe minigame list command through
-  `BMF.minigames.list`.
+- `bmf.minigames.list`: reports `UNSAFE_MINIGAME_COMMAND_DISABLED` by default
+  because Brickadia CL13530 can crash while formatting `Server.Minigames.List`.
 - `bmf.minigames.loadpreset name=<preset> [owner=<name>]`: runs
   `BMF.minigames.loadPreset`.
 - `bmf.minigames.savepreset index=<n> name=<preset>`: runs
@@ -81,6 +81,36 @@ console-style output.
 - `bmf.minigames.nextround index=<n>`: runs `BMF.minigames.nextRound`.
 - `bmf.minigames.reset index=<n>`: runs `BMF.minigames.reset`.
 - `bmf.minigames.delete index=<n>`: runs `BMF.minigames.delete`.
+- `bmf.minigames.events.emit event=<name> ...`: emits one namespaced
+  `minigames.<name>` event into the BMF event bus and event-fed data cache.
+- `bmf.minigames.events.status`: prints event relay counters and last-event
+  metadata.
+- `bmf.minigames.events.recent [event=<name>] [player=<id-or-name>]
+  [minigame=<name>] [limit=<n>]`: prints recent accepted minigame events.
+- `bmf.minigames.events.canary [event=<name>]`: registers a temporary
+  minigame event subscription, emits one event, verifies normalized metadata,
+  and unsubscribes.
+- `bmf.minigames.events.synthetic-flow`: emits a BMF-owned create, join, team,
+  round, leaderboard, kill, leave, and delete flow, verifies reducer
+  checkpoints, and restores the previous minigame data cache by default.
+- `bmf.minigames.data.status`: prints compact BMF-owned minigame cache counts.
+- `bmf.minigames.data.snapshot`: prints the full BMF-owned minigame cache as
+  `snapshot_json=<json>`.
+- `bmf.minigames.data.list [key=<key>|name=<name>] [index=<n>]`: lists
+  BMF-owned event-fed minigame records.
+- `bmf.minigames.data.get key=<key>|name=<name> [index=<n>]`: returns one
+  minigame plus known members, teams, team memberships, leaderboard records, and
+  round state.
+- `bmf.minigames.data.players [player=<id-or-name>] [minigame=<name>]`:
+  lists known minigame player contexts.
+- `bmf.minigames.data.teams [team=<id-or-name>] [minigame=<name>]`: lists
+  known minigame teams.
+- `bmf.minigames.data.player player=<id-or-name>`: returns one player's known
+  minigame membership, team, leaderboard, and minigame context.
+- `bmf.minigames.data.membership player=<id-or-name>`: returns one player's
+  current known minigame membership or `MINIGAME_MEMBERSHIP_NOT_FOUND`.
+- `bmf.minigames.data.clear confirm=CLEAR_MINIGAME_DATA`: clears the in-memory
+  minigame data cache for validation and troubleshooting.
 - `bmf.world.saveas name=<world>`: saves the current running world as a named
   `.brdb`.
 - `bmf.prefabs.loadbrz source=<file.brz> name=<staged-world> x=<x> y=<y>
@@ -177,11 +207,12 @@ player actor is available.
   reloaded `bmf.canary`, and `bmf.reload` through `Omegga.Bridge.BMF`, then
   verifies the BMF response files.
 - `L2 Headless`: `scripts/validate-bmf-admin-commands.ps1` invokes
-  `bmf.players.list`, `bmf.chat.broadcast`, and `bmf.minigames.list` through the
-  same command worker.
+  `bmf.players.list`, `bmf.chat.broadcast`, and the fail-closed
+  `bmf.minigames.list` command through the same command worker.
 - `L2 Headless + L5 Negative`:
   `scripts/validate-bmf-minigame-commands.ps1` invokes minigame lifecycle
-  command routes and proves invalid preset/index rejection.
+  command routes, proves they fail closed by default, and proves invalid
+  preset/index rejection.
 - `L2 Headless`: `scripts/validate-bmf-vehicle-spawn-set-command.ps1` stages
   vehicle worlds, invokes `bmf.vehicles.spawnset`, invokes `bmf.world.saveas`,
   then parses the saved world and exports a matched vehicle inventory.

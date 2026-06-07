@@ -8,12 +8,14 @@ mod support with more powerful server-side APIs.
 
 ## Runtime Direction
 
-BMF currently supports a BMF-compatible Omegga runtime. In practice that means
-Omegga is part of the supported Windows server stack for launch, UE4SS
+BMF currently supports the BMF-supported Omegga Windows fork:
+<https://github.com/Ty-lerCox/bmf-omegga-fork>. In practice that means this
+fork is part of the supported Windows server stack for launch, UE4SS
 compatibility setup, command transport, player identity sync, live helper calls,
-logs, and unattended validation. Upstream Omegga alone may not be sufficient
-until the BMF Windows/UE4SS compatibility work is packaged there or maintained
-as a supported fork.
+logs, and unattended validation. Stock upstream Omegga and the global npm
+package are not the supported Windows runtime for BMF. The fork intentionally
+trails the latest upstream Omegga builds because BMF validates against that
+fork's Windows/UE4SS bridge surfaces.
 
 ## Status Legend
 
@@ -46,6 +48,6 @@ as a supported fork.
 | Planned | Minigame API | Create, configure, reset, and manage minigames from Lua. |
 | Planned | Avatar/player appearance API | Read or modify player appearance from server-side Lua. |
 | Live tested, experimental | Omegga player sync adapter | Feeds safe Omegga player records into `BMF.players` cache after restart. On the current Windows runtime it uses a Brickadia-log fallback when Omegga's PlayerState matcher leaves the live player list empty. |
-| Planned | BMF-compatible Omegga runtime package | Make the required Omegga fork/build, UE4SS bridge, helper globals, and install shape explicit. |
+| Planned | BMF-supported Omegga Windows fork package | Make releases/install shape explicit for the supported fork, UE4SS bridge, helper globals, and BMF adapters. |
 | Future research | BMF standalone supervisor | Possible long-term replacement for Omegga launch, logs, command injection, and canary orchestration. |
 | Planned | Stable release package | Drag-and-drop BMF install package for UE4SS-powered Brickadia servers. |

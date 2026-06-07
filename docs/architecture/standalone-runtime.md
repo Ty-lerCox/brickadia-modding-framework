@@ -1,10 +1,10 @@
 # Standalone Runtime Future Track
 
 This is a future independence track, not the current first-package direction.
-BMF currently supports a BMF-compatible Omegga runtime because Omegga is acting
-as the Windows server supervisor, UE4SS installer/compatibility manager,
-command bridge, log source, player-sync source, and helper surface for some live
-player calls.
+BMF currently supports the BMF-supported Omegga Windows fork because that fork
+is acting as the Windows server supervisor, UE4SS installer/compatibility
+manager, command bridge, log source, player-sync source, and helper surface for
+some live player calls.
 
 Standalone BMF remains possible, but it would mean replacing those Omegga-owned
 responsibilities with BMF-owned runtime surfaces.

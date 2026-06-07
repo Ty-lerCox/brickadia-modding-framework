@@ -2,9 +2,10 @@
 
 Status: supported Omegga adapter.
 
-This plugin is part of the current BMF-compatible Omegga runtime direction. It
-feeds safe Omegga player identity records into BMF without requiring BMF Lua to
-read unsafe live `PlayerState` properties directly.
+This plugin is part of the current BMF-supported Omegga Windows fork direction:
+<https://github.com/Ty-lerCox/bmf-omegga-fork>. It feeds safe Omegga player
+identity records into BMF without requiring BMF Lua to read unsafe live
+`PlayerState` properties directly.
 
 Omegga plugin that feeds safe Omegga player identity records into BMF.
 

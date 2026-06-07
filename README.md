@@ -6,11 +6,16 @@ compatibility work.
 
 Current target: Brickadia EA2 `PC-Shipping-CL13530`.
 
-BMF currently targets a BMF-compatible Omegga runtime for Windows server
+BMF currently targets the BMF-supported Omegga Windows fork for Windows server
 launch, UE4SS compatibility setup, command transport, validation, and some live
-player helper surfaces. Upstream Omegga alone may not satisfy those requirements
-until the BMF compatibility work is packaged there or maintained as a supported
-fork.
+player helper surfaces:
+
+<https://github.com/Ty-lerCox/bmf-omegga-fork>
+
+Stock upstream Omegga and the global npm package are Linux/WSL-oriented and are
+not the supported Windows runtime for BMF. The supported fork intentionally
+trails the latest upstream Omegga builds because BMF validates against that
+fork's Windows/UE4SS bridge surfaces.
 
 ## Status
 
@@ -61,9 +66,9 @@ This repository is in early framework bring-up. The current package focuses on:
   staged car copies from one captured single-car slice.
 - First Lua prefab facade for loading BRZ-derived staged world bundles.
 - First Lua vehicle spawn-set facade for loading staged remapped vehicle copies.
-- BMF-compatible Omegga runtime direction for server launch, command transport,
-  player-sync, minigame event feeding, live chat helper delivery, and
-  validation.
+- BMF-supported Omegga Windows fork direction for server launch, command
+  transport, player-sync, minigame event feeding, live chat helper delivery,
+  and validation.
 - Static package validation.
 - Headless validation artifacts for world/archive research.
 
@@ -130,8 +135,8 @@ Runtime validation is tracked through timestamped artifacts under
 ## Native Applicator Hook Sync
 
 The experimental `NoSpawnItemApplicator` live blocker depends on Brickadia
-runtime pointers that move on every server restart. With a BMF-compatible
-Omegga server already running, refresh and install the blocker with:
+runtime pointers that move on every server restart. With the BMF-supported
+Omegga Windows fork already running, refresh and install the blocker with:
 
 ```powershell
 .\scripts\sync-applicator-blocker-native-hook.ps1

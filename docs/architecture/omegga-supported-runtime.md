@@ -1,15 +1,23 @@
 # Omegga-Supported Runtime
 
-BMF currently supports a BMF-compatible Omegga runtime for Windows Brickadia
-dedicated servers. That runtime is more than a convenience wrapper: it is the
-current server supervisor and UE4SS bridge environment that BMF canaries and
-some live-player APIs depend on.
+BMF currently supports the BMF-supported Omegga Windows fork for Windows
+Brickadia dedicated servers:
+
+<https://github.com/Ty-lerCox/bmf-omegga-fork>
+
+That runtime is more than a convenience wrapper: it is the current server
+supervisor and UE4SS bridge environment that BMF canaries and some live-player
+APIs depend on.
 
 ## Current Contract
 
-The supported runtime is not "any upstream Omegga install." It is an Omegga
-build, fork, or release artifact that includes the BMF Windows/UE4SS
-compatibility work.
+The supported runtime is not "any upstream Omegga install." It is the fork
+above, including the BMF Windows/UE4SS compatibility work.
+
+Stock upstream Omegga and the global npm package are Linux/WSL-oriented and are
+not the supported Windows runtime for BMF. The fork intentionally trails the
+latest upstream Omegga builds; treat that version skew as part of the runtime
+contract until BMF validates a newer fork or upstream release.
 
 | Runtime Surface | Why BMF Uses It |
 | --- | --- |
@@ -49,11 +57,11 @@ reported as `omegga.players.raw.<reason>.log-fallback`.
 
 BMF packages the current Omegga player sync adapter at
 `integrations/omegga/bmf-player-sync/` and the minigame event adapter at
-`integrations/omegga/bmf-minigame-events/`. The compatible Omegga runtime is
-expected to install or load those adapters when Omegga-fed player identity or
-BMF-owned minigame data/event production is needed.
+`integrations/omegga/bmf-minigame-events/`. The supported fork is expected to
+install or load those adapters when Omegga-fed player identity or BMF-owned
+minigame data/event production is needed.
 
-The compatible Omegga runtime must provide or preserve these bridge/helper
+The supported fork must provide or preserve these bridge/helper
 surfaces until BMF replaces them with equivalent names:
 
 - `Omegga.Bridge.BMF`
@@ -66,11 +74,14 @@ surfaces until BMF replaces them with equivalent names:
 ## Packaging Rule
 
 BMF should not vendor Omegga `node_modules` or runtime server data into the BMF
-release zip. The supported packaging shape should be one of:
+release zip. The supported packaging shape is currently:
 
-- a BMF-maintained Omegga fork with releases,
-- a BMF-compatible Omegga release artifact,
-- or upstream Omegga after the Windows/UE4SS compatibility work is accepted.
+- the BMF-supported Omegga Windows fork at
+  <https://github.com/Ty-lerCox/bmf-omegga-fork>.
+
+Future packaging can move to a BMF-compatible release artifact or upstream
+Omegga only after the Windows/UE4SS compatibility work is accepted and BMF has
+validated that route.
 
 The selected route must retain Omegga's license notices.
 

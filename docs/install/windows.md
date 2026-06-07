@@ -9,15 +9,19 @@ dedicated server.
 
 - Brickadia dedicated server for the supported build.
 - Brickadia-compatible UE4SS runtime.
-- BMF-compatible Omegga runtime for Windows server launch, command transport,
-  bridge helpers, logs, and validation.
+- BMF-supported Omegga Windows fork for Windows server launch, command
+  transport, bridge helpers, logs, and validation:
+  <https://github.com/Ty-lerCox/bmf-omegga-fork>.
 - BMF release package.
 - File-system access to the server `Binaries\Win64` directory.
 
 Do not assume an arbitrary upstream Omegga install is enough. The supported
-target is an Omegga build or fork that includes the BMF Windows/UE4SS
-compatibility work, including the command bridge and helper globals used by the
-current canaries.
+target is the fork above, including its BMF Windows/UE4SS compatibility work,
+command bridge, helper globals, and adapters used by the current canaries.
+Stock upstream Omegga and `npm i -g omegga` are Linux/WSL-oriented paths, not
+the supported Windows runtime for BMF. The fork intentionally trails the latest
+upstream builds; do not replace it with a newer upstream release until BMF has
+validated that release.
 
 ## Release Package
 
@@ -109,7 +113,7 @@ uninstall.
 ## Manual Install Shape
 
 1. Stop the dedicated server.
-2. Install or select the BMF-compatible Omegga runtime.
+2. Install or select the BMF-supported Omegga Windows fork.
 3. Install UE4SS for the Brickadia server build through that runtime or the BMF
    installer path.
 4. Copy `framework/ue4ss/Mods/BMF` into the UE4SS `Mods` folder.

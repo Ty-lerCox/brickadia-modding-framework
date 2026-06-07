@@ -12,6 +12,14 @@ That route queues a request under `Mods/BMF/runtime/commands`. The BMF command
 worker dispatches the command and writes a matching `.response.txt` file with
 console-style output.
 
+On the BMF-supported Omegga Windows fork, latency-sensitive plugin traffic can
+use the socket bridge instead of the file-backed worker. Omegga starts a
+loopback broker, the optional `BMFSocket` native UE4SS mod connects from inside
+the Brickadia server process, and Omegga plugins send newline-delimited JSON
+command envelopes to the broker. The command result shape is the same; socket
+responses include `bmf_command_transport=socket`. The file-backed command
+worker remains the fallback and the durable repair path.
+
 ## Built-In Commands
 
 - `bmf.status`: prints BMF health, version, loaded plugin count, and runtime
@@ -23,6 +31,9 @@ console-style output.
   and build-detection mode.
 - `bmf.plugins`: lists loaded BMF plugins and plugin error count.
 - `bmf.commands`: lists registered BMF console commands.
+- `bmf.socket.status`: prints socket transport configuration, counters,
+  native status, and last error. This is the primary health check for
+  socket-first Omegga plugin integrations.
 - `bmf.load`: loads BMF plugins from disk without restarting the server.
 - `bmf.unload`: unloads currently loaded BMF plugins, removing plugin-owned
   commands and event handlers.

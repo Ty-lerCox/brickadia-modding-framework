@@ -29,8 +29,10 @@ custom events for their own coordination.
 
 Each emitted event is also appended to `runtime/events.jsonl` with
 `source: "event"`, the event name, payload, handler count, and any handler
-errors. External integrations can tail this stream instead of polling Brickadia
-console output.
+errors. When the socket bridge is active, BMF also sends an event envelope to
+the Omegga socket broker so external integrations can subscribe without waiting
+for file polling. Integrations should use the socket path for latency-sensitive
+gameplay and keep the JSONL stream as a durable fallback and audit trail.
 
 ## `BMF.events.listenerCount(name)`
 
@@ -53,11 +55,12 @@ Returns the number of currently registered handlers for an event.
 
 ## External Relays
 
-The JSONL event stream is the preferred bridge for integrations that need BMF
-events outside UE4SS Lua. For CityRPG minigame work, this is the replacement
-path for the legacy `omegga-minigameevents` polling plugin: BMF should produce
-minigame lifecycle/combat events, and CityRPG should tail
-`runtime/events.jsonl` and re-emit only those event records. The first
+The socket event stream is the preferred live bridge for integrations that need
+BMF events outside UE4SS Lua. The JSONL event stream remains the fallback and
+audit trail. For CityRPG minigame work, this replaces the legacy
+`omegga-minigameevents` polling plugin: BMF should produce minigame
+lifecycle/combat events, and CityRPG should consume socket event records first,
+tailing `runtime/events.jsonl` only when the socket is unavailable. The first
 supported producer is the Omegga adapter at
 `integrations/omegga/bmf-minigame-events/`, which writes BMF command files for
 `BMF.minigames.emitEvent`. The event surface uses namespaced BMF event names
@@ -69,6 +72,11 @@ boundary. BMF-native data events such as `minigames.snapshot`,
 minigame event plugin. The packaged adapter defaults to log-events-only;
 snapshot, team, and leaderboard polling remain unsafe opt-ins until BMF has a
 proven native hook or another safe Brickadia data source.
+
+Live validation on June 7, 2026 proved this bridge with CityRPG: a
+`minigames.joinminigame` event reached the plugin over the socket path, and the
+follow-up team assignment command returned with `bmf_command_transport=socket`
+in about 51ms.
 
 ## Validation
 

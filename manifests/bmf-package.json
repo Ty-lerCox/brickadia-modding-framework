@@ -6,7 +6,14 @@
   "status": "experimental",
   "runtime": {
     "type": "UE4SS Lua",
-    "entrypoint": "framework/ue4ss/Mods/BMF/Scripts/main.lua"
+    "entrypoint": "framework/ue4ss/Mods/BMF/Scripts/main.lua",
+    "optionalNativeTransport": {
+      "type": "UE4SS C++",
+      "mod": "BMFSocket",
+      "entrypoint": "framework/ue4ss/Mods/BMFSocket/dlls/main.dll",
+      "source": "native/bmf_socket",
+      "buildScript": "scripts/build-bmf-socket-native-mod.ps1"
+    }
   },
   "runtimeStrategy": {
     "standalone": false,
@@ -59,6 +66,7 @@
     "commands.minigames.lifecycle.runtime-l2-negative",
     "commands.access-policy.runtime-l2-negative",
     "commands.dispatch-access.runtime-l2-negative",
+    "commands.socket-transport.experimental",
     "commands.world.saveas.runtime-l2",
     "commands.prefabs.loadbrz.runtime-l2",
     "commands.prefabs.loadbrdb.runtime-l2",
@@ -137,6 +145,7 @@
     "minigames.definitions.command-l2",
     "minigames.definitions.reconcile-l2",
     "minigames.events.event-log-l2",
+    "minigames.events.socket-transport.experimental",
     "minigames.events.subscription-l2",
     "minigames.data.status-l2",
     "minigames.data.apply-snapshot-l2",

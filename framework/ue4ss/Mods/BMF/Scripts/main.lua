@@ -2347,6 +2347,18 @@ local function option_number(options, key, default)
   return finite_number(value, default)
 end
 
+function option_boolean(options, key, default)
+  local value = options[key]
+  if value == nil or value == "" then
+    return default == true
+  end
+  if type(value) == "boolean" then
+    return value == true
+  end
+  local text = tostring(value):lower()
+  return text == "1" or text == "true" or text == "yes" or text == "on"
+end
+
 local function register_console_handler_for_command(name)
   if state.console_command_callbacks[name] then
     return true
@@ -4286,6 +4298,7 @@ local function register_builtin_commands()
     local options = parse_command_options(args)
     local snapshot = BMF.minigames.objectSnapshot({
       limit = option_number(options, "limit", 64),
+      includeProperties = option_boolean(options, "includeproperties", false),
     })
     local data = snapshot.data or {}
     data.lines = data.lines or {
@@ -7680,6 +7693,19 @@ local function minigame_object_full_name(object)
   return ""
 end
 
+function minigame_object_name(object)
+  if not minigame_object_valid(object) or type(object.GetName) ~= "function" then
+    return ""
+  end
+  local ok, object_name = pcall(function()
+    return object:GetName()
+  end)
+  if ok and object_name ~= nil then
+    return minigame_compact_value(object_name)
+  end
+  return ""
+end
+
 local function minigame_object_address(object)
   if object == nil or type(object) ~= "userdata" then
     return ""
@@ -7838,16 +7864,19 @@ BMF.minigames.objectSnapshot = function(options)
 
   local opts = type(options) == "table" and options or {}
   local limit = tonumber(opts.limit) or 64
+  local include_properties = opts.includeProperties == true or option_boolean(opts, "includeproperties", false)
   local rulesets = minigame_find_objects("BP_Ruleset_C", limit)
   local teams = minigame_find_objects("BP_Team_C", limit)
   local snapshot = {
     source = "bmf.objectSnapshot",
     checkedAt = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    unsafePropertiesIncluded = include_properties,
     rulesets = {},
     teams = {},
   }
   local lines = {
     "source=bmf.objectSnapshot",
+    "unsafe_properties_included=" .. tostring(include_properties),
     "rulesets=" .. tostring(#rulesets),
     "teams=" .. tostring(#teams),
   }
@@ -7855,31 +7884,43 @@ BMF.minigames.objectSnapshot = function(options)
   for index, object in ipairs(rulesets) do
     local item = {
       fullName = minigame_object_full_name(object),
+      objectName = minigame_object_name(object),
       address = minigame_object_address(object),
-      name = minigame_object_property(object, "RulesetName"),
-      inSession = minigame_object_property(object, "bInSession"),
-      memberStates = minigame_object_property(object, "MemberStates"),
     }
+    if include_properties then
+      item.name = minigame_object_property(object, "RulesetName")
+      item.inSession = minigame_object_property(object, "bInSession")
+      item.memberStates = minigame_object_property(object, "MemberStates")
+    end
     snapshot.rulesets[#snapshot.rulesets + 1] = item
     lines[#lines + 1] = "ruleset_" .. tostring(index) .. "_full=" .. item.fullName
-    lines[#lines + 1] = "ruleset_" .. tostring(index) .. "_name=" .. item.name
-    lines[#lines + 1] = "ruleset_" .. tostring(index) .. "_in_session=" .. item.inSession
-    lines[#lines + 1] = "ruleset_" .. tostring(index) .. "_members=" .. item.memberStates
+    lines[#lines + 1] = "ruleset_" .. tostring(index) .. "_object=" .. item.objectName
+    if include_properties then
+      lines[#lines + 1] = "ruleset_" .. tostring(index) .. "_name=" .. tostring(item.name or "")
+      lines[#lines + 1] = "ruleset_" .. tostring(index) .. "_in_session=" .. tostring(item.inSession or "")
+      lines[#lines + 1] = "ruleset_" .. tostring(index) .. "_members=" .. tostring(item.memberStates or "")
+    end
   end
 
   for index, object in ipairs(teams) do
     local item = {
       fullName = minigame_object_full_name(object),
+      objectName = minigame_object_name(object),
       address = minigame_object_address(object),
-      name = minigame_object_property(object, "TeamName"),
-      color = minigame_object_property(object, "TeamColor"),
-      memberStates = minigame_object_property(object, "MemberStates"),
     }
+    if include_properties then
+      item.name = minigame_object_property(object, "TeamName")
+      item.color = minigame_object_property(object, "TeamColor")
+      item.memberStates = minigame_object_property(object, "MemberStates")
+    end
     snapshot.teams[#snapshot.teams + 1] = item
     lines[#lines + 1] = "team_" .. tostring(index) .. "_full=" .. item.fullName
-    lines[#lines + 1] = "team_" .. tostring(index) .. "_name=" .. item.name
-    lines[#lines + 1] = "team_" .. tostring(index) .. "_color=" .. item.color
-    lines[#lines + 1] = "team_" .. tostring(index) .. "_members=" .. item.memberStates
+    lines[#lines + 1] = "team_" .. tostring(index) .. "_object=" .. item.objectName
+    if include_properties then
+      lines[#lines + 1] = "team_" .. tostring(index) .. "_name=" .. tostring(item.name or "")
+      lines[#lines + 1] = "team_" .. tostring(index) .. "_color=" .. tostring(item.color or "")
+      lines[#lines + 1] = "team_" .. tostring(index) .. "_members=" .. tostring(item.memberStates or "")
+    end
   end
 
   lines[#lines + 1] = "snapshot_json=" .. json_encode(snapshot)
@@ -7887,6 +7928,7 @@ BMF.minigames.objectSnapshot = function(options)
   return result(true, "OK", "Minigame object snapshot collected", {
     source = snapshot.source,
     checkedAt = snapshot.checkedAt,
+    unsafePropertiesIncluded = include_properties,
     rulesets = snapshot.rulesets,
     teams = snapshot.teams,
     counts = {
@@ -12012,6 +12054,7 @@ local function read_framework_config()
     allowPluginUnsafeGlobals = parse_json_boolean_field(raw, "allowPluginUnsafeGlobals") == true,
     allowUnsafeApplicatorLuaHook = parse_json_boolean_field(raw, "allowUnsafeApplicatorLuaHook") == true,
     allowUnsafeMinigameConsoleCommands = parse_json_boolean_field(raw, "allowUnsafeMinigameConsoleCommands") == true,
+    allowUnsafeMinigameObjectSnapshot = parse_json_boolean_field(raw, "allowUnsafeMinigameObjectSnapshot") == true,
     brickadiaSavedDir = parse_json_string_field(raw, "brickadiaSavedDir") or "",
   }
 end

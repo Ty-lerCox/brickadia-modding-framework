@@ -178,7 +178,9 @@ module.exports = class BmfMinigameEvents {
       seedPlayers: 0,
       seedMemberships: 0,
       seedTeamMemberships: 0,
+      snapshotImports: 0,
       lastSeed: null,
+      lastSnapshotImport: null,
       lastLeaveCheck: null,
       lastEvent: null,
       lastError: null,
@@ -187,6 +189,7 @@ module.exports = class BmfMinigameEvents {
     this.handleStart = this.handleStart.bind(this);
     this.handleStatusCommand = this.handleStatusCommand.bind(this);
     this.handleManualSync = this.handleManualSync.bind(this);
+    this.handleJoinTeamCommand = this.handleJoinTeamCommand.bind(this);
   }
 
   async init() {
@@ -208,6 +211,7 @@ module.exports = class BmfMinigameEvents {
     this.omegga.on('start', this.handleStart);
     this.omegga.on('cmd:bmfminigamestatus', this.handleStatusCommand);
     this.omegga.on('cmd:bmfminigamesync', this.handleManualSync);
+    this.omegga.on('cmd:jointeam', this.handleJoinTeamCommand);
 
     if (this.omegga.started) {
       this.handleStart();
@@ -240,6 +244,7 @@ module.exports = class BmfMinigameEvents {
       remove('start', this.handleStart);
       remove('cmd:bmfminigamestatus', this.handleStatusCommand);
       remove('cmd:bmfminigamesync', this.handleManualSync);
+      remove('cmd:jointeam', this.handleJoinTeamCommand);
     }
   }
 
@@ -414,7 +419,7 @@ module.exports = class BmfMinigameEvents {
     const lines = [
       `BMF minigame adapter: queued=${this.counters.queued} failed=${this.counters.failed}`,
       `cached: minigames=${this.minigameCache.size} playerStates=${this.playerStateCache.size} players=${this.playerMinigameCache.size} teamMemberships=${this.teamMembershipCache.size}`,
-      `checks: minigames=${this.counters.minigameChecks} leaderboards=${this.counters.leaderboardChecks} snapshots=${this.counters.snapshotChanges} teamChanges=${this.counters.teamChanges}`,
+      `checks: minigames=${this.counters.minigameChecks} leaderboards=${this.counters.leaderboardChecks} snapshots=${this.counters.snapshotChanges} imports=${this.counters.snapshotImports} teamChanges=${this.counters.teamChanges}`,
       `leaves: checks=${this.counters.leaveChecks} queued=${this.counters.leaveQueued} misses=${this.counters.leaveCacheMisses} noPlayer=${this.counters.leaveNoPlayer} same=${this.counters.leaveSameMinigame} switches=${this.counters.leaveSwitches} disconnects=${this.counters.leaveDisconnects}`,
       `seed: attempts=${this.counters.seedAttempts} successes=${this.counters.seedSuccesses} failures=${this.counters.seedFailures} players=${this.counters.seedPlayers} memberships=${this.counters.seedMemberships} teamMemberships=${this.counters.seedTeamMemberships}`,
       `unsafeConsoleSnapshots=${this.unsafeConsoleSnapshotsEnabled() ? 'enabled' : 'disabled'}`,
@@ -432,6 +437,10 @@ module.exports = class BmfMinigameEvents {
       const last = this.counters.lastSeed;
       lines.push(`lastSeed=${last.outcome} reason=${last.reason} memberships=${last.memberships || 0} at=${last.finishedAt || last.startedAt || ''}`);
     }
+    if (this.counters.lastSnapshotImport) {
+      const last = this.counters.lastSnapshotImport;
+      lines.push(`lastSnapshotImport=minigames=${last.minigames || 0} reason=${last.reason || ''} at=${last.queuedAt || ''}`);
+    }
     if (this.counters.lastError) {
       lines.push(`lastError=${this.counters.lastError}`);
     }
@@ -439,7 +448,7 @@ module.exports = class BmfMinigameEvents {
   }
 
   handleManualSync(speaker) {
-    if (!this.serverStarted || !this.pollingStarted) {
+    if (!this.serverStarted) {
       this.sayToSpeaker(speaker, ['BMF minigame adapter is waiting for the server to finish startup.']);
       this.writeStatusFile({ manualSyncSkipped: 'server-startup' });
       return;
@@ -632,6 +641,65 @@ module.exports = class BmfMinigameEvents {
 
     this.writeStatusFile({ lastLeaveCheck: summary });
     return summary.outcome === 'queued';
+  }
+
+  handleJoinTeamCommand(speaker, ...args) {
+    const teamName = args.map(value => String(value || '')).join(' ').trim();
+    const player = this.lookupPlayer(speaker) || compactObject({
+      name: String(speaker || ''),
+      displayName: String(speaker || ''),
+    });
+    const pkey = this.playerKey(player);
+    const minigame = pkey ? this.playerMinigameCache.get(pkey) : null;
+    const summary = {
+      reason: 'jointeam-command',
+      player: pkey || player.name || player.displayName || String(speaker || ''),
+      team: teamName,
+      minigame: minigame?.name || minigame?.ruleset || '',
+      outcome: '',
+    };
+
+    if (!teamName) {
+      summary.outcome = 'missing-team';
+      this.writeStatusFile({ lastJoinTeamCommand: summary });
+      return false;
+    }
+    if (!pkey || !minigame) {
+      summary.outcome = 'missing-player-minigame';
+      this.writeStatusFile({ lastJoinTeamCommand: summary });
+      return false;
+    }
+
+    const previous = this.teamMembershipCache.get(pkey) || null;
+    const team = compactObject({
+      name: teamName,
+      team: teamName,
+    });
+    const previousTeamKey = previous ? teamKey(previous.team, previous.minigame) : '';
+    const nextTeamKey = teamKey(team, minigame);
+    if (previous && sameMinigame(previous.minigame, minigame) && previousTeamKey === nextTeamKey) {
+      summary.outcome = 'same-team';
+      this.writeStatusFile({ lastJoinTeamCommand: summary });
+      return false;
+    }
+
+    const queued = this.queueEvent('teamchange', {
+      player,
+      minigame,
+      oldMinigame: previous?.minigame || minigame,
+      team,
+      oldTeam: previous?.team || null,
+      source: 'omegga.bmf-minigame-events',
+      reason: 'jointeam-command',
+    });
+
+    if (queued) {
+      this.counters.teamChanges += 1;
+      this.teamMembershipCache.set(pkey, { player, minigame, team });
+    }
+    summary.outcome = queued ? 'queued' : 'queue-failed';
+    this.writeStatusFile({ lastJoinTeamCommand: summary });
+    return queued;
   }
 
   normalizeSeedPlayer(player, fallbackKey) {
@@ -895,14 +963,19 @@ module.exports = class BmfMinigameEvents {
       }
       this.teamMembershipCache = currentTeamMemberships;
 
-      if (this.config.emitSnapshotEvents !== false && snapshotChanged) {
+      if (snapshotChanged) {
         this.snapshotSignature = signature;
         this.counters.snapshotChanges += 1;
+      }
+      if (this.config.emitSnapshotEvents !== false && snapshotChanged) {
         this.queueEvent('snapshot', {
           minigames,
           source: 'omegga.bmf-minigame-events',
           reason,
         });
+      }
+      if (this.config.applySnapshotImports !== false && snapshotChanged) {
+        this.queueSnapshotImport(minigames, reason);
       }
       this.writeStatusFile();
     } catch (error) {
@@ -1292,6 +1365,39 @@ module.exports = class BmfMinigameEvents {
       this.counters.lastError = error.message || String(error);
       console.warn(`[bmf-minigame-events] failed to queue ${eventName}: ${this.counters.lastError}`);
       this.writeStatusFile({ failedEvent: eventName });
+      return false;
+    }
+  }
+
+  queueSnapshotImport(minigames, reason) {
+    const payload = {
+      minigames: minigames || [],
+      source: 'omegga.bmf-minigame-events',
+      reason,
+    };
+    const command = [
+      'bmf.minigames.data.apply-snapshot',
+      `payload=${encodeURIComponent(JSON.stringify(payload))}`,
+    ].join(' ');
+
+    try {
+      this.writeCommandRequest(command, 'minigame_snapshot_import');
+      this.counters.snapshotImports += 1;
+      this.counters.lastSnapshotImport = {
+        minigames: payload.minigames.length,
+        reason,
+        queuedAt: new Date().toISOString(),
+      };
+      console.log(
+        `[bmf-minigame-events] queued snapshot import minigames=${payload.minigames.length} reason=${reason || ''}`
+      );
+      this.writeStatusFile({ lastSnapshotImport: this.counters.lastSnapshotImport });
+      return true;
+    } catch (error) {
+      this.counters.failed += 1;
+      this.counters.lastError = error.message || String(error);
+      console.warn(`[bmf-minigame-events] failed to queue snapshot import: ${this.counters.lastError}`);
+      this.writeStatusFile({ failedSnapshotImport: reason });
       return false;
     }
   }

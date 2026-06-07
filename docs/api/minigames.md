@@ -359,12 +359,16 @@ Omegga.Bridge.BMF bmf.minigames.data.clear confirm=CLEAR_MINIGAME_DATA
 `BMF.minigames.objectSnapshot({ limit = 64 })` is a direct UE4SS object probe
 for live `BP_Ruleset_C` and `BP_Team_C` objects. It does not use Brickadia
 console `GetAll`, but it is still disabled by default because raw UE4SS object
-enumeration is high risk on the current dedicated-server runtime.
+enumeration is high risk on the current dedicated-server runtime. When enabled,
+the default command only returns object metadata and counts; direct Unreal
+property reads such as `MemberStates` and `TeamColor` require the additional
+`includeProperties=true` opt-in.
 
 Server-console command route:
 
 ```text
 Omegga.Bridge.BMF bmf.minigames.objects.snapshot limit=64
+Omegga.Bridge.BMF bmf.minigames.objects.snapshot limit=64 includeProperties=true
 ```
 
 By default the command returns `UNSAFE_MINIGAME_OBJECT_SNAPSHOT_DISABLED` with

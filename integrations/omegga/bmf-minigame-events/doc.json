@@ -43,6 +43,11 @@
       "default": false,
       "type": "boolean"
     },
+    "applySnapshotImports": {
+      "description": "Import observed minigame/member/team snapshots into BMF.minigames data with bmf.minigames.data.apply-snapshot when allowUnsafeConsoleSnapshots is enabled.",
+      "default": true,
+      "type": "boolean"
+    },
     "emitCreateEvents": {
       "description": "Emit BMF-native created events when a new BP_Ruleset_C appears after the initial snapshot and allowUnsafeConsoleSnapshots is enabled.",
       "default": false,

@@ -135,10 +135,10 @@ console-style output.
   current known minigame membership or `MINIGAME_MEMBERSHIP_NOT_FOUND`.
 - `bmf.minigames.data.clear confirm=CLEAR_MINIGAME_DATA`: clears the in-memory
   minigame data cache for validation and troubleshooting.
-- `bmf.minigames.objects.snapshot [limit=<n>]`: fail-closed live
-  `BP_Ruleset_C`/`BP_Team_C` object probe. It returns
-  `UNSAFE_MINIGAME_OBJECT_SNAPSHOT_DISABLED` unless the explicit unsafe object
-  snapshot opt-in is enabled.
+- `bmf.minigames.objects.snapshot [limit=<n>] [includeProperties=true]`:
+  fail-closed live `BP_Ruleset_C`/`BP_Team_C` object probe. It returns
+  metadata/counts by default when the explicit unsafe object snapshot opt-in is
+  enabled; direct Unreal property reads require `includeProperties=true`.
 - `bmf.world.saveas name=<world>`: saves the current running world as a named
   `.brdb`.
 - `bmf.prefabs.loadbrz source=<file.brz> name=<staged-world> x=<x> y=<y>

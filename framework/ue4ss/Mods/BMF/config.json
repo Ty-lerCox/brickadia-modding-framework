@@ -6,5 +6,6 @@
   "pluginWatchdogMaxErrors": 3,
   "allowPluginUnsafeGlobals": false,
   "allowUnsafeApplicatorLuaHook": false,
+  "allowUnsafeMinigameObjectSnapshot": false,
   "brickadiaSavedDir": ""
 }

@@ -62,7 +62,8 @@ This repository is in early framework bring-up. The current package focuses on:
 - First Lua prefab facade for loading BRZ-derived staged world bundles.
 - First Lua vehicle spawn-set facade for loading staged remapped vehicle copies.
 - BMF-compatible Omegga runtime direction for server launch, command transport,
-  player-sync, live chat helper delivery, and validation.
+  player-sync, minigame event feeding, live chat helper delivery, and
+  validation.
 - Static package validation.
 - Headless validation artifacts for world/archive research.
 
@@ -92,6 +93,7 @@ docs/                       Install, API, and validation docs
 integrations/               Supported external adapters, currently Omegga
 manifests/                  Package and compatibility metadata
 scripts/                    Local validation helpers
+cli/                        bmfctl manager/troubleshooting CLI
 tests/fixtures/             Static fixtures for wrapper tests
 artifacts/                  Generated validation evidence
 ```
@@ -102,6 +104,18 @@ Run the static package validator:
 
 ```powershell
 .\scripts\validate-package.ps1
+```
+
+Validate the `bmfctl` manager CLI:
+
+```powershell
+.\scripts\validate-bmfctl.ps1
+```
+
+Run the BMF doctor against the local environment:
+
+```powershell
+node .\cli\bin\bmfctl.js doctor
 ```
 
 Build and validate a release zip:

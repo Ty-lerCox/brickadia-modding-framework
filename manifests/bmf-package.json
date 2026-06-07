@@ -14,9 +14,10 @@
     "requiresBmfCompatibleOmegga": true,
     "dependenciesManifest": "manifests/dependencies.json",
     "supportedAdapters": [
-      "integrations/omegga/bmf-player-sync"
+      "integrations/omegga/bmf-player-sync",
+      "integrations/omegga/bmf-minigame-events"
     ],
-    "notes": "BMF currently targets a BMF-compatible Omegga runtime for Windows launch, UE4SS setup, command transport, player sync, helper globals, logs, and validation. Upstream Omegga alone may not satisfy these requirements until the BMF compatibility work is included."
+    "notes": "BMF currently targets a BMF-compatible Omegga runtime for Windows launch, UE4SS setup, command transport, player sync, minigame event feeding, helper globals, logs, and validation. Upstream Omegga alone may not satisfy these requirements until the BMF compatibility work is included."
   },
   "supportedPlatforms": [
     "windows-dedicated-server"
@@ -133,11 +134,32 @@
     "minigames.list.command-l2",
     "minigames.lifecycle.experimental",
     "minigames.lifecycle.command-l2-negative",
+    "minigames.events.event-log-l2",
+    "minigames.events.subscription-l2",
+    "minigames.data.status-l2",
+    "minigames.data.snapshot-team-adapter.experimental",
+    "minigames.data.query-api-l2",
+    "minigames.events.omegga-adapter.experimental",
     "world.loadAdditive.experimental",
     "world.saveAs.experimental"
   ],
   "validation": {
     "staticValidator": "scripts/validate-package.ps1",
+    "managerCliValidator": "scripts/validate-bmfctl.ps1",
     "canarySchema": "manifests/canary.schema.json"
+  },
+  "managerCli": {
+    "name": "bmfctl",
+    "entrypoint": "cli/bin/bmfctl.js",
+    "package": "cli/package.json",
+    "status": "experimental",
+    "commands": [
+      "doctor",
+      "repair",
+      "snapshot",
+      "mods",
+      "paths"
+    ],
+    "notes": "CLI-first BMF manager for diagnostics, safe repairs, snapshots, and UE4SS mod enablement."
   }
 }

@@ -19,6 +19,7 @@ compatibility work.
 | Console execution helpers | Provides the proven CL13530 console manager and Kismet fallback paths used by world/save APIs. |
 | Live call-by-name helper | Enables the validated `ClientPushChatMessage` fanout to live `PlayerController` objects. |
 | Player sync adapter | Feeds safe player identity records into `BMF.players` without direct crash-prone `PlayerState` reads. |
+| Minigame data/event adapter | Feeds safe Omegga-observed minigame log events into `BMF.minigames.emitEvent` and `BMF.minigames.data()`; snapshot, team, and leaderboard polling stay unsafe opt-ins until replaced by a proven BMF producer. |
 | Log context | Gives the supervisor and canaries access to Brickadia and UE4SS logs. |
 
 ## What Omegga Should Fill
@@ -47,9 +48,10 @@ reported as `omegga.players.raw.<reason>.log-fallback`.
 ## Supported Omegga Assets
 
 BMF packages the current Omegga player sync adapter at
-`integrations/omegga/bmf-player-sync/`. The compatible Omegga runtime is
-expected to install or load that adapter when Omegga-fed player identity is
-needed.
+`integrations/omegga/bmf-player-sync/` and the minigame event adapter at
+`integrations/omegga/bmf-minigame-events/`. The compatible Omegga runtime is
+expected to install or load those adapters when Omegga-fed player identity or
+BMF-owned minigame data/event production is needed.
 
 The compatible Omegga runtime must provide or preserve these bridge/helper
 surfaces until BMF replaces them with equivalent names:

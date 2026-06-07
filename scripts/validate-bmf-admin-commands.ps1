@@ -168,8 +168,9 @@ try {
       'command=Chat.Broadcast'
     )
     Invoke-BmfConsoleCommand 'bmf.minigames.list' 'bmf-minigames-list' @(
-      'BMF bmf.minigames.list OK',
-      'command=Server.Minigames.List'
+      'BMF bmf.minigames.list UNSAFE_MINIGAME_COMMAND_DISABLED',
+      'command=Server.Minigames.List',
+      'allowUnsafeMinigameConsoleCommands=false'
     )
   }
 } catch {
@@ -193,7 +194,7 @@ if (Test-Path -LiteralPath $runtimeLogPath) {
     'registered console command bmf.minigames.list',
     'BMF bmf.chat.broadcast OK',
     'BMF bmf.players.list OK',
-    'BMF bmf.minigames.list OK'
+    'BMF bmf.minigames.list UNSAFE_MINIGAME_COMMAND_DISABLED'
   )) {
     if ($logText -notmatch [regex]::Escape($needle)) {
       $errors.Add("BMF log missing expected line: $needle")

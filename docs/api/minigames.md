@@ -1,12 +1,17 @@
 # Minigames API
 
-BMF minigame support starts with the console-backed surface already exposed by
-Omegga and Brickadia. These wrappers prove transport and command formatting;
-they do not yet create full configured minigames from scratch.
+BMF minigame support has two surfaces:
+
+- BMF-owned event/data APIs used by Omegga adapters and BMF consumers.
+- Legacy Brickadia `Server.Minigames.*` console wrappers.
+
+The legacy console wrappers are disabled by default because
+`Server.Minigames.List` can crash Brickadia CL13530 while formatting its console
+table output. Prefer the BMF-owned event/data APIs for minigame state.
 
 ## `BMF.minigames.list()`
 
-Runs:
+Would run, when explicitly enabled:
 
 ```text
 Server.Minigames.List
@@ -19,8 +24,9 @@ if result.ok then
 end
 ```
 
-On a headless empty server, this is expected to return command transport
-evidence. Rich parsing of the console table is still an Omegga-side capability.
+By default this returns `UNSAFE_MINIGAME_COMMAND_DISABLED` and does not execute
+Brickadia's console command. Rich parsing of the console table remains an
+Omegga-side capability when the underlying Brickadia command is safe.
 
 Server-console command route:
 
@@ -28,8 +34,8 @@ Server-console command route:
 Omegga.Bridge.BMF bmf.minigames.list
 ```
 
-The command response records `command=Server.Minigames.List` plus the executor
-used by the runtime.
+The command response records `command=Server.Minigames.List` and
+`allowUnsafeMinigameConsoleCommands=false` unless the unsafe opt-in is enabled.
 
 ## Presets
 
@@ -81,23 +87,229 @@ Omegga.Bridge.BMF bmf.minigames.reset index=0
 Omegga.Bridge.BMF bmf.minigames.delete index=0
 ```
 
-These wrap:
+These would wrap, when explicitly enabled:
 
 - `Server.Minigames.NextRound <index>`
 - `Server.Minigames.Reset <index>`
 - `Server.Minigames.Delete <index>`
 
-Indexes must be zero or greater.
+Indexes must be zero or greater. By default, valid lifecycle calls return
+`UNSAFE_MINIGAME_COMMAND_DISABLED` before reaching Brickadia.
+
+## Events
+
+BMF exposes a namespaced minigame event surface for external relays:
+
+```lua
+BMF.minigames.emitEvent("kill", {
+  player = { id = "11111111-1111-4111-8111-111111111111", name = "Player" },
+  minigame = { name = "CityRPG", index = 0, ruleset = "BP_Ruleset_C_1" },
+  leaderboard = { 0, 1, 0 },
+  oldLeaderboard = { 0, 0, 0 },
+})
+```
+
+The emitted BMF event name is `minigames.<event>`, for example
+`minigames.kill`. Supported legacy event names are:
+
+- `joinminigame`
+- `leaveminigame`
+- `roundchange`
+- `roundend`
+- `leaderboardchange`
+- `score`
+- `kill`
+- `death`
+
+BMF-native data event names are:
+
+- `snapshot`
+- `created`
+- `deleted`
+- `teamchange`
+
+Event subscription aliases are accepted by `BMF.minigames.on`,
+`BMF.minigames.listenerCount`, `BMF.minigames.recentEvents`, and
+`BMF.minigames.emitEvent`:
+
+- `join` -> `joinminigame`
+- `leave` -> `leaveminigame`
+- `team` -> `teamchange`
+- `leaderboard` -> `leaderboardchange`
+- `round` or `roundstart` -> `roundchange`
+- `create` -> `created`
+- `delete` -> `deleted`
+
+BMF plugins should prefer the minigame wrapper over raw `BMF.events.on`:
+
+```lua
+local id = BMF.minigames.on("join", function(payload, legacyEvent, eventName)
+  local meta = payload._bmf or {}
+  BMF.logInfo("player joined minigame", {
+    event = eventName,
+    legacy = legacyEvent,
+    eventId = meta.eventId,
+    playerKey = meta.playerKey,
+    minigameKey = meta.minigameKey,
+  })
+end)
+
+local listeners = BMF.minigames.listenerCount("join")
+BMF.minigames.off(id)
+```
+
+Every emitted payload receives normalized metadata under `_bmf` before
+subscribers run:
+
+```lua
+{
+  event = "minigames.joinminigame",
+  legacyEvent = "joinminigame",
+  legacy_event = "joinminigame",
+  eventId = "1",
+  event_id = "1",
+  emittedAt = "2026-06-07T15:16:31Z",
+  emitted_at = "2026-06-07T15:16:31Z",
+  source = "omegga.bmf-minigame-events",
+  playerKey = "<uuid-or-state>",
+  player_key = "<uuid-or-state>",
+  minigameKey = "name:GLOBAL#0",
+  minigame_key = "name:GLOBAL#0",
+}
+```
+
+Server-console command routes:
+
+```text
+Omegga.Bridge.BMF bmf.minigames.events.emit event=kill player=Player playerid=11111111-1111-4111-8111-111111111111 minigame=CityRPG index=0 leaderboard=0,1,0 oldleaderboard=0,0,0
+Omegga.Bridge.BMF bmf.minigames.events.status
+Omegga.Bridge.BMF bmf.minigames.events.recent event=kill limit=10
+Omegga.Bridge.BMF bmf.minigames.events.canary event=join
+Omegga.Bridge.BMF bmf.minigames.events.synthetic-flow
+```
+
+`bmf.minigames.events.canary` restores the minigame data cache after emitting
+its test event by default, so it does not leave `MinigameApiCanary` in live
+membership data. Pass `persist=true` only when intentionally testing reducer
+side effects.
+
+`bmf.minigames.events.synthetic-flow` emits a BMF-owned lifecycle canary:
+`created`, `joinminigame`, `teamchange`, `roundchange`,
+`leaderboardchange`, `kill`, `leaveminigame`, and `deleted`. It subscribes to
+each event, verifies the reducer checkpoints, and restores the previous data
+cache by default. Pass `persist=true` only when intentionally leaving the
+synthetic records in the current process.
+
+Every emitted event is also appended to `runtime/events.jsonl` through
+`BMF.events.emit`. CityRPG can tail that JSONL stream and map
+`minigames.kill` back to its existing `kill` listener without enabling the
+legacy `omegga-minigameevents` polling plugin.
+
+The supported Omegga producer is packaged at
+`integrations/omegga/bmf-minigame-events/`. Its safe default is log-events-only:
+it observes Brickadia/Omegga log evidence such as join-minigame messages and
+writes BMF command files for `BMF.minigames.emitEvent`. Snapshot/team and
+leaderboard polling are disabled by default because direct object/console
+enumeration has crashed CL13530 dedicated servers. Those producers remain unsafe
+opt-ins until BMF has a proven native hook or a safer Brickadia data source.
+
+## Data Snapshot
+
+BMF keeps an in-memory minigame data snapshot from accepted minigame events:
+
+```lua
+local snapshot = BMF.minigames.data()
+local status = BMF.minigames.dataStatus()
+local minigames = BMF.minigames.dataList({ limit = 25 })
+local city = BMF.minigames.get({ name = "CityRPG", index = 0 })
+local player = BMF.minigames.getPlayer({ player = "EventKiller" })
+local membership = BMF.minigames.membership({ player = "EventKiller" })
+local players = BMF.minigames.players({ minigame = "CityRPG", index = 0 })
+local teams = BMF.minigames.teams({ minigame = "CityRPG", index = 0 })
+local events = BMF.minigames.recentEvents({ event = "kill", limit = 10 })
+```
+
+Server-console command routes:
+
+```text
+Omegga.Bridge.BMF bmf.minigames.data.status
+Omegga.Bridge.BMF bmf.minigames.data.snapshot
+Omegga.Bridge.BMF bmf.minigames.data.list
+Omegga.Bridge.BMF bmf.minigames.data.get name=CityRPG index=0
+Omegga.Bridge.BMF bmf.minigames.data.players minigame=CityRPG index=0
+Omegga.Bridge.BMF bmf.minigames.data.teams minigame=CityRPG index=0
+Omegga.Bridge.BMF bmf.minigames.data.player player=EventKiller
+Omegga.Bridge.BMF bmf.minigames.data.membership player=EventKiller
+Omegga.Bridge.BMF bmf.minigames.events.recent event=kill limit=10
+```
+
+The status command prints compact counts:
+
+```text
+total_updates=6
+minigames=2
+players=1
+memberships=1
+teams=2
+team_memberships=1
+leaderboards=0
+rounds=0
+```
+
+This cache is event-fed. It becomes useful for BMF consumers after a supported
+producer emits a `snapshot` event, then stays current through membership, team,
+round, and leaderboard events. It does not require CityRPG to subscribe to
+`omegga-minigameevents`.
+
+`BMF.minigames.dataList(query)` lists known minigames with member/team counts.
+`BMF.minigames.get(query)` accepts `key`, `ruleset`, `name`, `minigame`, or
+`index` and returns one matched minigame plus its known members, teams, team
+memberships, leaderboard records, and round state. `BMF.minigames.players`,
+`BMF.minigames.teams`, and `BMF.minigames.membership` expose player/team views
+over the same cache. `BMF.minigames.getPlayer` accepts `player`, `playerid`,
+`uuid`, `id`, `name`, `state`, or `controller` and returns the player's known
+membership, team, leaderboard, and minigame context.
+
+`BMF.minigames.recentEvents(filter)` returns accepted events from BMF's recent
+minigame event ring buffer. Use `event`, `player`, `minigame`, and `limit`
+filters for troubleshooting producers without reading the full JSONL log.
+These are read-only BMF cache lookups; they do not call Brickadia
+`Server.Minigames.*` commands.
+
+For validation and troubleshooting only, the cache can be cleared explicitly:
+
+```text
+Omegga.Bridge.BMF bmf.minigames.data.clear confirm=CLEAR_MINIGAME_DATA
+```
 
 ## Validation
 
 - `L0 Static`: command formatting and preset directory listing.
 - `L1 Boot`: BMF Lua wrappers load and execute on a disposable headless server.
-- `L2 Headless`: command transport can be proven for safe commands such as
-  `Server.Minigames.List`.
+- `L2 Headless`: command transport can prove that unsafe minigame console
+  wrappers fail closed without reaching Brickadia.
+- `L2 Headless event-log`: `scripts/validate-bmf-events.ps1` emits a
+  namespaced `minigames.kill` canary and verifies it reaches
+  `runtime/events.jsonl`.
+- `L2 Headless data-status`: minigame event canaries update
+  `bmf.minigames.data.status` counts.
+- `L2 Headless data-query`: the same canaries prove
+  `bmf.minigames.data.snapshot`, `bmf.minigames.data.list`,
+  `bmf.minigames.data.get`, `bmf.minigames.data.players`,
+  `bmf.minigames.data.teams`, `bmf.minigames.data.player`,
+  `bmf.minigames.data.membership`, and `bmf.minigames.events.recent` return
+  stable JSON context without unsafe Brickadia minigame console calls.
+- `L2 Headless leave-reducer`: `scripts/validate-bmf-events.ps1` emits
+  `leaveminigame` after a join and proves the player's membership is removed.
+- `L2 Headless synthetic-flow`: `scripts/validate-bmf-events.ps1` runs
+  `bmf.minigames.events.synthetic-flow` to prove create, join, team, round,
+  leaderboard, kill, leave, and delete reducer checkpoints with data restoration.
+- `L2 Headless event-subscribe`: `bmf.minigames.events.canary` proves
+  `BMF.minigames.on`, `BMF.minigames.off`, listener counts, event aliases, and
+  normalized `_bmf` metadata.
 - `L2 Headless + L5 Negative`: `scripts/validate-bmf-minigame-commands.ps1`
-  proves command-worker transport for load preset, save preset, next round,
-  reset, and delete, plus invalid preset-name and invalid-index rejection.
+  proves command-worker transport, fail-closed behavior for unsafe minigame
+  console wrappers, and invalid preset-name/index rejection.
 - `L3 Live Player`: joining, membership, teams, scoring, and gameplay effects.
 - `L5 Negative`: permission or policy enforcement around minigame edits.
 

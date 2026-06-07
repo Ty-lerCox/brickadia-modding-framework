@@ -27,6 +27,11 @@ Unregisters a handler id. Returns `true` when a handler was removed.
 Emits an event and returns the standard BMF result shape. Plugins can emit
 custom events for their own coordination.
 
+Each emitted event is also appended to `runtime/events.jsonl` with
+`source: "event"`, the event name, payload, handler count, and any handler
+errors. External integrations can tail this stream instead of polling Brickadia
+console output.
+
 ## `BMF.events.listenerCount(name)`
 
 Returns the number of currently registered handlers for an event.
@@ -46,10 +51,33 @@ Returns the number of currently registered handlers for an event.
   current CL13530 `BMF.server.shutdown` path reports `SHUTDOWN_UNAVAILABLE`
   before emitting lifecycle shutdown events.
 
+## External Relays
+
+The JSONL event stream is the preferred bridge for integrations that need BMF
+events outside UE4SS Lua. For CityRPG minigame work, this is the replacement
+path for the legacy `omegga-minigameevents` polling plugin: BMF should produce
+minigame lifecycle/combat events, and CityRPG should tail
+`runtime/events.jsonl` and re-emit only those event records. The first
+supported producer is the Omegga adapter at
+`integrations/omegga/bmf-minigame-events/`, which writes BMF command files for
+`BMF.minigames.emitEvent`. The event surface uses namespaced BMF event names
+such as `minigames.joinminigame`, `minigames.kill`, and `minigames.death`;
+relays map those back to CityRPG's legacy event names at the application
+boundary. BMF-native data events such as `minigames.snapshot`,
+`minigames.created`, `minigames.deleted`, and `minigames.teamchange` update
+`BMF.minigames.data()` and do not require CityRPG to depend on Omegga's legacy
+minigame event plugin. The packaged adapter defaults to log-events-only;
+snapshot, team, and leaderboard polling remain unsafe opt-ins until BMF has a
+proven native hook or another safe Brickadia data source.
+
 ## Validation
 
 - `L0 Static`: package validator checks event API markers, docs, and canary.
 - `L2 Headless`: `scripts/validate-bmf-events.ps1` loads a temporary plugin,
   proves `serverReady` and `pluginLoaded`, emits a custom event with
-  registration/removal, saves the world through BMF, proves `worldSaved`, then
-  reloads plugins to prove plugin-owned handlers do not duplicate.
+  registration/removal, verifies emitted records in `runtime/events.jsonl`,
+  saves the world through BMF, proves `worldSaved`, then reloads plugins to
+  prove plugin-owned handlers do not duplicate.
+  The validator stages an `EventCanary` plugin into the UE4SS BMF runtime and
+  refuses to mutate the shared Omegga runtime while another Brickadia server is
+  active unless `-AllowSharedRuntimeMutation` is explicitly supplied.

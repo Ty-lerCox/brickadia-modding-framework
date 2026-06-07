@@ -117,9 +117,11 @@ uninstall.
    server files such as `Saved/Server/RoleSetup2.json`.
 6. Install `integrations/omegga/bmf-player-sync` when Omegga-fed player records
    are desired.
-7. Confirm `Mods/BMF/enabled.txt` exists.
-8. Start the server.
-9. Check `Mods/BMF/runtime/status.json`.
+7. Install `integrations/omegga/bmf-minigame-events` when CityRPG or another
+   plugin needs legacy-compatible minigame events from BMF.
+8. Confirm `Mods/BMF/enabled.txt` exists.
+9. Start the server.
+10. Check `Mods/BMF/runtime/status.json`.
 
 Do not install BMF into a running server. Runtime DLLs and mod files can be
 locked or partially loaded.

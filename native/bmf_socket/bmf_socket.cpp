@@ -106,6 +106,33 @@ namespace
         return value;
     }
 
+    std::string trim_ascii(std::string_view value)
+    {
+        size_t start = 0;
+        size_t end = value.size();
+        while (start < end && std::isspace(static_cast<unsigned char>(value[start])))
+        {
+            ++start;
+        }
+        while (end > start && std::isspace(static_cast<unsigned char>(value[end - 1])))
+        {
+            --end;
+        }
+        return std::string(value.substr(start, end - start));
+    }
+
+    bool env_flag_enabled(const char* name)
+    {
+        const char* raw = std::getenv(name);
+        if (!raw)
+        {
+            return false;
+        }
+
+        const std::string value = ascii_lower(trim_ascii(raw));
+        return value == "1" || value == "true" || value == "yes" || value == "on";
+    }
+
     bool contains_ascii_case_insensitive(std::string_view value, std::string_view needle)
     {
         std::string value_lower = ascii_lower(std::string(value));
@@ -164,6 +191,22 @@ namespace
             return nullptr;
         }
         return reinterpret_cast<Unreal::UObject*>(address);
+    }
+
+    bool is_native_location_scan_request(std::string_view raw)
+    {
+        const std::string text = ascii_lower(trim_ascii(raw));
+        return text == "*" || text == "scan" || text == "native-scan";
+    }
+
+    bool native_location_scan_enabled()
+    {
+        return env_flag_enabled("BMF_NATIVE_LOCATION_SCAN");
+    }
+
+    bool native_location_name_lookup_enabled()
+    {
+        return env_flag_enabled("BMF_NATIVE_LOCATION_NAME_LOOKUP");
     }
 
     bool is_live_uobject(Unreal::UObject* object)
@@ -272,6 +315,83 @@ namespace
         {
             return "";
         }
+    }
+
+    std::string normalize_object_lookup_name(std::string_view raw)
+    {
+        std::string text = trim_ascii(raw);
+        const std::string lowered = ascii_lower(text);
+        for (std::string_view prefix : {std::string_view("name:"), std::string_view("object:"), std::string_view("controller:")})
+        {
+            if (lowered.rfind(prefix, 0) == 0)
+            {
+                text = trim_ascii(std::string_view(text).substr(prefix.size()));
+                break;
+            }
+        }
+        return text;
+    }
+
+    bool object_matches_lookup_name(Unreal::UObject* object, std::string_view raw_query)
+    {
+        if (!is_live_uobject(object))
+        {
+            return false;
+        }
+
+        const std::string query = normalize_object_lookup_name(raw_query);
+        if (query.empty())
+        {
+            return false;
+        }
+        const std::string query_lower = ascii_lower(query);
+
+        try
+        {
+            const std::string object_name = narrow_string(object->GetName());
+            if (ascii_lower(object_name) == query_lower)
+            {
+                return true;
+            }
+
+            const std::string object_full_name = narrow_string(object->GetFullName());
+            const std::string object_full_name_lower = ascii_lower(object_full_name);
+            if (object_full_name_lower == query_lower ||
+                object_full_name_lower.find("." + query_lower) != std::string::npos ||
+                object_full_name_lower.find(":" + query_lower) != std::string::npos)
+            {
+                return true;
+            }
+        }
+        catch (...)
+        {
+            return false;
+        }
+
+        return false;
+    }
+
+    Unreal::UObject* uobject_from_address_or_name(std::string_view raw)
+    {
+        if (Unreal::UObject* object = uobject_from_address(raw))
+        {
+            return object;
+        }
+
+        if (!native_location_name_lookup_enabled())
+        {
+            return nullptr;
+        }
+
+        Unreal::UObject* found = nullptr;
+        Unreal::UObjectGlobals::ForEachUObject([&](Unreal::UObject* object, int32_t, int32_t) {
+            if (!found && object_matches_lookup_name(object, raw))
+            {
+                found = object;
+            }
+            return LoopAction::Continue;
+        });
+        return found;
     }
 
     Unreal::FProperty* get_class_property_by_name_in_chain(Unreal::UObject* object, Unreal::FName property_name)
@@ -810,18 +930,105 @@ namespace
         return stats;
     }
 
+    void write_native_player_location_fields(std::ostringstream& out, const NativePlayerLocation& location)
+    {
+        out << "match=single-live-pawn\n"
+            << "source_kind=" << json_escape(location.source_kind) << "\n"
+            << "source_object=" << json_escape(location.source_name) << "\n"
+            << "source_full_name=" << json_escape(location.source_full_name) << "\n"
+            << "controller=" << json_escape(location.controller_name) << "\n"
+            << "controller_full_name=" << json_escape(location.controller_full_name) << "\n"
+            << "pawn=" << json_escape(location.pawn_name) << "\n"
+            << "pawn_full_name=" << json_escape(location.pawn_full_name) << "\n"
+            << std::fixed << std::setprecision(3)
+            << "x=" << location.x << "\n"
+            << "y=" << location.y << "\n"
+            << "z=" << location.z << "\n";
+    }
+
+    void write_native_player_location_scan_lines(std::ostringstream& out, const std::vector<NativePlayerLocation>& locations)
+    {
+        for (size_t index = 0; index < locations.size(); ++index)
+        {
+            const NativePlayerLocation& location = locations[index];
+            out << "position_" << (index + 1) << "="
+                << "ok=true"
+                << "|x=" << std::fixed << std::setprecision(3) << location.x
+                << "|y=" << location.y
+                << "|z=" << location.z
+                << "|source_kind=" << json_escape(location.source_kind)
+                << "|source_object=" << json_escape(location.source_name)
+                << "|source_full_name=" << json_escape(location.source_full_name)
+                << "|controller=" << json_escape(location.controller_name)
+                << "|controller_full_name=" << json_escape(location.controller_full_name)
+                << "|pawn=" << json_escape(location.pawn_name)
+                << "|pawn_full_name=" << json_escape(location.pawn_full_name)
+                << "\n";
+        }
+    }
+
     std::string build_native_player_location_text(std::string_view source_address, std::string_view requested_name)
     {
         std::vector<NativePlayerLocation> locations;
         std::vector<Unreal::UObject*> seen_sources;
-        Unreal::UObject* source = uobject_from_address(source_address);
 
         std::ostringstream out;
         out << "Native player location\n"
             << "requested_name=" << json_escape(requested_name) << "\n"
             << "source=BMFSocketPlayerLocation\n"
-            << "source_address=" << json_escape(source_address) << "\n"
-            << "native_scan=disabled\n";
+            << "source_address=" << json_escape(source_address) << "\n";
+
+        if (is_native_location_scan_request(source_address))
+        {
+            if (!native_location_scan_enabled())
+            {
+                out << "native_scan=disabled\n"
+                    << "ok=false\n"
+                    << "detail=native location scan is disabled; provide a live UObject address or set BMF_NATIVE_LOCATION_SCAN=1 for diagnostics\n";
+                return out.str();
+            }
+
+            const NativePlayerLocationScanStats stats = collect_controller_locations_by_scan(locations, seen_sources);
+            out << "native_scan=enabled\n"
+                << "native_location_count=" << locations.size() << "\n"
+                << "scan_scanned_objects=" << stats.scanned_objects << "\n"
+                << "scan_controller_candidates=" << stats.controller_candidates << "\n"
+                << "scan_controller_attempts=" << stats.controller_attempts << "\n"
+                << "scan_controller_errors=" << stats.controller_errors << "\n"
+                << "scan_player_state_candidates=" << stats.player_state_candidates << "\n"
+                << "scan_player_state_attempts=" << stats.player_state_attempts << "\n"
+                << "scan_player_state_errors=" << stats.player_state_errors << "\n"
+                << "scan_pawn_candidates=" << stats.pawn_candidates << "\n";
+
+            if (locations.empty())
+            {
+                out << "ok=false\n"
+                    << "detail=native scan found no pawn locations\n";
+                return out.str();
+            }
+
+            out << "ok=true\n"
+                << "detail=native scan collected player locations\n";
+            write_native_player_location_scan_lines(out, locations);
+            if (locations.size() == 1)
+            {
+                write_native_player_location_fields(out, locations.front());
+            }
+            return out.str();
+        }
+
+        out << "native_scan=disabled\n";
+
+        uintptr_t parsed_source_address = 0;
+        if (!parse_uobject_address(source_address, parsed_source_address) && !native_location_name_lookup_enabled())
+        {
+            out << "source_lookup=name_lookup_disabled\n"
+                << "ok=false\n"
+                << "detail=native location name lookup is disabled; provide a live UObject address or set BMF_NATIVE_LOCATION_NAME_LOOKUP=1 for diagnostics\n";
+            return out.str();
+        }
+
+        Unreal::UObject* source = uobject_from_address_or_name(source_address);
 
         if (!is_live_uobject(source))
         {
@@ -864,19 +1071,8 @@ namespace
         }
 
         const NativePlayerLocation& location = locations.front();
-        out << "ok=true\n"
-            << "match=single-live-pawn\n"
-            << "source_kind=" << json_escape(location.source_kind) << "\n"
-            << "source_object=" << json_escape(location.source_name) << "\n"
-            << "source_full_name=" << json_escape(location.source_full_name) << "\n"
-            << "controller=" << json_escape(location.controller_name) << "\n"
-            << "controller_full_name=" << json_escape(location.controller_full_name) << "\n"
-            << "pawn=" << json_escape(location.pawn_name) << "\n"
-            << "pawn_full_name=" << json_escape(location.pawn_full_name) << "\n"
-            << std::fixed << std::setprecision(3)
-            << "x=" << location.x << "\n"
-            << "y=" << location.y << "\n"
-            << "z=" << location.z << "\n";
+        out << "ok=true\n";
+        write_native_player_location_fields(out, location);
         return out.str();
     }
 

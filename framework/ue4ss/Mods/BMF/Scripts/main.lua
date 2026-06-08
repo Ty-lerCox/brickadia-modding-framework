@@ -3401,8 +3401,11 @@ local function register_builtin_commands()
     return sent
   end)
 
-  BMF.commands.register("bmf.players.list", "List known BMF player records.", function()
-    local listed = BMF.players.list()
+  BMF.commands.register("bmf.players.list", "List known BMF player records.", function(args)
+    local options = parse_command_options(args)
+    local listed = BMF.players.list({
+      liveControllers = option_boolean(options, "livecontrollers", false) or option_boolean(options, "includelivecontrollers", false),
+    })
     local players = {}
     if listed.data and type(listed.data.players) == "table" then
       players = listed.data.players
@@ -3412,6 +3415,7 @@ local function register_builtin_commands()
       "players_count=" .. tostring(#players),
       "known_players_count=" .. tostring((listed.data and listed.data.knownPlayerCount) or #players),
       "live_controllers_count=" .. tostring((listed.data and listed.data.liveControllerCount) or 0),
+      "live_controllers_included=" .. tostring((listed.data and listed.data.liveControllersIncluded) == true),
       "adapter=" .. tostring((listed.data and listed.data.adapter) or "headless-empty"),
       "cache_path=" .. tostring((listed.data and listed.data.cachePath) or PLAYER_CACHE_PATH),
     }
@@ -3453,6 +3457,8 @@ local function register_builtin_commands()
     local snapshot = BMF.players.positions({
       player = player_query,
       limit = option_number(options, "limit", 32),
+      nativeController = option_boolean(options, "nativecontroller", true),
+      nativeCache = option_boolean(options, "nativecache", true),
       unsafe = option_boolean(options, "unsafe", false),
       allowLivePawnRead = option_boolean(options, "allowlivepawnread", false),
       liveController = option_boolean(options, "livecontroller", false),
@@ -12863,7 +12869,8 @@ local function player_cache_records(cache)
   return cache
 end
 
-BMF.players.list = function()
+BMF.players.list = function(options)
+  local opts = type(options) == "table" and options or {}
   local native_records, native_detail = native_player_records()
   local cache, cache_err = load_player_cache()
   local raw_records = #native_records > 0 and native_records or player_cache_records(cache)
@@ -12897,10 +12904,20 @@ BMF.players.list = function()
     adapter = "headless-empty"
   end
 
-  local live_count, live_targets = live_player_controller_count()
+  local include_live_controllers =
+    opts.liveControllers == true or
+    opts.includeLiveControllers == true or
+    option_boolean(opts, "livecontrollers", false) or
+    option_boolean(opts, "includelivecontrollers", false) or
+    os.getenv("BMF_PLAYERS_LIST_LIVE_CONTROLLERS") == "1"
+  local live_count = 0
+  local live_targets = {}
   local live_controllers = {}
-  for _, target in ipairs(live_targets or {}) do
-    live_controllers[#live_controllers + 1] = live_chat_target_summary(target)
+  if include_live_controllers then
+    live_count, live_targets = live_player_controller_count()
+    for _, target in ipairs(live_targets or {}) do
+      live_controllers[#live_controllers + 1] = live_chat_target_summary(target)
+    end
   end
   return result(true, "OK", #players > 0 and "Known player records listed" or "No cached player identity records are available", {
     players = players,
@@ -12910,6 +12927,7 @@ BMF.players.list = function()
     invalidCount = #invalid,
     liveControllerCount = live_count,
     liveControllers = live_controllers,
+    liveControllersIncluded = include_live_controllers,
     adapter = adapter,
     source = source,
     updatedAt = updated_at,
@@ -13261,6 +13279,84 @@ function player_position_parse_native_lines(text)
   return fields
 end
 
+function player_position_parse_pipe_fields(text)
+  local fields = {}
+  for part in tostring(text or ""):gmatch("[^|]+") do
+    local key, value = part:match("^([A-Za-z0-9_]+)=(.*)$")
+    if key ~= nil then
+      fields[key] = value or ""
+    end
+  end
+  return fields
+end
+
+function player_position_native_attempt(fields, source_value, source_label, raw)
+  fields = type(fields) == "table" and fields or {}
+  local detail = tostring(fields.detail or "native helper returned ok=false")
+  return {
+    source = "native.BMFSocketPlayerLocation." .. tostring(source_label or "source"),
+    ok = tostring(fields.ok or "") == "true",
+    address = tostring(source_value or ""),
+    sourceKind = tostring(fields.source_kind or ""),
+    sourceObject = tostring(fields.source_object or ""),
+    sourceFullName = tostring(fields.source_full_name or ""),
+    controller = tostring(fields.controller or ""),
+    controllerFullName = tostring(fields.controller_full_name or ""),
+    pawn = tostring(fields.pawn or ""),
+    pawnFullName = tostring(fields.pawn_full_name or ""),
+    detail = detail,
+    raw = tostring(raw or ""),
+  }
+end
+
+function player_position_native_position_from_attempt(attempt, fields)
+  if not (attempt and attempt.ok == true) then
+    return nil
+  end
+  local position = {
+    x = finite_number(fields.x, nil),
+    y = finite_number(fields.y, nil),
+    z = finite_number(fields.z, nil),
+  }
+  if position.x ~= nil and position.y ~= nil and position.z ~= nil then
+    attempt.detail = "ok"
+    return position
+  end
+  attempt.ok = false
+  attempt.detail = "native helper returned incomplete coordinates"
+  return nil
+end
+
+function player_position_native_from_source(source_value, query, source_label)
+  if type(BMFSocketPlayerLocation) ~= "function" then
+    return nil, "BMFSocketPlayerLocation unavailable", {
+      source = "native.BMFSocketPlayerLocation." .. tostring(source_label or "source"),
+      ok = false,
+      address = tostring(source_value or ""),
+      detail = "native helper unavailable",
+    }
+  end
+
+  local ok, response = pcall(BMFSocketPlayerLocation, tostring(source_value or ""), tostring(query or ""))
+  if not ok then
+    return nil, tostring(response or "native helper failed"), {
+      source = "native.BMFSocketPlayerLocation." .. tostring(source_label or "source"),
+      ok = false,
+      address = tostring(source_value or ""),
+      detail = tostring(response or "native helper failed"),
+    }
+  end
+
+  local fields = player_position_parse_native_lines(response)
+  local attempt = player_position_native_attempt(fields, source_value, source_label, response)
+  local position = player_position_native_position_from_attempt(attempt, fields)
+  if position ~= nil then
+    return position, attempt.source, attempt
+  end
+
+  return nil, attempt.detail, attempt
+end
+
 function player_position_native_from_controller(controller, query)
   if type(BMFSocketPlayerLocation) ~= "function" then
     return nil, "BMFSocketPlayerLocation unavailable", {
@@ -13377,6 +13473,161 @@ function player_position_native_from_controller(controller, query)
     detail = last_detail,
     attempts = attempts,
   }
+end
+
+function player_position_known_records_snapshot(opts, query, limit)
+  opts = type(opts) == "table" and opts or {}
+  query = trim_string(query or "")
+  limit = tonumber(limit) or 32
+
+  local listed = BMF.players.list()
+  local known_players = listed.data and type(listed.data.players) == "table" and listed.data.players or {}
+  local selected = {}
+  local resolve_candidates = {}
+  if query ~= "" then
+    local found = BMF.players.find(known_players, query)
+    if found.ok and found.data and found.data.player then
+      selected[#selected + 1] = found.data.player
+    else
+      resolve_candidates = found.data and found.data.players or {}
+    end
+  else
+    for _, player in ipairs(known_players or {}) do
+      selected[#selected + 1] = player
+    end
+  end
+
+  local players = {}
+  local positioned = 0
+  local max_count = math.min(limit, #(selected or {}))
+  local native_available = type(BMFSocketPlayerLocation) == "function"
+
+  for index = 1, max_count do
+    local player = selected[index]
+    local attempts = {}
+    local position = nil
+    local source = ""
+    local native_detail = nil
+    local source_values = {}
+
+    local controller_path = trim_string(player and player.controllerPath or "")
+    local player_state_path = trim_string(player and player.playerStatePath or "")
+    if controller_path ~= "" then
+      source_values[#source_values + 1] = { value = controller_path, label = "cache.controllerPath" }
+    end
+    if player_state_path ~= "" then
+      source_values[#source_values + 1] = { value = player_state_path, label = "cache.playerStatePath" }
+    end
+
+    for _, source_value in ipairs(source_values) do
+      position, source, native_detail = player_position_native_from_source(
+        source_value.value,
+        query ~= "" and query or player and (player.username or player.playerName or player.displayName or player.uuid) or "",
+        source_value.label
+      )
+      attempts[#attempts + 1] = native_detail
+      if position ~= nil then
+        break
+      end
+    end
+
+    if position ~= nil then
+      positioned = positioned + 1
+    end
+
+    players[#players + 1] = {
+      player = {
+        id = tostring(player and (player.uuid or player.id) or ""),
+        uuid = tostring(player and (player.uuid or player.id) or ""),
+        name = tostring(player and (player.playerName or player.username or player.displayName) or ""),
+        username = tostring(player and (player.username or player.playerName) or ""),
+        displayName = tostring(player and (player.displayName or player.username or player.playerName) or ""),
+        identitySource = "cache",
+      },
+      ok = position ~= nil,
+      position = position,
+      source = source,
+      playerState = tostring(player_state_path or ""),
+      playerStateName = tostring(player_state_path or ""),
+      controller = native_detail and native_detail.address or tostring(controller_path or ""),
+      controllerName = native_detail and native_detail.controller or tostring(controller_path or ""),
+      controllerFullName = native_detail and native_detail.controllerFullName or "",
+      pawn = native_detail and native_detail.pawn or "",
+      pawnName = native_detail and native_detail.pawn or "",
+      pawnFullName = native_detail and native_detail.pawnFullName or "",
+      pawnSource = native_detail and native_detail.sourceKind or "",
+      attempts = opts.includeMissing == true and attempts or nil,
+      native = native_detail,
+    }
+  end
+
+  local lines = {
+    "source=bmf.players.positions",
+    "query=" .. query,
+    "source_mode=native-cache",
+    "player_array_count=0",
+    "live_controllers=0",
+    "players=" .. tostring(#(selected or {})),
+    "returned=" .. tostring(#players),
+    "positioned=" .. tostring(positioned),
+    "known_players=" .. tostring(#known_players),
+    "native_available=" .. tostring(native_available),
+    "adapter=" .. tostring((listed.data and listed.data.adapter) or ""),
+  }
+  if query ~= "" and #players == 0 then
+    lines[#lines + 1] = "code=PLAYER_NOT_FOUND"
+    local candidate_texts = {}
+    for _, candidate in ipairs(resolve_candidates or {}) do
+      if type(candidate) == "table" then
+        candidate_texts[#candidate_texts + 1] = first_string(
+          candidate.uuid,
+          candidate.id,
+          candidate.username,
+          candidate.playerName,
+          candidate.displayName,
+          candidate.controllerPath,
+          candidate.playerStatePath
+        ) or ""
+      else
+        candidate_texts[#candidate_texts + 1] = tostring(candidate or "")
+      end
+    end
+    lines[#lines + 1] = "candidates=" .. table.concat(candidate_texts, "|")
+  end
+  for index, player in ipairs(players) do
+    local pos = player.position or {}
+    lines[#lines + 1] =
+      "position_" .. tostring(index) ..
+      "=" .. tostring(player.player.name or "") ..
+      "|id=" .. tostring(player.player.id or "") ..
+      "|ok=" .. tostring(player.ok == true) ..
+      "|x=" .. tostring(pos.x or "") ..
+      "|y=" .. tostring(pos.y or "") ..
+      "|z=" .. tostring(pos.z or "") ..
+      "|source=" .. tostring(player.source or "") ..
+      "|pawn=" .. tostring(player.pawn or "") ..
+      "|pawn_source=" .. tostring(player.pawnSource or "")
+  end
+
+  local data = {
+    source = "bmf.players.positions",
+    checkedAt = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    query = query,
+    sourceMode = "native-cache",
+    playerArrayCount = 0,
+    liveControllerCount = 0,
+    nativeAvailable = native_available,
+    players = players,
+    counts = {
+      observed = #(selected or {}),
+      returned = #players,
+      positioned = positioned,
+      knownPlayers = #known_players,
+    },
+    lines = lines,
+  }
+  lines[#lines + 1] = "positions_json=" .. json_encode(data)
+  return data
 end
 
 function player_position_live_controller_snapshot(opts, query, limit)
@@ -13555,9 +13806,26 @@ BMF.players.positions = function(options)
     option_boolean(opts, "unsafe", false) or
     option_boolean(opts, "allowlivepawnread", false)
 
-  local allow_live_controller_read =
+  local allow_native_cache =
     opts.nativeController ~= false and
-    option_boolean(opts, "nativecontroller", true) or
+    opts.nativeCache ~= false and
+    os.getenv("BMF_PLAYERS_POSITIONS_NATIVE_CACHE") ~= "0"
+  if allow_native_cache then
+    local native_cache_data = player_position_known_records_snapshot(opts, query, limit)
+    local native_cache_counts = native_cache_data.counts or {}
+    if tonumber(native_cache_counts.positioned) and tonumber(native_cache_counts.positioned) > 0 then
+      return result(true, "OK", "Native cached player positions collected", native_cache_data)
+    end
+
+    if not allow_live_pawn_read and opts.liveController ~= true and os.getenv("BMF_PLAYERS_POSITIONS_LIVE_CONTROLLER") ~= "1" then
+      native_cache_data.lines[#native_cache_data.lines + 1] = "code=POSITION_UNAVAILABLE"
+      native_cache_data.lines[#native_cache_data.lines + 1] =
+        "reason=native cached player position was unavailable; live Lua controller reads require livecontroller=1"
+      return result(false, "POSITION_UNAVAILABLE", "Native cached player position was unavailable", native_cache_data)
+    end
+  end
+
+  local allow_live_controller_read =
     opts.liveController == true or
     option_boolean(opts, "livecontroller", false) or
     os.getenv("BMF_PLAYERS_POSITIONS_LIVE_CONTROLLER") == "1"

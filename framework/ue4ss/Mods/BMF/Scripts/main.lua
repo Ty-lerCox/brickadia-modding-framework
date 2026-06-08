@@ -67,6 +67,8 @@ local state = {
   game_thread_callback_order = {},
   game_thread_callback_retention_limit = 8192,
   next_game_thread_callback_id = 1,
+  delayed_callbacks = {},
+  next_delayed_callback_id = 1,
   commands = {},
   console_command_callbacks = {},
   command_worker_started = false,
@@ -84,6 +86,9 @@ local state = {
     sent_responses = 0,
     received_commands = 0,
     received_messages = 0,
+    poll_count = 0,
+    last_poll_at = "",
+    last_drain_count = 0,
     last_error = "",
     last_status = "",
     last_started_at = "",
@@ -1068,6 +1073,10 @@ function BMF_socket_status_snapshot()
     sentResponses = state.socket.sent_responses,
     receivedCommands = state.socket.received_commands,
     receivedMessages = state.socket.received_messages,
+    pollCount = state.socket.poll_count,
+    lastPollAt = state.socket.last_poll_at,
+    lastDrainCount = state.socket.last_drain_count,
+    workerStarted = state.socket_worker_started,
     lastError = state.socket.last_error,
     lastStatus = state.socket.last_status,
     lastStartedAt = state.socket.last_started_at,
@@ -1134,20 +1143,115 @@ local function run_on_game_thread(callback)
     end
     state.game_thread_callbacks[id] = function()
       local retained = state.game_thread_callbacks[id]
+      state.game_thread_callbacks[id] = nil
       if retained then
-        callback()
+        local ok, err = pcall(callback)
+        if not ok then
+          log("error", "game-thread callback failed: " .. tostring(err))
+        end
       end
     end
-    ExecuteInGameThread(state.game_thread_callbacks[id], EGameThreadMethod.EngineTick)
-    return
+    local scheduled = pcall(ExecuteInGameThread, state.game_thread_callbacks[id], EGameThreadMethod.EngineTick)
+    if scheduled then
+      return
+    end
+    state.game_thread_callbacks[id] = nil
   end
 
   if type(ExecuteInGameThreadWithDelay) == "function" then
-    ExecuteInGameThreadWithDelay(0, callback)
-    return
+    local scheduled = pcall(ExecuteInGameThreadWithDelay, 0, callback)
+    if scheduled then
+      return
+    end
   end
 
   callback()
+end
+
+function BMF_retain_delayed_callback(prefix, callback)
+  local key = tostring(prefix or "delay") .. ":" .. tostring(state.next_delayed_callback_id)
+  state.next_delayed_callback_id = state.next_delayed_callback_id + 1
+  local wrapped
+  wrapped = function(...)
+    state.delayed_callbacks[key] = nil
+    local ok, err = pcall(callback, ...)
+    if not ok then
+      log("error", "delayed callback failed: " .. tostring(err))
+    end
+  end
+  state.delayed_callbacks[key] = wrapped
+  return wrapped, key
+end
+
+function BMF_schedule_delayed_callback(prefix, delay_ms, callback)
+  if type(callback) ~= "function" then
+    return false
+  end
+
+  local delay = tonumber(delay_ms) or 0
+  local wrapped, key = BMF_retain_delayed_callback(prefix, callback)
+
+  if type(ExecuteWithDelay) == "function" then
+    local scheduled = pcall(ExecuteWithDelay, delay, wrapped)
+    if scheduled then
+      return true
+    end
+  end
+
+  if type(ExecuteInGameThreadWithDelay) == "function" then
+    local scheduled = pcall(ExecuteInGameThreadWithDelay, delay, wrapped)
+    if scheduled then
+      return true
+    end
+  end
+
+  if type(MakeActionHandle) == "function" and type(ExecuteInGameThreadWithDelay) == "function" then
+    local ok, action_handle = pcall(MakeActionHandle)
+    if ok and action_handle ~= nil then
+      local scheduled = pcall(ExecuteInGameThreadWithDelay, action_handle, delay, wrapped)
+      if scheduled then
+        return true
+      end
+    end
+  end
+
+  state.delayed_callbacks[key] = nil
+  return false
+end
+
+function BMF_start_async_loop(prefix, interval_ms, callback)
+  if type(callback) ~= "function" or type(LoopAsync) ~= "function" then
+    return false
+  end
+  if os.getenv("BMF_ALLOW_LOOPASYNC") ~= "1" then
+    return false
+  end
+
+  local key = "loop:" .. tostring(prefix or "worker")
+  local interval = tonumber(interval_ms) or 250
+  local wrapped
+  wrapped = function()
+    local ok, should_stop_or_error = pcall(callback)
+    if not ok then
+      log("error", tostring(prefix or "worker") .. " loop failed: " .. tostring(should_stop_or_error))
+      state.delayed_callbacks[key] = nil
+      return true
+    end
+    if should_stop_or_error == true then
+      state.delayed_callbacks[key] = nil
+      return true
+    end
+    return false
+  end
+
+  state.delayed_callbacks[key] = wrapped
+  local scheduled = pcall(LoopAsync, interval, wrapped)
+  if scheduled then
+    return true
+  end
+
+  state.delayed_callbacks[key] = nil
+  return false
 end
 
 local BMF = {
@@ -1227,6 +1331,7 @@ API_REGISTRY = {
   { name = "BMF.players.resolve", namespace = "players", kind = "function", stability = "scaffold", risk = "live-player", validation = "L0 Fixture + L2 Headless negative; L3 Live Player for real records", requiresPlayer = true, capability = "", summary = "Resolve direct or current-list player query." },
   { name = "BMF.players.getName", namespace = "players", kind = "function", stability = "scaffold", risk = "live-player", validation = "L0 Fixture + L2 Headless negative; L3 Live Player for real records", requiresPlayer = true, capability = "", summary = "Return normalized identity fields." },
   { name = "BMF.players.summary", namespace = "players", kind = "function", stability = "experimental", risk = "low", validation = "L0 Static + L2 Headless; L3 Live Player for whispered delivery", requiresPlayer = false, capability = "", summary = "Resolve one player and include known-player/live-controller counts." },
+  { name = "BMF.players.positions", namespace = "players", kind = "function", stability = "experimental", risk = "live-player", validation = "L0 Static + L3 Live Player", requiresPlayer = true, capability = "", summary = "Read live player pawn positions from safe PlayerState/Controller references." },
   { name = "BMF.players.whisperSummary", namespace = "players", kind = "function", stability = "experimental", risk = "live-player", validation = "L0 Static + L3 Live Player for visible delivery", requiresPlayer = true, capability = "chat.whisper", summary = "Whisper a cached identity summary back to the selected player." },
   { name = "BMF.permissions.describeRole", namespace = "permissions", kind = "function", stability = "stable", risk = "low", validation = "L0 Fixture + L2 Headless", requiresPlayer = false, capability = "", summary = "Normalize a RoleSetup2-style role permission map." },
   { name = "BMF.permissions.evaluateNoSpawnItemApplicator", namespace = "permissions", kind = "function", stability = "stable", risk = "medium", validation = "L0 Fixture + L2 Headless; L3 Live Player + L5 Negative for runtime exploit denial", requiresPlayer = false, capability = "", summary = "Evaluate the default-role policy that keeps applicator access but forbids spawn items." },
@@ -3109,6 +3214,10 @@ local function register_builtin_commands()
         "sent_responses=" .. tostring(status.sentResponses),
         "received_commands=" .. tostring(status.receivedCommands),
         "received_messages=" .. tostring(status.receivedMessages),
+        "poll_count=" .. tostring(status.pollCount),
+        "last_poll_at=" .. tostring(status.lastPollAt),
+        "last_drain_count=" .. tostring(status.lastDrainCount),
+        "worker_started=" .. tostring(status.workerStarted),
         "last_error=" .. tostring(status.lastError),
         "native_status=" .. tostring(status.nativeStatus),
       },
@@ -3199,10 +3308,14 @@ local function register_builtin_commands()
   end)
 
   BMF.commands.register("bmf.chat.broadcast", "Broadcast a server chat message.", function(args)
-    local message = trim_string(args or "")
-    local prefixed = message:match("^message=(.*)$")
+    local raw = trim_string(args or "")
+    local options = parse_command_options(raw)
+    local message = raw
+    local prefixed = raw:match("^message=(.*)$")
     if prefixed ~= nil then
-      message = trim_string(prefixed)
+      message = percent_decode(trim_string(prefixed))
+    elseif options.message ~= nil then
+      message = percent_decode(options.message)
     end
 
     local broadcast = BMF.chat.broadcast(message)
@@ -3224,8 +3337,13 @@ local function register_builtin_commands()
 
   BMF.commands.register("bmf.chat.whisper", "Send a private chat message to a player.", function(args)
     local text = tostring(args or "")
-    local target = text:match("target=([^%s]+)") or text:match("player=([^%s]+)") or text:match("uuid=([^%s]+)")
-    local message = text:match("message=(.*)$") or ""
+    local options = parse_command_options(text)
+    local target = options.target or options.player or options.uuid or text:match("target=([^%s]+)") or text:match("player=([^%s]+)") or text:match("uuid=([^%s]+)")
+    if target ~= nil then
+      target = percent_decode(target)
+    end
+    local message = text:match("message=(.*)$") or options.message or ""
+    message = percent_decode(message)
     local whispered = BMF.chat.whisper(target, trim_string(message))
     local lines = {
       "target=" .. tostring(target or ""),
@@ -3252,8 +3370,13 @@ local function register_builtin_commands()
 
   BMF.commands.register("bmf.chat.statusmessage", "Send a private status message to a player.", function(args)
     local text = tostring(args or "")
-    local target = text:match("target=([^%s]+)") or text:match("player=([^%s]+)") or text:match("uuid=([^%s]+)")
-    local message = text:match("message=(.*)$") or ""
+    local options = parse_command_options(text)
+    local target = options.target or options.player or options.uuid or text:match("target=([^%s]+)") or text:match("player=([^%s]+)") or text:match("uuid=([^%s]+)")
+    if target ~= nil then
+      target = percent_decode(target)
+    end
+    local message = text:match("message=(.*)$") or options.message or ""
+    message = percent_decode(message)
     local sent = BMF.chat.statusMessage(target, trim_string(message))
     local lines = {
       "target=" .. tostring(target or ""),
@@ -3298,6 +3421,19 @@ local function register_builtin_commands()
     if listed.data and listed.data.cacheError and tostring(listed.data.cacheError) ~= "" then
       lines[#lines + 1] = "cache_error=" .. tostring(listed.data.cacheError)
     end
+    if listed.data and type(listed.data.liveControllers) == "table" then
+      for index, controller in ipairs(listed.data.liveControllers) do
+        lines[#lines + 1] =
+          "live_controller_" .. tostring(index) ..
+          "=label=" .. tostring(controller.label or "") ..
+          "|controller=" .. tostring(controller.controllerPath or "") ..
+          "|controller_name=" .. tostring(controller.controllerName or "") ..
+          "|controller_full_name=" .. tostring(controller.controllerFullName or "") ..
+          "|player_state=" .. tostring(controller.playerStatePath or "") ..
+          "|name=" .. tostring(controller.name or controller.userName or controller.displayName or "") ..
+          "|source=" .. tostring(controller.source or "")
+      end
+    end
     for index, player in ipairs(players) do
       lines[#lines + 1] =
         "player_" .. tostring(index) ..
@@ -3308,6 +3444,31 @@ local function register_builtin_commands()
     end
     listed.data.lines = lines
     return listed
+  end)
+
+  BMF.commands.register("bmf.players.positions", "Read live player pawn positions.", function(args)
+    local options = parse_command_options(args)
+    local positional = type(options._positional) == "table" and options._positional or {}
+    local player_query = options.player or options.query or options.name or positional[1] or ""
+    local snapshot = BMF.players.positions({
+      player = player_query,
+      limit = option_number(options, "limit", 32),
+      unsafe = option_boolean(options, "unsafe", false),
+      allowLivePawnRead = option_boolean(options, "allowlivepawnread", false),
+      liveController = option_boolean(options, "livecontroller", false),
+      callMethods = option_boolean(options, "methods", false) or option_boolean(options, "callmethods", false),
+      includeMissing = option_boolean(options, "includemissing", false),
+      fallbackFindAll = option_boolean(options, "fallbackfindall", true),
+    })
+    local data = snapshot.data or {}
+    data.lines = data.lines or {
+      "source=bmf.players.positions",
+      "query=" .. tostring(player_query or ""),
+      "players=0",
+      "returned=0",
+    }
+    snapshot.data = data
+    return snapshot
   end)
 
   BMF.commands.register("bmf.players.sync", "Sync safe external player identity records into BMF.", function(args)
@@ -12161,7 +12322,7 @@ end
 
 BMF.chat = {}
 
-local LIVE_CHAT_CONTROLLER_CLASSES = { "PlayerController", "BRPlayerController", "BP_PlayerController_C" }
+local LIVE_CHAT_CONTROLLER_CLASSES = { "BP_PlayerController_C", "BRPlayerController", "PlayerController" }
 
 local function live_chat_is_valid_object(object)
   if object == nil then
@@ -12309,6 +12470,8 @@ local function live_chat_target_summary(target)
     displayName = tostring(target.displayName or ""),
     playerId = tostring(target.playerId or ""),
     controllerPath = tostring(target.controllerPath or ""),
+    controllerName = live_chat_object_label(target.controller, ""),
+    controllerFullName = live_chat_object_full_name(target.controller),
     playerStatePath = tostring(target.playerStatePath or ""),
     label = tostring(target.label or ""),
     source = tostring(target.source or ""),
@@ -12734,7 +12897,11 @@ BMF.players.list = function()
     adapter = "headless-empty"
   end
 
-  local live_count = live_player_controller_count()
+  local live_count, live_targets = live_player_controller_count()
+  local live_controllers = {}
+  for _, target in ipairs(live_targets or {}) do
+    live_controllers[#live_controllers + 1] = live_chat_target_summary(target)
+  end
   return result(true, "OK", #players > 0 and "Known player records listed" or "No cached player identity records are available", {
     players = players,
     invalid = invalid,
@@ -12742,6 +12909,7 @@ BMF.players.list = function()
     knownPlayerCount = #players,
     invalidCount = #invalid,
     liveControllerCount = live_count,
+    liveControllers = live_controllers,
     adapter = adapter,
     source = source,
     updatedAt = updated_at,
@@ -12749,6 +12917,841 @@ BMF.players.list = function()
     cacheError = cache_error,
     native = native_detail,
   })
+end
+
+function player_position_axis_from_value(value, names, index)
+  if type(value) == "number" then
+    return finite_number(value, nil)
+  end
+  if type(value) == "table" then
+    local direct = finite_number(value[index], nil)
+    if direct ~= nil then
+      return direct
+    end
+    for _, name in ipairs(names or {}) do
+      local number = finite_number(value[name], nil)
+      if number ~= nil then
+        return number
+      end
+    end
+    return nil
+  end
+  if type(value) ~= "userdata" then
+    return nil
+  end
+
+  for _, name in ipairs(names or {}) do
+    local raw = minigame_try_property(value, name)
+    local number = finite_number(raw, nil)
+    if number ~= nil then
+      return number
+    end
+  end
+  return nil
+end
+
+function player_position_from_text(value)
+  local text = minigame_value_to_string(value)
+  if trim_string(text) == "" then
+    text = tostring(value or "")
+  end
+  local x = text:match("[Xx]%s*=%s*([%-%+]?%d+%.?%d*)")
+  local y = text:match("[Yy]%s*=%s*([%-%+]?%d+%.?%d*)")
+  local z = text:match("[Zz]%s*=%s*([%-%+]?%d+%.?%d*)")
+  if x and y and z then
+    return {
+      x = finite_number(x, 0),
+      y = finite_number(y, 0),
+      z = finite_number(z, 0),
+    }
+  end
+
+  local a, b, c = text:match("^%s*%(%s*([%-%+]?%d+%.?%d*)%s*,%s*([%-%+]?%d+%.?%d*)%s*,%s*([%-%+]?%d+%.?%d*)%s*%)%s*$")
+  if not a then
+    a, b, c = text:match("^%s*([%-%+]?%d+%.?%d*)%s*,%s*([%-%+]?%d+%.?%d*)%s*,%s*([%-%+]?%d+%.?%d*)%s*$")
+  end
+  if a and b and c then
+    return {
+      x = finite_number(a, 0),
+      y = finite_number(b, 0),
+      z = finite_number(c, 0),
+    }
+  end
+  return nil
+end
+
+function player_position_from_vector(value)
+  if value == nil then
+    return nil
+  end
+
+  local x = player_position_axis_from_value(value, { "X", "x" }, 1)
+  local y = player_position_axis_from_value(value, { "Y", "y" }, 2)
+  local z = player_position_axis_from_value(value, { "Z", "z" }, 3)
+  if x ~= nil and y ~= nil and z ~= nil then
+    return { x = x, y = y, z = z }
+  end
+
+  return player_position_from_text(value)
+end
+
+function player_position_call_vector(object, method_name)
+  if not minigame_object_valid(object) then
+    return nil, "invalid object"
+  end
+
+  local method = minigame_userdata_method(object, method_name)
+  if type(method) ~= "function" then
+    return nil, "method unavailable"
+  end
+
+  local ok, value = pcall(function()
+    return method(object)
+  end)
+  if not ok then
+    return nil, tostring(value)
+  end
+
+  local position = player_position_from_vector(value)
+  if position ~= nil then
+    return position, ""
+  end
+  return nil, "method returned non-vector " .. minigame_compact_value(minigame_value_to_string(value))
+end
+
+function player_position_property_vector(object, property_name)
+  if not minigame_object_valid(object) then
+    return nil, "invalid object"
+  end
+  local value = minigame_try_property(object, property_name)
+  if value == nil then
+    return nil, "property unavailable"
+  end
+  local position = player_position_from_vector(value)
+  if position ~= nil then
+    return position, ""
+  end
+  return nil, "property returned non-vector " .. minigame_compact_value(minigame_value_to_string(value))
+end
+
+function player_position_component_vector(object, component_property, vector_property)
+  if not minigame_object_valid(object) then
+    return nil, "invalid object"
+  end
+  local component = minigame_try_property(object, component_property)
+  if not minigame_object_valid(component) then
+    return nil, "component unavailable"
+  end
+  return player_position_property_vector(component, vector_property)
+end
+
+function player_position_add_candidate(candidates, seen, object, source)
+  if not minigame_object_valid(object) then
+    return
+  end
+  local key = minigame_object_address(object)
+  if key == "" then
+    key = minigame_object_full_name(object)
+  end
+  if key == "" then
+    key = tostring(object or "")
+  end
+  if key == "" or seen[key] then
+    return
+  end
+  seen[key] = true
+  candidates[#candidates + 1] = {
+    object = object,
+    source = tostring(source or ""),
+    address = minigame_object_address(object),
+    objectName = minigame_object_name(object),
+    fullName = minigame_object_full_name(object),
+    className = minigame_object_class_name(object),
+  }
+end
+
+function player_position_candidate_pawns(player_state)
+  local candidates = {}
+  local seen = {}
+  local controller = minigame_try_property(player_state, "Owner")
+
+  for _, property_name in ipairs({ "PawnPrivate", "Pawn", "Character", "DefaultPawn" }) do
+    player_position_add_candidate(
+      candidates,
+      seen,
+      minigame_try_property(player_state, property_name),
+      "player_state." .. property_name
+    )
+  end
+
+  if minigame_object_valid(controller) then
+    for _, property_name in ipairs({ "AcknowledgedPawn", "Pawn", "Character", "ControlledPawn" }) do
+      player_position_add_candidate(
+        candidates,
+        seen,
+        minigame_try_property(controller, property_name),
+        "controller." .. property_name
+      )
+    end
+  end
+
+  return candidates, controller
+end
+
+function player_position_read_from_pawn(pawn, options)
+  local attempts = {}
+  local opts = type(options) == "table" and options or {}
+  local allow_method_calls =
+    opts.callMethods == true or
+    option_boolean(opts, "callmethods", false) or
+    option_boolean(opts, "methods", false)
+
+  if allow_method_calls then
+    for _, method_name in ipairs({
+      "K2_GetActorLocation",
+      "GetActorLocation",
+      "GetTransform",
+    }) do
+      local position, err = player_position_call_vector(pawn, method_name)
+      attempts[#attempts + 1] = {
+        source = "pawn." .. method_name,
+        ok = position ~= nil,
+        error = tostring(err or ""),
+      }
+      if position ~= nil then
+        return position, "pawn." .. method_name, attempts
+      end
+    end
+  else
+    for _, method_name in ipairs({
+      "K2_GetActorLocation",
+      "GetActorLocation",
+      "GetTransform",
+    }) do
+      attempts[#attempts + 1] = {
+        source = "pawn." .. method_name,
+        ok = false,
+        error = "skipped-unsafe-struct-return",
+      }
+    end
+  end
+
+  for _, chain in ipairs({
+    { component = "RootComponent", vector = "RelativeLocation" },
+    { component = "CollisionCylinder", vector = "RelativeLocation" },
+    { component = "CapsuleComponent", vector = "RelativeLocation" },
+    { component = "Mesh", vector = "RelativeLocation" },
+  }) do
+    local position, err = player_position_component_vector(pawn, chain.component, chain.vector)
+    attempts[#attempts + 1] = {
+      source = "pawn." .. chain.component .. "." .. chain.vector,
+      ok = position ~= nil,
+      error = tostring(err or ""),
+    }
+    if position ~= nil then
+      return position, "pawn." .. chain.component .. "." .. chain.vector, attempts
+    end
+  end
+
+  for _, property_name in ipairs({
+    "Location",
+    "RelativeLocation",
+    "ReplicatedMovement",
+    "ActorLocation",
+    "K2Node_ComponentBoundEvent_Location",
+  }) do
+    local position, err = player_position_property_vector(pawn, property_name)
+    attempts[#attempts + 1] = {
+      source = "pawn." .. property_name,
+      ok = position ~= nil,
+      error = tostring(err or ""),
+    }
+    if position ~= nil then
+      return position, "pawn." .. property_name, attempts
+    end
+  end
+
+  return nil, "", attempts
+end
+
+function player_position_identity_from_cache(players, player_name, candidates)
+  local lowered_name = trim_string(player_name or ""):lower()
+  local candidate_map = {}
+  for _, candidate in ipairs(candidates or {}) do
+    local lowered = trim_string(candidate):lower()
+    if lowered ~= "" then
+      candidate_map[lowered] = true
+    end
+  end
+
+  for _, player in ipairs(players or {}) do
+    local values = {
+      player.uuid,
+      player.id,
+      player.username,
+      player.playerName,
+      player.displayName,
+      player.originalName,
+      player.playerStatePath,
+      player.controllerPath,
+    }
+    for _, value in ipairs(values) do
+      local lowered = trim_string(value or ""):lower()
+      if lowered ~= "" and (candidate_map[lowered] or lowered == lowered_name) then
+        return player, lowered == lowered_name and "cache.name" or "cache.candidate"
+      end
+    end
+  end
+
+  return nil, ""
+end
+
+function player_position_candidate_pawns_from_controller(controller)
+  local candidates = {}
+  local seen = {}
+  if not minigame_object_valid(controller) then
+    return candidates
+  end
+
+  for _, property_name in ipairs({ "AcknowledgedPawn", "Pawn", "Character", "ControlledPawn" }) do
+    player_position_add_candidate(
+      candidates,
+      seen,
+      minigame_try_property(controller, property_name),
+      "controller." .. property_name
+    )
+  end
+
+  return candidates
+end
+
+function player_position_identity_from_live_target(known_players, target, target_count)
+  target = type(target) == "table" and target or {}
+  known_players = type(known_players) == "table" and known_players or {}
+
+  local candidates = {
+    target.playerId,
+    target.name,
+    target.userName,
+    target.displayName,
+    target.controllerPath,
+    target.playerStatePath,
+    target.label,
+  }
+  local identity, identity_source = player_position_identity_from_cache(known_players, target.name, candidates)
+  if identity ~= nil then
+    return identity, identity_source
+  end
+
+  if tonumber(target_count) == 1 and #known_players == 1 then
+    return known_players[1], "cache.single-live-controller"
+  end
+
+  return nil, ""
+end
+
+function player_position_parse_native_lines(text)
+  local fields = {}
+  for line in tostring(text or ""):gmatch("[^\r\n]+") do
+    local key, value = line:match("^([A-Za-z0-9_]+)=(.*)$")
+    if key ~= nil then
+      fields[key] = value or ""
+    end
+  end
+  return fields
+end
+
+function player_position_native_from_controller(controller, query)
+  if type(BMFSocketPlayerLocation) ~= "function" then
+    return nil, "BMFSocketPlayerLocation unavailable", {
+      source = "native.BMFSocketPlayerLocation",
+      ok = false,
+      address = "",
+      detail = "native helper unavailable",
+    }
+  end
+  if not minigame_object_valid(controller) then
+    return nil, "controller unavailable", {
+      source = "native.BMFSocketPlayerLocation",
+      ok = false,
+      address = "",
+      detail = "controller unavailable",
+    }
+  end
+
+  local sources = {}
+  local seen = {}
+  local function add_source(object, source)
+    if not minigame_object_valid(object) then
+      return
+    end
+    local address = minigame_object_address(object)
+    if address == "" then
+      address = live_chat_object_key(object, "")
+    end
+    if address == "" or seen[address] then
+      return
+    end
+    seen[address] = true
+    sources[#sources + 1] = {
+      address = address,
+      source = tostring(source or ""),
+      objectName = minigame_object_name(object),
+      fullName = minigame_object_full_name(object),
+    }
+  end
+
+  add_source(controller, "controller")
+  for _, property_name in ipairs({ "Pawn", "AcknowledgedPawn", "Character", "ControlledPawn" }) do
+    add_source(minigame_try_property(controller, property_name), "controller." .. property_name)
+  end
+
+  if #sources == 0 then
+    return nil, "controller address unavailable", {
+      source = "native.BMFSocketPlayerLocation",
+      ok = false,
+      address = "",
+      detail = "controller address unavailable",
+    }
+  end
+
+  local attempts = {}
+  local last_detail = "native helper returned no position"
+  for _, source in ipairs(sources) do
+    local ok, response = pcall(BMFSocketPlayerLocation, source.address, tostring(query or ""))
+    if not ok then
+      last_detail = tostring(response or "native helper failed")
+      attempts[#attempts + 1] = {
+        source = "native.BMFSocketPlayerLocation." .. source.source,
+        ok = false,
+        address = source.address,
+        objectName = source.objectName,
+        fullName = source.fullName,
+        detail = last_detail,
+      }
+    else
+      local fields = player_position_parse_native_lines(response)
+      local detail = tostring(fields.detail or "native helper returned ok=false")
+      local attempt = {
+        source = "native.BMFSocketPlayerLocation." .. source.source,
+        ok = tostring(fields.ok or "") == "true",
+        address = source.address,
+        objectName = source.objectName,
+        fullName = source.fullName,
+        sourceKind = tostring(fields.source_kind or ""),
+        sourceObject = tostring(fields.source_object or ""),
+        sourceFullName = tostring(fields.source_full_name or ""),
+        controller = tostring(fields.controller or ""),
+        controllerFullName = tostring(fields.controller_full_name or ""),
+        pawn = tostring(fields.pawn or ""),
+        pawnFullName = tostring(fields.pawn_full_name or ""),
+        detail = detail,
+        raw = tostring(response or ""),
+      }
+      attempts[#attempts + 1] = attempt
+
+      if attempt.ok then
+        local position = {
+          x = finite_number(fields.x, nil),
+          y = finite_number(fields.y, nil),
+          z = finite_number(fields.z, nil),
+        }
+        if position.x ~= nil and position.y ~= nil and position.z ~= nil then
+          attempt.detail = "ok"
+          attempt.attempts = attempts
+          return position, attempt.source, attempt
+        end
+        last_detail = "native helper returned incomplete coordinates"
+        attempt.ok = false
+        attempt.detail = last_detail
+      else
+        last_detail = detail
+      end
+    end
+  end
+
+  return nil, last_detail, {
+    source = "native.BMFSocketPlayerLocation",
+    ok = false,
+    address = sources[1].address,
+    detail = last_detail,
+    attempts = attempts,
+  }
+end
+
+function player_position_live_controller_snapshot(opts, query, limit)
+  opts = type(opts) == "table" and opts or {}
+  query = trim_string(query or "")
+  limit = tonumber(limit) or 32
+
+  local listed = BMF.players.list()
+  local known_players = listed.data and type(listed.data.players) == "table" and listed.data.players or {}
+  local targets = {}
+  local selected = {}
+
+  if query ~= "" then
+    local target, resolved_targets = live_chat_resolve_target(query)
+    targets = resolved_targets or {}
+    if target ~= nil then
+      selected[#selected + 1] = target
+    end
+  else
+    targets = live_chat_collect_targets()
+    for _, target in ipairs(targets or {}) do
+      selected[#selected + 1] = target
+    end
+  end
+
+  local players = {}
+  local positioned = 0
+  local max_count = math.min(limit, #(selected or {}))
+  local native_available = type(BMFSocketPlayerLocation) == "function"
+  local allow_lua_pawn_read =
+    opts.luaPawnRead == true or
+    opts.luaVectors == true or
+    option_boolean(opts, "luapawnread", false) or
+    option_boolean(opts, "luavectors", false)
+
+  for index = 1, max_count do
+    local target = selected[index]
+    local identity, identity_source = player_position_identity_from_live_target(known_players, target, #(targets or {}))
+    local pawn_candidates = {}
+    local position = nil
+    local source = ""
+    local attempts = {}
+    local pawn_record = nil
+    local native_detail = nil
+
+    position, source, native_detail = player_position_native_from_controller(
+      target and target.controller or nil,
+      query ~= "" and query or target and (target.name or target.userName or target.displayName or target.playerId) or ""
+    )
+    attempts[#attempts + 1] = native_detail or {
+      source = "native.BMFSocketPlayerLocation",
+      ok = false,
+      detail = "native detail missing",
+    }
+
+    if position == nil and allow_lua_pawn_read then
+      pawn_candidates = player_position_candidate_pawns_from_controller(target and target.controller or nil)
+      for _, candidate in ipairs(pawn_candidates) do
+        local lua_position, lua_source, lua_attempts = player_position_read_from_pawn(candidate.object, opts)
+        for _, attempt in ipairs(lua_attempts or {}) do
+          attempts[#attempts + 1] = attempt
+        end
+        if lua_position ~= nil then
+          position = lua_position
+          source = lua_source
+          pawn_record = candidate
+          break
+        end
+      end
+    end
+
+    if position ~= nil then
+      positioned = positioned + 1
+    end
+
+    local player_name = first_string(
+      identity and identity.username,
+      identity and identity.playerName,
+      identity and identity.displayName,
+      target and target.name,
+      target and target.userName,
+      target and target.displayName
+    ) or ""
+
+    players[#players + 1] = {
+      player = {
+        id = tostring(identity and (identity.uuid or identity.id) or target and target.playerId or ""),
+        uuid = tostring(identity and (identity.uuid or identity.id) or target and target.playerId or ""),
+        name = tostring(player_name or ""),
+        username = tostring(identity and identity.username or target and target.userName or player_name or ""),
+        displayName = tostring(identity and identity.displayName or target and target.displayName or player_name or ""),
+        identitySource = identity_source,
+      },
+      ok = position ~= nil,
+      position = position,
+      source = source,
+      playerState = tostring(target and target.playerStatePath or ""),
+      playerStateName = tostring(target and target.playerStatePath or ""),
+      controller = native_detail and native_detail.address or live_chat_object_key(target and target.controller or nil, ""),
+      controllerName = native_detail and native_detail.controller or live_chat_object_label(target and target.controller or nil, ""),
+      controllerFullName = native_detail and native_detail.controllerFullName or live_chat_object_full_name(target and target.controller or nil),
+      pawn = native_detail and native_detail.pawn or pawn_record and pawn_record.address or "",
+      pawnName = native_detail and native_detail.pawn or pawn_record and pawn_record.objectName or "",
+      pawnFullName = native_detail and native_detail.pawnFullName or "",
+      pawnSource = pawn_record and pawn_record.source or "",
+      pawnCandidates = pawn_candidates,
+      attempts = opts.includeMissing == true and attempts or nil,
+      native = native_detail,
+    }
+  end
+
+  local lines = {
+    "source=bmf.players.positions",
+    "query=" .. query,
+    "source_mode=native-controller",
+    "player_array_count=0",
+    "live_controllers=" .. tostring(#(targets or {})),
+    "players=" .. tostring(#(selected or {})),
+    "returned=" .. tostring(#players),
+    "positioned=" .. tostring(positioned),
+    "known_players=" .. tostring(#known_players),
+    "native_available=" .. tostring(native_available),
+  }
+  if query ~= "" and #players == 0 then
+    lines[#lines + 1] = "code=PLAYER_NOT_FOUND"
+  end
+  for index, player in ipairs(players) do
+    local pos = player.position or {}
+    lines[#lines + 1] =
+      "position_" .. tostring(index) .. "=" ..
+      tostring(player.player.name or "") ..
+      "|id=" .. tostring(player.player.id or "") ..
+      "|ok=" .. tostring(player.ok == true) ..
+      "|x=" .. tostring(pos.x or "") ..
+      "|y=" .. tostring(pos.y or "") ..
+      "|z=" .. tostring(pos.z or "") ..
+      "|source=" .. tostring(player.source or "") ..
+      "|pawn=" .. tostring(player.pawn or "") ..
+      "|pawn_source=" .. tostring(player.pawnSource or "")
+  end
+
+  local data = {
+    source = "bmf.players.positions",
+    checkedAt = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    query = query,
+    sourceMode = "native-controller",
+    playerArrayCount = 0,
+    liveControllerCount = #(targets or {}),
+    nativeAvailable = native_available,
+    players = players,
+    counts = {
+      observed = #(selected or {}),
+      returned = #players,
+      positioned = positioned,
+      knownPlayers = #known_players,
+    },
+    lines = lines,
+  }
+  lines[#lines + 1] = "positions_json=" .. json_encode(data)
+  return data
+end
+
+BMF.players.positions = function(options)
+  local opts = type(options) == "table" and options or {}
+  local query = trim_string(opts.player or opts.query or opts.name or "")
+  local limit = tonumber(opts.limit) or 32
+  if limit < 1 then
+    limit = 1
+  elseif limit > 128 then
+    limit = 128
+  end
+
+  local allow_live_pawn_read =
+    opts.unsafe == true or
+    opts.allowLivePawnRead == true or
+    option_boolean(opts, "unsafe", false) or
+    option_boolean(opts, "allowlivepawnread", false)
+
+  local allow_live_controller_read =
+    opts.nativeController ~= false and
+    option_boolean(opts, "nativecontroller", true) or
+    opts.liveController == true or
+    option_boolean(opts, "livecontroller", false) or
+    os.getenv("BMF_PLAYERS_POSITIONS_LIVE_CONTROLLER") == "1"
+  if allow_live_controller_read then
+    local live_controller_data = player_position_live_controller_snapshot(opts, query, limit)
+    local live_controller_counts = live_controller_data.counts or {}
+    if tonumber(live_controller_counts.positioned) and tonumber(live_controller_counts.positioned) > 0 then
+      return result(true, "OK", "Live controller player positions collected", live_controller_data)
+    end
+
+    if not allow_live_pawn_read then
+      live_controller_data.lines[#live_controller_data.lines + 1] = "code=POSITION_UNAVAILABLE"
+      live_controller_data.lines[#live_controller_data.lines + 1] =
+        "reason=live controller pawn position was unavailable; broad PlayerState reads require unsafe=1"
+      return result(false, "POSITION_UNAVAILABLE", "Live controller pawn position was unavailable", live_controller_data)
+    end
+  end
+
+  if not allow_live_pawn_read then
+    local lines = {
+      "source=bmf.players.positions",
+      "query=" .. query,
+      "source_mode=disabled-safe-default",
+      "player_array_count=0",
+      "players=0",
+      "returned=0",
+      "positioned=0",
+      "known_players=0",
+      "code=POSITION_UNAVAILABLE",
+      "reason=live pawn position reads require native support or unsafe=1",
+    }
+    local data = {
+      source = "bmf.players.positions",
+      checkedAt = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+      query = query,
+      sourceMode = "disabled-safe-default",
+      playerArrayCount = 0,
+      players = {},
+      counts = {
+        observed = 0,
+        returned = 0,
+        positioned = 0,
+        knownPlayers = 0,
+      },
+      lines = lines,
+    }
+    lines[#lines + 1] = "positions_json=" .. json_encode(data)
+    return result(false, "POSITION_UNAVAILABLE", "Live pawn position reads require native support or unsafe=1", data)
+  end
+
+  local player_items = {}
+  local meta = {
+    source = "",
+    playerArrayCount = 0,
+    errors = {},
+  }
+  local resolve_candidates = {}
+  if query ~= "" then
+    local item, candidates, item_meta = minigame_live_resolve_player_state_for_assignment(query)
+    resolve_candidates = candidates or {}
+    meta = item_meta or meta
+    if item and minigame_object_valid(item.object) then
+      player_items[#player_items + 1] = item
+    end
+  else
+    player_items, meta = minigame_live_player_states({
+      fallbackFindAll = opts.fallbackFindAll ~= false,
+    })
+  end
+
+  local listed = BMF.players.list()
+  local known_players = listed.data and listed.data.players or {}
+  local players = {}
+  local positioned = 0
+
+  for _, item in ipairs(player_items or {}) do
+    if #players >= limit then
+      break
+    end
+    local player_state = item.object
+    local property_values = minigame_live_collect_property_values(
+      player_state,
+      {
+        "UserName",
+        "PlayerNamePrivate",
+        "PlayerName",
+        "DisplayName",
+      },
+      0,
+      false
+    )
+    local player_name = minigame_live_first_property_text(property_values, {
+      "UserName",
+      "PlayerNamePrivate",
+      "PlayerName",
+      "DisplayName",
+    })
+    local assignment_candidates = minigame_live_player_assignment_candidates(player_state)
+    local identity, identity_source = player_position_identity_from_cache(known_players, player_name, assignment_candidates)
+    local pawn_candidates, controller = player_position_candidate_pawns(player_state)
+    local position = nil
+    local source = ""
+    local attempts = {}
+    local pawn_record = nil
+
+    for _, candidate in ipairs(pawn_candidates) do
+      position, source, attempts = player_position_read_from_pawn(candidate.object, opts)
+      if position ~= nil then
+        pawn_record = candidate
+        break
+      end
+    end
+
+    if position ~= nil then
+      positioned = positioned + 1
+    end
+
+    local record = {
+      player = {
+        id = tostring(identity and (identity.uuid or identity.id) or ""),
+        uuid = tostring(identity and (identity.uuid or identity.id) or ""),
+        name = tostring(player_name or ""),
+        username = tostring(identity and identity.username or player_name or ""),
+        displayName = tostring(identity and identity.displayName or player_name or ""),
+        identitySource = identity_source,
+      },
+      ok = position ~= nil,
+      position = position,
+      source = source,
+      playerState = minigame_object_address(player_state),
+      playerStateName = minigame_object_name(player_state),
+      controller = minigame_object_address(controller),
+      controllerName = minigame_object_name(controller),
+      pawn = pawn_record and pawn_record.address or "",
+      pawnName = pawn_record and pawn_record.objectName or "",
+      pawnSource = pawn_record and pawn_record.source or "",
+      pawnCandidates = pawn_candidates,
+      attempts = opts.includeMissing == true and attempts or nil,
+    }
+    players[#players + 1] = record
+  end
+
+  local lines = {
+    "source=bmf.players.positions",
+    "query=" .. query,
+    "source_mode=" .. tostring(meta and meta.source or ""),
+    "player_array_count=" .. tostring(meta and meta.playerArrayCount or 0),
+    "players=" .. tostring(#(player_items or {})),
+    "returned=" .. tostring(#players),
+    "positioned=" .. tostring(positioned),
+    "known_players=" .. tostring(#known_players),
+  }
+
+  if query ~= "" and #players == 0 then
+    lines[#lines + 1] = "code=PLAYER_NOT_FOUND"
+    lines[#lines + 1] = "candidates=" .. table.concat(resolve_candidates or {}, "|")
+  end
+  for index, error_text in ipairs((meta and meta.errors) or {}) do
+    lines[#lines + 1] = "error_" .. tostring(index) .. "=" .. tostring(error_text)
+  end
+  for index, player in ipairs(players) do
+    local pos = player.position or {}
+    lines[#lines + 1] =
+      "position_" .. tostring(index) .. "=" ..
+      tostring(player.player.name or "") ..
+      "|id=" .. tostring(player.player.id or "") ..
+      "|ok=" .. tostring(player.ok == true) ..
+      "|x=" .. tostring(pos.x or "") ..
+      "|y=" .. tostring(pos.y or "") ..
+      "|z=" .. tostring(pos.z or "") ..
+      "|source=" .. tostring(player.source or "") ..
+      "|pawn=" .. tostring(player.pawn or "") ..
+      "|pawn_source=" .. tostring(player.pawnSource or "")
+  end
+
+  local data = {
+    source = "bmf.players.positions",
+    checkedAt = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    query = query,
+    sourceMode = tostring(meta and meta.source or ""),
+    playerArrayCount = meta and meta.playerArrayCount or 0,
+    players = players,
+    counts = {
+      observed = #(player_items or {}),
+      returned = #players,
+      positioned = positioned,
+      knownPlayers = #known_players,
+    },
+    lines = lines,
+  }
+  lines[#lines + 1] = "positions_json=" .. json_encode(data)
+
+  local ok = #players > 0 and (query == "" or positioned > 0)
+  return result(ok, ok and "OK" or "POSITION_UNAVAILABLE", ok and "Live player positions collected" or "Live player positions were unavailable", data)
 end
 
 BMF.players.normalize = function(record)
@@ -13342,11 +14345,7 @@ BMF.timers.after = function(ms, callback)
     state.timers[id] = nil
   end
 
-  if type(ExecuteWithDelay) == "function" then
-    ExecuteWithDelay(tonumber(ms) or 0, wrapped)
-  elseif type(ExecuteInGameThreadWithDelay) == "function" then
-    ExecuteInGameThreadWithDelay(tonumber(ms) or 0, wrapped)
-  else
+  if not BMF_schedule_delayed_callback("timer_after", tonumber(ms) or 0, wrapped) then
     state.timers[id] = nil
     return nil
   end
@@ -13364,53 +14363,26 @@ BMF.timers.every = function(ms, callback)
   state.timers[id] = { cancelled = false, interval = interval, count = 0 }
 
   local function schedule()
-    if type(ExecuteWithDelay) == "function" then
-      ExecuteWithDelay(interval, function()
-        local timer = state.timers[id]
-        if not timer or timer.cancelled then
-          state.timers[id] = nil
-          return
-        end
-        timer.count = timer.count + 1
-        local ok, err = pcall(callback, id, timer.count)
-        if not ok then
-          log("error", "timer callback failed: " .. tostring(err))
-          state.timers[id] = nil
-          return
-        end
-        timer = state.timers[id]
-        if timer and not timer.cancelled then
-          schedule()
-        else
-          state.timers[id] = nil
-        end
-      end)
-      return true
-    end
-    if type(ExecuteInGameThreadWithDelay) == "function" then
-      ExecuteInGameThreadWithDelay(interval, function()
-        local timer = state.timers[id]
-        if not timer or timer.cancelled then
-          state.timers[id] = nil
-          return
-        end
-        timer.count = timer.count + 1
-        local ok, err = pcall(callback, id, timer.count)
-        if not ok then
-          log("error", "timer callback failed: " .. tostring(err))
-          state.timers[id] = nil
-          return
-        end
-        timer = state.timers[id]
-        if timer and not timer.cancelled then
-          schedule()
-        else
-          state.timers[id] = nil
-        end
-      end)
-      return true
-    end
-    return false
+    return BMF_schedule_delayed_callback("timer_every", interval, function()
+      local timer = state.timers[id]
+      if not timer or timer.cancelled then
+        state.timers[id] = nil
+        return
+      end
+      timer.count = timer.count + 1
+      local ok, err = pcall(callback, id, timer.count)
+      if not ok then
+        log("error", "timer callback failed: " .. tostring(err))
+        state.timers[id] = nil
+        return
+      end
+      timer = state.timers[id]
+      if timer and not timer.cancelled then
+        schedule()
+      else
+        state.timers[id] = nil
+      end
+    end)
   end
 
   if not schedule() then
@@ -13540,25 +14512,13 @@ local poll_command_requests
 
 local function schedule_command_worker_poll(delay_ms)
   local delay = tonumber(delay_ms) or 250
-  if type(ExecuteWithDelay) == "function" then
-    ExecuteWithDelay(delay, function()
-      run_on_game_thread(function()
-        if poll_command_requests then
-          poll_command_requests()
-        end
-      end)
-    end)
-    return true
-  end
-  if type(ExecuteInGameThreadWithDelay) == "function" then
-    ExecuteInGameThreadWithDelay(delay, function()
+  return BMF_schedule_delayed_callback("command_worker", delay, function()
+    run_on_game_thread(function()
       if poll_command_requests then
         poll_command_requests()
       end
     end)
-    return true
-  end
-  return false
+  end)
 end
 
 poll_command_requests = function()
@@ -13566,6 +14526,13 @@ poll_command_requests = function()
     local ok, err = pcall(process_command_request, file_name)
     if not ok then
       log("error", "command worker failed for " .. tostring(file_name) .. ": " .. tostring(err))
+    end
+  end
+
+  if state.socket.started and type(BMF_drain_socket_messages) == "function" then
+    local ok, err = pcall(BMF_drain_socket_messages, 128)
+    if not ok then
+      state.socket.last_error = "socket command-worker watchdog failed: " .. tostring(err)
     end
   end
 
@@ -13577,12 +14544,38 @@ poll_command_requests = function()
   end
 end
 
+function BMF_poll_command_requests_async()
+  if not state.command_worker_started then
+    return true
+  end
+
+  local request_files = list_command_request_files()
+  if #request_files == 0 then
+    return false
+  end
+
+  for _, file_name in ipairs(request_files) do
+    run_on_game_thread(function()
+      local ok, err = pcall(process_command_request, file_name)
+      if not ok then
+        log("error", "command worker failed for " .. tostring(file_name) .. ": " .. tostring(err))
+      end
+    end)
+  end
+
+  return false
+end
+
 local function start_command_worker()
   if state.command_worker_started then
     return
   end
   state.command_worker_started = true
   log("info", "command worker started path=" .. COMMAND_DIR)
+  if BMF_start_async_loop("command_worker", 250, BMF_poll_command_requests_async) then
+    log("info", "command worker polling via LoopAsync")
+    return
+  end
   if not schedule_command_worker_poll(250) then
     state.command_worker_started = false
     log("error", "command worker unavailable: no game-thread scheduler available")
@@ -13640,27 +14633,47 @@ function BMF_process_socket_message(line)
   end
 end
 
+function BMF_drain_socket_messages(max_count)
+  if not state.socket.started or type(BMFSocketReceive) ~= "function" then
+    state.socket_worker_started = false
+    return 0
+  end
+
+  local requested_count = math.max(1, tonumber(max_count) or 64)
+  state.socket.poll_count = (tonumber(state.socket.poll_count) or 0) + 1
+  state.socket.last_poll_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+
+  local ok, messages_or_error = pcall(BMFSocketReceive, requested_count)
+  if ok and type(messages_or_error) == "table" then
+    local drained = 0
+    for _, line in ipairs(messages_or_error) do
+      if trim_string(line) ~= "" then
+        drained = drained + 1
+        local processed, err = pcall(BMF_process_socket_message, line)
+        if not processed then
+          state.socket.last_error = "socket message failed: " .. tostring(err)
+        end
+      end
+    end
+    state.socket.last_drain_count = drained
+    return drained
+  elseif not ok then
+    state.socket.last_error = "BMFSocketReceive failed: " .. tostring(messages_or_error)
+  end
+
+  state.socket.last_drain_count = 0
+  return 0
+end
+
 function BMF_schedule_socket_worker_poll(delay_ms)
   local delay = tonumber(delay_ms) or state.socket.poll_interval_ms or SOCKET_DEFAULT_POLL_MS
-  if type(ExecuteWithDelay) == "function" then
-    ExecuteWithDelay(delay, function()
-      run_on_game_thread(function()
-        if BMF_poll_socket_messages then
-          BMF_poll_socket_messages()
-        end
-      end)
-    end)
-    return true
-  end
-  if type(ExecuteInGameThreadWithDelay) == "function" then
-    ExecuteInGameThreadWithDelay(delay, function()
+  return BMF_schedule_delayed_callback("socket_worker", delay, function()
+    run_on_game_thread(function()
       if BMF_poll_socket_messages then
         BMF_poll_socket_messages()
       end
     end)
-    return true
-  end
-  return false
+  end)
 end
 
 function BMF_poll_socket_messages()
@@ -13669,17 +14682,7 @@ function BMF_poll_socket_messages()
     return
   end
 
-  local ok, messages_or_error = pcall(BMFSocketReceive, 64)
-  if ok and type(messages_or_error) == "table" then
-    for _, line in ipairs(messages_or_error) do
-      local processed, err = pcall(BMF_process_socket_message, line)
-      if not processed then
-        state.socket.last_error = "socket message failed: " .. tostring(err)
-      end
-    end
-  elseif not ok then
-    state.socket.last_error = "BMFSocketReceive failed: " .. tostring(messages_or_error)
-  end
+  BMF_drain_socket_messages(64)
 
   if state.socket_worker_started then
     if not BMF_schedule_socket_worker_poll(state.socket.poll_interval_ms) then
@@ -13687,6 +14690,35 @@ function BMF_poll_socket_messages()
       log("error", "socket worker stopped: no game-thread scheduler available")
     end
   end
+end
+
+function BMF_poll_socket_messages_async()
+  if not state.socket_worker_started then
+    return true
+  end
+
+  if not state.socket.started or type(BMFSocketReceive) ~= "function" then
+    state.socket_worker_started = false
+    return true
+  end
+
+  local ok, messages_or_error = pcall(BMFSocketReceive, 64)
+  if ok and type(messages_or_error) == "table" then
+    for _, line in ipairs(messages_or_error) do
+      if trim_string(line) ~= "" then
+        run_on_game_thread(function()
+          local processed, err = pcall(BMF_process_socket_message, line)
+          if not processed then
+            state.socket.last_error = "socket message failed: " .. tostring(err)
+          end
+        end)
+      end
+    end
+  elseif not ok then
+    state.socket.last_error = "BMFSocketReceive failed: " .. tostring(messages_or_error)
+  end
+
+  return false
 end
 
 function BMF_start_socket_transport()
@@ -13721,6 +14753,10 @@ function BMF_start_socket_transport()
   state.socket.last_started_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
   state.socket_worker_started = true
   log("info", "socket transport started host=" .. tostring(state.socket.host) .. " port=" .. tostring(state.socket.port) .. " poll_ms=" .. tostring(state.socket.poll_interval_ms))
+  if BMF_start_async_loop("socket_worker", state.socket.poll_interval_ms, BMF_poll_socket_messages_async) then
+    log("info", "socket worker polling via LoopAsync")
+    return
+  end
   if not BMF_schedule_socket_worker_poll(state.socket.poll_interval_ms) then
     state.socket_worker_started = false
     log("error", "socket worker unavailable: no game-thread scheduler available")

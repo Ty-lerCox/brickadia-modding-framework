@@ -1,18 +1,32 @@
 #define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
 
+#include <Helpers/String.hpp>
 #include <Mod/CppUserModBase.hpp>
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
+#include <Unreal/AActor.hpp>
+#include <Unreal/CoreUObject/UObject/Class.hpp>
+#include <Unreal/CoreUObject/UObject/UnrealType.hpp>
+#include <Unreal/UObjectGlobals.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cmath>
+#include <cctype>
 #include <deque>
+#include <exception>
+#include <iomanip>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -77,6 +91,793 @@ namespace
             remaining -= sent;
         }
         return true;
+    }
+
+    std::string narrow_string(const StringType& value)
+    {
+        return to_string(value);
+    }
+
+    std::string ascii_lower(std::string value)
+    {
+        std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+            return static_cast<char>(std::tolower(ch));
+        });
+        return value;
+    }
+
+    bool contains_ascii_case_insensitive(std::string_view value, std::string_view needle)
+    {
+        std::string value_lower = ascii_lower(std::string(value));
+        std::string needle_lower = ascii_lower(std::string(needle));
+        return value_lower.find(needle_lower) != std::string::npos;
+    }
+
+    bool parse_uobject_address(std::string_view raw, uintptr_t& address)
+    {
+        std::string text;
+        text.reserve(raw.size());
+        for (char ch : raw)
+        {
+            if (!std::isspace(static_cast<unsigned char>(ch)))
+            {
+                text.push_back(ch);
+            }
+        }
+        if (text.empty())
+        {
+            return false;
+        }
+
+        if (text.rfind("UObject:", 0) == 0 || text.rfind("uobject:", 0) == 0)
+        {
+            text = text.substr(text.find(':') + 1);
+        }
+
+        int base = 10;
+        const char* cursor = text.c_str();
+        if (text.rfind("0x", 0) == 0 || text.rfind("0X", 0) == 0)
+        {
+            base = 16;
+            cursor += 2;
+        }
+        else if (text.find_first_of("ABCDEFabcdef") != std::string::npos)
+        {
+            base = 16;
+        }
+
+        char* end = nullptr;
+        const unsigned long long parsed = std::strtoull(cursor, &end, base);
+        if (end == cursor || (end && *end != '\0') || parsed == 0)
+        {
+            return false;
+        }
+        address = static_cast<uintptr_t>(parsed);
+        return address != 0;
+    }
+
+    Unreal::UObject* uobject_from_address(std::string_view raw)
+    {
+        uintptr_t address = 0;
+        if (!parse_uobject_address(raw, address))
+        {
+            return nullptr;
+        }
+        return reinterpret_cast<Unreal::UObject*>(address);
+    }
+
+    bool is_live_uobject(Unreal::UObject* object)
+    {
+        return object != nullptr &&
+               Unreal::UObject::IsReal(object) &&
+               !object->HasAnyFlags(Unreal::RF_ClassDefaultObject);
+    }
+
+    bool object_class_has_any_cast_flags(Unreal::UObject* object, Unreal::EClassCastFlags flags)
+    {
+        if (!is_live_uobject(object))
+        {
+            return false;
+        }
+
+        try
+        {
+            auto object_class = object->GetClassPrivate();
+            return object_class && object_class->HasAnyCastFlag(flags);
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
+    bool object_is_actor(Unreal::UObject* object)
+    {
+        if (!is_live_uobject(object))
+        {
+            return false;
+        }
+
+        try
+        {
+            return object->IsA<Unreal::AActor>();
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
+    bool object_is_pawn(Unreal::UObject* object)
+    {
+        return object_class_has_any_cast_flags(object, Unreal::CASTCLASS_APawn);
+    }
+
+    std::string object_class_name(Unreal::UObject* object)
+    {
+        if (!is_live_uobject(object))
+        {
+            return "";
+        }
+
+        try
+        {
+            auto object_class = object->GetClassPrivate();
+            return object_class ? narrow_string(object_class->GetName()) : "";
+        }
+        catch (...)
+        {
+            return "";
+        }
+    }
+
+    std::string object_class_full_name(Unreal::UObject* object)
+    {
+        if (!is_live_uobject(object))
+        {
+            return "";
+        }
+
+        try
+        {
+            auto object_class = object->GetClassPrivate();
+            return object_class ? narrow_string(object_class->GetFullName()) : "";
+        }
+        catch (...)
+        {
+            return "";
+        }
+    }
+
+    std::string object_class_cast_flags_hex(Unreal::UObject* object)
+    {
+        if (!is_live_uobject(object))
+        {
+            return "";
+        }
+
+        try
+        {
+            auto object_class = object->GetClassPrivate();
+            if (!object_class)
+            {
+                return "";
+            }
+
+            std::ostringstream out;
+            out << "0x" << std::hex << std::uppercase << object_class->GetClassCastFlags();
+            return out.str();
+        }
+        catch (...)
+        {
+            return "";
+        }
+    }
+
+    Unreal::FProperty* get_class_property_by_name_in_chain(Unreal::UObject* object, Unreal::FName property_name)
+    {
+        if (!object)
+        {
+            return nullptr;
+        }
+
+        auto object_class = object->GetClassPrivate();
+        if (!object_class)
+        {
+            return nullptr;
+        }
+
+        for (Unreal::FProperty* property : Unreal::TFieldRange<Unreal::FProperty>(
+                 object_class,
+                 Unreal::EFieldIterationFlags::IncludeSuper | Unreal::EFieldIterationFlags::IncludeDeprecated))
+        {
+            if (property && property->GetFName().Equals(property_name))
+            {
+                return property;
+            }
+        }
+
+        return nullptr;
+    }
+
+    Unreal::UObject* get_object_property(Unreal::UObject* object, const CharType* property_name)
+    {
+        if (!is_live_uobject(object) || !property_name)
+        {
+            return nullptr;
+        }
+
+        try
+        {
+            const Unreal::FName wanted_property_name{property_name, Unreal::FNAME_Find};
+            Unreal::FProperty* property = get_class_property_by_name_in_chain(object, wanted_property_name);
+            if (!property)
+            {
+                return nullptr;
+            }
+
+            auto value = property->ContainerPtrToValuePtr<Unreal::UObject*>(object);
+            if (!value || !is_live_uobject(*value))
+            {
+                return nullptr;
+            }
+            return *value;
+        }
+        catch (...)
+        {
+            return nullptr;
+        }
+    }
+
+    bool read_vector_property(Unreal::UObject* object, const CharType* property_name, Unreal::FVector& out_vector)
+    {
+        if (!is_live_uobject(object) || !property_name)
+        {
+            return false;
+        }
+
+        try
+        {
+            const Unreal::FName wanted_property_name{property_name, Unreal::FNAME_Find};
+            Unreal::FProperty* property = get_class_property_by_name_in_chain(object, wanted_property_name);
+            if (!property)
+            {
+                return false;
+            }
+
+            auto value = property->ContainerPtrToValuePtr<Unreal::FVector>(object);
+            if (!value)
+            {
+                return false;
+            }
+
+            const double x = value->X();
+            const double y = value->Y();
+            const double z = value->Z();
+            if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
+            {
+                return false;
+            }
+
+            out_vector = *value;
+            return true;
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
+    bool read_transform_translation_property(Unreal::UObject* object,
+                                             const CharType* property_name,
+                                             Unreal::FVector& out_vector)
+    {
+        if (!is_live_uobject(object) || !property_name)
+        {
+            return false;
+        }
+
+        try
+        {
+            const Unreal::FName wanted_property_name{property_name, Unreal::FNAME_Find};
+            Unreal::FProperty* property = get_class_property_by_name_in_chain(object, wanted_property_name);
+            if (!property)
+            {
+                return false;
+            }
+
+            auto value = property->ContainerPtrToValuePtr<Unreal::FTransform>(object);
+            if (!value)
+            {
+                return false;
+            }
+
+            Unreal::FVector vector = value->GetTranslation();
+            const double x = vector.X();
+            const double y = vector.Y();
+            const double z = vector.Z();
+            if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
+            {
+                return false;
+            }
+
+            out_vector = vector;
+            return true;
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
+    bool try_actor_k2_location(Unreal::UObject* pawn, Unreal::FVector& out_vector)
+    {
+        if (!is_live_uobject(pawn))
+        {
+            return false;
+        }
+
+        try
+        {
+            auto actor = static_cast<Unreal::AActor*>(pawn);
+            const Unreal::FVector vector = actor->K2_GetActorLocation();
+            const double x = vector.X();
+            const double y = vector.Y();
+            const double z = vector.Z();
+            if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
+            {
+                return false;
+            }
+
+            out_vector = vector;
+            return true;
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
+    bool try_actor_root_component_location(Unreal::UObject* pawn,
+                                           Unreal::FVector& out_vector,
+                                           std::string& method)
+    {
+        Unreal::UObject* root_component = get_object_property(pawn, STR("RootComponent"));
+        if (!is_live_uobject(root_component))
+        {
+            return false;
+        }
+
+        if (read_transform_translation_property(root_component, STR("ComponentToWorld"), out_vector))
+        {
+            method = ".root_component.ComponentToWorld";
+            return true;
+        }
+
+        if (read_vector_property(root_component, STR("RelativeLocation"), out_vector))
+        {
+            method = ".root_component.RelativeLocation";
+            return true;
+        }
+
+        return false;
+    }
+
+    bool is_object_property(Unreal::FProperty* property)
+    {
+        if (!property)
+        {
+            return false;
+        }
+
+        try
+        {
+            auto field_class = property->GetClass();
+            return field_class.IsValid() && field_class.HasAllCastFlags(Unreal::CASTCLASS_FObjectPropertyBase);
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
+    Unreal::UObject* get_first_object_property_with_class_flags(Unreal::UObject* object, Unreal::EClassCastFlags flags)
+    {
+        if (!is_live_uobject(object))
+        {
+            return nullptr;
+        }
+
+        try
+        {
+            auto object_class = object->GetClassPrivate();
+            if (!object_class)
+            {
+                return nullptr;
+            }
+
+            for (Unreal::FProperty* property : Unreal::TFieldRange<Unreal::FProperty>(
+                     object_class,
+                     Unreal::EFieldIterationFlags::IncludeSuper | Unreal::EFieldIterationFlags::IncludeDeprecated))
+            {
+                if (!is_object_property(property))
+                {
+                    continue;
+                }
+
+                auto value = property->ContainerPtrToValuePtr<Unreal::UObject*>(object);
+                if (value && object_class_has_any_cast_flags(*value, flags))
+                {
+                    return *value;
+                }
+            }
+        }
+        catch (...)
+        {
+        }
+
+        return nullptr;
+    }
+
+    struct NativePlayerLocation
+    {
+        std::string source_kind;
+        std::string source_name;
+        std::string source_full_name;
+        std::string controller_name;
+        std::string controller_full_name;
+        std::string pawn_name;
+        std::string pawn_full_name;
+        double x = 0.0;
+        double y = 0.0;
+        double z = 0.0;
+    };
+
+    struct NativePlayerLocationScanStats
+    {
+        size_t scanned_objects = 0;
+        size_t controller_candidates = 0;
+        size_t controller_attempts = 0;
+        size_t controller_errors = 0;
+        size_t player_state_candidates = 0;
+        size_t player_state_attempts = 0;
+        size_t player_state_errors = 0;
+        size_t pawn_candidates = 0;
+        std::vector<std::string> sample_names;
+        std::vector<std::string> sample_class_names;
+        std::vector<std::string> playerish_sample_names;
+    };
+
+    bool maybe_player_controller_name(std::string_view value)
+    {
+        return contains_ascii_case_insensitive(value, "PlayerController") ||
+               contains_ascii_case_insensitive(value, "BRPlayerController") ||
+               contains_ascii_case_insensitive(value, "BP_PlayerController");
+    }
+
+    bool maybe_player_state_name(std::string_view value)
+    {
+        return contains_ascii_case_insensitive(value, "PlayerState") ||
+               contains_ascii_case_insensitive(value, "BRPlayerState") ||
+               contains_ascii_case_insensitive(value, "BP_PlayerState");
+    }
+
+    bool maybe_playerish_name(std::string_view value)
+    {
+        return contains_ascii_case_insensitive(value, "player") ||
+               contains_ascii_case_insensitive(value, "controller") ||
+               contains_ascii_case_insensitive(value, "state") ||
+               contains_ascii_case_insensitive(value, "pawn") ||
+               contains_ascii_case_insensitive(value, "figure");
+    }
+
+    bool try_push_pawn_location(std::vector<NativePlayerLocation>& results,
+                                std::vector<Unreal::UObject*>& seen_sources,
+                                Unreal::UObject* source,
+                                Unreal::UObject* controller,
+                                Unreal::UObject* pawn,
+                                std::string_view source_kind)
+    {
+        if (!is_live_uobject(source) || !is_live_uobject(pawn))
+        {
+            return false;
+        }
+        if (std::find(seen_sources.begin(), seen_sources.end(), source) != seen_sources.end())
+        {
+            return false;
+        }
+
+        try
+        {
+            if (!object_is_actor(pawn) &&
+                !object_class_has_any_cast_flags(pawn, Unreal::CASTCLASS_AActor))
+            {
+                return false;
+            }
+
+            Unreal::FVector vector;
+            std::string source_kind_suffix;
+            if (try_actor_k2_location(pawn, vector))
+            {
+                source_kind_suffix = ".K2_GetActorLocation";
+            }
+            else if (!try_actor_root_component_location(pawn, vector, source_kind_suffix))
+            {
+                return false;
+            }
+
+            const double x = vector.X();
+            const double y = vector.Y();
+            const double z = vector.Z();
+            if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
+            {
+                return false;
+            }
+
+            NativePlayerLocation location;
+            location.source_kind = std::string(source_kind) + source_kind_suffix;
+            location.source_name = narrow_string(source->GetName());
+            location.source_full_name = narrow_string(source->GetFullName());
+            if (is_live_uobject(controller))
+            {
+                location.controller_name = narrow_string(controller->GetName());
+                location.controller_full_name = narrow_string(controller->GetFullName());
+            }
+            location.pawn_name = narrow_string(pawn->GetName());
+            location.pawn_full_name = narrow_string(pawn->GetFullName());
+            location.x = x;
+            location.y = y;
+            location.z = z;
+            seen_sources.push_back(source);
+            results.push_back(std::move(location));
+            return true;
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
+    bool try_push_controller_location(std::vector<NativePlayerLocation>& results,
+                                      std::vector<Unreal::UObject*>& seen_sources,
+                                      Unreal::UObject* controller)
+    {
+        if (!is_live_uobject(controller))
+        {
+            return false;
+        }
+
+        try
+        {
+            Unreal::UObject* pawn = get_object_property(controller, STR("Pawn"));
+            if (!pawn)
+            {
+                pawn = get_object_property(controller, STR("AcknowledgedPawn"));
+            }
+            if (!pawn)
+            {
+                pawn = get_object_property(controller, STR("Character"));
+            }
+            if (!pawn)
+            {
+                pawn = get_first_object_property_with_class_flags(controller, Unreal::CASTCLASS_APawn);
+            }
+            return try_push_pawn_location(results, seen_sources, controller, controller, pawn, "controller");
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
+    bool try_push_player_state_location(std::vector<NativePlayerLocation>& results,
+                                        std::vector<Unreal::UObject*>& seen_sources,
+                                        Unreal::UObject* player_state)
+    {
+        if (!is_live_uobject(player_state))
+        {
+            return false;
+        }
+
+        try
+        {
+            Unreal::UObject* owner = get_object_property(player_state, STR("Owner"));
+            Unreal::UObject* pawn = get_object_property(player_state, STR("PawnPrivate"));
+            if (!pawn)
+            {
+                pawn = get_object_property(player_state, STR("Pawn"));
+            }
+            if (!pawn)
+            {
+                pawn = get_object_property(player_state, STR("Character"));
+            }
+            if (!pawn && owner)
+            {
+                pawn = get_object_property(owner, STR("Pawn"));
+            }
+            if (!pawn && owner)
+            {
+                pawn = get_object_property(owner, STR("AcknowledgedPawn"));
+            }
+            if (!pawn && owner)
+            {
+                pawn = get_object_property(owner, STR("Character"));
+            }
+
+            Unreal::UObject* source = owner ? owner : player_state;
+            return try_push_pawn_location(results, seen_sources, source, owner, pawn, "player_state");
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
+    NativePlayerLocationScanStats collect_controller_locations_by_scan(
+        std::vector<NativePlayerLocation>& results,
+        std::vector<Unreal::UObject*>& seen_sources)
+    {
+        NativePlayerLocationScanStats stats;
+        std::vector<Unreal::UObject*> pawn_candidates;
+
+        Unreal::UObjectGlobals::ForEachUObject([&](Unreal::UObject* object, int32_t, int32_t) {
+            ++stats.scanned_objects;
+            if (!object || object->HasAnyFlags(Unreal::RF_ClassDefaultObject))
+            {
+                return LoopAction::Continue;
+            }
+
+            try
+            {
+                const std::string object_name = narrow_string(object->GetName());
+                const std::string object_full_name = narrow_string(object->GetFullName());
+                std::string class_name;
+                std::string class_full_name;
+                if (auto object_class = object->GetClassPrivate())
+                {
+                    class_name = narrow_string(object_class->GetName());
+                    class_full_name = narrow_string(object_class->GetFullName());
+                }
+
+                if (stats.sample_names.size() < 12 && !object_full_name.empty())
+                {
+                    stats.sample_names.push_back(object_full_name);
+                }
+                if (stats.sample_class_names.size() < 24 && !class_full_name.empty())
+                {
+                    stats.sample_class_names.push_back(class_full_name);
+                }
+                if (stats.playerish_sample_names.size() < 24 &&
+                    (maybe_playerish_name(object_name) ||
+                     maybe_playerish_name(object_full_name) ||
+                     maybe_playerish_name(class_name) ||
+                     maybe_playerish_name(class_full_name)))
+                {
+                    const std::string label = object_full_name.empty() ? object_name : object_full_name;
+                    const std::string class_label = class_full_name.empty() ? class_name : class_full_name;
+                    stats.playerish_sample_names.push_back(label + " class=" + class_label);
+                }
+
+                const bool controller_candidate =
+                    object_class_has_any_cast_flags(object, Unreal::CASTCLASS_APlayerController) ||
+                    maybe_player_controller_name(object_name) ||
+                    maybe_player_controller_name(object_full_name) ||
+                    maybe_player_controller_name(class_name) ||
+                    maybe_player_controller_name(class_full_name);
+                const bool player_state_candidate =
+                    maybe_player_state_name(object_name) ||
+                    maybe_player_state_name(object_full_name) ||
+                    maybe_player_state_name(class_name) ||
+                    maybe_player_state_name(class_full_name);
+                const bool pawn_candidate = object_class_has_any_cast_flags(object, Unreal::CASTCLASS_APawn);
+
+                if (pawn_candidate)
+                {
+                    ++stats.pawn_candidates;
+                    pawn_candidates.push_back(object);
+                }
+
+                if (controller_candidate)
+                {
+                    ++stats.controller_candidates;
+                    ++stats.controller_attempts;
+                    try_push_controller_location(results, seen_sources, object);
+                }
+
+                if (player_state_candidate)
+                {
+                    ++stats.player_state_candidates;
+                    ++stats.player_state_attempts;
+                    try_push_player_state_location(results, seen_sources, object);
+                }
+            }
+            catch (...)
+            {
+                ++stats.controller_errors;
+            }
+
+            return LoopAction::Continue;
+        });
+
+        if (results.empty())
+        {
+            for (Unreal::UObject* pawn : pawn_candidates)
+            {
+                try_push_pawn_location(results, seen_sources, pawn, nullptr, pawn, "pawn_scan");
+            }
+        }
+
+        return stats;
+    }
+
+    std::string build_native_player_location_text(std::string_view source_address, std::string_view requested_name)
+    {
+        std::vector<NativePlayerLocation> locations;
+        std::vector<Unreal::UObject*> seen_sources;
+        Unreal::UObject* source = uobject_from_address(source_address);
+
+        std::ostringstream out;
+        out << "Native player location\n"
+            << "requested_name=" << json_escape(requested_name) << "\n"
+            << "source=BMFSocketPlayerLocation\n"
+            << "source_address=" << json_escape(source_address) << "\n"
+            << "native_scan=disabled\n";
+
+        if (!is_live_uobject(source))
+        {
+            out << "ok=false\n"
+                << "detail=source address does not point to a live UObject\n";
+            return out.str();
+        }
+
+        bool resolved = try_push_controller_location(locations, seen_sources, source);
+        if (!resolved)
+        {
+            resolved = try_push_player_state_location(locations, seen_sources, source);
+        }
+        if (!resolved)
+        {
+            resolved = try_push_pawn_location(locations, seen_sources, source, nullptr, source, "pawn");
+        }
+
+        out << "native_location_count=" << locations.size() << "\n";
+
+        if (locations.empty())
+        {
+            out << "ok=false\n"
+                << "detail=no pawn location resolved from source address\n"
+                << "source_object=" << json_escape(narrow_string(source->GetName())) << "\n"
+                << "source_full_name=" << json_escape(narrow_string(source->GetFullName())) << "\n"
+                << "source_class=" << json_escape(object_class_name(source)) << "\n"
+                << "source_class_full_name=" << json_escape(object_class_full_name(source)) << "\n"
+                << "source_class_cast_flags=" << json_escape(object_class_cast_flags_hex(source)) << "\n"
+                << "source_is_actor=" << (object_is_actor(source) ? "true" : "false") << "\n"
+                << "source_is_pawn=" << (object_is_pawn(source) ? "true" : "false") << "\n";
+            return out.str();
+        }
+
+        if (locations.size() > 1)
+        {
+            out << "ok=false\n"
+                << "detail=multiple pawn locations resolved from source address\n";
+            return out.str();
+        }
+
+        const NativePlayerLocation& location = locations.front();
+        out << "ok=true\n"
+            << "match=single-live-pawn\n"
+            << "source_kind=" << json_escape(location.source_kind) << "\n"
+            << "source_object=" << json_escape(location.source_name) << "\n"
+            << "source_full_name=" << json_escape(location.source_full_name) << "\n"
+            << "controller=" << json_escape(location.controller_name) << "\n"
+            << "controller_full_name=" << json_escape(location.controller_full_name) << "\n"
+            << "pawn=" << json_escape(location.pawn_name) << "\n"
+            << "pawn_full_name=" << json_escape(location.pawn_full_name) << "\n"
+            << std::fixed << std::setprecision(3)
+            << "x=" << location.x << "\n"
+            << "y=" << location.y << "\n"
+            << "z=" << location.z << "\n";
+        return out.str();
     }
 
     class SocketRuntime
@@ -499,6 +1300,19 @@ namespace
         return 1;
     }
 
+    int lua_socket_player_location(const LuaMadeSimple::Lua& lua)
+    {
+        lua_State* state = lua.get_lua_state();
+        size_t address_length = 0;
+        size_t requested_length = 0;
+        const char* address = lua_isstring(state, 1) ? lua_tolstring(state, 1, &address_length) : "";
+        const char* requested = lua_isstring(state, 2) ? lua_tolstring(state, 2, &requested_length) : "";
+        lua.set_string(build_native_player_location_text(
+            address ? std::string_view(address, address_length) : std::string_view(),
+            requested ? std::string_view(requested, requested_length) : std::string_view()));
+        return 1;
+    }
+
     class BMFSocketMod : public CppUserModBase
     {
       public:
@@ -527,6 +1341,7 @@ namespace
             lua.register_function("BMFSocketSend", lua_socket_send);
             lua.register_function("BMFSocketReceive", lua_socket_receive);
             lua.register_function("BMFSocketStatus", lua_socket_status);
+            lua.register_function("BMFSocketPlayerLocation", lua_socket_player_location);
         }
     };
 } // namespace

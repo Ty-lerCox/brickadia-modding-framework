@@ -96,6 +96,54 @@ These would wrap, when explicitly enabled:
 Indexes must be zero or greater. By default, valid lifecycle calls return
 `UNSAFE_MINIGAME_COMMAND_DISABLED` before reaching Brickadia.
 
+## Desired Definitions
+
+BMF can store desired minigame definitions without calling Brickadia's unsafe
+minigame console commands. These records are BMF-owned target state for plugins
+such as CityRPG and future BMF minigame producers; they do not create, delete,
+or mutate live Brickadia minigames by themselves.
+
+```lua
+BMF.minigames.define({
+  name = "CityRPG",
+  index = 0,
+  teams = { "Police", "Criminal" },
+  persistent = true,
+  ownerOnly = false,
+  includedBrickMode = "all",
+})
+
+local definitions = BMF.minigames.definitions()
+local cityDefinition = BMF.minigames.definition({ name = "CityRPG", index = 0 })
+local status = BMF.minigames.definitionStatus()
+local reconcile = BMF.minigames.reconcileDefinitions({ name = "CityRPG", index = 0 })
+```
+
+Server-console command routes:
+
+```text
+Omegga.Bridge.BMF bmf.minigames.definitions.status
+Omegga.Bridge.BMF bmf.minigames.definitions.set name=CityRPG index=0 teams=Police,Criminal persistent=true owneronly=false includedbrickmode=all
+Omegga.Bridge.BMF bmf.minigames.definitions.list
+Omegga.Bridge.BMF bmf.minigames.definitions.get name=CityRPG index=0
+Omegga.Bridge.BMF bmf.minigames.definitions.delete name=CityRPG index=0 confirm=DELETE_MINIGAME_DEFINITION
+Omegga.Bridge.BMF bmf.minigames.definitions.reconcile name=CityRPG index=0
+```
+
+Definitions persist at `ue4ss/main/Mods/BMF/runtime/minigames/definitions.json`
+and expose `liveEnforcement="definition-only"` until a validated producer maps
+that desired state into live minigame behavior. Supported fields currently
+include `name`, `index`, `ruleset`, `owner`, `mode`, `teams`, `persistent`,
+`ownerOnly`, `includedBrickMode`, `includedBricks`, and `maxPlayers`.
+
+`BMF.minigames.reconcileDefinitions(query)` compares those desired records with
+the current BMF-owned observed minigame data snapshot. A definition is `present`
+when an observed minigame matches by key, ruleset, or name/index and all desired
+team labels are present. It is `missing` when no observed minigame matches, and
+`team-mismatch` when the minigame exists but one or more desired teams are not
+in the observed team snapshot. Reconciliation is read-only and does not call
+Brickadia `Server.Minigames.*` commands.
+
 ## Events
 
 BMF exposes a namespaced minigame event surface for external relays:
@@ -232,6 +280,12 @@ BMF keeps an in-memory minigame data snapshot from accepted minigame events:
 ```lua
 local snapshot = BMF.minigames.data()
 local status = BMF.minigames.dataStatus()
+local applied = BMF.minigames.applySnapshot({
+  source = "adapter",
+  minigames = {
+    { name = "CityRPG", index = 0, teams = { { name = "Police" } } },
+  },
+})
 local minigames = BMF.minigames.dataList({ limit = 25 })
 local city = BMF.minigames.get({ name = "CityRPG", index = 0 })
 local player = BMF.minigames.getPlayer({ player = "EventKiller" })
@@ -248,6 +302,7 @@ Server-console command routes:
 ```text
 Omegga.Bridge.BMF bmf.minigames.data.status
 Omegga.Bridge.BMF bmf.minigames.data.snapshot
+Omegga.Bridge.BMF bmf.minigames.data.apply-snapshot name=CityRPG index=0 teams=Police,Criminal
 Omegga.Bridge.BMF bmf.minigames.data.list
 Omegga.Bridge.BMF bmf.minigames.data.get name=CityRPG index=0
 Omegga.Bridge.BMF bmf.minigames.data.players minigame=CityRPG index=0
@@ -272,10 +327,13 @@ leaderboards=0
 rounds=0
 ```
 
-This cache is event-fed. It becomes useful for BMF consumers after a supported
-producer emits a `snapshot` event, then stays current through membership, team,
-round, and leaderboard events. It does not require CityRPG to subscribe to
-`omegga-minigameevents`.
+This cache is fed by accepted minigame events and by explicit BMF-owned snapshot
+imports. `BMF.minigames.applySnapshot(payload)` and
+`bmf.minigames.data.apply-snapshot` apply the same observed snapshot shape as a
+`snapshot` event without emitting a framework event. That gives Omegga adapters
+and validators a direct import path for known minigames and teams; later
+membership, team, round, and leaderboard events can keep it current. It does not
+require CityRPG to subscribe to `omegga-minigameevents`.
 
 `BMF.minigames.dataList(query)` lists known minigames with member/team counts.
 `BMF.minigames.get(query)` accepts `key`, `ruleset`, `name`, `minigame`, or
@@ -310,12 +368,16 @@ Omegga.Bridge.BMF bmf.minigames.data.clear confirm=CLEAR_MINIGAME_DATA
 `BMF.minigames.objectSnapshot({ limit = 64 })` is a direct UE4SS object probe
 for live `BP_Ruleset_C` and `BP_Team_C` objects. It does not use Brickadia
 console `GetAll`, but it is still disabled by default because raw UE4SS object
-enumeration is high risk on the current dedicated-server runtime.
+enumeration is high risk on the current dedicated-server runtime. When enabled,
+the default command only returns object metadata and counts; direct Unreal
+property reads such as `MemberStates` and `TeamColor` require the additional
+`includeProperties=true` opt-in.
 
 Server-console command route:
 
 ```text
 Omegga.Bridge.BMF bmf.minigames.objects.snapshot limit=64
+Omegga.Bridge.BMF bmf.minigames.objects.snapshot limit=64 includeProperties=true
 ```
 
 By default the command returns `UNSAFE_MINIGAME_OBJECT_SNAPSHOT_DISABLED` with
@@ -353,7 +415,8 @@ acceptable and the server can be restarted.
 - `L2 Headless + L5 Negative`: `scripts/validate-bmf-minigame-commands.ps1`
   proves command-worker transport, fail-closed behavior for unsafe minigame
   console wrappers, fail-closed behavior for the unsafe object snapshot probe,
-  and invalid preset-name/index rejection.
+  desired-definition set/list/get/delete, and invalid preset-name/index
+  rejection.
 - `L3 Live Player`: joining, membership, teams, scoring, and gameplay effects.
 - `L5 Negative`: permission or policy enforcement around minigame edits.
 

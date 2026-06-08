@@ -128,3 +128,163 @@ test('seeds leave caches from BMF minigame data snapshot response', async t => {
   assert.strictEqual(adapter.minigameCache.get('name:GLOBAL#0').name, 'GLOBAL');
   assert.strictEqual(adapter.teamMembershipCache.get('33333333-3333-4333-8333-333333333333').team.name, 'Blue');
 });
+
+test('imports changed unsafe minigame snapshots through BMF data apply-snapshot', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bmf-minigame-events-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  const commandDir = path.join(root, 'commands');
+  const match = groups => ({ groups });
+  const omegga = {
+    async watchLogChunk(command) {
+      if (command === 'GetAll BP_Ruleset_C RulesetName') {
+        return [
+          match({
+            index: '0',
+            ruleset: 'BP_Ruleset_C_99',
+            name: 'Codex Arena',
+          }),
+        ];
+      }
+      if (command === 'GetAll BP_Ruleset_C MemberStates') {
+        return [['item', match({ index: '0', ruleset: 'BP_Ruleset_C_99' })]];
+      }
+      if (command === 'GetAll BP_Ruleset_C bInSession') {
+        return [
+          match({
+            index: '0',
+            ruleset: 'BP_Ruleset_C_99',
+            inSession: 'True',
+          }),
+        ];
+      }
+      if (command === 'GetAll BP_Team_C MemberStates') {
+        return [['item', match({ index: '0', ruleset: 'BP_Ruleset_C_99', team: 'BP_Team_C_1' })]];
+      }
+      if (command === 'GetAll BP_Team_C TeamName') {
+        return [match({ index: '0', ruleset: 'BP_Ruleset_C_99', team: 'BP_Team_C_1', name: 'Blue' })];
+      }
+      if (command === 'GetAll BP_Team_C TeamColor') {
+        return [
+          match({
+            index: '0',
+            ruleset: 'BP_Ruleset_C_99',
+            team: 'BP_Team_C_1',
+            r: '12',
+            g: '34',
+            b: '56',
+            a: '255',
+          }),
+        ];
+      }
+      return [];
+    },
+  };
+  const adapter = new BmfMinigameEvents(
+    omegga,
+    {
+      commandDir,
+      allowUnsafeConsoleSnapshots: true,
+      applySnapshotImports: true,
+      emitSnapshotEvents: false,
+      minigameCheckTimeoutMs: 2000,
+    }
+  );
+
+  await adapter.minigameCheck('real-minigame-validation');
+
+  const requestPath = await waitForRequest(commandDir);
+  const command = fs.readFileSync(requestPath, 'utf8');
+  assert.match(command, /^bmf\.minigames\.data\.apply-snapshot payload=/);
+  assert.doesNotMatch(command, /^bmf\.minigames\.events\.emit/);
+
+  const payload = JSON.parse(decodeURIComponent(command.match(/payload=([^ ]+)/)[1]));
+  assert.strictEqual(payload.source, 'omegga.bmf-minigame-events');
+  assert.strictEqual(payload.reason, 'real-minigame-validation');
+  assert.strictEqual(payload.minigames.length, 1);
+  assert.strictEqual(payload.minigames[0].name, 'Codex Arena');
+  assert.strictEqual(payload.minigames[0].ruleset, 'BP_Ruleset_C_99');
+  assert.strictEqual(payload.minigames[0].teams.length, 1);
+  assert.strictEqual(payload.minigames[0].teams[0].name, 'Blue');
+  assert.deepStrictEqual(payload.minigames[0].teams[0].color, [12, 34, 56, 255]);
+  assert.strictEqual(adapter.counters.snapshotChanges, 1);
+  assert.strictEqual(adapter.counters.snapshotImports, 1);
+  assert.strictEqual(adapter.counters.queued, 0);
+});
+
+test('observed JoinTeam command queues BMF teamchange event', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bmf-minigame-events-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  const commandDir = path.join(root, 'commands');
+  const player = {
+    name: 'Ty',
+    displayName: 'Ty',
+    id: '33333333-3333-4333-8333-333333333333',
+  };
+  const adapter = new BmfMinigameEvents(
+    {
+      getPlayer(ref) {
+        return ref === 'Ty' ? player : null;
+      },
+    },
+    { commandDir }
+  );
+
+  adapter.playerMinigameCache.set(player.id, {
+    name: 'Codex Arena',
+    index: 0,
+  });
+
+  assert.strictEqual(adapter.handleJoinTeamCommand('Ty', 'Blue'), true);
+
+  const requestPath = await waitForRequest(commandDir);
+  const command = fs.readFileSync(requestPath, 'utf8');
+  assert.match(command, /^bmf\.minigames\.events\.emit event=teamchange payload=/);
+
+  const payload = JSON.parse(decodeURIComponent(command.match(/payload=([^ ]+)/)[1]));
+  assert.strictEqual(payload.source, 'omegga.bmf-minigame-events');
+  assert.strictEqual(payload.reason, 'jointeam-command');
+  assert.strictEqual(payload.player.id, player.id);
+  assert.strictEqual(payload.minigame.name, 'Codex Arena');
+  assert.strictEqual(payload.team.name, 'Blue');
+  assert.strictEqual(adapter.counters.teamChanges, 1);
+  assert.strictEqual(adapter.teamMembershipCache.get(player.id).team.name, 'Blue');
+
+  assert.strictEqual(adapter.handleJoinTeamCommand('Ty', 'Blue'), false);
+  assert.strictEqual(
+    fs.readdirSync(commandDir).filter(file => file.endsWith('.request.txt')).length,
+    1
+  );
+  assert.strictEqual(adapter.counters.teamChanges, 1);
+});
+
+test('manual unsafe sync runs during startup delay after server start', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bmf-minigame-events-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  const messages = [];
+  const adapter = new BmfMinigameEvents(
+    {
+      whisper(_target, message) {
+        messages.push(message);
+      },
+    },
+    {
+      commandDir: path.join(root, 'commands'),
+      allowUnsafeConsoleSnapshots: true,
+    }
+  );
+
+  const calls = [];
+  adapter.serverStarted = true;
+  adapter.pollingStarted = false;
+  adapter.minigameCheck = async reason => calls.push(`minigame:${reason}`);
+  adapter.leaderboardCheck = async reason => calls.push(`leaderboard:${reason}`);
+
+  adapter.handleManualSync('Ty');
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.deepStrictEqual(calls, ['minigame:manual', 'leaderboard:manual']);
+  assert.deepStrictEqual(messages, ['BMF minigame snapshot queued.']);
+});

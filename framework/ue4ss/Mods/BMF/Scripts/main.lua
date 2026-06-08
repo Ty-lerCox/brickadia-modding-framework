@@ -11,6 +11,7 @@ local AUDIT_LOG_PATH = RUNTIME_DIR .. "/audit.jsonl"
 local PLUGIN_LOG_DIR = RUNTIME_DIR .. "/logs/plugins"
 local COMMAND_DIR = RUNTIME_DIR .. "/commands"
 local PLAYER_CACHE_PATH = RUNTIME_DIR .. "/players.json"
+local MINIGAME_DEFINITIONS_PATH = RUNTIME_DIR .. "/minigames/definitions.json"
 local TARGET_BRICKADIA_BUILD = "PC-Shipping-CL13530"
 local TARGET_BRICKADIA_NAME = "Brickadia EA2"
 local TARGET_SERVER_EXECUTABLE = "BrickadiaServer-Win64-Shipping.exe"
@@ -52,6 +53,14 @@ local state = {
     team_memberships_by_player = {},
     leaderboards_by_player = {},
     rounds_by_key = {},
+  },
+  minigame_definitions = {
+    loaded = false,
+    updated_at = "",
+    source = "",
+    total_updates = 0,
+    last_error = "",
+    records_by_key = {},
   },
   rate_limits = {},
   game_thread_callbacks = {},
@@ -1250,6 +1259,13 @@ API_REGISTRY = {
   { name = "BMF.minigames.listenerCount", namespace = "minigames", kind = "function", stability = "experimental", risk = "low", validation = "L0 Static + L2 Headless event canary", requiresPlayer = false, capability = "", summary = "Count handlers for a normalized BMF minigame event." },
   { name = "BMF.minigames.eventStatus", namespace = "minigames", kind = "function", stability = "experimental", risk = "low", validation = "L0 Static + L2 Headless", requiresPlayer = false, capability = "", summary = "Inspect BMF minigame event counters and recent event metadata." },
   { name = "BMF.minigames.syntheticFlow", namespace = "minigames", kind = "function", stability = "experimental", risk = "low", validation = "L0 Static + L2 Headless synthetic-flow", requiresPlayer = false, capability = "", summary = "Emit a self-contained minigame lifecycle canary and restore data by default." },
+  { name = "BMF.minigames.define", namespace = "minigames", kind = "function", stability = "experimental", risk = "low", validation = "L0 Static + L2 Headless", requiresPlayer = false, capability = "", summary = "Upsert a BMF-owned desired minigame definition without mutating Brickadia." },
+  { name = "BMF.minigames.definitions", namespace = "minigames", kind = "function", stability = "experimental", risk = "low", validation = "L0 Static + L2 Headless", requiresPlayer = false, capability = "", summary = "List BMF-owned desired minigame definitions." },
+  { name = "BMF.minigames.definition", namespace = "minigames", kind = "function", stability = "experimental", risk = "low", validation = "L0 Static + L2 Headless", requiresPlayer = false, capability = "", summary = "Find one BMF-owned desired minigame definition." },
+  { name = "BMF.minigames.deleteDefinition", namespace = "minigames", kind = "function", stability = "experimental", risk = "low", validation = "L0 Static + L2 Headless", requiresPlayer = false, capability = "", summary = "Delete one BMF-owned desired minigame definition with confirmation." },
+  { name = "BMF.minigames.definitionStatus", namespace = "minigames", kind = "function", stability = "experimental", risk = "low", validation = "L0 Static + L2 Headless", requiresPlayer = false, capability = "", summary = "Inspect BMF-owned minigame definition registry counts and persistence path." },
+  { name = "BMF.minigames.reconcileDefinitions", namespace = "minigames", kind = "function", stability = "experimental", risk = "low", validation = "L0 Static + L2 Headless", requiresPlayer = false, capability = "", summary = "Compare BMF-owned desired minigame definitions with observed BMF minigame data." },
+  { name = "BMF.minigames.applySnapshot", namespace = "minigames", kind = "function", stability = "experimental", risk = "low", validation = "L0 Static + L2 Headless", requiresPlayer = false, capability = "", summary = "Apply a BMF-owned observed minigame data snapshot without emitting an event." },
   { name = "BMF.minigames.data", namespace = "minigames", kind = "function", stability = "experimental", risk = "low", validation = "L0 Static + L2 Headless; L3 Live Player for gameplay producers", requiresPlayer = false, capability = "", summary = "Read BMF-owned minigame data learned from observed gameplay events and snapshots." },
   { name = "BMF.minigames.dataStatus", namespace = "minigames", kind = "function", stability = "experimental", risk = "low", validation = "L0 Static + L2 Headless; L3 Live Player for gameplay producers", requiresPlayer = false, capability = "", summary = "Inspect compact counts for the BMF-owned minigame data snapshot." },
   { name = "BMF.minigames.dataList", namespace = "minigames", kind = "function", stability = "experimental", risk = "low", validation = "L0 Static + L2 Headless; L3 Live Player for gameplay producers", requiresPlayer = false, capability = "", summary = "List BMF-owned event-fed minigames without unsafe Brickadia console calls." },
@@ -2452,6 +2468,18 @@ local function option_number(options, key, default)
   return finite_number(value, default)
 end
 
+function option_boolean(options, key, default)
+  local value = options[key]
+  if value == nil or value == "" then
+    return default == true
+  end
+  if type(value) == "boolean" then
+    return value == true
+  end
+  local text = tostring(value):lower()
+  return text == "1" or text == "true" or text == "yes" or text == "on"
+end
+
 local function register_console_handler_for_command(name)
   if state.console_command_callbacks[name] then
     return true
@@ -3605,6 +3633,172 @@ local function register_builtin_commands()
     return minigame_command_lines(deleted, "delete", index, nil, nil)
   end)
 
+  local function minigame_definition_options_from_command(options)
+    local positional_name = options._positional and options._positional[1] or ""
+    return {
+      key = percent_decode(options.key or ""),
+      name = percent_decode(options.name or options.minigame or positional_name or ""),
+      index = options.index,
+      ruleset = percent_decode(options.ruleset or options.id or ""),
+      owner = percent_decode(options.owner or ""),
+      mode = percent_decode(options.mode or options.type or ""),
+      teams = percent_decode(options.teams or options.teamnames or ""),
+      persistent = options.persistent,
+      ownerOnly = options.owneronly or options.ownerOnly,
+      includedBrickMode = options.includedbrickmode or options.brickmode,
+      includedBricks = percent_decode(options.includedbricks or options.bricks or ""),
+      maxPlayers = options.maxplayers,
+      source = percent_decode(options.source or "bmf-command"),
+      limit = options.limit,
+      confirm = options.confirm or options.token,
+    }
+  end
+
+  local function minigame_definition_response_lines(response, data, definition)
+    definition = definition or data.definition or {}
+    local lines = {
+      "code=" .. tostring(response.code or ""),
+      "key=" .. tostring(data.key or definition.key or ""),
+      "name=" .. tostring(definition.name or ""),
+      "index=" .. tostring(definition.index or ""),
+      "ruleset=" .. tostring(definition.ruleset or ""),
+      "teams=" .. tostring(definition.teamCount or #(definition.teams or {})),
+      "persistent=" .. tostring(definition.persistent == true),
+      "owner_only=" .. tostring(definition.ownerOnly == true),
+      "included_brick_mode=" .. tostring(definition.includedBrickMode or ""),
+      "live_enforcement=" .. tostring(definition.liveEnforcement or ""),
+    }
+    return lines
+  end
+
+  BMF.commands.register("bmf.minigames.definitions.status", "Show BMF-owned minigame definition registry status.", function()
+    local status = BMF.minigames.definitionStatus()
+    local data = status.data or {}
+    local counts = data.counts or {}
+    data.lines = {
+      "code=" .. tostring(status.code or ""),
+      "path=" .. tostring(data.path or ""),
+      "definitions=" .. tostring(counts.definitions or 0),
+      "teams=" .. tostring(counts.teams or 0),
+      "total_updates=" .. tostring(data.totalUpdates or 0),
+      "last_error=" .. tostring(data.lastError or ""),
+    }
+    status.data = data
+    return status
+  end)
+
+  BMF.commands.register("bmf.minigames.definitions.set", "Upsert a BMF-owned minigame definition without mutating Brickadia.", function(args)
+    local options = parse_command_options(args)
+    local defined = BMF.minigames.define(minigame_definition_options_from_command(options))
+    local data = defined.data or {}
+    local lines = minigame_definition_response_lines(defined, data, data.definition or {})
+    lines[#lines + 1] = "updated=" .. tostring(data.updated == true)
+    lines[#lines + 1] = "definition_json=" .. json_encode(data)
+    data.lines = lines
+    defined.data = data
+    return defined
+  end)
+
+  BMF.commands.register("bmf.minigames.definitions.list", "List BMF-owned minigame definitions.", function(args)
+    local options = parse_command_options(args)
+    local listed = BMF.minigames.definitions(minigame_definition_options_from_command(options))
+    local data = listed.data or {}
+    local definitions = data.definitions or {}
+    local json_payload = copy_table(data)
+    json_payload.lines = nil
+    local lines = {
+      "code=" .. tostring(listed.code or ""),
+      "definitions=" .. tostring((data.counts and data.counts.definitions) or data.total or 0),
+      "returned=" .. tostring(data.count or #definitions),
+    }
+    for index, definition in ipairs(definitions) do
+      if index > 10 then
+        break
+      end
+      lines[#lines + 1] =
+        "definition_" .. tostring(index) ..
+        "=" .. tostring(definition.key or "") ..
+        "|name=" .. tostring(definition.name or "") ..
+        "|index=" .. tostring(definition.index or "") ..
+        "|teams=" .. tostring(definition.teamCount or #(definition.teams or {})) ..
+        "|persistent=" .. tostring(definition.persistent == true)
+    end
+    lines[#lines + 1] = "definitions_json=" .. json_encode(json_payload)
+    data.lines = lines
+    listed.data = data
+    return listed
+  end)
+
+  BMF.commands.register("bmf.minigames.definitions.get", "Find one BMF-owned minigame definition.", function(args)
+    local options = parse_command_options(args)
+    local found = BMF.minigames.definition(minigame_definition_options_from_command(options))
+    local data = found.data or {}
+    local lines = minigame_definition_response_lines(found, data, data.definition or {})
+    lines[#lines + 1] = "definition_json=" .. json_encode(data)
+    data.lines = lines
+    found.data = data
+    return found
+  end)
+
+  BMF.commands.register("bmf.minigames.definitions.delete", "Delete one BMF-owned minigame definition after confirmation.", function(args)
+    local options = parse_command_options(args)
+    local query = minigame_definition_options_from_command(options)
+    local deleted = BMF.minigames.deleteDefinition(query, query.confirm)
+    local data = deleted.data or {}
+    if deleted.ok then
+      local lines = minigame_definition_response_lines(deleted, data, data.definition or {})
+      lines[#lines + 1] = "deleted=" .. tostring(data.deleted == true)
+      lines[#lines + 1] = "definition_json=" .. json_encode(data)
+      data.lines = lines
+    else
+      data.lines = {
+        "code=" .. tostring(deleted.code or ""),
+        "confirm_required=DELETE_MINIGAME_DEFINITION",
+        "deleted=false",
+      }
+    end
+    deleted.data = data
+    return deleted
+  end)
+
+  BMF.commands.register("bmf.minigames.definitions.reconcile", "Compare BMF-owned minigame definitions with observed BMF minigame data.", function(args)
+    local options = parse_command_options(args)
+    local reconciled = BMF.minigames.reconcileDefinitions(minigame_definition_options_from_command(options))
+    local data = reconciled.data or {}
+    local summary = data.summary or {}
+    local items = data.items or {}
+    local json_payload = copy_table(data)
+    json_payload.lines = nil
+    local lines = {
+      "code=" .. tostring(reconciled.code or ""),
+      "definitions=" .. tostring(summary.definitions or data.count or #items),
+      "checked=" .. tostring(summary.checked or #items),
+      "present=" .. tostring(summary.present or 0),
+      "missing=" .. tostring(summary.missing or 0),
+      "team_mismatches=" .. tostring(summary.teamMismatches or 0),
+      "data_minigames=" .. tostring((data.dataCounts and data.dataCounts.minigames) or 0),
+      "data_teams=" .. tostring((data.dataCounts and data.dataCounts.teams) or 0),
+    }
+    for index, item in ipairs(items) do
+      if index > 10 then
+        break
+      end
+      lines[#lines + 1] =
+        "definition_" .. tostring(index) ..
+        "=" .. tostring(item.key or "") ..
+        "|status=" .. tostring(item.status or "") ..
+        "|observed=" .. tostring(item.observedKey or "") ..
+        "|expected_teams=" .. tostring((item.counts and item.counts.expectedTeams) or 0) ..
+        "|observed_teams=" .. tostring((item.counts and item.counts.observedTeams) or 0) ..
+        "|members=" .. tostring((item.counts and item.counts.members) or 0) ..
+        "|missing_teams=" .. table.concat(item.missingTeams or {}, ",")
+    end
+    lines[#lines + 1] = "reconcile_json=" .. json_encode(json_payload)
+    data.lines = lines
+    reconciled.data = data
+    return reconciled
+  end)
+
   local function parse_number_list(value)
     local text = trim_string(value or "")
     local numbers = {}
@@ -3725,6 +3919,70 @@ local function register_builtin_commands()
       end
     end
     return query
+  end
+
+  local function minigame_snapshot_payload_from_options(options)
+    local raw = ""
+    local source = percent_decode(options.source or "bmf-command")
+    if options.file and trim_string(options.file) ~= "" then
+      local file_path = percent_decode(options.file)
+      raw = read_file(file_path) or ""
+      source = "file:" .. file_path
+    elseif options.payload and trim_string(options.payload) ~= "" then
+      raw = percent_decode(options.payload)
+    elseif options.json and trim_string(options.json) ~= "" then
+      raw = percent_decode(options.json)
+    elseif options.snapshot and trim_string(options.snapshot) ~= "" then
+      raw = percent_decode(options.snapshot)
+    end
+
+    if trim_string(raw) ~= "" then
+      local decoded, err = json_decode(raw)
+      if err then
+        return nil, "snapshot JSON could not be parsed: " .. tostring(err)
+      end
+      if type(decoded) ~= "table" then
+        return nil, "snapshot JSON must decode to an object"
+      end
+      if trim_string(decoded.source or "") == "" then
+        decoded.source = source
+      end
+      return decoded, nil
+    end
+
+    local positional_name = options._positional and options._positional[1] or ""
+    local name = percent_decode(options.name or options.minigame or positional_name or "")
+    local ruleset = percent_decode(options.ruleset or options.id or "")
+    if name == "" and ruleset == "" then
+      return nil, "snapshot payload, file, name, or ruleset is required"
+    end
+
+    local minigame = {
+      name = name,
+      index = tonumber(options.index) or 0,
+      teams = {},
+    }
+    if ruleset ~= "" then
+      minigame.ruleset = ruleset
+    end
+    for _, team in ipairs(minigame_definition_text_list(percent_decode(options.teams or options.teamnames or ""))) do
+      local team_record = {}
+      if type(team) == "table" then
+        team_record = copy_table(team)
+        team_record.name = trim_string(team_record.name or team_record.team or team_record.id or team_record.key or "")
+      else
+        team_record.name = trim_string(team)
+      end
+      if team_record.name ~= "" then
+        team_record.members = type(team_record.members) == "table" and team_record.members or {}
+        minigame.teams[#minigame.teams + 1] = team_record
+      end
+    end
+
+    return {
+      source = source,
+      minigames = { minigame },
+    }, nil
   end
 
   BMF.commands.register("bmf.minigames.events.status", "Show BMF minigame event relay status.", function()
@@ -3911,6 +4169,41 @@ local function register_builtin_commands()
     }
     snapshot.data = data
     return snapshot
+  end)
+
+  BMF.commands.register("bmf.minigames.data.apply-snapshot", "Apply a BMF-owned observed minigame data snapshot without emitting an event.", function(args)
+    local options = parse_command_options(args)
+    local payload, payload_error = minigame_snapshot_payload_from_options(options)
+    if not payload then
+      return result(false, "INVALID_MINIGAME_SNAPSHOT", payload_error, {
+        lines = {
+          "code=INVALID_MINIGAME_SNAPSHOT",
+          "error=" .. tostring(payload_error or ""),
+        },
+      })
+    end
+
+    local applied = BMF.minigames.applySnapshot(payload)
+    local data = applied.data or {}
+    local counts = data.counts or {}
+    local json_payload = copy_table(data)
+    json_payload.lines = nil
+    data.lines = {
+      "code=" .. tostring(applied.code or ""),
+      "applied_at=" .. tostring(data.appliedAt or ""),
+      "source=" .. tostring(data.source or ""),
+      "snapshot_minigames=" .. tostring(data.snapshotMinigames or 0),
+      "minigames=" .. tostring(counts.minigames or 0),
+      "players=" .. tostring(counts.players or 0),
+      "memberships=" .. tostring(counts.memberships or 0),
+      "teams=" .. tostring(counts.teams or 0),
+      "team_memberships=" .. tostring(counts.teamMemberships or 0),
+      "leaderboards=" .. tostring(counts.leaderboards or 0),
+      "rounds=" .. tostring(counts.rounds or 0),
+      "data_json=" .. json_encode(json_payload),
+    }
+    applied.data = data
+    return applied
   end)
 
   BMF.commands.register("bmf.minigames.data.list", "List BMF-owned minigame data records.", function(args)
@@ -7612,6 +7905,19 @@ local function minigame_object_full_name(object)
   return ""
 end
 
+function minigame_object_name(object)
+  if not minigame_object_valid(object) or type(object.GetName) ~= "function" then
+    return ""
+  end
+  local ok, object_name = pcall(function()
+    return object:GetName()
+  end)
+  if ok and object_name ~= nil then
+    return minigame_compact_value(object_name)
+  end
+  return ""
+end
+
 local function minigame_object_address(object)
   if object == nil or type(object) ~= "userdata" then
     return ""
@@ -9386,6 +9692,592 @@ local function team_key(value, minigame)
   return "team:" .. team
 end
 
+function minigame_definitions_state()
+  state.minigame_definitions = state.minigame_definitions or {}
+  local definitions = state.minigame_definitions
+  definitions.records_by_key = definitions.records_by_key or {}
+  definitions.updated_at = definitions.updated_at or ""
+  definitions.source = definitions.source or ""
+  definitions.total_updates = tonumber(definitions.total_updates) or 0
+  definitions.last_error = tostring(definitions.last_error or "")
+  return definitions
+end
+
+function normalize_minigame_definition_bool(value, label)
+  if value == nil or value == "" then
+    return nil, nil
+  end
+  if type(value) == "boolean" then
+    return value, nil
+  end
+  local lower = trim_string(value):lower()
+  if lower == "true" or lower == "1" or lower == "yes" or lower == "on" then
+    return true, nil
+  end
+  if lower == "false" or lower == "0" or lower == "no" or lower == "off" then
+    return false, nil
+  end
+  return nil, label .. " must be a boolean"
+end
+
+function minigame_definition_text_list(value)
+  local items = {}
+  if type(value) == "table" then
+    for _, item in ipairs(value) do
+      if type(item) == "table" then
+        local name = trim_string(item.name or item.team or item.id or item.key or "")
+        if name ~= "" then
+          local copied = copy_table(item)
+          copied.name = name
+          items[#items + 1] = copied
+        end
+      else
+        local text = trim_string(item)
+        if text ~= "" then
+          items[#items + 1] = text
+        end
+      end
+    end
+    return items
+  end
+
+  local text = trim_string(value or "")
+  if text == "" then
+    return items
+  end
+  for item in text:gmatch("[^,|]+") do
+    local decoded = trim_string(percent_decode(item))
+    if decoded ~= "" then
+      items[#items + 1] = decoded
+    end
+  end
+  return items
+end
+
+function normalize_minigame_definition_teams(value)
+  local teams = {}
+  for index, item in ipairs(minigame_definition_text_list(value)) do
+    local team = {}
+    if type(item) == "table" then
+      team = copy_table(item)
+      team.name = trim_string(team.name or team.team or team.id or team.key or "")
+    else
+      team.name = tostring(item)
+    end
+    if team.name ~= "" then
+      team.index = tonumber(team.index) or index
+      team.key = trim_string(team.key or team.id or team.team or team.name)
+      teams[#teams + 1] = team
+    end
+  end
+  return teams
+end
+
+function minigame_definition_counts(definitions)
+  definitions = definitions or minigame_definitions_state()
+  local team_count = 0
+  for _, record in pairs(definitions.records_by_key or {}) do
+    if type(record) == "table" and type(record.teams) == "table" then
+      team_count = team_count + #record.teams
+    end
+  end
+  return {
+    definitions = table_count(definitions.records_by_key),
+    teams = team_count,
+  }
+end
+
+function load_minigame_definitions()
+  local definitions = minigame_definitions_state()
+  if definitions.loaded then
+    return definitions
+  end
+  definitions.loaded = true
+  definitions.records_by_key = definitions.records_by_key or {}
+
+  local raw = read_file(MINIGAME_DEFINITIONS_PATH)
+  if not raw or trim_string(raw) == "" then
+    return definitions
+  end
+
+  local decoded, err = json_decode(raw)
+  if err or type(decoded) ~= "table" then
+    definitions.last_error = "definition JSON could not be parsed: " .. tostring(err or "not an object")
+    return definitions
+  end
+
+  definitions.updated_at = tostring(decoded.updatedAt or decoded.updated_at or "")
+  definitions.source = tostring(decoded.source or "")
+  definitions.total_updates = tonumber(decoded.totalUpdates or decoded.total_updates) or 0
+  definitions.records_by_key = {}
+  local records = decoded.definitions or decoded.records or {}
+  if type(records) == "table" then
+    for key, record in pairs(records) do
+      if type(record) == "table" then
+        local copied = copy_table(record)
+        copied.key = trim_string(copied.key or key)
+        if copied.key ~= "" then
+          definitions.records_by_key[copied.key] = copied
+        end
+      end
+    end
+  end
+  definitions.last_error = ""
+  return definitions
+end
+
+function save_minigame_definitions(definitions)
+  definitions = definitions or minigame_definitions_state()
+  local payload = {
+    updatedAt = definitions.updated_at or "",
+    source = definitions.source or "",
+    totalUpdates = tonumber(definitions.total_updates) or 0,
+    definitions = definitions.records_by_key or {},
+    counts = minigame_definition_counts(definitions),
+  }
+  if not write_file(MINIGAME_DEFINITIONS_PATH, json_encode(payload) .. "\n") then
+    definitions.last_error = "could not write minigame definitions"
+    return false
+  end
+  definitions.last_error = ""
+  return true
+end
+
+function normalize_minigame_definition(input)
+  if type(input) ~= "table" then
+    return nil, "definition options table is required"
+  end
+
+  local errors = {}
+  local name = trim_string(input.name or input.minigame or input.displayName or "")
+  if name ~= "" and name:match("[%c]") then
+    errors[#errors + 1] = "name contains unsupported control characters"
+  end
+  local ruleset = trim_string(input.ruleset or input.id or input.minigameId or "")
+  local index = tonumber(input.index or input.minigameIndex)
+  if index == nil then
+    index = 0
+  else
+    index = math.floor(index)
+  end
+  if name == "" and ruleset == "" then
+    errors[#errors + 1] = "name or ruleset is required"
+  end
+
+  local persistent, persistent_error = normalize_minigame_definition_bool(input.persistent, "persistent")
+  if persistent_error then
+    errors[#errors + 1] = persistent_error
+  end
+  local owner_only, owner_only_error = normalize_minigame_definition_bool(input.ownerOnly or input.owneronly, "ownerOnly")
+  if owner_only_error then
+    errors[#errors + 1] = owner_only_error
+  end
+
+  local included_brick_mode = trim_string(input.includedBrickMode or input.includedbrickmode or input.brickMode or input.brickmode or "")
+  if included_brick_mode ~= "" then
+    included_brick_mode = included_brick_mode:lower()
+    local valid_modes = {
+      all = true,
+      none = true,
+      listed = true,
+      include = true,
+      exclude = true,
+    }
+    if not valid_modes[included_brick_mode] then
+      errors[#errors + 1] = "includedBrickMode must be all, none, listed, include, or exclude"
+    end
+  end
+
+  local max_players = tonumber(input.maxPlayers or input.maxplayers or "")
+  if max_players ~= nil then
+    max_players = math.floor(max_players)
+    if max_players < 0 then
+      errors[#errors + 1] = "maxPlayers must be zero or greater"
+    end
+  end
+
+  if #errors > 0 then
+    return nil, table.concat(errors, "; ")
+  end
+
+  local minigame = {
+    name = name,
+    index = index,
+  }
+  if ruleset ~= "" then
+    minigame.ruleset = ruleset
+  end
+  local key = trim_string(input.key or "")
+  if key == "" then
+    key = minigame_key(minigame)
+  end
+
+  local teams = normalize_minigame_definition_teams(input.teams or input.teamNames or input.teamnames)
+  local included_bricks = minigame_definition_text_list(input.includedBricks or input.includedbricks or input.bricks)
+  local now = os.date("!%Y-%m-%dT%H:%M:%SZ")
+  local definition = {
+    key = key,
+    name = name,
+    index = index,
+    ruleset = ruleset,
+    owner = trim_string(input.owner or ""),
+    mode = trim_string(input.mode or input.type or ""),
+    persistent = persistent,
+    ownerOnly = owner_only,
+    includedBrickMode = included_brick_mode,
+    includedBricks = included_bricks,
+    maxPlayers = max_players,
+    teams = teams,
+    teamCount = #teams,
+    source = trim_string(input.source or "bmf-definition"),
+    updatedAt = now,
+    liveEnforcement = "definition-only",
+  }
+  return definition, nil
+end
+
+function minigame_definition_matches(record, query)
+  query = type(query) == "table" and query or {}
+  record = type(record) == "table" and record or {}
+  local direct = normalize_api_filter_value(minigame_query_value(query, "key") or "")
+  local ruleset = normalize_api_filter_value(minigame_query_value(query, "ruleset", "minigameid", "id") or "")
+  local name = normalize_api_filter_value(minigame_query_value(query, "name", "minigame", "displayName") or "")
+  local index_value = minigame_query_value(query, "index", "minigameIndex")
+  local wanted_index = tonumber(index_value)
+  if direct ~= "" and normalize_api_filter_value(record.key) ~= direct then
+    return false
+  end
+  if ruleset ~= "" and normalize_api_filter_value(record.ruleset) ~= ruleset then
+    return false
+  end
+  if name ~= "" and normalize_api_filter_value(record.name) ~= name then
+    return false
+  end
+  if index_value ~= nil and (wanted_index == nil or tonumber(record.index or 0) ~= wanted_index) then
+    return false
+  end
+  return true
+end
+
+function minigame_definition_query_has_filter(query)
+  return minigame_query_value(query, "key", "ruleset", "minigameid", "id", "name", "minigame", "displayName", "index", "minigameIndex") ~= nil
+end
+
+function minigame_definition_find(query)
+  local definitions = load_minigame_definitions()
+  local normalized = normalize_minigame_lookup_query(query, "key")
+  local key = trim_string(minigame_query_value(normalized, "key") or "")
+  if key ~= "" and definitions.records_by_key[key] then
+    return key, definitions.records_by_key[key], normalized
+  end
+  for _, record_key in ipairs(minigame_sorted_keys(definitions.records_by_key)) do
+    local record = definitions.records_by_key[record_key]
+    if minigame_definition_matches(record, normalized) then
+      return record_key, record, normalized
+    end
+  end
+  return "", nil, normalized
+end
+
+function BMF.minigames.definitionStatus()
+  local definitions = load_minigame_definitions()
+  return result(true, "OK", "Minigame definition status collected", {
+    path = MINIGAME_DEFINITIONS_PATH,
+    updatedAt = definitions.updated_at or "",
+    source = definitions.source or "",
+    totalUpdates = tonumber(definitions.total_updates) or 0,
+    loaded = definitions.loaded == true,
+    lastError = tostring(definitions.last_error or ""),
+    counts = minigame_definition_counts(definitions),
+  })
+end
+
+function BMF.minigames.define(options)
+  local definition, normalize_error = normalize_minigame_definition(options)
+  if not definition then
+    return result(false, "INVALID_MINIGAME_DEFINITION", normalize_error)
+  end
+
+  local definitions = load_minigame_definitions()
+  local previous = definitions.records_by_key[definition.key]
+  definition.revision = (previous and tonumber(previous.revision) or 0) + 1
+  definitions.records_by_key[definition.key] = definition
+  definitions.updated_at = definition.updatedAt
+  definitions.source = definition.source
+  definitions.total_updates = (tonumber(definitions.total_updates) or 0) + 1
+  if not save_minigame_definitions(definitions) then
+    return result(false, "MINIGAME_DEFINITION_WRITE_FAILED", definitions.last_error, {
+      path = MINIGAME_DEFINITIONS_PATH,
+      definition = definition,
+    })
+  end
+  if write_status then
+    write_status()
+  end
+  return result(true, "OK", "Minigame definition upserted", {
+    definition = copy_table(definition),
+    key = definition.key,
+    updated = previous ~= nil,
+    counts = minigame_definition_counts(definitions),
+    path = MINIGAME_DEFINITIONS_PATH,
+  })
+end
+
+function BMF.minigames.definitions(query)
+  local definitions = load_minigame_definitions()
+  local normalized = normalize_minigame_lookup_query(query, "key")
+  local limit = minigame_query_limit(normalized, 50, 100)
+  local has_filter = minigame_query_has_minigame_filter(normalized)
+  local items = {}
+  for _, key in ipairs(minigame_sorted_keys(definitions.records_by_key)) do
+    if #items >= limit then
+      break
+    end
+    local record = definitions.records_by_key[key]
+    if type(record) == "table" and (not has_filter or minigame_definition_matches(record, normalized)) then
+      items[#items + 1] = copy_table(record)
+    end
+  end
+  return result(true, "OK", "Minigame definitions listed", {
+    definitions = items,
+    count = #items,
+    total = table_count(definitions.records_by_key),
+    query = normalized,
+    counts = minigame_definition_counts(definitions),
+    path = MINIGAME_DEFINITIONS_PATH,
+    updatedAt = definitions.updated_at or "",
+    source = definitions.source or "",
+    totalUpdates = tonumber(definitions.total_updates) or 0,
+    lastError = tostring(definitions.last_error or ""),
+  })
+end
+
+function BMF.minigames.definition(query)
+  local normalized = normalize_minigame_lookup_query(query, "key")
+  if not minigame_definition_query_has_filter(normalized) then
+    return result(false, "INVALID_MINIGAME_DEFINITION_QUERY", "Minigame definition key, name, ruleset, or index is required", {
+      query = normalized,
+      counts = minigame_definition_counts(load_minigame_definitions()),
+    })
+  end
+  local key, record, normalized = minigame_definition_find(query)
+  if not record then
+    return result(false, "MINIGAME_DEFINITION_NOT_FOUND", "Minigame definition not found", {
+      query = normalized,
+      counts = minigame_definition_counts(load_minigame_definitions()),
+    })
+  end
+  return result(true, "OK", "Minigame definition found", {
+    key = key,
+    definition = copy_table(record),
+    query = normalized,
+    counts = minigame_definition_counts(load_minigame_definitions()),
+    path = MINIGAME_DEFINITIONS_PATH,
+  })
+end
+
+function BMF.minigames.deleteDefinition(query, confirm)
+  local token = confirm
+  if type(query) == "table" then
+    token = token or query.confirm or query.token
+  end
+  local normalized = normalize_minigame_lookup_query(query, "key")
+  if not minigame_definition_query_has_filter(normalized) then
+    return result(false, "INVALID_MINIGAME_DEFINITION_QUERY", "Minigame definition key, name, ruleset, or index is required", {
+      query = normalized,
+      counts = minigame_definition_counts(load_minigame_definitions()),
+    })
+  end
+  if tostring(token or "") ~= "DELETE_MINIGAME_DEFINITION" then
+    return result(false, "CONFIRMATION_REQUIRED", "Pass confirm=DELETE_MINIGAME_DEFINITION to delete a minigame definition.", {
+      confirmRequired = "DELETE_MINIGAME_DEFINITION",
+    })
+  end
+
+  local key, record, normalized = minigame_definition_find(query)
+  if not record then
+    return result(false, "MINIGAME_DEFINITION_NOT_FOUND", "Minigame definition not found", {
+      query = normalized,
+      counts = minigame_definition_counts(load_minigame_definitions()),
+    })
+  end
+  local definitions = load_minigame_definitions()
+  definitions.records_by_key[key] = nil
+  definitions.updated_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+  definitions.source = "definition-delete"
+  definitions.total_updates = (tonumber(definitions.total_updates) or 0) + 1
+  if not save_minigame_definitions(definitions) then
+    return result(false, "MINIGAME_DEFINITION_WRITE_FAILED", definitions.last_error, {
+      path = MINIGAME_DEFINITIONS_PATH,
+      key = key,
+    })
+  end
+  if write_status then
+    write_status()
+  end
+  return result(true, "OK", "Minigame definition deleted", {
+    key = key,
+    definition = copy_table(record),
+    deleted = true,
+    counts = minigame_definition_counts(definitions),
+    path = MINIGAME_DEFINITIONS_PATH,
+  })
+end
+
+function minigame_definition_team_label(team)
+  if type(team) == "table" then
+    return trim_string(team.name or team.team or team.id or team.key or "")
+  end
+  return trim_string(team or "")
+end
+
+function minigame_definition_team_labels(teams)
+  local labels = {}
+  local by_normalized = {}
+  if type(teams) ~= "table" then
+    return labels, by_normalized
+  end
+  for _, team in ipairs(teams) do
+    local label = minigame_definition_team_label(team)
+    local normalized = normalize_api_filter_value(label)
+    if label ~= "" and not by_normalized[normalized] then
+      labels[#labels + 1] = label
+      by_normalized[normalized] = label
+    end
+  end
+  return labels, by_normalized
+end
+
+function minigame_definition_observed_minigame(data, definition)
+  data = type(data) == "table" and data or new_minigame_data_state()
+  definition = type(definition) == "table" and definition or {}
+  local queries = {}
+  local direct_key = trim_string(definition.key or "")
+  local ruleset = trim_string(definition.ruleset or "")
+  local name = trim_string(definition.name or "")
+  if direct_key ~= "" then
+    queries[#queries + 1] = { key = direct_key }
+  end
+  if ruleset ~= "" then
+    queries[#queries + 1] = { ruleset = ruleset }
+  end
+  if name ~= "" then
+    queries[#queries + 1] = { name = name, index = definition.index or 0 }
+    queries[#queries + 1] = { name = name }
+  end
+
+  local last_matches = {}
+  local last_query = {}
+  for _, query in ipairs(queries) do
+    local key, record, matches, _, normalized = minigame_find_by_query(data, query)
+    last_matches = matches or last_matches
+    last_query = normalized or query
+    if record then
+      return key, record, matches or {}, last_query
+    end
+  end
+  return "", nil, last_matches, last_query
+end
+
+function minigame_definition_reconcile_item(data, definition)
+  definition = type(definition) == "table" and definition or {}
+  local key = trim_string(definition.key or "")
+  local observed_key, observed, matches, lookup_query = minigame_definition_observed_minigame(data, definition)
+  local context = nil
+  if observed then
+    context = minigame_context_for_key(data, observed_key, observed, matches)
+  end
+
+  local expected_teams = minigame_definition_team_labels(definition.teams or {})
+  local observed_teams = {}
+  local observed_map = {}
+  if context then
+    observed_teams, observed_map = minigame_definition_team_labels(context.teams or {})
+  end
+
+  local missing_teams = {}
+  for _, team in ipairs(expected_teams) do
+    if not observed_map[normalize_api_filter_value(team)] then
+      missing_teams[#missing_teams + 1] = team
+    end
+  end
+
+  local status = "missing"
+  if observed then
+    status = #missing_teams > 0 and "team-mismatch" or "present"
+  end
+
+  return {
+    key = key,
+    definition = copy_table(definition),
+    status = status,
+    present = observed ~= nil,
+    observedKey = observed_key,
+    observedMinigame = observed and copy_table(observed) or nil,
+    expectedTeams = expected_teams,
+    observedTeams = observed_teams,
+    missingTeams = missing_teams,
+    query = copy_table(lookup_query or {}),
+    counts = {
+      expectedTeams = #expected_teams,
+      observedTeams = #observed_teams,
+      missingTeams = #missing_teams,
+      members = context and context.counts and context.counts.members or 0,
+      teamMemberships = context and context.counts and context.counts.teamMemberships or 0,
+      leaderboards = context and context.counts and context.counts.leaderboards or 0,
+    },
+  }
+end
+
+function BMF.minigames.reconcileDefinitions(query)
+  local listed = BMF.minigames.definitions(query)
+  if not listed.ok then
+    return listed
+  end
+  local definitions_data = listed.data or {}
+  local definitions = definitions_data.definitions or {}
+  local data = state.minigame_data or new_minigame_data_state()
+  local items = {}
+  local summary = {
+    definitions = #definitions,
+    checked = 0,
+    present = 0,
+    missing = 0,
+    teamMismatches = 0,
+    expectedTeams = 0,
+    observedTeams = 0,
+  }
+
+  for _, definition in ipairs(definitions) do
+    local item = minigame_definition_reconcile_item(data, definition)
+    items[#items + 1] = item
+    summary.checked = summary.checked + 1
+    summary.expectedTeams = summary.expectedTeams + ((item.counts and item.counts.expectedTeams) or 0)
+    summary.observedTeams = summary.observedTeams + ((item.counts and item.counts.observedTeams) or 0)
+    if item.status == "present" then
+      summary.present = summary.present + 1
+    elseif item.status == "team-mismatch" then
+      summary.teamMismatches = summary.teamMismatches + 1
+    else
+      summary.missing = summary.missing + 1
+    end
+  end
+
+  return result(true, "OK", "Minigame definitions reconciled", {
+    items = items,
+    count = #items,
+    summary = summary,
+    query = definitions_data.query or normalize_minigame_lookup_query(query, "key"),
+    definitionCounts = definitions_data.counts or {},
+    dataCounts = minigame_data_counts(data),
+    definitionsPath = MINIGAME_DEFINITIONS_PATH,
+    definitionsUpdatedAt = definitions_data.updatedAt or "",
+    dataUpdatedAt = data.updated_at or "",
+    dataSource = data.source or "",
+    dataTotalUpdates = tonumber(data.total_updates) or 0,
+  })
+end
+
 function minigame_event_metadata(legacy_name, event_name, payload, emitted_at, event_id)
   payload = type(payload) == "table" and payload or {}
   local minigame = type(payload.minigame) == "table" and payload.minigame or payload
@@ -9492,12 +10384,35 @@ local function forget_membership(data, player, minigame)
   end
 end
 
-local function remember_minigame_snapshot(data, payload)
+function minigame_snapshot_records(payload)
+  payload = type(payload) == "table" and payload or {}
   local minigames = payload.minigames
   if type(minigames) ~= "table" and type(payload.snapshot) == "table" then
     minigames = payload.snapshot.minigames
   end
+  local records = {}
   if type(minigames) ~= "table" then
+    return records
+  end
+
+  for _, minigame in ipairs(minigames) do
+    if type(minigame) == "table" then
+      records[#records + 1] = minigame
+    end
+  end
+  if #records == 0 then
+    for _, minigame in pairs(minigames) do
+      if type(minigame) == "table" then
+        records[#records + 1] = minigame
+      end
+    end
+  end
+  return records
+end
+
+local function remember_minigame_snapshot(data, payload)
+  local minigames = minigame_snapshot_records(payload)
+  if #minigames == 0 then
     return
   end
 
@@ -10493,6 +11408,43 @@ BMF.minigames.data = function()
     teamMemberships = copy_table(data.team_memberships_by_player or {}),
     leaderboards = copy_table(data.leaderboards_by_player or {}),
     rounds = copy_table(data.rounds_by_key or {}),
+    counts = minigame_data_counts(data),
+  })
+end
+
+BMF.minigames.applySnapshot = function(payload)
+  if type(payload) ~= "table" then
+    return result(false, "INVALID_MINIGAME_SNAPSHOT", "snapshot payload table is required", {
+      counts = minigame_data_counts(state.minigame_data or new_minigame_data_state()),
+    })
+  end
+
+  local snapshot_payload = copy_table(payload)
+  local minigames = minigame_snapshot_records(snapshot_payload)
+  if #minigames == 0 then
+    return result(false, "INVALID_MINIGAME_SNAPSHOT", "snapshot must include at least one minigame", {
+      counts = minigame_data_counts(state.minigame_data or new_minigame_data_state()),
+    })
+  end
+
+  if trim_string(snapshot_payload.source or "") == "" then
+    snapshot_payload.source = "bmf-snapshot-import"
+  end
+  state.minigame_data = state.minigame_data or new_minigame_data_state()
+  local applied_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+  remember_minigame_data("snapshot", snapshot_payload, applied_at)
+  if write_status then
+    write_status()
+  end
+
+  local data = state.minigame_data
+  return result(true, "OK", "Minigame data snapshot applied", {
+    appliedAt = applied_at,
+    source = data.source or "",
+    snapshotMinigames = #minigames,
+    updatedAt = data.updated_at or "",
+    totalUpdates = data.total_updates or 0,
+    lastEvent = type(data.last_event) == "table" and copy_table(data.last_event) or nil,
     counts = minigame_data_counts(data),
   })
 end
@@ -12936,6 +13888,7 @@ local function read_framework_config()
     allowPluginUnsafeGlobals = parse_json_boolean_field(raw, "allowPluginUnsafeGlobals") == true,
     allowUnsafeApplicatorLuaHook = parse_json_boolean_field(raw, "allowUnsafeApplicatorLuaHook") == true,
     allowUnsafeMinigameConsoleCommands = parse_json_boolean_field(raw, "allowUnsafeMinigameConsoleCommands") == true,
+    allowUnsafeMinigameObjectSnapshot = parse_json_boolean_field(raw, "allowUnsafeMinigameObjectSnapshot") == true,
     brickadiaSavedDir = parse_json_string_field(raw, "brickadiaSavedDir") or "",
   }
 end

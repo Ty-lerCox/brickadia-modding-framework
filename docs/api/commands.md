@@ -92,6 +92,20 @@ worker remains the fallback and the durable repair path.
 - `bmf.minigames.nextround index=<n>`: runs `BMF.minigames.nextRound`.
 - `bmf.minigames.reset index=<n>`: runs `BMF.minigames.reset`.
 - `bmf.minigames.delete index=<n>`: runs `BMF.minigames.delete`.
+- `bmf.minigames.definitions.status`: prints BMF-owned desired-definition
+  registry counts and persistence path.
+- `bmf.minigames.definitions.set name=<name> [index=<n>] [teams=A,B]
+  [persistent=true|false] [owneronly=true|false] [includedbrickmode=<mode>]`:
+  upserts a BMF-owned desired minigame definition without mutating Brickadia.
+- `bmf.minigames.definitions.list [name=<name>] [index=<n>]`: lists desired
+  minigame definitions.
+- `bmf.minigames.definitions.get key=<key>|name=<name> [index=<n>]`: returns
+  one desired minigame definition.
+- `bmf.minigames.definitions.delete key=<key>|name=<name> [index=<n>]
+  confirm=DELETE_MINIGAME_DEFINITION`: deletes one desired definition.
+- `bmf.minigames.definitions.reconcile [name=<name>] [index=<n>]`: compares
+  desired definitions with the BMF-owned observed minigame data snapshot and
+  reports `present`, `missing`, and team mismatch counts.
 - `bmf.minigames.events.emit event=<name> ...`: emits one namespaced
   `minigames.<name>` event into the BMF event bus and event-fed data cache.
 - `bmf.minigames.events.status`: prints event relay counters and last-event
@@ -107,6 +121,9 @@ worker remains the fallback and the durable repair path.
 - `bmf.minigames.data.status`: prints compact BMF-owned minigame cache counts.
 - `bmf.minigames.data.snapshot`: prints the full BMF-owned minigame cache as
   `snapshot_json=<json>`.
+- `bmf.minigames.data.apply-snapshot payload=<json>|name=<name> [index=<n>]
+  [teams=A,B]`: applies a BMF-owned observed minigame snapshot without emitting
+  a framework event.
 - `bmf.minigames.data.list [key=<key>|name=<name>] [index=<n>]`: lists
   BMF-owned event-fed minigame records.
 - `bmf.minigames.data.get key=<key>|name=<name> [index=<n>]`: returns one
@@ -129,10 +146,10 @@ worker remains the fallback and the durable repair path.
   current known minigame membership or `MINIGAME_MEMBERSHIP_NOT_FOUND`.
 - `bmf.minigames.data.clear confirm=CLEAR_MINIGAME_DATA`: clears the in-memory
   minigame data cache for validation and troubleshooting.
-- `bmf.minigames.objects.snapshot [limit=<n>]`: fail-closed live
-  `BP_Ruleset_C`/`BP_Team_C` object probe. It returns
-  `UNSAFE_MINIGAME_OBJECT_SNAPSHOT_DISABLED` unless the explicit unsafe object
-  snapshot opt-in is enabled.
+- `bmf.minigames.objects.snapshot [limit=<n>] [includeProperties=true]`:
+  fail-closed live `BP_Ruleset_C`/`BP_Team_C` object probe. It returns
+  metadata/counts by default when the explicit unsafe object snapshot opt-in is
+  enabled; direct Unreal property reads require `includeProperties=true`.
 - `bmf.world.saveas name=<world>`: saves the current running world as a named
   `.brdb`.
 - `bmf.prefabs.loadbrz source=<file.brz> name=<staged-world> x=<x> y=<y>
@@ -233,8 +250,9 @@ player actor is available.
   `bmf.minigames.list` command through the same command worker.
 - `L2 Headless + L5 Negative`:
   `scripts/validate-bmf-minigame-commands.ps1` invokes minigame lifecycle
-  command routes, proves they fail closed by default, and proves invalid
-  preset/index rejection.
+  command routes, proves they fail closed by default, proves BMF-owned
+  desired-definition set/list/get/delete, and proves invalid preset/index
+  rejection.
 - `L2 Headless`: `scripts/validate-bmf-vehicle-spawn-set-command.ps1` stages
   vehicle worlds, invokes `bmf.vehicles.spawnset`, invokes `bmf.world.saveas`,
   then parses the saved world and exports a matched vehicle inventory.

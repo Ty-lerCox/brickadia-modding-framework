@@ -39,6 +39,8 @@ nav:
   - Getting Started:
       - First Plugin: getting-started/first-plugin.md
       - Windows Install: install/windows.md
+  - Examples:
+      - Lua Examples: examples/index.md
   - Architecture:
       - Omegga-Supported Runtime: architecture/omegga-supported-runtime.md
       - Standalone Runtime: architecture/standalone-runtime.md

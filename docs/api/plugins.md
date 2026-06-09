@@ -10,6 +10,13 @@ Mods/BMF/plugins/<PluginName>/
   data/
 ```
 
+## Examples
+
+- [HelloBroadcast](../examples/index.md#hellobroadcast): minimal plugin shape
+  with `onLoad`.
+- [Plugin Storage](../examples/index.md#plugin-storage): complete plugin using
+  config and plugin-scoped state.
+
 `main.lua` returns a plugin table. The loader supports:
 
 - `onLoad(BMF, data)`: called after the plugin script loads.

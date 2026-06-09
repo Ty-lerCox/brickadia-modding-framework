@@ -3,6 +3,11 @@
 The first BMF world API wraps Brickadia console commands that have local
 headless evidence on CL13530.
 
+## Examples
+
+- [LoadThreeCars](../examples/index.md#loadthreecars): complete plugin that
+  loads a staged world bundle and saves the result.
+
 ## `BMF.world.loadAdditive(options)`
 
 Loads a staged `.brdb` world additively.

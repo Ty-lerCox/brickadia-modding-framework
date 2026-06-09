@@ -17,6 +17,11 @@ Built-in protected actions currently include:
 Plugins are counted under `plugin:<PluginName>`. Framework/admin command calls
 are counted separately under `framework`.
 
+## Examples
+
+- [RateLimitedCommand](../examples/index.md#ratelimitedcommand): complete
+  plugin command guarded by `BMF.rateLimits.check`.
+
 Plugins can use custom limits for their own features:
 
 ```lua

@@ -2,6 +2,11 @@
 
 BMF exposes a small event bus for plugins:
 
+## Examples
+
+- [EventAudit](../examples/index.md#eventaudit): complete plugin that
+  subscribes to `serverReady` and records an audit event.
+
 ```lua
 local id = BMF.events.on("serverReady", function(data, event)
   BMF.log("ready version=" .. tostring(data.version))

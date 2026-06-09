@@ -3,6 +3,13 @@
 BMF server settings support is currently split between Lua planning and
 file-backed patch tooling. It does not hot-change the live server yet.
 
+## Examples
+
+- [WelcomeMessage](../examples/index.md#welcomemessage): complete plugin that
+  plans a server name and welcome-message patch.
+- [HealthCheck](../examples/index.md#healthcheck): logs server/runtime health
+  fields at plugin load.
+
 ## `BMF.server.status()`
 
 Returns structured server/runtime status. Fields that are not safely known in a

@@ -9,6 +9,13 @@ The legacy console wrappers are disabled by default because
 `Server.Minigames.List` can crash Brickadia CL13530 while formatting its console
 table output. Prefer the BMF-owned event/data APIs for minigame state.
 
+## Examples
+
+- [ListMinigames](../examples/index.md#listminigames): complete plugin that
+  runs the minigame list wrapper after startup.
+- [EventAudit](../examples/index.md#eventaudit): event subscription pattern
+  shared by BMF-owned minigame event adapters.
+
 ## `BMF.minigames.list()`
 
 Would run, when explicitly enabled:

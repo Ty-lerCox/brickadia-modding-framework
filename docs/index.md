@@ -29,6 +29,7 @@ response time.
 ## Start Here
 
 - [First plugin](getting-started/first-plugin.md)
+- [Lua examples](examples/index.md)
 - [Windows install](install/windows.md)
 - [Omegga-supported runtime](architecture/omegga-supported-runtime.md)
 - [API overview](api/index.md)

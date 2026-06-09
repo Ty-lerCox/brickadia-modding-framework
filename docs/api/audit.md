@@ -6,6 +6,11 @@ BMF writes an admin-oriented audit stream under:
 Mods/BMF/runtime/audit.jsonl
 ```
 
+## Examples
+
+- [EventAudit](../examples/index.md#eventaudit): complete plugin that records
+  structured audit data from an event handler.
+
 Each line is a JSON object with stable fields:
 
 ```json

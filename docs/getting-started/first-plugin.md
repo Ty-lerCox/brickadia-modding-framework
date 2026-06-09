@@ -31,3 +31,8 @@ BMF.storage.writeText("HelloBroadcast", "state/last-load.txt", os.date("!%Y-%m-%
 The first public example is intentionally small. It validates the BMF plugin
 loader, lifecycle hook, and broadcast API without introducing unsafe game-state
 mutation.
+
+For more complete examples, see [Lua examples](../examples/index.md). That page
+includes copy-pasteable plugins for chat, timers, commands, storage, world
+loading, prefab loading, vehicles, minigames, permissions, events, audit, health,
+and rate limits.

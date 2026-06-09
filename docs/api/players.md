@@ -7,6 +7,11 @@ Configure `brickadiaSavedDir` so BMF can read Brickadia's own
 `Saved/Logs/Brickadia.log` plus `Saved/Server/PlayerNameCache.json`, and run
 the Omegga player sync adapter so `runtime/players.json` stays populated.
 
+## Examples
+
+- [PlayerSummary](../examples/index.md#playersummary): complete plugin that
+  lists known players and logs normalized display names.
+
 ## `BMF.players.list()`
 
 ```lua

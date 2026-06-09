@@ -9,6 +9,14 @@ BMF permission work currently has two layers:
 The live runtime effect of changed permissions still requires a connected
 player test. The file-backed patch path can be validated headlessly.
 
+## Examples
+
+- [AssignRole](../examples/index.md#assignrole): complete plugin that plans a
+  copied player role assignment change.
+- [Placement Guards](../examples/index.md#placement-guards): runnable policy
+  plugins for applicator components, Interactable console prefixes, brick
+  assets, and restricted prefab hashes.
+
 ## `BMF.permissions.describeRole(role)`
 
 Normalizes a RoleSetup2-style role table into a permission map and duplicate

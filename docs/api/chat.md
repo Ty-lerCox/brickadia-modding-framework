@@ -5,6 +5,13 @@ currently BMF-compatible Omegga plus UE4SS. Omegga supplies the server wrapper,
 command bridge, and helper globals BMF uses to reach live Brickadia
 `PlayerController` objects.
 
+## Examples
+
+- [HelloBroadcast](../examples/index.md#hellobroadcast): complete load-time
+  broadcast plugin.
+- [TimedBroadcast](../examples/index.md#timedbroadcast): delayed broadcast with
+  `BMF.timers.after`.
+
 ## `BMF.chat.broadcast(message)`
 
 Broadcasts a message by finding a live player controller and calling

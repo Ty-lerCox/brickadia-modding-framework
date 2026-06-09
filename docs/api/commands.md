@@ -20,6 +20,13 @@ command envelopes to the broker. The command result shape is the same; socket
 responses include `bmf_command_transport=socket`. The file-backed command
 worker remains the fallback and the durable repair path.
 
+## Examples
+
+- [Plugin Command](../examples/index.md#plugin-command): complete Lua plugin
+  that registers a server-console command.
+- [RateLimitedCommand](../examples/index.md#ratelimitedcommand): command
+  handler with `BMF.rateLimits.check`.
+
 ## Built-In Commands
 
 - `bmf.status`: prints BMF health, version, loaded plugin count, and runtime

@@ -1,5 +1,10 @@
 # Health API
 
+## Examples
+
+- [HealthCheck](../examples/index.md#healthcheck): complete plugin that logs
+  `BMF.health()`, `BMF.version`, and `BMF.compatibility.check()`.
+
 ## `BMF.health()`
 
 Returns the standard BMF result shape:

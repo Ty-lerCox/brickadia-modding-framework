@@ -4,6 +4,13 @@ Archive support is currently an offline/headless tooling lane, not an in-game
 Lua runtime API. It wraps the BRDB parser from the Brickadia reverse-engineering
 workspace so BMF can produce stable evidence about saved worlds.
 
+## Examples
+
+- [LoadCarBrz](../examples/index.md#loadcarbrz): complete Lua plugin that
+  consumes a staged archive after the offline tools have prepared it.
+- [LoadThreeCars](../examples/index.md#loadthreecars): complete plugin for
+  saving a loaded staged world so archive validators can inspect the result.
+
 ## `scripts/describe-world-archive.ps1`
 
 Describe one `.brdb` file:

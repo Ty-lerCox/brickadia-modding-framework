@@ -4,6 +4,11 @@ BMF currently targets Windows dedicated servers for Brickadia EA2
 `PC-Shipping-CL13530` with the patched UE4SS runtime from the Brickadia
 reverse-engineering workspace.
 
+## Examples
+
+- [HealthCheck](../examples/index.md#healthcheck): complete plugin that logs
+  compatibility status with runtime health.
+
 ## `BMF.compatibility.check()`
 
 Returns the standard BMF result shape with build target metadata and runtime

@@ -2,6 +2,11 @@
 
 BMF timers schedule callbacks on the server runtime without requiring a player.
 
+## Examples
+
+- [TimedBroadcast](../examples/index.md#timedbroadcast): complete plugin that
+  schedules a delayed chat broadcast.
+
 ```lua
 local id = BMF.timers.after(1000, function()
   BMF.log("one second passed")

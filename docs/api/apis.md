@@ -3,6 +3,11 @@
 BMF exposes machine-readable stability, crash-risk, and validation labels for
 the public Lua surface.
 
+## Examples
+
+- [InspectApiLabels](../examples/index.md#inspectapilabels): complete plugin
+  that lists a namespace and inspects labels for one API.
+
 ```lua
 local listed = BMF.apis.list({ namespace = "players" })
 local whisper = BMF.apis.get("BMF.chat.whisper")

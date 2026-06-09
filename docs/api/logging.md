@@ -10,6 +10,13 @@ Mods/BMF/runtime/
   logs/plugins/<PluginName>.log
 ```
 
+## Examples
+
+- [EventAudit](../examples/index.md#eventaudit): complete plugin that combines
+  `BMF.logInfo` with `BMF.audit.record`.
+- [HelloBroadcast](../examples/index.md#hellobroadcast): minimal plugin logging
+  during `onLoad`.
+
 Framework code can use:
 
 ```lua

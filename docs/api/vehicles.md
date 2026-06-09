@@ -25,6 +25,11 @@ default, copies the first vehicle unchanged, remaps later copies by persistent
 entity/grid id offsets, validates each copy as one vehicle-like graph, and writes
 a manifest with world names and positions.
 
+## Examples
+
+- [SpawnVehicleSet](../examples/index.md#spawnvehicleset): complete plugin that
+  loads multiple staged vehicle worlds with separated positions.
+
 ## `BMF.vehicles.planSpawnSet(options)`
 
 Plan staged vehicle loads without executing them:

@@ -5,6 +5,11 @@ to turn `.brz` prefab archives into `.brdb` world bundles that a server can load
 with `BR.World.LoadAdditive`, then later wrap that path with Lua helpers such as
 `BMF.prefabs.loadBrz(options)`.
 
+## Examples
+
+- [LoadCarBrz](../examples/index.md#loadcarbrz): complete plugin that loads a
+  staged BRZ-derived world bundle and saves the running world.
+
 ## Current Shape
 
 `scripts/stage-brz-prefab.ps1` is the safe staging entry point:

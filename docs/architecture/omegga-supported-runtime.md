@@ -27,7 +27,7 @@ contract until BMF validates a newer fork or upstream release.
 | UE4SS compatibility setup | Installs the pinned UE4SS payload, Brickadia config, signatures, and bridge mod. |
 | Command bridge | Routes `Omegga.Bridge.BMF ...` into the BMF command worker for canaries and admin commands. |
 | BMF socket broker | Provides an authenticated loopback TCP broker for low-latency BMF command responses and event delivery between UE4SS and Omegga plugins. |
-| Console execution helpers | Provides the proven CL13530 console manager and Kismet fallback paths used by world/save APIs. |
+| Console execution helpers | Provides the proven CL13530 console manager and Kismet fallback paths used by world/save APIs and environment preset reloads. |
 | Live call-by-name helper | Enables the validated `ClientPushChatMessage` fanout to live `PlayerController` objects. |
 | Player sync adapter | Feeds safe player identity records into `BMF.players` without direct crash-prone `PlayerState` reads. |
 | Minigame data/event adapter | Feeds safe Omegga-observed minigame log events into `BMF.minigames.emitEvent` and `BMF.minigames.data()`; snapshot, team, and leaderboard polling stay unsafe opt-ins until replaced by a proven BMF producer. |
@@ -91,6 +91,13 @@ Player Sync adapter therefore has a supported log-fallback source under Omegga's
 Brickadia data path. It still writes `adapter=omegga-cache`, but the source is
 reported as `omegga.players.raw.<reason>.log-fallback`.
 
+Weather and environment changes currently remain Omegga-owned. The supported
+fork routes `Server.Environment.LoadPreset ...` and `Server.Environment.Reset`
+through `Omegga.Bridge.ForceConsoleExecutor consolemanager ...` on Windows
+UE4SS launches, which avoids the normal console-exec completion stall observed
+with direct environment reloads. BMF should treat that as an Omegga runtime
+shim unless weather becomes a gameplay hook surface later.
+
 ## Supported Omegga Assets
 
 BMF packages the current Omegga player sync adapter at
@@ -103,6 +110,7 @@ The supported fork must provide or preserve these bridge/helper
 surfaces until BMF replaces them with equivalent names:
 
 - `Omegga.Bridge.BMF`
+- `Omegga.Bridge.ForceConsoleExecutor`
 - `OmeggaExecuteConsoleManagerInput`
 - `OmeggaExecuteKismetConsoleCommand`
 - `OmeggaExecuteCachedConsoleExec`

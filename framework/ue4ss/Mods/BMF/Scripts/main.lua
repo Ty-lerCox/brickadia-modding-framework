@@ -65,9 +65,11 @@ local state = {
   rate_limits = {},
   game_thread_callbacks = {},
   game_thread_callback_order = {},
-  game_thread_callback_retention_limit = 8192,
+  game_thread_callback_retention_limit = 65536,
   next_game_thread_callback_id = 1,
   delayed_callbacks = {},
+  delayed_callback_order = {},
+  delayed_callback_retention_limit = 65536,
   next_delayed_callback_id = 1,
   commands = {},
   console_command_callbacks = {},
@@ -230,12 +232,16 @@ local function safe_relative_path(value, label)
 end
 
 local function json_escape(value)
-  return tostring(value or "")
-    :gsub("\\", "\\\\")
-    :gsub("\"", "\\\"")
-    :gsub("\r", "\\r")
-    :gsub("\n", "\\n")
-    :gsub("\t", "\\t")
+  local ok, text = pcall(tostring, value or "")
+  if not ok or type(text) ~= "string" then
+    text = "<unstringifiable:" .. type(value) .. ">"
+  end
+  text = text:gsub("\\", "\\\\")
+  text = text:gsub("\"", "\\\"")
+  text = text:gsub("\r", "\\r")
+  text = text:gsub("\n", "\\n")
+  text = text:gsub("\t", "\\t")
+  return text
 end
 
 local function json_string(value)
@@ -1143,7 +1149,6 @@ local function run_on_game_thread(callback)
     end
     state.game_thread_callbacks[id] = function()
       local retained = state.game_thread_callbacks[id]
-      state.game_thread_callbacks[id] = nil
       if retained then
         local ok, err = pcall(callback)
         if not ok then
@@ -1171,9 +1176,14 @@ end
 function BMF_retain_delayed_callback(prefix, callback)
   local key = tostring(prefix or "delay") .. ":" .. tostring(state.next_delayed_callback_id)
   state.next_delayed_callback_id = state.next_delayed_callback_id + 1
+  state.delayed_callback_order[#state.delayed_callback_order + 1] = key
+  while #state.delayed_callback_order > state.delayed_callback_retention_limit do
+    local old_key = table.remove(state.delayed_callback_order, 1)
+    state.delayed_callbacks[old_key] = nil
+  end
+
   local wrapped
   wrapped = function(...)
-    state.delayed_callbacks[key] = nil
     local ok, err = pcall(callback, ...)
     if not ok then
       log("error", "delayed callback failed: " .. tostring(err))
@@ -1234,11 +1244,9 @@ function BMF_start_async_loop(prefix, interval_ms, callback)
     local ok, should_stop_or_error = pcall(callback)
     if not ok then
       log("error", tostring(prefix or "worker") .. " loop failed: " .. tostring(should_stop_or_error))
-      state.delayed_callbacks[key] = nil
       return true
     end
     if should_stop_or_error == true then
-      state.delayed_callbacks[key] = nil
       return true
     end
     return false
@@ -1248,6 +1256,46 @@ function BMF_start_async_loop(prefix, interval_ms, callback)
   local scheduled = pcall(LoopAsync, interval, wrapped)
   if scheduled then
     return true
+  end
+
+  state.delayed_callbacks[key] = nil
+  return false
+end
+
+function BMF_start_game_thread_loop(prefix, interval_ms, callback)
+  if type(callback) ~= "function" then
+    return false
+  end
+
+  local key = "game_loop:" .. tostring(prefix or "worker")
+  local interval = tonumber(interval_ms) or 250
+  local wrapped
+  wrapped = function()
+    local ok, should_stop_or_error = pcall(callback)
+    if not ok then
+      log("error", tostring(prefix or "worker") .. " game-thread loop failed: " .. tostring(should_stop_or_error))
+      return true
+    end
+    if should_stop_or_error == true then
+      return true
+    end
+    return false
+  end
+
+  state.delayed_callbacks[key] = wrapped
+  if type(LoopInGameThreadWithDelay) == "function" then
+    local scheduled = pcall(LoopInGameThreadWithDelay, interval, wrapped)
+    if scheduled then
+      return true
+    end
+  end
+
+  if type(LoopInGameThreadAfterFrames) == "function" then
+    local frames = math.max(1, math.floor((interval / 16) + 0.5))
+    local scheduled = pcall(LoopInGameThreadAfterFrames, frames, wrapped)
+    if scheduled then
+      return true
+    end
   end
 
   state.delayed_callbacks[key] = nil
@@ -9126,6 +9174,72 @@ function minigame_cached_single_player_match(query)
   return false, "player_cache.single_no_match"
 end
 
+function minigame_live_controller_candidates_for_assignment()
+  local candidates = {}
+  local seen = {}
+  local classes = { "BP_PlayerController_C", "BRPlayerController", "PlayerController" }
+
+  local function add(controller, source)
+    if not minigame_object_valid(controller) then
+      return
+    end
+    local key = minigame_object_address(controller)
+    if key == "" then
+      key = minigame_object_full_name(controller)
+    end
+    if key == "" then
+      key = tostring(controller or "")
+    end
+    if key == "" or seen[key] then
+      return
+    end
+    seen[key] = true
+    candidates[#candidates + 1] = {
+      object = controller,
+      source = tostring(source or ""),
+      address = minigame_object_address(controller),
+      name = minigame_object_name(controller),
+      fullName = minigame_object_full_name(controller),
+    }
+  end
+
+  if type(FindAllOf) == "function" then
+    for _, class_name in ipairs(classes) do
+      local ok, found = pcall(FindAllOf, class_name)
+      if ok and type(found) == "table" then
+        for index, controller in ipairs(found) do
+          add(controller, "FindAllOf(" .. class_name .. ")[" .. tostring(index) .. "]")
+        end
+      end
+    end
+  end
+
+  if #candidates == 0 and type(FindFirstOf) == "function" then
+    for _, class_name in ipairs(classes) do
+      local ok, controller = pcall(FindFirstOf, class_name)
+      if ok then
+        add(controller, "FindFirstOf(" .. class_name .. ")")
+      end
+    end
+  end
+
+  return candidates
+end
+
+function minigame_live_resolve_controller_for_assignment(query)
+  local single_cached_player, cache_source = minigame_cached_single_player_match(query)
+  if not single_cached_player then
+    return nil, "", cache_source
+  end
+
+  local candidates = minigame_live_controller_candidates_for_assignment()
+  if #candidates == 1 then
+    return candidates[1].object, "live_controller." .. tostring(candidates[1].source or ""), cache_source .. ".single_live_controller"
+  end
+
+  return nil, "", cache_source .. ".live_controllers=" .. tostring(#candidates)
+end
+
 function minigame_live_first_player_state_for_assignment(source_hint)
   local errors = {}
   local source = "FindFirstOf"
@@ -9250,6 +9364,8 @@ BMF.minigames.assignTeam = function(player_query, team_index, options)
 
   local player_state = player_item.object
   local controller = minigame_try_property(player_state, "Owner")
+  local controller_source = "player_state.Owner"
+  local controller_fallback = ""
   local ruleset, ruleset_source = minigame_live_resolve_ruleset_for_assignment(player_state)
   local requested_method = trim_string(opts.method or opts.assignMethod or opts.nativeMethod or ""):lower()
   local method = requested_method
@@ -9276,6 +9392,15 @@ BMF.minigames.assignTeam = function(player_query, team_index, options)
         "supported_methods=joinrulesetteam|serverrpc|handleplayerswitchteam|servercallbyname|joincallbyname",
       },
     })
+  end
+
+  if method ~= "handleplayerswitchteam" and not minigame_object_valid(controller) then
+    local fallback_controller, fallback_source, fallback_detail = minigame_live_resolve_controller_for_assignment(query)
+    controller_fallback = tostring(fallback_detail or fallback_source or "")
+    if minigame_object_valid(fallback_controller) then
+      controller = fallback_controller
+      controller_source = tostring(fallback_source or "live_controller")
+    end
   end
 
   local flag1 = opts.flag1
@@ -9331,6 +9456,8 @@ BMF.minigames.assignTeam = function(player_query, team_index, options)
     "player_state_name=" .. minigame_object_name(player_state),
     "controller=" .. minigame_object_address(controller),
     "controller_name=" .. minigame_object_name(controller),
+    "controller_source=" .. tostring(controller_source or ""),
+    "controller_fallback=" .. tostring(controller_fallback or ""),
     "ruleset=" .. minigame_object_address(ruleset),
     "ruleset_name=" .. minigame_object_name(ruleset),
     "ruleset_source=" .. tostring(ruleset_source or ""),
@@ -9373,6 +9500,8 @@ BMF.minigames.assignTeam = function(player_query, team_index, options)
       teamIndex = team,
       playerState = minigame_object_address(player_state),
       controller = minigame_object_address(controller),
+      controllerSource = controller_source,
+      controllerFallback = controller_fallback,
       ruleset = minigame_object_address(ruleset),
       context = minigame_object_address(call_context),
       contextKind = call_context_kind,
@@ -9422,6 +9551,8 @@ BMF.minigames.assignTeam = function(player_query, team_index, options)
       teamIndex = team,
       playerState = minigame_object_address(player_state),
       controller = minigame_object_address(controller),
+      controllerSource = controller_source,
+      controllerFallback = controller_fallback,
       ruleset = minigame_object_address(ruleset),
       context = minigame_object_address(call_context),
       contextKind = call_context_kind,
@@ -9466,13 +9597,15 @@ BMF.minigames.assignTeam = function(player_query, team_index, options)
   end
 
   return result(assigned, assigned and "OK" or "PROCESS_EVENT_FAILED", assigned and "Minigame team assignment invoked" or "Minigame team assignment failed", {
-    player = query,
-    teamIndex = team,
-    playerState = minigame_object_address(player_state),
-    controller = minigame_object_address(controller),
-    ruleset = minigame_object_address(ruleset),
-    context = minigame_object_address(call_context),
-    contextKind = call_context_kind,
+      player = query,
+      teamIndex = team,
+      playerState = minigame_object_address(player_state),
+      controller = minigame_object_address(controller),
+      controllerSource = controller_source,
+      controllerFallback = controller_fallback,
+      ruleset = minigame_object_address(ruleset),
+      context = minigame_object_address(call_context),
+      contextKind = call_context_kind,
     method = method,
     functionName = function_name,
     paramHex = buffer_hex,
@@ -14789,7 +14922,7 @@ local function schedule_command_worker_poll(delay_ms)
   end)
 end
 
-poll_command_requests = function()
+function BMF_poll_command_requests_once()
   for _, file_name in ipairs(list_command_request_files()) do
     local ok, err = pcall(process_command_request, file_name)
     if not ok then
@@ -14803,6 +14936,10 @@ poll_command_requests = function()
       state.socket.last_error = "socket command-worker watchdog failed: " .. tostring(err)
     end
   end
+end
+
+poll_command_requests = function()
+  BMF_poll_command_requests_once()
 
   if state.command_worker_started then
     if not schedule_command_worker_poll(250) then
@@ -14842,6 +14979,16 @@ local function start_command_worker()
   log("info", "command worker started path=" .. COMMAND_DIR)
   if BMF_start_async_loop("command_worker", 250, BMF_poll_command_requests_async) then
     log("info", "command worker polling via LoopAsync")
+    return
+  end
+  if BMF_start_game_thread_loop("command_worker", 250, function()
+    if not state.command_worker_started then
+      return true
+    end
+    BMF_poll_command_requests_once()
+    return false
+  end) then
+    log("info", "command worker polling via LoopInGameThread")
     return
   end
   if not schedule_command_worker_poll(250) then
@@ -15023,6 +15170,20 @@ function BMF_start_socket_transport()
   log("info", "socket transport started host=" .. tostring(state.socket.host) .. " port=" .. tostring(state.socket.port) .. " poll_ms=" .. tostring(state.socket.poll_interval_ms))
   if BMF_start_async_loop("socket_worker", state.socket.poll_interval_ms, BMF_poll_socket_messages_async) then
     log("info", "socket worker polling via LoopAsync")
+    return
+  end
+  if BMF_start_game_thread_loop("socket_worker", state.socket.poll_interval_ms, function()
+    if not state.socket_worker_started then
+      return true
+    end
+    if not state.socket.started or type(BMFSocketReceive) ~= "function" then
+      state.socket_worker_started = false
+      return true
+    end
+    BMF_drain_socket_messages(64)
+    return false
+  end) then
+    log("info", "socket worker polling via LoopInGameThread")
     return
   end
   if not BMF_schedule_socket_worker_poll(state.socket.poll_interval_ms) then

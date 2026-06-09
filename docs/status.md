@@ -26,6 +26,29 @@ fork's Windows/UE4SS bridge surfaces.
 | Live tested, experimental | Validated in a live/headless test, but still subject to change. |
 | Production ready | Stable API and validation coverage. |
 
+## Validation Stages
+
+Every feature should state the highest validation stage it has passed. Stages
+are cumulative for functional proof, while `L5 Negative` and `L6 Frame Time`
+can be added to the relevant live/headless stage when the feature has failure
+or performance risk.
+
+| Stage | Meaning |
+| --- | --- |
+| `L0 Static` | Package layout, manifests, docs, scripts, fixtures, and static checks pass without starting Brickadia. |
+| `L1 Boot` | Brickadia dedicated server starts with UE4SS and BMF loaded, and `status.json` is written. |
+| `L2 Headless` | A canary passes on a dedicated server without a connected player/controller. |
+| `L3 Live Player` | A canary passes with one connected player and proves player-visible or player-bound behavior. |
+| `L4 Multiplayer` | A canary passes with two or more players, proving targeting, isolation, or multiplayer interactions. |
+| `L5 Negative` | Failure, denial, exploit, or abuse-prevention behavior is tested, not only the happy path. |
+| `L6 Frame Time` | A feature is exercised while native frame telemetry is captured before, during, and after the test. Evidence must include average/max frame time, slow-frame counters, command/worker attribution, and whether disabling the feature returns frame time toward baseline. |
+
+Run `L6 Frame Time` for any feature that polls, loops over players, sends
+frequent BMF commands, reads live player positions, scans UObjects, mutates
+Brickadia state, or handles bursty minigame traffic. See
+[Observability and Performance](architecture/observability-performance.md) for
+the metric names and acceptance workflow.
+
 ## Current Capabilities
 
 | Status | Capability | Notes |
@@ -42,6 +65,7 @@ fork's Windows/UE4SS bridge surfaces.
 | Coded, needs validation | World load/save helpers | Early helpers for loading and saving world/prefab data. |
 | Coded, needs validation | Player data API | Safe normalized identity records, summary formatting, and Omegga sync exist. Health, pawn, role effects, and controller identity binding still need validation. |
 | Live tested, experimental | BMF socket bridge | Optional `BMFSocket` native UE4SS mod plus Omegga loopback broker deliver BMF event records and command responses to plugins without multi-second file polling. CityRPG minigame team assignment was live-validated at about 51ms command response time with file-backed commands retained as fallback. |
+| Live tested, experimental | Runtime observability and frame-time validation | The supported Omegga fork exports BMF status, BMF telemetry, command-worker metrics, and optional native `BMFFrameTelemetry` samples through `/metrics` for Grafana Alloy/Grafana Cloud. Performance-sensitive features should add `L6 Frame Time` evidence before promotion. |
 | Planned | Better permission controls | More detailed control over tools, roles, and restricted actions. |
 | Live tested, experimental | Applicator SpawnItem restriction | `NoSpawnItemApplicator` keeps the file-backed role policy compliant, but live validation proved `BR.Permission.SpawnItems` does not block Applicator `ItemSpawn`. The working path is an experimental native `ServerAddComponent` `UFunction::Func` blocker that denies the `ItemSpawn` component pointer and emits events consumed by BMF/Omegga chat feedback. The direct UE4SS Lua hook remains disabled after a `push_structproperty` crash. |
 | Live tested, experimental | Interactable Print-to-Console prefix policy | `InteractConsolePrefixGuard` lets Owner/Admin use any prefix while everyone else is limited to whitelisted prefixes such as `buyweapon:`. Current enforcement uses an experimental native `ServerModifyComponent` `UFunction::Func` hook to block denied Interactable console tags at save time, with BMF/Omegga player identity and chat feedback where available. Live validation proved Owner allow for `teleport:` and denied-role block feedback for `teleport:deny-sim`. |

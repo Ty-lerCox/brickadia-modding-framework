@@ -33,6 +33,10 @@ contract until BMF validates a newer fork or upstream release.
 | Minigame data/event adapter | Feeds safe Omegga-observed minigame log events into `BMF.minigames.emitEvent` and `BMF.minigames.data()`; snapshot, team, and leaderboard polling stay unsafe opt-ins until replaced by a proven BMF producer. |
 | Log context | Gives the supervisor and canaries access to Brickadia and UE4SS logs. |
 
+See [Observability and Performance](observability-performance.md) for the
+runtime telemetry files, Omegga `/metrics` export, Grafana Alloy/Grafana Cloud
+data path, command-worker guardrails, and native frame-time sampler.
+
 ## Low-Latency Socket Bridge
 
 The supported Omegga fork now starts a local BMF socket broker during UE4SS

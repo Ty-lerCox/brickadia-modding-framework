@@ -53,9 +53,15 @@ Omegga.Bridge.BMF bmf.version
 `bmf.version` includes `version`, `target_build`, `target_name`, `platform`,
 `server_executable`, `compatibility_status`, and `build_detection`.
 
+Frame-time health is intentionally not inferred from `bmf.status` alone. Use
+the Omegga `/metrics` exporter plus `BMFFrameTelemetry` for `L6 Frame Time`
+validation; see [Observability and Performance](../architecture/observability-performance.md).
+
 Validation levels:
 
 - `L0 Static`: package contains the API.
 - `L1 Boot`: `status.json` is written.
 - `L2 Headless`: health and version commands can be inspected without a
   connected player.
+- `L6 Frame Time`: native frame telemetry is readable and tested around the
+  feature path when performance risk is part of the status decision.

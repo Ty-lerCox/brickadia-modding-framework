@@ -18,6 +18,11 @@ file-backed command worker retained as fallback. Live CityRPG validation reduced
 minigame team assignment from a multi-second polling path to about 51ms command
 response time.
 
+BMF also writes runtime telemetry that the supported Omegga fork exports through
+Prometheus for Grafana Cloud dashboards. The current telemetry stack covers BMF
+runtime health, command/event/plugin timings, command-worker throughput, and
+optional native frame-time samples from `BMFFrameTelemetry`.
+
 ## What BMF Provides
 
 - A UE4SS-loadable Lua framework package.
@@ -32,6 +37,7 @@ response time.
 - [Lua examples](examples/index.md)
 - [Windows install](install/windows.md)
 - [Omegga-supported runtime](architecture/omegga-supported-runtime.md)
+- [Observability and performance](architecture/observability-performance.md)
 - [API overview](api/index.md)
 - [Current status](status.md)
 

@@ -43,6 +43,7 @@ nav:
       - Lua Examples: examples/index.md
   - Architecture:
       - Omegga-Supported Runtime: architecture/omegga-supported-runtime.md
+      - Observability and Performance: architecture/observability-performance.md
       - Standalone Runtime: architecture/standalone-runtime.md
   - API:
       - Overview: api/index.md

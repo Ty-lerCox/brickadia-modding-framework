@@ -61,9 +61,13 @@ Each API record includes:
 level so automation can choose appropriate work:
 
 - `L0 Static`: no server boot required.
+- `L1 Boot`: BMF starts and writes runtime status on a dedicated server.
 - `L2 Headless`: proved on a disposable dedicated server without a player.
 - `L3 Live Player`: still needs a connected player for meaningful proof.
+- `L4 Multiplayer`: needs two or more connected players for meaningful proof.
 - `L5 Negative`: failure or abuse behavior is tested.
+- `L6 Frame Time`: native frame telemetry is captured around the feature path
+  and checked for average/max frame time, slow frames, spikes, and attribution.
 
 ## Validation Command
 

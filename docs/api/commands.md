@@ -12,6 +12,24 @@ That route queues a request under `Mods/BMF/runtime/commands`. The BMF command
 worker dispatches the command and writes a matching `.response.txt` file with
 console-style output.
 
+The command worker is performance-sensitive because command dispatch often
+crosses onto the Brickadia game thread. Current defaults keep the worker
+bounded:
+
+```text
+BMF_COMMAND_WORKER_POLL_MS=250
+BMF_COMMAND_WORKER_FALLBACK_POLL_MS=1000
+BMF_COMMAND_WORKER_MAX_FILES_PER_POLL=1
+BMF_COMMAND_WORKER_ASYNC=1
+```
+
+When `LoopAsync` is available, BMF enumerates command files from the async loop
+and schedules only claimed dispatch work onto the game thread. If async polling
+is disabled or unavailable, BMF can fall back to game-thread loops or delayed
+callbacks. Check `bmf_command_worker_info`, `bmf_worker_items_total`, and
+`bmf_worker_poll_duration_milliseconds` in Prometheus/Grafana when command
+traffic changes.
+
 On the BMF-supported Omegga Windows fork, latency-sensitive plugin traffic can
 use the socket bridge instead of the file-backed worker. Omegga starts a
 loopback broker, the optional `BMFSocket` native UE4SS mod connects from inside
@@ -19,6 +37,11 @@ the Brickadia server process, and Omegga plugins send newline-delimited JSON
 command envelopes to the broker. The command result shape is the same; socket
 responses include `bmf_command_transport=socket`. The file-backed command
 worker remains the fallback and the durable repair path.
+
+For high-frequency plugin traffic, prefer the socket bridge or an event-fed
+cache over repeated command-file requests. A socket reduces transport latency,
+but command handlers still need batching, caching, idempotency, and frame-time
+telemetry when they read or mutate Brickadia state.
 
 ## Examples
 

@@ -1,0 +1,253 @@
+# Observability and Performance
+
+BMF exposes performance telemetry through runtime JSON files that the
+BMF-supported Omegga fork exports as Prometheus metrics. Grafana Alloy can then
+scrape Omegga locally and remote-write the data to Grafana Cloud.
+
+## Runtime Files
+
+BMF writes the following files under the managed UE4SS runtime:
+
+```text
+Mods/BMF/runtime/status.json
+Mods/BMF/runtime/telemetry.json
+Mods/BMF/runtime/frame-telemetry.json
+```
+
+`status.json` describes runtime health, loaded plugins, audit counts, command
+worker mode, command worker intervals, and command worker limits.
+
+`telemetry.json` aggregates BMF-side activity:
+
+- command counts and durations by command name
+- file/socket command transport counts and durations
+- framework event emit and handler counts/durations
+- plugin-owned Lua handler counts/durations by plugin and hook
+- scheduler callback counts/durations
+- command/socket worker poll counts, durations, and processed item counts
+
+`frame-telemetry.json` is written by the optional native `BMFFrameTelemetry`
+UE4SS C++ mod. It contains Unreal engine tick `DeltaSeconds` aggregates,
+sample counts, slow-frame counters, and recent spikes.
+
+## Omegga and Grafana Cloud Path
+
+The BMF-supported Omegga Windows fork reads the runtime JSON files and exposes
+them at:
+
+```text
+http://127.0.0.1:8080/metrics
+```
+
+The Omegga repository owns the Grafana Cloud setup guide, Alloy config, and
+dashboard JSON:
+
+```text
+omegga-master/omegga-master/docs/observability-grafana-cloud.md
+omegga-master/omegga-master/observability/grafana-cloud.alloy
+omegga-master/omegga-master/observability/run-grafana-alloy.ps1
+omegga-master/omegga-master/observability/grafana/brickadia-overview-dashboard.json
+```
+
+Use that guide for Grafana Cloud tokens, remote-write variables, dashboard
+import, and Alloy troubleshooting.
+
+## Command Worker Performance Changes
+
+The file-backed command worker is still the durable fallback path for
+`Omegga.Bridge.BMF`, but it is no longer treated as cheap idle work.
+
+Current defaults:
+
+```text
+BMF_COMMAND_WORKER_POLL_MS=250
+BMF_COMMAND_WORKER_FALLBACK_POLL_MS=1000
+BMF_COMMAND_WORKER_MAX_FILES_PER_POLL=1
+BMF_COMMAND_WORKER_ASYNC=1
+```
+
+When `LoopAsync` is available, the command worker enumerates request files from
+an async loop and schedules only the claimed command dispatch onto the game
+thread. This keeps filesystem polling and idle directory scans away from the
+game thread. `BMF_COMMAND_WORKER_MAX_FILES_PER_POLL` caps how much work can be
+scheduled from one poll.
+
+If async scheduling is unavailable or disabled, BMF can fall back to
+game-thread loops or delayed callbacks. Treat those modes as degraded:
+
+```text
+bmf_command_worker_info{mode="LoopAsync"}                  preferred
+bmf_command_worker_info{mode="LoopInGameThread"}           fallback
+bmf_command_worker_info{mode="ExecuteInGameThreadWithDelay"} fallback
+bmf_command_worker_info{mode="stopped"}                    unhealthy
+```
+
+Environment knobs:
+
+```text
+BMF_ALLOW_LOOPASYNC=1                  allow LoopAsync explicitly
+BMF_ALLOW_LOOPASYNC=0                  force async loop off
+BMF_COMMAND_WORKER_ASYNC=0             disable async command worker path
+BMF_ALLOW_GAME_THREAD_LOOP=1           allow game-thread loop fallback
+BMF_COMMAND_WORKER_POLL_MS=<ms>        async poll interval
+BMF_COMMAND_WORKER_FALLBACK_POLL_MS=<ms>
+BMF_COMMAND_WORKER_MAX_FILES_PER_POLL=<n>
+```
+
+Use `BMF_COMMAND_WORKER_MAX_FILES_PER_POLL=1` unless a live test proves a higher
+value does not raise max frame time.
+
+## Socket Worker
+
+`BMFSocket` remains the preferred path for latency-sensitive Omegga plugin
+traffic. Omegga starts an authenticated loopback broker and passes
+`OMEGGA_BMF_SOCKET_*` values into the Brickadia server. BMF connects from inside
+the UE4SS process and processes newline-delimited JSON command/event messages.
+
+The socket worker can also use `LoopAsync`; it still must queue and bound game
+thread work. A socket reduces transport latency, but it does not make Unreal
+property reads, team mutation, or command dispatch free.
+
+Useful variables:
+
+```text
+OMEGGA_BMF_SOCKET_ENABLED=1
+OMEGGA_BMF_SOCKET_HOST=127.0.0.1
+OMEGGA_BMF_SOCKET_PORT=<port>
+OMEGGA_BMF_SOCKET_TOKEN=<token>
+OMEGGA_BMF_SOCKET_POLL_MS=200
+```
+
+Use `bmf.socket.status` to inspect socket health from the command worker.
+
+## Native Frame Telemetry
+
+`BMFFrameTelemetry` is optional because it is native UE4SS code. When deployed
+and enabled, it registers an engine tick callback and writes low-rate aggregate
+frame data to:
+
+```text
+Mods/BMF/runtime/frame-telemetry.json
+```
+
+The Omegga exporter turns that JSON into metrics such as:
+
+```text
+brickadia_frame_telemetry_up
+brickadia_frame_telemetry_hook_registered
+brickadia_frame_delta_milliseconds{scope="window",statistic="avg"}
+brickadia_frame_delta_milliseconds{scope="window",statistic="max"}
+brickadia_frame_fps{scope="window",statistic="avg"}
+brickadia_frame_slow_total{threshold_ms}
+brickadia_frame_spikes_total{threshold_ms="100"}
+brickadia_frame_spike_last_delta_milliseconds
+```
+
+Build and deploy with:
+
+```powershell
+.\scripts\build-bmf-frame-telemetry-native-mod.ps1 -Deploy
+```
+
+Restart the Brickadia server after deploying so Omegga can stage and enable the
+native mod. Disable the sampler with `BMF_FRAME_TELEMETRY_ENABLED=0` or override
+the output path with `BMF_FRAME_TELEMETRY_PATH`.
+
+## Performance Guardrails
+
+Every new feature that polls, loops over players, sends BMF commands, scans
+UObjects, mutates Brickadia state, or handles minigame bursts needs a frame-time
+budget.
+
+Use these rules:
+
+- Prefer event-driven data or one shared bulk snapshot over per-player polling.
+- Do not scan files, parse large payloads, enumerate broad UObject lists, or run
+  analytics on the game thread.
+- Keep command/event work idempotent where possible, for example
+  `playerId:teamId`, so duplicate events do not duplicate mutations.
+- Add feature flags for risky or experimental paths.
+- Emit command count, command duration, worker throughput, queue/backlog, and
+  frame metrics before considering a high-risk path done.
+- Validate with a 30 to 60 second baseline, then trigger the feature, then
+  disable it and confirm frame time returns toward baseline.
+
+Do not rely only on average frame time. The local telemetry investigation showed
+that max frame time can remain high even after command volume improves.
+
+## L6 Frame Time Validation
+
+`L6 Frame Time` is the status-stage gate for performance-sensitive features.
+Run it after the feature already has the functional validation level it needs,
+such as `L2 Headless`, `L3 Live Player`, or `L4 Multiplayer`.
+
+Minimum procedure:
+
+1. Enable `BMFFrameTelemetry` and confirm `brickadia_frame_telemetry_up` and
+   `brickadia_frame_telemetry_hook_registered` are `1`.
+2. Capture a 30 to 60 second baseline with the feature idle.
+3. Trigger the feature path under realistic load.
+4. Capture command, worker, event, and frame metrics during the active window.
+5. Disable or stop the feature path and capture a recovery window.
+6. Record whether frame time returns toward baseline.
+
+Required evidence:
+
+- baseline, active, and recovery time ranges;
+- average and max `brickadia_frame_delta_milliseconds`;
+- slow-frame rates for `16.67`, `33.33`, `50`, and `100` ms thresholds;
+- `brickadia_frame_spikes_total` and latest spike age/delta;
+- relevant command/worker attribution, including command rate, command duration,
+  worker item count, and worker poll duration;
+- feature flags or config values used for the run;
+- final result: passed, failed, blocked, or skipped with reason.
+
+Default acceptance target for local development:
+
+- steady-state max frame time returns near baseline after the active window;
+- no unexplained recurring `>= 100 ms` native frame spikes;
+- command-worker throughput remains bounded;
+- disabling the suspected feature reduces the spike pattern if that feature is
+  blamed for the regression.
+
+If the feature intentionally performs a large bounded operation, document the
+expected spike and add a follow-up if it can affect live gameplay.
+
+## Player Position Lesson
+
+CityRPG zone polling exposed the first important regression: frequent live
+player-position reads can produce visible hitches and `100+ ms` native frame
+spikes even with one player. Reducing command volume helped, but the expensive
+part was still the live position read path.
+
+For future player-location features:
+
+- Prefer a single shared provider and cache over each feature polling BMF.
+- Use a bulk player-position snapshot or event stream if one is available.
+- Coalesce duplicate position requests for the same player/window.
+- Increase cache TTL before increasing poll rate.
+- Keep unsafe live pawn reads disabled unless crash-validated for the current
+  Brickadia build.
+- Add a feature flag so the position consumer can be disabled during frame-time
+  diagnosis.
+
+When debugging spikes, first disable the consumer, then reduce duplicate work,
+then batch/cache/coalesce, and only then change transport.
+
+## Validation Queries
+
+In Grafana Explore, useful first checks are:
+
+```promql
+brickadia_frame_delta_milliseconds{scope="window",statistic="max"}
+sum by (threshold_ms) (rate(brickadia_frame_slow_total[$__rate_interval]))
+sum by (command, status) (rate(bmf_command_processed_total[$__rate_interval]))
+bmf_command_duration_milliseconds{statistic=~"avg|max|last"}
+bmf_command_worker_info
+bmf_worker_items_total
+```
+
+Healthy steady state for local development should have fresh BMF status and
+telemetry files, a readable frame telemetry file when the native sampler is
+enabled, bounded command-worker throughput, and no unexplained recurring max
+frame spikes above `100 ms`.

@@ -16,7 +16,7 @@
     },
     "validationLevel": {
       "type": "string",
-      "enum": ["L0 Static", "L1 Boot", "L2 Headless", "L3 Live Player", "L4 Multiplayer", "L5 Negative"]
+      "enum": ["L0 Static", "L1 Boot", "L2 Headless", "L3 Live Player", "L4 Multiplayer", "L5 Negative", "L6 Frame Time"]
     },
     "startedAt": { "type": "string" },
     "finishedAt": { "type": "string" },

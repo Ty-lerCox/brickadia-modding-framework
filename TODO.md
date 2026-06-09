@@ -88,9 +88,16 @@ called complete.
 - `L4 Multiplayer`: A canary passes with two or more players.
 - `L5 Negative`: Abuse prevention or failure behavior is tested, not only the
   happy path.
+- `L6 Frame Time`: Native frame telemetry is captured before, during, and after
+  the feature path. Evidence records average/max frame time, slow-frame
+  counters, command/worker attribution, and whether disabling the feature
+  returns frame time toward baseline.
 
 Goal-mode completion rule: a feature is not done until the implementation,
 public docs, example if relevant, and validation artifact are all updated.
+Performance-sensitive features are not complete until they also have `L6 Frame
+Time` evidence or an explicit documented reason why frame-time testing is not
+applicable.
 
 ## Known Starting Evidence
 

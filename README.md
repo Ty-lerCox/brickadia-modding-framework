@@ -73,6 +73,10 @@ This repository is in early framework bring-up. The current package focuses on:
   and event messages, with the file-backed bridge retained as fallback.
 - Optional `BMFFrameTelemetry` UE4SS C++ sampler for native engine tick
   `DeltaSeconds` frame-time telemetry.
+- Runtime telemetry files for BMF status, command/event/plugin timings,
+  command-worker throughput, and native frame-time samples. The supported
+  Omegga fork exports these through `/metrics` for Grafana Alloy and Grafana
+  Cloud dashboards.
 - Live-tested socket relay from in-process BMF events/commands to Omegga
   plugins. CityRPG minigame team assignment was validated through the socket
   path at about 51ms response time, replacing the earlier multi-second
@@ -88,6 +92,11 @@ See [TODO.md](TODO.md) for the long-term roadmap and
 API documentation is published with GitHub Pages after pushes to `main`:
 
 <https://ty-lercox.github.io/brickadia-modding-framework/>
+
+Start with `docs/architecture/observability-performance.md` for the current
+BMF telemetry model, command-worker performance guardrails, native frame sampler
+details, Grafana/Omegga data path, and the player-position polling lesson from
+CityRPG validation.
 
 Build the docs locally with MkDocs:
 

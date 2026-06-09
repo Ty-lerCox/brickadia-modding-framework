@@ -18,4 +18,16 @@ Recommended artifact path:
 artifacts/overnight/<timestamp>/<feature>.json
 ```
 
-Validation levels are defined in `TODO.md`.
+Validation levels are defined in [Framework Status](../status.md) and
+`TODO.md`.
+
+For `L6 Frame Time` artifacts, include evidence for:
+
+- the baseline window before the feature path is triggered;
+- the active window while the feature path is under test;
+- the recovery window after disabling or stopping the feature path;
+- average and max `brickadia_frame_delta_milliseconds`;
+- slow-frame and spike counters;
+- command/worker attribution such as `bmf_command_processed_total`,
+  `bmf_command_duration_milliseconds`, and `bmf_worker_items_total`;
+- the decision: passed, failed, blocked, or skipped with reason.

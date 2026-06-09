@@ -13,6 +13,14 @@
       "entrypoint": "framework/ue4ss/Mods/BMFSocket/dlls/main.dll",
       "source": "native/bmf_socket",
       "buildScript": "scripts/build-bmf-socket-native-mod.ps1"
+    },
+    "optionalNativeFrameTelemetry": {
+      "type": "UE4SS C++",
+      "mod": "BMFFrameTelemetry",
+      "entrypoint": "framework/ue4ss/Mods/BMFFrameTelemetry/dlls/main.dll",
+      "source": "native/bmf_frame_telemetry",
+      "buildScript": "scripts/build-bmf-frame-telemetry-native-mod.ps1",
+      "output": "framework/ue4ss/Mods/BMF/runtime/frame-telemetry.json"
     }
   },
   "runtimeStrategy": {
@@ -67,6 +75,7 @@
     "commands.access-policy.runtime-l2-negative",
     "commands.dispatch-access.runtime-l2-negative",
     "commands.socket-transport.experimental",
+    "telemetry.frame-time.native.experimental",
     "commands.world.saveas.runtime-l2",
     "commands.prefabs.loadbrz.runtime-l2",
     "commands.prefabs.loadbrdb.runtime-l2",

@@ -5,6 +5,7 @@ local RUNTIME_DIR = ROOT .. "/runtime"
 local PLUGINS_DIR = ROOT .. "/plugins"
 local CONFIG_PATH = ROOT .. "/config.json"
 local STATUS_PATH = RUNTIME_DIR .. "/status.json"
+BMF_TELEMETRY_PATH = RUNTIME_DIR .. "/telemetry.json"
 local LOG_PATH = RUNTIME_DIR .. "/bmf.log"
 local EVENT_LOG_PATH = RUNTIME_DIR .. "/events.jsonl"
 local AUDIT_LOG_PATH = RUNTIME_DIR .. "/audit.jsonl"
@@ -40,6 +41,65 @@ local state = {
     recent = {},
     max_recent = 50,
     last = nil,
+  },
+  telemetry = {
+    schema_version = 1,
+    started_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    updated_at = "",
+    last_write_epoch = 0,
+    write_interval_seconds = 5,
+    commands = {
+      total = 0,
+      ok = 0,
+      error = 0,
+      by_name = {},
+      by_transport = {},
+      last = nil,
+    },
+    events = {
+      total = 0,
+      ok = 0,
+      error = 0,
+      handler_calls = 0,
+      handler_errors = 0,
+      by_event = {},
+      last = nil,
+    },
+    plugins = {
+      hook_total = 0,
+      hook_ok = 0,
+      hook_error = 0,
+      by_plugin = {},
+      by_hook = {},
+      last = nil,
+    },
+    scheduler = {
+      callback_total = 0,
+      callback_ok = 0,
+      callback_error = 0,
+      by_key = {},
+      last = nil,
+    },
+    workers = {
+      command_polls = {
+        count = 0,
+        ok = 0,
+        error = 0,
+        duration_ms_sum = 0,
+        duration_ms_max = 0,
+        last_ms = 0,
+        files_processed = 0,
+      },
+      socket_drains = {
+        count = 0,
+        ok = 0,
+        error = 0,
+        duration_ms_sum = 0,
+        duration_ms_max = 0,
+        last_ms = 0,
+        messages = 0,
+      },
+    },
   },
   minigame_data = {
     updated_at = "",
@@ -709,6 +769,267 @@ local function plugin_unsafe_global_denial_count()
   return count
 end
 
+function BMF_telemetry_now()
+  return os.date("!%Y-%m-%dT%H:%M:%SZ")
+end
+
+function BMF_telemetry_duration_ms(start_clock)
+  local started = tonumber(start_clock)
+  if not started then
+    return 0
+  end
+  local duration = (os.clock() - started) * 1000
+  if duration < 0 then
+    duration = 0
+  end
+  return math.floor(duration + 0.5)
+end
+
+function BMF_telemetry_key(value, fallback)
+  local text = tostring(value or ""):gsub("^%s+", ""):gsub("%s+$", "")
+  if text == "" then
+    text = tostring(fallback or "unknown")
+  end
+  return text
+end
+
+function BMF_telemetry_series(map, key, fields)
+  if type(map) ~= "table" then
+    return nil
+  end
+  local normalized_key = BMF_telemetry_key(key, "unknown")
+  local item = map[normalized_key]
+  if type(item) ~= "table" then
+    item = {}
+    map[normalized_key] = item
+  end
+  if type(fields) == "table" then
+    for field, value in pairs(fields) do
+      item[field] = value
+    end
+  end
+  return item
+end
+
+function BMF_telemetry_observe(item, duration_ms, ok)
+  if type(item) ~= "table" then
+    return
+  end
+  local ms = tonumber(duration_ms) or 0
+  if ms < 0 then
+    ms = 0
+  end
+  item.count = (tonumber(item.count) or 0) + 1
+  if ok == false then
+  item.error = (tonumber(item.error) or 0) + 1
+  else
+    item.ok = (tonumber(item.ok) or 0) + 1
+  end
+  item.duration_ms_sum = (tonumber(item.duration_ms_sum) or 0) + ms
+  item.duration_ms_max = math.max(tonumber(item.duration_ms_max) or 0, ms)
+  item.last_ms = ms
+  item.last_at = BMF_telemetry_now()
+end
+
+function BMF_telemetry_add(item, field, value)
+  if type(item) ~= "table" then
+    return
+  end
+  item[field] = (tonumber(item[field]) or 0) + (tonumber(value) or 0)
+end
+
+function BMF_telemetry_snapshot()
+  local telemetry = state.telemetry
+  telemetry.updated_at = BMF_telemetry_now()
+  telemetry.paths = {
+    status = STATUS_PATH,
+    telemetry = BMF_TELEMETRY_PATH,
+  }
+  telemetry.runtime = {
+    plugins_loaded = plugin_count(),
+    plugin_errors = #state.plugin_errors,
+    plugin_tick_active = state.plugin_tick_timer_id ~= nil,
+    plugin_tick_count = state.plugin_tick_count,
+    server_ready = state.server_ready and true or false,
+  }
+  telemetry.socket = {
+    started = state.socket.started and true or false,
+    received_messages = tonumber(state.socket.received_messages) or 0,
+    received_commands = tonumber(state.socket.received_commands) or 0,
+    sent_responses = tonumber(state.socket.sent_responses) or 0,
+    poll_count = tonumber(state.socket.poll_count) or 0,
+    last_drain_count = tonumber(state.socket.last_drain_count) or 0,
+  }
+  return telemetry
+end
+
+function BMF_telemetry_write(force)
+  local telemetry = state.telemetry
+  local now_epoch = os.time()
+  local interval = tonumber(telemetry.write_interval_seconds) or 5
+  if not force and tonumber(telemetry.last_write_epoch or 0) > 0 and (now_epoch - telemetry.last_write_epoch) < interval then
+    return false
+  end
+  telemetry.last_write_epoch = now_epoch
+  return write_file(BMF_TELEMETRY_PATH, json_encode(BMF_telemetry_snapshot()) .. "\n")
+end
+
+function BMF_telemetry_record_command(command_name, transport, ok, detail, duration_ms, dispatch_ms, request_age_ms)
+  local telemetry = state.telemetry.commands
+  local normalized_command = BMF_telemetry_key(command_name, "unknown"):lower()
+  local normalized_transport = BMF_telemetry_key(transport, "file"):lower()
+  telemetry.total = (tonumber(telemetry.total) or 0) + 1
+  if ok == false then
+    telemetry.error = (tonumber(telemetry.error) or 0) + 1
+  else
+    telemetry.ok = (tonumber(telemetry.ok) or 0) + 1
+  end
+
+  BMF_telemetry_observe(BMF_telemetry_series(telemetry.by_name, normalized_command, {
+    command = normalized_command,
+  }), duration_ms, ok)
+  BMF_telemetry_observe(BMF_telemetry_series(telemetry.by_transport, normalized_transport, {
+    transport = normalized_transport,
+  }), duration_ms, ok)
+
+  telemetry.last = {
+    command = normalized_command,
+    transport = normalized_transport,
+    ok = ok ~= false,
+    detail = tostring(detail or ""),
+    duration_ms = tonumber(duration_ms) or 0,
+    dispatch_ms = tonumber(dispatch_ms) or 0,
+    request_age_ms = tonumber(request_age_ms) or 0,
+    at = BMF_telemetry_now(),
+  }
+  BMF_telemetry_write(false)
+end
+
+function BMF_telemetry_record_event_handler(event_name, owner, duration_ms, ok)
+  local telemetry = state.telemetry.events
+  local normalized_event = BMF_telemetry_key(event_name, "unknown")
+  local item = BMF_telemetry_series(telemetry.by_event, normalized_event, {
+    event = normalized_event,
+  })
+  BMF_telemetry_add(item, "handler_calls", 1)
+  if ok == false then
+    telemetry.handler_errors = (tonumber(telemetry.handler_errors) or 0) + 1
+    BMF_telemetry_add(item, "handler_errors", 1)
+  end
+  BMF_telemetry_add(item, "handler_duration_ms_sum", duration_ms)
+  item.handler_duration_ms_max = math.max(tonumber(item.handler_duration_ms_max) or 0, tonumber(duration_ms) or 0)
+  item.handler_last_ms = tonumber(duration_ms) or 0
+
+  if owner then
+    BMF_telemetry_record_plugin_hook(owner, "event:" .. normalized_event, duration_ms, ok)
+  end
+end
+
+function BMF_telemetry_record_event(event_name, handlers, errors, duration_ms)
+  local telemetry = state.telemetry.events
+  local normalized_event = BMF_telemetry_key(event_name, "unknown")
+  local error_count = tonumber(errors) or 0
+  local ok = error_count == 0
+  telemetry.total = (tonumber(telemetry.total) or 0) + 1
+  telemetry.handler_calls = (tonumber(telemetry.handler_calls) or 0) + (tonumber(handlers) or 0)
+  if ok then
+    telemetry.ok = (tonumber(telemetry.ok) or 0) + 1
+  else
+    telemetry.error = (tonumber(telemetry.error) or 0) + 1
+  end
+
+  local item = BMF_telemetry_series(telemetry.by_event, normalized_event, {
+    event = normalized_event,
+  })
+  BMF_telemetry_observe(item, duration_ms, ok)
+  BMF_telemetry_add(item, "handlers", handlers)
+  telemetry.last = {
+    event = normalized_event,
+    ok = ok,
+    handlers = tonumber(handlers) or 0,
+    errors = error_count,
+    duration_ms = tonumber(duration_ms) or 0,
+    at = BMF_telemetry_now(),
+  }
+  BMF_telemetry_write(false)
+end
+
+function BMF_telemetry_record_plugin_hook(plugin_name, hook, duration_ms, ok)
+  local telemetry = state.telemetry.plugins
+  local normalized_plugin = BMF_telemetry_key(plugin_name, "unknown")
+  local normalized_hook = BMF_telemetry_key(hook, "unknown")
+  telemetry.hook_total = (tonumber(telemetry.hook_total) or 0) + 1
+  if ok == false then
+    telemetry.hook_error = (tonumber(telemetry.hook_error) or 0) + 1
+  else
+    telemetry.hook_ok = (tonumber(telemetry.hook_ok) or 0) + 1
+  end
+
+  BMF_telemetry_observe(BMF_telemetry_series(telemetry.by_plugin, normalized_plugin, {
+    plugin = normalized_plugin,
+  }), duration_ms, ok)
+  BMF_telemetry_observe(BMF_telemetry_series(telemetry.by_hook, normalized_plugin .. "|" .. normalized_hook, {
+    plugin = normalized_plugin,
+    hook = normalized_hook,
+  }), duration_ms, ok)
+
+  telemetry.last = {
+    plugin = normalized_plugin,
+    hook = normalized_hook,
+    ok = ok ~= false,
+    duration_ms = tonumber(duration_ms) or 0,
+    at = BMF_telemetry_now(),
+  }
+  BMF_telemetry_write(false)
+end
+
+function BMF_telemetry_record_scheduler(kind, name, duration_ms, ok)
+  local telemetry = state.telemetry.scheduler
+  local normalized_kind = BMF_telemetry_key(kind, "callback")
+  local normalized_name = BMF_telemetry_key(name, "unknown")
+  telemetry.callback_total = (tonumber(telemetry.callback_total) or 0) + 1
+  if ok == false then
+    telemetry.callback_error = (tonumber(telemetry.callback_error) or 0) + 1
+  else
+    telemetry.callback_ok = (tonumber(telemetry.callback_ok) or 0) + 1
+  end
+
+  BMF_telemetry_observe(BMF_telemetry_series(telemetry.by_key, normalized_kind .. "|" .. normalized_name, {
+    kind = normalized_kind,
+    name = normalized_name,
+  }), duration_ms, ok)
+  telemetry.last = {
+    kind = normalized_kind,
+    name = normalized_name,
+    ok = ok ~= false,
+    duration_ms = tonumber(duration_ms) or 0,
+    at = BMF_telemetry_now(),
+  }
+  BMF_telemetry_write(false)
+end
+
+function BMF_telemetry_record_worker(name, duration_ms, ok, count_field, count_value)
+  local workers = state.telemetry.workers
+  local normalized_name = BMF_telemetry_key(name, "worker")
+  local item = workers[normalized_name]
+  if type(item) ~= "table" then
+    item = {
+      count = 0,
+      ok = 0,
+      error = 0,
+      duration_ms_sum = 0,
+      duration_ms_max = 0,
+      last_ms = 0,
+    }
+    workers[normalized_name] = item
+  end
+  BMF_telemetry_observe(item, duration_ms, ok)
+  if count_field then
+    BMF_telemetry_add(item, count_field, count_value)
+  end
+  BMF_telemetry_write(false)
+end
+
 local function unsafe_plugin_global_names()
   local names = {}
   for _, name in ipairs(UNSAFE_PLUGIN_GLOBAL_NAMES) do
@@ -869,6 +1190,7 @@ write_status = function()
     "\"runtime_missing_required_helper_groups\":" .. tostring(#(compatibility.ue4ss.missingRequiredGroups or {})),
     "\"started_at\":" .. json_string(state.started_at),
     "\"updated_at\":" .. json_string(os.date("!%Y-%m-%dT%H:%M:%SZ")),
+    "\"telemetry_path\":" .. json_string(BMF_TELEMETRY_PATH),
     "\"plugins_loaded\":" .. tostring(plugin_count()),
     "\"plugin_errors\":" .. tostring(#state.plugin_errors),
     "\"server_ready\":" .. tostring(state.server_ready and true or false),
@@ -1264,6 +1586,9 @@ end
 
 function BMF_start_game_thread_loop(prefix, interval_ms, callback)
   if type(callback) ~= "function" then
+    return false
+  end
+  if os.getenv("BMF_ALLOW_GAME_THREAD_LOOP") ~= "1" then
     return false
   end
 
@@ -1815,6 +2140,7 @@ BMF.events.emit = function(name, data)
   if not event_name then
     return result(false, "INVALID_EVENT", event_error)
   end
+  local event_started_clock = os.clock()
   local handlers = state.event_handlers[event_name] or {}
   local calls = {}
   for id, entry in pairs(handlers) do
@@ -1830,7 +2156,9 @@ BMF.events.emit = function(name, data)
 
   local errors = {}
   for _, item in ipairs(calls) do
+    local handler_started_clock = os.clock()
     local ok, err = pcall(item.handler, copy_table(data or {}), event_name)
+    BMF_telemetry_record_event_handler(event_name, item.owner, BMF_telemetry_duration_ms(handler_started_clock), ok)
     if not ok then
       errors[#errors + 1] = {
         id = item.id,
@@ -1839,6 +2167,7 @@ BMF.events.emit = function(name, data)
       log("error", "event handler failed event=" .. event_name .. " id=" .. tostring(item.id) .. ": " .. tostring(err))
     end
   end
+  BMF_telemetry_record_event(event_name, #calls, #errors, BMF_telemetry_duration_ms(event_started_clock))
 
   write_log_event(os.date("!%Y-%m-%dT%H:%M:%SZ"), #errors == 0 and "info" or "error", "event emitted: " .. event_name, {
     source = "event",
@@ -2070,7 +2399,9 @@ local function run_plugin_hook(name, plugin, hook, data)
   if plugin_watchdog_isolated(name) then
     return false, "PLUGIN_ISOLATED"
   end
+  local hook_started_clock = os.clock()
   local ok, err = pcall(plugin[hook], plugin.bmf_api or BMF, copy_table(data or {}))
+  BMF_telemetry_record_plugin_hook(name, hook, BMF_telemetry_duration_ms(hook_started_clock), ok)
   if not ok then
     record_plugin_error(name, hook, err, data, plugin)
     return false, err
@@ -2092,9 +2423,24 @@ BMF.health = function()
     runtime_required_helper_groups_available = compatibility.ue4ss.requiredGroupsAvailable,
     runtime_missing_required_helper_groups = #(compatibility.ue4ss.missingRequiredGroups or {}),
     status_path = STATUS_PATH,
+    telemetry_path = BMF_TELEMETRY_PATH,
     log_path = LOG_PATH,
     audit_path = AUDIT_LOG_PATH,
     audit_records = #state.audit_records,
+  })
+end
+
+BMF.telemetry = function()
+  BMF_telemetry_write(true)
+  local telemetry = BMF_telemetry_snapshot()
+  return result(true, "OK", "BMF telemetry collected", {
+    telemetry_path = BMF_TELEMETRY_PATH,
+    schema_version = telemetry.schema_version,
+    commands_total = telemetry.commands.total,
+    events_total = telemetry.events.total,
+    plugin_hook_total = telemetry.plugins.hook_total,
+    scheduler_callback_total = telemetry.scheduler.callback_total,
+    telemetry = telemetry,
   })
 end
 
@@ -2272,6 +2618,7 @@ BMF.server.status = function()
     bmfStatus = "running",
     paths = {
       status = STATUS_PATH,
+      telemetry = BMF_TELEMETRY_PATH,
       log = LOG_PATH,
       events = EVENT_LOG_PATH,
       audit = AUDIT_LOG_PATH,
@@ -2756,7 +3103,12 @@ BMF.commands.dispatch = function(name, args, ar)
   end
 
   command_output(ar, "BMF " .. command_name .. " begin")
+  local handler_started_clock = os.clock()
   local ok, response_or_error = pcall(command.handler, args or "", ar)
+  local handler_duration_ms = BMF_telemetry_duration_ms(handler_started_clock)
+  if command.owner then
+    BMF_telemetry_record_plugin_hook(command.owner, "command:" .. command_name, handler_duration_ms, ok)
+  end
   if not ok then
     if command.owner then
       record_plugin_error(command.owner, "command:" .. command_name, response_or_error, {
@@ -2910,6 +3262,7 @@ local function register_builtin_commands()
         "plugins_loaded=" .. tostring(health.data.plugins_loaded),
         "plugin_errors=" .. tostring(health.data.plugin_errors),
         "status_path=" .. tostring(health.data.status_path),
+        "telemetry_path=" .. tostring(health.data.telemetry_path),
         "log_path=" .. tostring(health.data.log_path),
       },
     })
@@ -2943,6 +3296,40 @@ local function register_builtin_commands()
 
   BMF.commands.register("bmf.health", "Show BMF runtime health.", function()
     return health_command_response()
+  end)
+
+  BMF.commands.register("bmf.telemetry", "Show BMF aggregate telemetry.", function(args)
+    local options = parse_command_options(args)
+    local telemetry = BMF.telemetry()
+    local data = telemetry.data or {}
+    local snapshot = data.telemetry or {}
+    local commands = snapshot.commands or {}
+    local events = snapshot.events or {}
+    local plugins = snapshot.plugins or {}
+    local scheduler = snapshot.scheduler or {}
+    local last_command = commands.last or {}
+    local lines = {
+      "telemetry_path=" .. tostring(data.telemetry_path or BMF_TELEMETRY_PATH),
+      "schema_version=" .. tostring(data.schema_version or 0),
+      "commands_total=" .. tostring(commands.total or 0),
+      "commands_ok=" .. tostring(commands.ok or 0),
+      "commands_error=" .. tostring(commands.error or 0),
+      "events_total=" .. tostring(events.total or 0),
+      "event_handler_calls=" .. tostring(events.handler_calls or 0),
+      "event_handler_errors=" .. tostring(events.handler_errors or 0),
+      "plugin_hook_total=" .. tostring(plugins.hook_total or 0),
+      "plugin_hook_error=" .. tostring(plugins.hook_error or 0),
+      "scheduler_callback_total=" .. tostring(scheduler.callback_total or 0),
+      "scheduler_callback_error=" .. tostring(scheduler.callback_error or 0),
+      "last_command=" .. tostring(last_command.command or ""),
+      "last_command_total_ms=" .. tostring(last_command.duration_ms or 0),
+      "last_command_dispatch_ms=" .. tostring(last_command.dispatch_ms or 0),
+    }
+    if option_boolean(options, "json", false) then
+      lines[#lines + 1] = "telemetry_json=" .. json_encode(snapshot)
+    end
+    telemetry.data.lines = lines
+    return telemetry
   end)
 
   BMF.commands.register("bmf.version", "Show BMF version and target build.", function()
@@ -3021,6 +3408,7 @@ local function register_builtin_commands()
       "unsafe_global_denials=" .. tostring((data.runtime and data.runtime.unsafeGlobalDenials) or 0),
       "unsafe_globals_allowed=" .. tostring((data.config and data.config.allowPluginUnsafeGlobals) == true),
       "status_path=" .. tostring((data.paths and data.paths.status) or ""),
+      "telemetry_path=" .. tostring((data.paths and data.paths.telemetry) or ""),
       "event_log_path=" .. tostring((data.paths and data.paths.events) or ""),
       "audit_log_path=" .. tostring((data.paths and data.paths.audit) or ""),
     }
@@ -9276,43 +9664,126 @@ function minigame_live_first_player_state_for_assignment(source_hint)
   }
 end
 
+function minigame_assignment_candidate_match_kind(candidates, needle)
+  local query = trim_string(needle or ""):lower()
+  if query == "" then
+    return true, "empty"
+  end
+
+  local partial = false
+  for _, candidate in ipairs(candidates or {}) do
+    local lower = trim_string(candidate):lower()
+    if lower ~= "" then
+      if lower == query then
+        return true, "exact"
+      end
+      if lower:find(query, 1, true) ~= nil then
+        partial = true
+      end
+    end
+  end
+
+  return partial, partial and "partial" or ""
+end
+
+function minigame_assignment_player_state_score(item, candidates, match_kind)
+  local player_state = item and item.object or nil
+  local score = 0
+
+  if match_kind == "exact" then
+    score = score + 1000
+  elseif match_kind == "partial" then
+    score = score + 800
+  elseif match_kind == "empty" then
+    score = score + 100
+  end
+
+  local owner = minigame_try_property(player_state, "Owner")
+  if minigame_object_valid(owner) then
+    score = score + 250
+  end
+
+  for _, property_name in ipairs({ "Pawn", "PawnPrivate", "Character", "AcknowledgedPawn" }) do
+    if minigame_object_valid(minigame_try_property(player_state, property_name)) then
+      score = score + 50
+      break
+    end
+  end
+
+  local ruleset = minigame_live_resolve_ruleset_for_assignment(player_state)
+  if minigame_object_valid(ruleset) then
+    score = score + 50
+  end
+
+  if tostring(item and item.source or ""):find("PlayerArray", 1, true) then
+    score = score + 25
+  end
+
+  if #(candidates or {}) > 0 then
+    score = score + math.min(#candidates, 10)
+  end
+
+  return score
+end
+
+function minigame_assignment_better_candidate(candidate, current)
+  if candidate == nil then
+    return current
+  end
+  if current == nil then
+    return candidate
+  end
+  if tonumber(candidate.score or 0) > tonumber(current.score or 0) then
+    return candidate
+  end
+  return current
+end
+
 function minigame_live_resolve_player_state_for_assignment(query)
   local needle = trim_string(query or ""):lower()
   local single_cached_player, cache_source = minigame_cached_single_player_match(query)
-  if single_cached_player then
+  local player_states, meta = minigame_live_player_states({
+    fallbackFindAll = true,
+  })
+  meta = type(meta) == "table" and meta or {}
+  meta.fastPath = single_cached_player and cache_source or ""
+  local fallback = nil
+  local matched = nil
+
+  for _, item in ipairs(player_states or {}) do
+    local player_state = item.object
+    local candidates = minigame_live_player_assignment_candidates(player_state)
+    local matches, match_kind = minigame_assignment_candidate_match_kind(candidates, needle)
+    local scored = {
+      item = item,
+      candidates = candidates,
+      matchKind = match_kind,
+      score = minigame_assignment_player_state_score(item, candidates, match_kind),
+    }
+    fallback = minigame_assignment_better_candidate(scored, fallback)
+    if matches then
+      matched = minigame_assignment_better_candidate(scored, matched)
+    end
+  end
+
+  if matched ~= nil then
+    meta.fastPath = tostring(meta.fastPath or "") .. ".filtered." .. tostring(matched.matchKind or "")
+    return matched.item, matched.candidates, meta
+  end
+
+  if single_cached_player and fallback ~= nil then
+    meta.fastPath = tostring(meta.fastPath or "") .. ".single_filtered"
+    return fallback.item, fallback.candidates, meta
+  end
+
+  if single_cached_player and #(player_states or {}) == 0 then
     local first_item, first_meta = minigame_live_first_player_state_for_assignment(cache_source)
     if first_item and minigame_object_valid(first_item.object) then
       return first_item, { cache_source }, first_meta
     end
   end
 
-  local player_states, meta = minigame_live_player_states({
-    fallbackFindAll = true,
-  })
-  local first = nil
-  local first_candidates = {}
-
-  for _, item in ipairs(player_states or {}) do
-    local player_state = item.object
-    local candidates = minigame_live_player_assignment_candidates(player_state)
-    if not first then
-      first = item
-      first_candidates = candidates
-    end
-
-    if needle == "" then
-      return item, candidates, meta
-    end
-
-    for _, candidate in ipairs(candidates) do
-      local lower = trim_string(candidate):lower()
-      if lower ~= "" and (lower == needle or lower:find(needle, 1, true) ~= nil) then
-        return item, candidates, meta
-      end
-    end
-  end
-
-  return nil, first_candidates, meta
+  return nil, fallback and fallback.candidates or {}, meta
 end
 
 BMF.minigames.assignTeam = function(player_query, team_index, options)
@@ -14864,6 +15335,10 @@ function BMF_dispatch_bmf_command_text(request_id, command_text, transport)
   local request_created_ms = tonumber(tostring(request_id):match("_(%d%d%d%d%d%d%d%d%d%d%d%d%d)_"))
   local processed_at_ms = tonumber(process_started_epoch) and (tonumber(process_started_epoch) * 1000) or nil
   local request_age_ms = request_created_ms and processed_at_ms and (processed_at_ms - request_created_ms) or nil
+  if request_age_ms and request_age_ms < 0 then
+    request_age_ms = 0
+  end
+  BMF_telemetry_record_command(command_name or "unknown", transport or "file", ok, detail, total_duration_ms, dispatch_duration_ms, request_age_ms)
 
   local response = {
     "ok=" .. tostring(ok),
@@ -14885,7 +15360,7 @@ end
 local function process_command_request(file_name)
   local request_id = tostring(file_name or ""):match("^(.*)%.request%.txt$")
   if not request_id or request_id == "" then
-    return
+    return false
   end
 
   local request_path = COMMAND_DIR .. "/" .. file_name
@@ -14896,7 +15371,7 @@ local function process_command_request(file_name)
     local empty_reads = tonumber(state.command_empty_reads[request_id] or 0) + 1
     state.command_empty_reads[request_id] = empty_reads
     if empty_reads < COMMAND_EMPTY_READ_RETRY_LIMIT then
-      return
+      return false
     end
   else
     state.command_empty_reads[request_id] = nil
@@ -14907,6 +15382,7 @@ local function process_command_request(file_name)
 
   local response = BMF_dispatch_bmf_command_text(request_id, command_text, "file")
   write_file(response_path, response)
+  return true
 end
 
 local poll_command_requests
@@ -14923,18 +15399,28 @@ local function schedule_command_worker_poll(delay_ms)
 end
 
 function BMF_poll_command_requests_once()
+  local poll_started_clock = os.clock()
+  local processed_files = 0
+  local poll_ok = true
   for _, file_name in ipairs(list_command_request_files()) do
-    local ok, err = pcall(process_command_request, file_name)
+    local ok, processed_or_error = pcall(process_command_request, file_name)
     if not ok then
-      log("error", "command worker failed for " .. tostring(file_name) .. ": " .. tostring(err))
+      poll_ok = false
+      log("error", "command worker failed for " .. tostring(file_name) .. ": " .. tostring(processed_or_error))
+    elseif processed_or_error == true then
+      processed_files = processed_files + 1
     end
   end
 
   if state.socket.started and type(BMF_drain_socket_messages) == "function" then
     local ok, err = pcall(BMF_drain_socket_messages, 128)
     if not ok then
+      poll_ok = false
       state.socket.last_error = "socket command-worker watchdog failed: " .. tostring(err)
     end
+  end
+  if processed_files > 0 or not poll_ok then
+    BMF_telemetry_record_worker("command_polls", BMF_telemetry_duration_ms(poll_started_clock), poll_ok, "files_processed", processed_files)
   end
 end
 
@@ -15054,6 +15540,8 @@ function BMF_drain_socket_messages(max_count)
     return 0
   end
 
+  local drain_started_clock = os.clock()
+  local drain_ok = true
   local requested_count = math.max(1, tonumber(max_count) or 64)
   state.socket.poll_count = (tonumber(state.socket.poll_count) or 0) + 1
   state.socket.last_poll_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
@@ -15066,17 +15554,25 @@ function BMF_drain_socket_messages(max_count)
         drained = drained + 1
         local processed, err = pcall(BMF_process_socket_message, line)
         if not processed then
+          drain_ok = false
           state.socket.last_error = "socket message failed: " .. tostring(err)
         end
       end
     end
     state.socket.last_drain_count = drained
+    if drained > 0 or not drain_ok then
+      BMF_telemetry_record_worker("socket_drains", BMF_telemetry_duration_ms(drain_started_clock), drain_ok, "messages", drained)
+    end
     return drained
   elseif not ok then
+    drain_ok = false
     state.socket.last_error = "BMFSocketReceive failed: " .. tostring(messages_or_error)
   end
 
   state.socket.last_drain_count = 0
+  if not drain_ok then
+    BMF_telemetry_record_worker("socket_drains", BMF_telemetry_duration_ms(drain_started_clock), drain_ok, "messages", 0)
+  end
   return 0
 end
 
@@ -16025,3 +16521,4 @@ mark_server_ready({
   pluginsLoaded = plugin_count(),
   commandsRegistered = #command_names(),
 })
+BMF_telemetry_write(true)

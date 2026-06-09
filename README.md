@@ -71,6 +71,8 @@ This repository is in early framework bring-up. The current package focuses on:
   and validation.
 - Optional `BMFSocket` UE4SS C++ transport for low-latency loopback command
   and event messages, with the file-backed bridge retained as fallback.
+- Optional `BMFFrameTelemetry` UE4SS C++ sampler for native engine tick
+  `DeltaSeconds` frame-time telemetry.
 - Live-tested socket relay from in-process BMF events/commands to Omegga
   plugins. CityRPG minigame team assignment was validated through the socket
   path at about 51ms response time, replacing the earlier multi-second
@@ -100,6 +102,8 @@ python -m mkdocs build --strict
 framework/ue4ss/Mods/BMF/   UE4SS Lua mod package
 framework/ue4ss/Mods/BMFSocket/
                               Optional UE4SS C++ socket transport package
+framework/ue4ss/Mods/BMFFrameTelemetry/
+                              Optional UE4SS C++ frame-time telemetry package
 installer/                  Windows install and rollback scripts
 examples/                   Example BMF plugins
 docs/                       Install, API, and validation docs
@@ -107,6 +111,7 @@ integrations/               Supported external adapters, currently Omegga
 manifests/                  Package and compatibility metadata
 scripts/                    Local validation helpers
 native/bmf_socket/          BMFSocket native transport source
+native/bmf_frame_telemetry/ BMFFrameTelemetry native sampler source
 cli/                        bmfctl manager/troubleshooting CLI
 tests/fixtures/             Static fixtures for wrapper tests
 artifacts/                  Generated validation evidence

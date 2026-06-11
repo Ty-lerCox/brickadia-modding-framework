@@ -20,6 +20,15 @@ async function waitForRequest(commandDir, timeoutMs = 2000) {
   throw new Error('timed out waiting for request file');
 }
 
+function readEventLogRecords(eventLogPath) {
+  return fs
+    .readFileSync(eventLogPath, 'utf8')
+    .trim()
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map(line => JSON.parse(line));
+}
+
 test('seeds leave caches from BMF minigame data snapshot response', async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bmf-minigame-events-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -212,7 +221,7 @@ test('imports changed unsafe minigame snapshots through BMF data apply-snapshot'
   assert.strictEqual(adapter.counters.queued, 0);
 });
 
-test('observed JoinTeam command queues BMF teamchange event', async t => {
+test('observed JoinTeam command writes BMF-compatible teamchange event log by default', async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bmf-minigame-events-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
@@ -238,6 +247,64 @@ test('observed JoinTeam command queues BMF teamchange event', async t => {
 
   assert.strictEqual(adapter.handleJoinTeamCommand('Ty', 'Blue'), true);
 
+  const records = readEventLogRecords(path.join(root, 'events.jsonl'));
+  assert.strictEqual(records.length, 1);
+  assert.strictEqual(records[0].source, 'event');
+  assert.strictEqual(records[0].data.event, 'minigames.teamchange');
+  assert.strictEqual(records[0].data.handlers, 0);
+  assert.deepStrictEqual(records[0].data.errors, []);
+  assert.strictEqual(records[0].data.ok, true);
+
+  const payload = records[0].data.payload;
+  assert.strictEqual(payload.source, 'omegga.bmf-minigame-events');
+  assert.strictEqual(payload.reason, 'jointeam-command');
+  assert.strictEqual(payload.player.id, player.id);
+  assert.strictEqual(payload.minigame.name, 'Codex Arena');
+  assert.strictEqual(payload.team.name, 'Blue');
+  assert.strictEqual(payload._bmf.event, 'minigames.teamchange');
+  assert.strictEqual(payload._bmf.legacyEvent, 'teamchange');
+  assert.strictEqual(payload._bmf.minigameKey, 'name:Codex Arena#0');
+  assert.strictEqual(payload._bmf.playerKey, player.id);
+  assert.strictEqual(adapter.counters.lastEvent.transport, 'event-log');
+  assert.strictEqual(adapter.counters.teamChanges, 1);
+  assert.strictEqual(adapter.teamMembershipCache.get(player.id).team.name, 'Blue');
+  assert.strictEqual(
+    fs.existsSync(commandDir)
+      ? fs.readdirSync(commandDir).filter(file => file.endsWith('.request.txt')).length
+      : 0,
+    0
+  );
+
+  assert.strictEqual(adapter.handleJoinTeamCommand('Ty', 'Blue'), false);
+  assert.strictEqual(adapter.counters.teamChanges, 1);
+});
+
+test('command transport queues BMF teamchange event for Lua handlers', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bmf-minigame-events-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  const commandDir = path.join(root, 'commands');
+  const player = {
+    name: 'Ty',
+    displayName: 'Ty',
+    id: '33333333-3333-4333-8333-333333333333',
+  };
+  const adapter = new BmfMinigameEvents(
+    {
+      getPlayer(ref) {
+        return ref === 'Ty' ? player : null;
+      },
+    },
+    { commandDir, eventTransport: 'command' }
+  );
+
+  adapter.playerMinigameCache.set(player.id, {
+    name: 'Codex Arena',
+    index: 0,
+  });
+
+  assert.strictEqual(adapter.handleJoinTeamCommand('Ty', 'Blue'), true);
+
   const requestPath = await waitForRequest(commandDir);
   const command = fs.readFileSync(requestPath, 'utf8');
   assert.match(command, /^bmf\.minigames\.events\.emit event=teamchange payload=/);
@@ -248,6 +315,8 @@ test('observed JoinTeam command queues BMF teamchange event', async t => {
   assert.strictEqual(payload.player.id, player.id);
   assert.strictEqual(payload.minigame.name, 'Codex Arena');
   assert.strictEqual(payload.team.name, 'Blue');
+  assert.ok(payload._telemetry.adapterEventQueuedAtMs > 0);
+  assert.strictEqual(adapter.counters.lastEvent.transport, 'command');
   assert.strictEqual(adapter.counters.teamChanges, 1);
   assert.strictEqual(adapter.teamMembershipCache.get(player.id).team.name, 'Blue');
 

@@ -6,6 +6,39 @@ function asNumber(value, fallback) {
   return Number.isFinite(number) ? number : fallback;
 }
 
+let localEnvCache = null;
+
+function readLocalEnv() {
+  const values = new Map();
+  const envPath = path.join(process.cwd(), '.env');
+  try {
+    const text = fs.readFileSync(envPath, 'utf8');
+    for (const line of text.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const separator = trimmed.indexOf('=');
+      if (separator <= 0) continue;
+      const key = trimmed.slice(0, separator).trim();
+      const value = trimmed.slice(separator + 1).trim().replace(/^['"]|['"]$/g, '');
+      if (key) values.set(key, value);
+    }
+  } catch (_error) {}
+  return values;
+}
+
+function envValue(name) {
+  const value = String(process.env[name] ?? '').trim();
+  if (value) return value;
+  localEnvCache = localEnvCache || readLocalEnv();
+  return localEnvCache.get(name);
+}
+
+function envFlag(name) {
+  const value = envValue(name);
+  if (value == null || String(value).trim() === '') return null;
+  return /^(1|true|yes|on)$/i.test(String(value).trim());
+}
+
 function commandValue(value) {
   return encodeURIComponent(String(value ?? ''));
 }
@@ -38,6 +71,26 @@ function compactPlayers(players) {
   return (players || [])
     .map(normalizePlayer)
     .filter(player => player[0] && player[2]);
+}
+
+function cachePlayerRecord(player) {
+  return {
+    username: String(player[0] || ''),
+    playerName: String(player[0] || ''),
+    originalName: String(player[0] || ''),
+    displayName: String(player[1] || player[0] || ''),
+    id: String(player[2] || ''),
+    uuid: String(player[2] || ''),
+    controllerPath: String(player[3] || ''),
+    playerStatePath: String(player[4] || ''),
+    controllerAvailable: String(player[3] || '').trim() !== '',
+    permissions: [],
+    roles: [],
+  };
+}
+
+function isoSeconds(date = new Date()) {
+  return date.toISOString().replace(/\.\d{3}Z$/, 'Z');
 }
 
 function parseBrickadiaLogPlayers(logPath) {
@@ -147,7 +200,7 @@ module.exports = class BmfPlayerSync {
     this.omegga.on('leave', this.handlePlayerChange);
     this.omegga.on('start', this.handlePlayerChange);
     this.omegga.on('cmd:bmfsyncplayers', this.handleManualSync);
-    if (this.config.forwardInteract !== false) {
+    if (this.shouldForwardInteract()) {
       this.omegga.on('interact', this.handleInteract);
     }
     this.scheduleSync('init');
@@ -184,7 +237,7 @@ module.exports = class BmfPlayerSync {
   }
 
   handleInteract(interaction) {
-    if (this.config.forwardInteract === false) return;
+    if (!this.shouldForwardInteract()) return;
     const commandName = String(this.config.interactCommand || 'bmf.interact.console').trim();
     if (!commandName) return;
 
@@ -213,10 +266,22 @@ module.exports = class BmfPlayerSync {
   }
 
   startPeriodicSync() {
-    const intervalMs = Math.max(0, asNumber(this.config.syncIntervalMs, 5000));
-    if (intervalMs <= 0) return;
+    const intervalMs = Math.max(
+      0,
+      asNumber(envValue('OMEGGA_BMF_PLAYER_SYNC_INTERVAL_MS') ?? this.config.syncIntervalMs, 5000),
+    );
+    if (intervalMs <= 0) {
+      console.log('[bmf-player-sync] periodic sync disabled');
+      return;
+    }
     if (this.interval) clearInterval(this.interval);
     this.interval = setInterval(() => this.scheduleSync('interval'), intervalMs);
+  }
+
+  shouldForwardInteract() {
+    const envOverride = envFlag('OMEGGA_BMF_FORWARD_INTERACT');
+    if (envOverride !== null) return envOverride;
+    return this.config.forwardInteract === true;
   }
 
   get commandDir() {
@@ -230,6 +295,27 @@ module.exports = class BmfPlayerSync {
     if (envRuntimeDir) return path.resolve(envRuntimeDir, 'commands');
 
     return '';
+  }
+
+  get runtimeDir() {
+    const envRuntimeDir = String(process.env.OMEGGA_BMF_RUNTIME_DIR || '').trim();
+    if (envRuntimeDir) return path.resolve(envRuntimeDir);
+
+    const commandDir = this.commandDir;
+    if (commandDir) return path.resolve(commandDir, '..');
+
+    return '';
+  }
+
+  get playerCachePath() {
+    const configured = String(this.config.playerCachePath || '').trim();
+    if (configured) return path.resolve(configured);
+
+    const envPath = String(process.env.OMEGGA_BMF_PLAYER_CACHE_PATH || '').trim();
+    if (envPath) return path.resolve(envPath);
+
+    const runtimeDir = this.runtimeDir;
+    return runtimeDir ? path.join(runtimeDir, 'players.json') : '';
   }
 
   queueCommand(prefix, command, logMessage) {
@@ -254,6 +340,37 @@ module.exports = class BmfPlayerSync {
         if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
       } catch (_cleanupError) {}
       console.warn(`[bmf-player-sync] failed to queue command: ${error.message}`);
+      return false;
+    }
+  }
+
+  writePlayerCache(players, source) {
+    const cachePath = this.playerCachePath;
+    if (!cachePath) {
+      console.warn('[bmf-player-sync] player cache path is not configured');
+      return false;
+    }
+
+    const cache = {
+      schemaVersion: 1,
+      adapter: 'omegga-cache',
+      source,
+      updatedAt: isoSeconds(),
+      players: players.map(cachePlayerRecord),
+      invalid: [],
+    };
+    const tmpPath = `${cachePath}.${process.pid}.${Date.now()}.tmp`;
+
+    try {
+      fs.mkdirSync(path.dirname(cachePath), { recursive: true });
+      fs.writeFileSync(tmpPath, `${JSON.stringify(cache)}\n`, 'utf8');
+      fs.renameSync(tmpPath, cachePath);
+      return true;
+    } catch (error) {
+      try {
+        if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+      } catch (_cleanupError) {}
+      console.warn(`[bmf-player-sync] failed to write player cache: ${error.message}`);
       return false;
     }
   }
@@ -286,17 +403,28 @@ module.exports = class BmfPlayerSync {
     for (const player of omeggaPlayers) byUuid.set(player[2], player);
     const players = Array.from(byUuid.values());
     const sourceSuffix = omeggaPlayers.length > 0 ? reason || 'sync' : `${reason || 'sync'}.log-fallback`;
-    const command = [
-      'bmf.players.sync',
-      'adapter=omegga-cache',
-      `source=omegga.players.raw.${sourceSuffix}`,
-      `players=${JSON.stringify(players)}`,
-    ].join(' ');
+    const source = `omegga.players.raw.${sourceSuffix}`;
 
-    this.queueCommand(
-      'players_sync',
-      command,
-      `[bmf-player-sync] queued ${players.length} player(s) reason=${reason || 'sync'} omegga=${omeggaPlayers.length} log=${logPlayers.length}`,
-    );
+    if (envValue('OMEGGA_BMF_PLAYER_SYNC_COMMAND_BRIDGE') === '1' || this.config.commandBridge === true) {
+      const command = [
+        'bmf.players.sync',
+        'adapter=omegga-cache',
+        `source=${source}`,
+        `players=${JSON.stringify(players)}`,
+      ].join(' ');
+
+      this.queueCommand(
+        'players_sync',
+        command,
+        `[bmf-player-sync] queued ${players.length} player(s) reason=${reason || 'sync'} omegga=${omeggaPlayers.length} log=${logPlayers.length}`,
+      );
+      return;
+    }
+
+    if (this.writePlayerCache(players, source)) {
+      console.log(
+        `[bmf-player-sync] cached ${players.length} player(s) reason=${reason || 'sync'} omegga=${omeggaPlayers.length} log=${logPlayers.length}`,
+      );
+    }
   }
 };

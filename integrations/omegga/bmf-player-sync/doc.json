@@ -24,8 +24,8 @@
       "type": "string"
     },
     "forwardInteract": {
-      "description": "Forward Omegga interact events into BMF as bmf.interact.console commands.",
-      "default": true,
+      "description": "Forward Omegga interact events into BMF as bmf.interact.console commands. This is game-thread sensitive and should stay disabled unless a BMF Lua handler explicitly needs it. OMEGGA_BMF_FORWARD_INTERACT overrides this value.",
+      "default": false,
       "type": "boolean"
     },
     "interactCommand": {

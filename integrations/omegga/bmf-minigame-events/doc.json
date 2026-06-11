@@ -8,6 +8,16 @@
       "default": "",
       "type": "string"
     },
+    "eventTransport": {
+      "description": "How log-derived minigame events are delivered. event-log writes BMF-compatible runtime/events.jsonl records from Omegga and avoids BMF game-thread command dispatch. command uses bmf.minigames.events.emit so BMF Lua event handlers run.",
+      "default": "event-log",
+      "type": "string"
+    },
+    "eventLogPath": {
+      "description": "Path to Mods/BMF/runtime/events.jsonl for event-log transport. If blank, OMEGGA_BMF_EVENTS_PATH or the runtime directory beside commandDir is used.",
+      "default": "",
+      "type": "string"
+    },
     "enabled": {
       "description": "Enable the adapter.",
       "default": true,

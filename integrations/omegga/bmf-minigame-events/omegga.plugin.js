@@ -46,6 +46,12 @@ function compactObject(value) {
   return result;
 }
 
+function telemetryPayload(payload) {
+  return payload && typeof payload === 'object' && !Array.isArray(payload)
+    ? { ...(payload._telemetry || {}) }
+    : {};
+}
+
 function normalizePlayer(player) {
   if (!player) return null;
 
@@ -86,8 +92,32 @@ function teamKey(team, minigame) {
   return ruleset && !id.startsWith('BP_Team') ? `${ruleset}:${id}` : id;
 }
 
+function minigameKey(minigame) {
+  if (!minigame) return '';
+  if (minigame.key) return String(minigame.key);
+  if (minigame.ruleset) return `ruleset:${minigame.ruleset}`;
+
+  const name = String(minigame.name || '');
+  if (!name) return '';
+  const index = Number.isFinite(Number(minigame.index)) ? Number(minigame.index) : 0;
+  return `name:${name}#${index}`;
+}
+
 function playerKey(player) {
   return String(player?.id || player?.state || player?.controller || player?.name || player?.displayName || '');
+}
+
+function isoSeconds(date = new Date()) {
+  return date.toISOString().replace(/\.\d{3}Z$/, 'Z');
+}
+
+function minigameEventName(eventName) {
+  const text = String(eventName || '');
+  return text.startsWith('minigames.') ? text : `minigames.${text}`;
+}
+
+function legacyMinigameEventName(eventName) {
+  return String(eventName || '').replace(/^minigames\./, '');
 }
 
 function minigameFromKey(key) {
@@ -156,6 +186,7 @@ module.exports = class BmfMinigameEvents {
     this.joinTimers = new Set();
     this.minigameCheckInFlight = false;
     this.leaderboardCheckInFlight = false;
+    this.eventSequence = 0;
     this.counters = {
       queued: 0,
       failed: 0,
@@ -287,6 +318,29 @@ module.exports = class BmfMinigameEvents {
     return commandDir ? path.join(path.dirname(commandDir), 'minigame-adapter-status.json') : '';
   }
 
+  get runtimeDir() {
+    const commandDir = this.commandDir;
+    return commandDir ? path.dirname(commandDir) : '';
+  }
+
+  get eventLogPath() {
+    const configured = String(this.config.eventLogPath || '').trim();
+    if (configured) return path.resolve(configured);
+
+    const envEventPath = String(process.env.OMEGGA_BMF_EVENTS_PATH || '').trim();
+    if (envEventPath) return path.resolve(envEventPath);
+
+    const runtimeDir = this.runtimeDir;
+    return runtimeDir ? path.join(runtimeDir, 'events.jsonl') : '';
+  }
+
+  get eventTransport() {
+    const configured = String(process.env.OMEGGA_BMF_MINIGAME_EVENT_TRANSPORT || this.config.eventTransport || 'event-log')
+      .trim()
+      .toLowerCase();
+    return configured === 'command' ? 'command' : 'event-log';
+  }
+
   currentPollingMode() {
     const allowUnsafeConsoleSnapshots = this.unsafeConsoleSnapshotsEnabled();
     if (!this.serverStarted) return 'waiting-for-server-start';
@@ -301,6 +355,8 @@ module.exports = class BmfMinigameEvents {
     const status = {
       updatedAt: new Date().toISOString(),
       commandDir: this.commandDir,
+      eventTransport: this.eventTransport,
+      eventLogPath: this.eventLogPath,
       polling: this.currentPollingMode(),
       allowUnsafeConsoleSnapshots: this.unsafeConsoleSnapshotsEnabled(),
       serverStarted: this.serverStarted,
@@ -422,8 +478,10 @@ module.exports = class BmfMinigameEvents {
       `checks: minigames=${this.counters.minigameChecks} leaderboards=${this.counters.leaderboardChecks} snapshots=${this.counters.snapshotChanges} imports=${this.counters.snapshotImports} teamChanges=${this.counters.teamChanges}`,
       `leaves: checks=${this.counters.leaveChecks} queued=${this.counters.leaveQueued} misses=${this.counters.leaveCacheMisses} noPlayer=${this.counters.leaveNoPlayer} same=${this.counters.leaveSameMinigame} switches=${this.counters.leaveSwitches} disconnects=${this.counters.leaveDisconnects}`,
       `seed: attempts=${this.counters.seedAttempts} successes=${this.counters.seedSuccesses} failures=${this.counters.seedFailures} players=${this.counters.seedPlayers} memberships=${this.counters.seedMemberships} teamMemberships=${this.counters.seedTeamMemberships}`,
+      `eventTransport=${this.eventTransport}`,
       `unsafeConsoleSnapshots=${this.unsafeConsoleSnapshotsEnabled() ? 'enabled' : 'disabled'}`,
       `commandDir=${this.commandDir || '(not configured)'}`,
+      `eventLogPath=${this.eventLogPath || '(not configured)'}`,
       `statusPath=${this.statusPath || '(not configured)'}`,
     ];
     if (this.counters.lastEvent) {
@@ -512,6 +570,7 @@ module.exports = class BmfMinigameEvents {
     }
 
     this.counters.joinMatches += 1;
+    const matchedAtMs = Date.now();
     return {
       player: {
         name: match.groups.playerName,
@@ -522,11 +581,21 @@ module.exports = class BmfMinigameEvents {
         index: 0,
         ruleset: null,
       },
+      _telemetry: {
+        brickadiaLogMatchedAt: new Date(matchedAtMs).toISOString(),
+        brickadiaLogMatchedAtMs: matchedAtMs,
+      },
     };
   }
 
   onMinigameJoin(joinMinigame, retryCount = 0) {
     if (this.config.emitJoinEvents === false) return;
+    if (!joinMinigame._telemetry) joinMinigame._telemetry = {};
+    if (!joinMinigame._telemetry.adapterJoinFirstSeenAtMs) {
+      const firstSeenAtMs = Date.now();
+      joinMinigame._telemetry.adapterJoinFirstSeenAt = new Date(firstSeenAtMs).toISOString();
+      joinMinigame._telemetry.adapterJoinFirstSeenAtMs = firstSeenAtMs;
+    }
 
     const playerRef = joinMinigame?.player || {};
     const player = this.lookupPlayer(playerRef.id) || this.lookupPlayer(playerRef.name) || normalizePlayer(playerRef);
@@ -539,7 +608,8 @@ module.exports = class BmfMinigameEvents {
       });
 
     const maxRetries = Math.max(0, asNumber(this.config.joinRetryCount, 20));
-    if ((!player || !minigame?.ruleset) && retryCount < maxRetries) {
+    const rulesetRequired = this.unsafeConsoleSnapshotsEnabled();
+    if ((!player || (rulesetRequired && !minigame?.ruleset)) && retryCount < maxRetries) {
       const delayMs = Math.max(0, asNumber(this.config.joinRetryDelayMs, 100));
       const timer = setTimeout(() => {
         this.joinTimers.delete(timer);
@@ -551,10 +621,19 @@ module.exports = class BmfMinigameEvents {
 
     if (!player || !minigame?.name) return;
 
+    const queuedAtMs = Date.now();
     const joinEvent = {
       player,
       minigame,
       source: 'omegga.bmf-minigame-events',
+      _telemetry: {
+        ...telemetryPayload(joinMinigame),
+        adapterJoinRetries: retryCount,
+        adapterJoinQueuedAt: new Date(queuedAtMs).toISOString(),
+        adapterJoinQueuedAtMs: queuedAtMs,
+        adapterJoinResolveMs:
+          queuedAtMs - Number(joinMinigame._telemetry.adapterJoinFirstSeenAtMs || queuedAtMs),
+      },
     };
 
     this.onMinigameLeave(player, joinEvent, 'minigame-switch');
@@ -1339,31 +1418,122 @@ module.exports = class BmfMinigameEvents {
     throw new Error(`timed out waiting for BMF command response: ${command}`);
   }
 
-  queueEvent(eventName, payload) {
-    const command = [
-      'bmf.minigames.events.emit',
-      `event=${encodeURIComponent(eventName)}`,
-      `payload=${encodeURIComponent(JSON.stringify(payload || {}))}`,
-    ].join(' ');
+  buildQueuedEventPayload(payload, queuedAtMs) {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      return payload;
+    }
 
+    return {
+      ...payload,
+      _telemetry: {
+        ...telemetryPayload(payload),
+        adapterEventQueuedAt: new Date(queuedAtMs).toISOString(),
+        adapterEventQueuedAtMs: queuedAtMs,
+      },
+    };
+  }
+
+  buildEventLogPayload(eventName, payload, queuedAtMs) {
+    const eventPayload = this.buildQueuedEventPayload(payload, queuedAtMs) || {};
+    const namespacedEvent = minigameEventName(eventName);
+    const legacyEvent = legacyMinigameEventName(namespacedEvent);
+    const emittedAt = isoSeconds(new Date(queuedAtMs));
+    const minigame = eventPayload.minigame || (eventPayload.name || eventPayload.ruleset ? eventPayload : null);
+    const player = eventPayload.player || null;
+    const team = eventPayload.team || null;
+    const minigameKeyValue = minigameKey(minigame);
+    const playerKeyValue = playerKey(player);
+    const teamKeyValue = teamKey(team, minigame);
+    const eventId = String(++this.eventSequence);
+
+    return {
+      ...eventPayload,
+      _bmf: compactObject({
+        ...(eventPayload._bmf || {}),
+        emittedAt,
+        emitted_at: emittedAt,
+        event: namespacedEvent,
+        legacyEvent,
+        legacy_event: legacyEvent,
+        eventId,
+        event_id: eventId,
+        source: eventPayload.source || eventPayload._bmf?.source || 'omegga.bmf-minigame-events',
+        minigameKey: minigameKeyValue,
+        minigame_key: minigameKeyValue,
+        playerKey: playerKeyValue,
+        player_key: playerKeyValue,
+        teamKey: teamKeyValue,
+        team_key: teamKeyValue,
+      }),
+    };
+  }
+
+  writeEventLogRecord(eventName, eventPayload) {
+    const eventLogPath = this.eventLogPath;
+    if (!eventLogPath) {
+      throw new Error('eventLogPath is not configured');
+    }
+
+    const namespacedEvent = minigameEventName(eventName);
+    const record = {
+      level: 'info',
+      message: `event emitted: ${namespacedEvent}`,
+      source: 'event',
+      ts: eventPayload?._bmf?.emittedAt || isoSeconds(),
+      data: {
+        event: namespacedEvent,
+        payload: eventPayload || {},
+        handlers: 0,
+        errors: [],
+        ok: true,
+      },
+    };
+
+    fs.mkdirSync(path.dirname(eventLogPath), { recursive: true });
+    fs.appendFileSync(eventLogPath, `${JSON.stringify(record)}\n`, 'utf8');
+    return eventLogPath;
+  }
+
+  recordDeliveredEvent(eventName, payload, transport) {
+    this.counters.queued += 1;
+    this.counters.byEvent[eventName] = (this.counters.byEvent[eventName] || 0) + 1;
+    this.counters.lastEvent = {
+      event: eventName,
+      player: payload?.player?.id || payload?.player?.name || '',
+      minigame: payload?.minigame?.name || payload?.name || '',
+      adapterLatencyMs: payload?._telemetry?.adapterJoinResolveMs,
+      transport,
+    };
+    console.log(
+      `[bmf-minigame-events] ${transport} ${eventName} player=${this.counters.lastEvent.player || 'unknown'} minigame=${this.counters.lastEvent.minigame || 'unknown'} adapterLatencyMs=${this.counters.lastEvent.adapterLatencyMs ?? ''}`
+    );
+    this.writeStatusFile({ lastQueuedEvent: eventName, lastEventTransport: transport });
+  }
+
+  queueEvent(eventName, payload) {
+    const queuedAtMs = Date.now();
     try {
-      this.writeCommandRequest(command, `minigame_${eventName}`);
-      this.counters.queued += 1;
-      this.counters.byEvent[eventName] = (this.counters.byEvent[eventName] || 0) + 1;
-      this.counters.lastEvent = {
-        event: eventName,
-        player: payload?.player?.id || payload?.player?.name || '',
-        minigame: payload?.minigame?.name || payload?.name || '',
-      };
-      console.log(
-        `[bmf-minigame-events] queued ${eventName} player=${this.counters.lastEvent.player || 'unknown'} minigame=${this.counters.lastEvent.minigame || 'unknown'}`
-      );
-      this.writeStatusFile({ lastQueuedEvent: eventName });
+      if (this.eventTransport === 'command') {
+        const eventPayload = this.buildQueuedEventPayload(payload, queuedAtMs);
+        const command = [
+          'bmf.minigames.events.emit',
+          `event=${encodeURIComponent(eventName)}`,
+          `payload=${encodeURIComponent(JSON.stringify(eventPayload || {}))}`,
+        ].join(' ');
+
+        this.writeCommandRequest(command, `minigame_${eventName}`);
+        this.recordDeliveredEvent(eventName, eventPayload, 'command');
+        return true;
+      }
+
+      const eventPayload = this.buildEventLogPayload(eventName, payload, queuedAtMs);
+      this.writeEventLogRecord(eventName, eventPayload);
+      this.recordDeliveredEvent(eventName, eventPayload, 'event-log');
       return true;
     } catch (error) {
       this.counters.failed += 1;
       this.counters.lastError = error.message || String(error);
-      console.warn(`[bmf-minigame-events] failed to queue ${eventName}: ${this.counters.lastError}`);
+      console.warn(`[bmf-minigame-events] failed to deliver ${eventName}: ${this.counters.lastError}`);
       this.writeStatusFile({ failedEvent: eventName });
       return false;
     }

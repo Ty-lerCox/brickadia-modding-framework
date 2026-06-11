@@ -16,12 +16,14 @@
 #include <Unreal/UObjectGlobals.hpp>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <cmath>
 #include <cctype>
 #include <deque>
@@ -32,6 +34,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 using namespace RC;
@@ -138,6 +141,38 @@ namespace
         std::string value_lower = ascii_lower(std::string(value));
         std::string needle_lower = ascii_lower(std::string(needle));
         return value_lower.find(needle_lower) != std::string::npos;
+    }
+
+    bool is_accessible_memory(uintptr_t address, size_t bytes)
+    {
+        MEMORY_BASIC_INFORMATION mbi{};
+        if (address == 0 || bytes == 0 || VirtualQuery(reinterpret_cast<void*>(address), &mbi, sizeof(mbi)) == 0)
+        {
+            return false;
+        }
+        if (mbi.State != MEM_COMMIT || (mbi.Protect & PAGE_GUARD) || (mbi.Protect & PAGE_NOACCESS))
+        {
+            return false;
+        }
+        const uintptr_t region_start = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+        const uintptr_t region_end = region_start + mbi.RegionSize;
+        return address >= region_start && address + bytes >= address && address + bytes <= region_end;
+    }
+
+    bool is_executable_memory(uintptr_t address)
+    {
+        MEMORY_BASIC_INFORMATION mbi{};
+        if (address == 0 || VirtualQuery(reinterpret_cast<void*>(address), &mbi, sizeof(mbi)) == 0)
+        {
+            return false;
+        }
+        if (mbi.State != MEM_COMMIT || (mbi.Protect & PAGE_GUARD) || (mbi.Protect & PAGE_NOACCESS))
+        {
+            return false;
+        }
+        const DWORD execute_flags =
+            PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+        return (mbi.Protect & execute_flags) != 0;
     }
 
     bool parse_uobject_address(std::string_view raw, uintptr_t& address)
@@ -254,6 +289,53 @@ namespace
     bool object_is_pawn(Unreal::UObject* object)
     {
         return object_class_has_any_cast_flags(object, Unreal::CASTCLASS_APawn);
+    }
+
+    std::string object_address_hex(Unreal::UObject* object)
+    {
+        if (!object)
+        {
+            return "";
+        }
+
+        std::ostringstream out;
+        out << "0x" << std::hex << std::uppercase << std::setw(sizeof(uintptr_t) * 2)
+            << std::setfill('0') << reinterpret_cast<uintptr_t>(object);
+        return out.str();
+    }
+
+    std::string object_name(Unreal::UObject* object)
+    {
+        if (!is_live_uobject(object))
+        {
+            return "";
+        }
+
+        try
+        {
+            return narrow_string(object->GetName());
+        }
+        catch (...)
+        {
+            return "";
+        }
+    }
+
+    std::string object_full_name(Unreal::UObject* object)
+    {
+        if (!is_live_uobject(object))
+        {
+            return "";
+        }
+
+        try
+        {
+            return narrow_string(object->GetFullName());
+        }
+        catch (...)
+        {
+            return "";
+        }
     }
 
     std::string object_class_name(Unreal::UObject* object)
@@ -581,6 +663,2843 @@ namespace
         }
 
         return false;
+    }
+
+    void write_object_reference_fields(std::ostringstream& out, std::string_view prefix, Unreal::UObject* object)
+    {
+        if (!is_live_uobject(object))
+        {
+            return;
+        }
+
+        out << prefix << "_address=" << json_escape(object_address_hex(object)) << "\n"
+            << prefix << "_name=" << json_escape(object_name(object)) << "\n"
+            << prefix << "_full_name=" << json_escape(object_full_name(object)) << "\n"
+            << prefix << "_class=" << json_escape(object_class_name(object)) << "\n"
+            << prefix << "_class_full_name=" << json_escape(object_class_full_name(object)) << "\n";
+    }
+
+    bool property_is_object_reference(Unreal::FProperty* property)
+    {
+        if (!property)
+        {
+            return false;
+        }
+
+        try
+        {
+            auto field_class = property->GetClass();
+            return field_class.IsValid() && field_class.HasAllCastFlags(Unreal::CASTCLASS_FObjectPropertyBase);
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
+    void write_bounded_object_property_references(std::ostringstream& out, Unreal::UObject* object, int max_refs)
+    {
+        if (!is_live_uobject(object))
+        {
+            return;
+        }
+
+        auto object_class = object->GetClassPrivate();
+        if (!object_class)
+        {
+            return;
+        }
+
+        int visited = 0;
+        int emitted = 0;
+        int errors = 0;
+        for (Unreal::FProperty* property : Unreal::TFieldRange<Unreal::FProperty>(
+                 object_class,
+                 Unreal::EFieldIterationFlags::IncludeSuper | Unreal::EFieldIterationFlags::IncludeDeprecated))
+        {
+            ++visited;
+            if (!property_is_object_reference(property))
+            {
+                continue;
+            }
+
+            try
+            {
+                auto value = property->ContainerPtrToValuePtr<Unreal::UObject*>(object);
+                if (!value || !is_live_uobject(*value))
+                {
+                    continue;
+                }
+
+                ++emitted;
+                const std::string prefix = std::string("ref_") + std::to_string(emitted);
+                out << prefix << "_property=" << json_escape(narrow_string(property->GetName())) << "\n";
+                write_object_reference_fields(out, prefix, *value);
+
+                if (emitted >= max_refs)
+                {
+                    break;
+                }
+            }
+            catch (...)
+            {
+                ++errors;
+            }
+        }
+
+        out << "object_ref_properties_visited=" << visited << "\n"
+            << "object_ref_properties_emitted=" << emitted << "\n"
+            << "object_ref_properties_errors=" << errors << "\n"
+            << "object_ref_properties_truncated=" << (emitted >= max_refs ? "true" : "false") << "\n";
+    }
+
+    std::string build_native_uobject_description_text(std::string_view source_address)
+    {
+        std::ostringstream out;
+        out << "Native UObject description\n"
+            << "source=BMFSocketDescribeUObject\n"
+            << "requested_address=" << json_escape(source_address) << "\n";
+
+        uintptr_t parsed_source_address = 0;
+        if (!parse_uobject_address(source_address, parsed_source_address))
+        {
+            out << "ok=false\n"
+                << "detail=source address must be a non-zero UObject pointer\n";
+            return out.str();
+        }
+
+        Unreal::UObject* source = reinterpret_cast<Unreal::UObject*>(parsed_source_address);
+        if (!is_live_uobject(source))
+        {
+            out << "ok=false\n"
+                << "detail=source address does not point to a live UObject\n";
+            return out.str();
+        }
+
+        out << "ok=true\n";
+        write_object_reference_fields(out, "object", source);
+        out << "object_class_cast_flags=" << json_escape(object_class_cast_flags_hex(source)) << "\n"
+            << "object_is_actor=" << (object_is_actor(source) ? "true" : "false") << "\n"
+            << "object_is_pawn=" << (object_is_pawn(source) ? "true" : "false") << "\n";
+
+        Unreal::FVector location{};
+        std::string location_method;
+        if (try_actor_k2_location(source, location))
+        {
+            location_method = ".K2_GetActorLocation";
+        }
+        else
+        {
+            try_actor_root_component_location(source, location, location_method);
+        }
+        if (!location_method.empty())
+        {
+            out << std::setprecision(17)
+                << "object_location_method=" << json_escape(location_method) << "\n"
+                << "object_location_x=" << static_cast<double>(location.X()) << "\n"
+                << "object_location_y=" << static_cast<double>(location.Y()) << "\n"
+                << "object_location_z=" << static_cast<double>(location.Z()) << "\n";
+        }
+
+        struct PropertyProbe
+        {
+            const char* output_name;
+            const CharType* property_name;
+        };
+
+        const PropertyProbe probes[] = {
+            {"owner", STR("Owner")},
+            {"instigator", STR("Instigator")},
+            {"instigator_controller", STR("InstigatorController")},
+            {"controller", STR("Controller")},
+            {"player_state", STR("PlayerState")},
+            {"pawn", STR("Pawn")},
+            {"acknowledged_pawn", STR("AcknowledgedPawn")},
+            {"weapon", STR("Weapon")},
+            {"item", STR("Item")},
+            {"tool", STR("Tool")},
+            {"target", STR("Target")},
+        };
+
+        for (const PropertyProbe& probe : probes)
+        {
+            if (Unreal::UObject* value = get_object_property(source, probe.property_name))
+            {
+                write_object_reference_fields(out, probe.output_name, value);
+            }
+        }
+
+        write_bounded_object_property_references(out, source, 32);
+
+        return out.str();
+    }
+
+    using NativeFunc = void(__fastcall*)(void* context, void* stack, void* result);
+
+    constexpr uintptr_t kTreeCutFuncOffset = 0xD8;
+    constexpr uintptr_t kTreeCutStackLocalsOffset = 0x28;
+    constexpr size_t kTreeCutParamBytes = sizeof(double) * 7;
+    constexpr double kTreeCutTargetResolveRadius = 650.0;
+    constexpr double kTreeCutTargetResolveRadiusSq =
+        kTreeCutTargetResolveRadius * kTreeCutTargetResolveRadius;
+    constexpr size_t kTreeCutTargetCacheMaxCandidates = 512;
+
+    std::atomic<bool> g_treecut_enabled{false};
+    std::atomic<bool> g_treecut_installed{false};
+    std::atomic<uint64_t> g_treecut_hits{0};
+    std::atomic<uint64_t> g_treecut_events{0};
+    std::atomic<uint64_t> g_treecut_verified_handaxe_hits{0};
+    std::atomic<uint64_t> g_treecut_rejected_non_handaxe{0};
+    std::atomic<uint64_t> g_treecut_param_failures{0};
+    std::atomic<uint64_t> g_treecut_queue_drops{0};
+    std::atomic<uint64_t> g_treecut_target_resolve_attempts{0};
+    std::atomic<uint64_t> g_treecut_target_resolve_hits{0};
+    std::atomic<uint64_t> g_treecut_target_resolve_misses{0};
+    std::atomic<uint64_t> g_treecut_target_cache_refreshes{0};
+    std::atomic<uint64_t> g_treecut_target_cache_scanned_objects{0};
+    std::atomic<uint64_t> g_treecut_target_cache_errors{0};
+    std::atomic<uint64_t> g_treecut_target_cache_last_refresh_ms{0};
+    std::atomic<uint64_t> g_treecut_console_tag_hits{0};
+    std::atomic<uint64_t> g_treecut_console_tag_misses{0};
+    std::atomic<uintptr_t> g_treecut_function{0};
+    std::atomic<uintptr_t> g_treecut_slot{0};
+    std::atomic<uintptr_t> g_treecut_original{0};
+    std::atomic<uintptr_t> g_treecut_handaxe_class{0};
+    std::atomic<bool> g_treecut_handaxe_class_resolved{false};
+    std::atomic<bool> g_treecut_handaxe_class_attempted{false};
+    std::atomic<uintptr_t> g_treecut_last_context{0};
+    std::atomic<uintptr_t> g_treecut_last_context_class{0};
+    std::mutex g_treecut_mutex;
+    std::deque<std::string> g_treecut_queue;
+    std::string g_treecut_last_error;
+    std::string g_treecut_last_item_type;
+    std::string g_treecut_last_reject_reason;
+    std::string g_treecut_handaxe_class_source;
+    std::string g_treecut_handaxe_class_detail;
+    std::string g_treecut_last_target_name;
+    std::string g_treecut_last_target_full_name;
+    std::string g_treecut_last_target_class;
+    std::string g_treecut_last_target_detail;
+    std::string g_treecut_last_console_tag;
+    std::string g_treecut_last_console_tag_source;
+
+    struct TreeCutTargetCandidate
+    {
+        Unreal::UObject* actor{nullptr};
+        std::string address;
+        std::string name;
+        std::string full_name;
+        std::string class_name;
+        std::string class_full_name;
+        Unreal::FVector location{};
+        std::string location_method;
+        std::string console_tag;
+        std::string console_tag_source;
+        std::string console_tag_source_object;
+        bool tagged_component{false};
+    };
+
+    std::vector<TreeCutTargetCandidate> g_treecut_target_cache;
+
+    void __fastcall treecut_native_detour(void* context, void* stack, void* result);
+    void __fastcall treecut_probe_detour_0(void* context, void* stack, void* result);
+    void __fastcall treecut_probe_detour_1(void* context, void* stack, void* result);
+    void __fastcall treecut_probe_detour_2(void* context, void* stack, void* result);
+    void __fastcall treecut_probe_detour_3(void* context, void* stack, void* result);
+    void __fastcall treecut_probe_detour_4(void* context, void* stack, void* result);
+    void __fastcall treecut_probe_detour_5(void* context, void* stack, void* result);
+    void __fastcall treecut_probe_detour_6(void* context, void* stack, void* result);
+    void __fastcall treecut_probe_detour_7(void* context, void* stack, void* result);
+    void __fastcall treecut_probe_detour_8(void* context, void* stack, void* result);
+
+    std::string pointer_hex(uintptr_t value)
+    {
+        if (value == 0)
+        {
+            return "";
+        }
+        std::ostringstream out;
+        out << "0x" << std::hex << std::uppercase << std::setw(sizeof(uintptr_t) * 2)
+            << std::setfill('0') << value;
+        return out.str();
+    }
+
+    std::string system_utc_iso()
+    {
+        SYSTEMTIME st{};
+        GetSystemTime(&st);
+        char buffer[64]{};
+        std::snprintf(
+            buffer,
+            sizeof(buffer),
+            "%04u-%02u-%02uT%02u:%02u:%02u.%03uZ",
+            st.wYear,
+            st.wMonth,
+            st.wDay,
+            st.wHour,
+            st.wMinute,
+            st.wSecond,
+            st.wMilliseconds);
+        return std::string(buffer);
+    }
+
+    bool read_treecut_params(void* stack, uintptr_t& out_locals, double out_values[7])
+    {
+        if (!stack || !out_values)
+        {
+            return false;
+        }
+
+        uintptr_t locals = 0;
+        __try
+        {
+            std::memcpy(&locals, static_cast<unsigned char*>(stack) + kTreeCutStackLocalsOffset, sizeof(uintptr_t));
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+
+        if (locals == 0 || !is_accessible_memory(locals, kTreeCutParamBytes))
+        {
+            return false;
+        }
+
+        __try
+        {
+            std::memcpy(out_values, reinterpret_cast<void*>(locals), kTreeCutParamBytes);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+
+        for (int index = 0; index < 7; ++index)
+        {
+            if (!std::isfinite(out_values[index]))
+            {
+                return false;
+            }
+        }
+
+        out_locals = locals;
+        return true;
+    }
+
+    bool read_process_event_locals(void* stack, uintptr_t& out_locals)
+    {
+        if (!stack)
+        {
+            return false;
+        }
+
+        uintptr_t locals = 0;
+        __try
+        {
+            std::memcpy(&locals, static_cast<unsigned char*>(stack) + kTreeCutStackLocalsOffset, sizeof(uintptr_t));
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+
+        if (locals == 0)
+        {
+            return false;
+        }
+
+        out_locals = locals;
+        return true;
+    }
+
+    Unreal::UObject* read_uobject_at(uintptr_t address)
+    {
+        if (!is_accessible_memory(address, sizeof(uintptr_t)))
+        {
+            return nullptr;
+        }
+
+        uintptr_t value = 0;
+        __try
+        {
+            std::memcpy(&value, reinterpret_cast<void*>(address), sizeof(value));
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return nullptr;
+        }
+
+        auto* object = reinterpret_cast<Unreal::UObject*>(value);
+        return is_live_uobject(object) ? object : nullptr;
+    }
+
+    bool read_u64_at(uintptr_t address, uint64_t& out_value)
+    {
+        if (!is_accessible_memory(address, sizeof(uint64_t)))
+        {
+            return false;
+        }
+
+        __try
+        {
+            std::memcpy(&out_value, reinterpret_cast<void*>(address), sizeof(out_value));
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+        return true;
+    }
+
+    std::string hex_u64(uint64_t value)
+    {
+        std::ostringstream out;
+        out << "0x" << std::uppercase << std::hex << std::setw(16) << std::setfill('0') << value;
+        return out.str();
+    }
+
+    bool read_i32_at(uintptr_t address, int32_t& out_value)
+    {
+        if (!is_accessible_memory(address, sizeof(int32_t)))
+        {
+            return false;
+        }
+
+        __try
+        {
+            std::memcpy(&out_value, reinterpret_cast<void*>(address), sizeof(out_value));
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+        return true;
+    }
+
+    bool read_u32_at(uintptr_t address, uint32_t& out_value)
+    {
+        if (!is_accessible_memory(address, sizeof(uint32_t)))
+        {
+            return false;
+        }
+
+        __try
+        {
+            std::memcpy(&out_value, reinterpret_cast<void*>(address), sizeof(out_value));
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+        return true;
+    }
+
+    bool read_u8_at(uintptr_t address, uint8_t& out_value)
+    {
+        if (!is_accessible_memory(address, sizeof(uint8_t)))
+        {
+            return false;
+        }
+
+        __try
+        {
+            std::memcpy(&out_value, reinterpret_cast<void*>(address), sizeof(out_value));
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+        return true;
+    }
+
+    bool write_u8_at(uintptr_t address, uint8_t value)
+    {
+        if (!is_accessible_memory(address, sizeof(uint8_t)))
+        {
+            return false;
+        }
+
+        __try
+        {
+            *reinterpret_cast<uint8_t*>(address) = value;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+        return true;
+    }
+
+    bool read_utf16_ascii_string(uintptr_t address, int32_t length, std::string& out_value)
+    {
+        if (address == 0 || length <= 0 || length > 512)
+        {
+            return false;
+        }
+        const size_t bytes = static_cast<size_t>(length) * sizeof(wchar_t);
+        if (!is_accessible_memory(address, bytes))
+        {
+            return false;
+        }
+
+        std::string text;
+        text.reserve(static_cast<size_t>(length));
+        const wchar_t* chars = reinterpret_cast<const wchar_t*>(address);
+        for (int32_t index = 0; index < length; ++index)
+        {
+            const wchar_t ch = chars[index];
+            if (ch == 0)
+            {
+                break;
+            }
+            if (ch < 0x20 || ch > 0x7e)
+            {
+                return false;
+            }
+            text.push_back(static_cast<char>(ch));
+        }
+
+        text = trim_ascii(text);
+        if (text.empty())
+        {
+            return false;
+        }
+        out_value = std::move(text);
+        return true;
+    }
+
+    bool read_ansi_ascii_string(uintptr_t address, int32_t length, std::string& out_value)
+    {
+        if (address == 0 || length <= 0 || length > 512 || !is_accessible_memory(address, static_cast<size_t>(length)))
+        {
+            return false;
+        }
+
+        std::string text;
+        text.reserve(static_cast<size_t>(length));
+        const char* chars = reinterpret_cast<const char*>(address);
+        for (int32_t index = 0; index < length; ++index)
+        {
+            const unsigned char ch = static_cast<unsigned char>(chars[index]);
+            if (ch == 0)
+            {
+                break;
+            }
+            if (ch < 0x20 || ch > 0x7e)
+            {
+                return false;
+            }
+            text.push_back(static_cast<char>(ch));
+        }
+
+        text = trim_ascii(text);
+        if (text.empty())
+        {
+            return false;
+        }
+        out_value = std::move(text);
+        return true;
+    }
+
+    bool is_console_tag_candidate(std::string_view raw, bool allow_plain)
+    {
+        const std::string text = trim_ascii(raw);
+        if (text.empty() || text.size() > 128)
+        {
+            return false;
+        }
+
+        bool has_colon = false;
+        for (unsigned char ch : text)
+        {
+            if (ch == ':')
+            {
+                has_colon = true;
+                continue;
+            }
+            if (!(std::isalnum(ch) || ch == '_' || ch == '-' || ch == '.'))
+            {
+                return false;
+            }
+        }
+        return allow_plain || has_colon;
+    }
+
+    void push_console_tag_candidate(std::vector<std::string>& tags, std::string_view raw, bool allow_plain)
+    {
+        const std::string text = trim_ascii(raw);
+        if (!is_console_tag_candidate(text, allow_plain))
+        {
+            return;
+        }
+        for (const std::string& existing : tags)
+        {
+            if (existing == text)
+            {
+                return;
+            }
+        }
+        tags.push_back(text);
+    }
+
+    bool treecut_console_tag_is_tree_id(std::string_view raw)
+    {
+        const std::string text = ascii_lower(trim_ascii(raw));
+        return text.rfind("treeid:", 0) == 0 || text.rfind("choptree:", 0) == 0;
+    }
+
+    std::string treecut_first_tree_id_console_tag(const std::vector<std::string>& tags)
+    {
+        for (const std::string& tag : tags)
+        {
+            if (treecut_console_tag_is_tree_id(tag))
+            {
+                return tag;
+            }
+        }
+        return "";
+    }
+
+    void scan_fstring_like_console_tags(uintptr_t base, uint32_t bytes, std::vector<std::string>& tags, bool allow_plain)
+    {
+        if (base == 0 || bytes < 16 || !is_accessible_memory(base, bytes))
+        {
+            return;
+        }
+
+        const uint32_t max_offset = bytes > 16 ? bytes - 16 : 0;
+        for (uint32_t offset = 0; offset <= max_offset; offset += 4)
+        {
+            uintptr_t data_ptr = 0;
+            int32_t len = 0;
+            int32_t max = 0;
+            if (!read_u64_at(base + offset, data_ptr) ||
+                !read_i32_at(base + offset + 8, len) ||
+                !read_i32_at(base + offset + 12, max))
+            {
+                continue;
+            }
+            if (data_ptr == 0 || len <= 0 || len > 512 || max < len || max > 4096)
+            {
+                continue;
+            }
+
+            std::string text;
+            if (read_utf16_ascii_string(data_ptr, len, text) ||
+                read_ansi_ascii_string(data_ptr, len, text))
+            {
+                push_console_tag_candidate(tags, text, allow_plain);
+            }
+        }
+    }
+
+    struct TreeCutConsoleTagInfo
+    {
+        std::vector<std::string> tags;
+        std::string source;
+        std::string source_object;
+    };
+
+    void treecut_note_console_tag_source(TreeCutConsoleTagInfo& info, std::string_view source, Unreal::UObject* object = nullptr)
+    {
+        if (info.source.empty())
+        {
+            info.source = std::string(source);
+        }
+        if (info.source_object.empty() && is_live_uobject(object))
+        {
+            info.source_object = object_address_hex(object);
+        }
+    }
+
+    std::string compact_object_label(Unreal::UObject* object)
+    {
+        if (!is_live_uobject(object))
+        {
+            return "";
+        }
+
+        std::ostringstream out;
+        out << object_address_hex(object);
+
+        const std::string name = object_name(object);
+        if (!name.empty())
+        {
+            out << " name=" << name;
+        }
+
+        const std::string full_name = object_full_name(object);
+        if (!full_name.empty() && full_name != name)
+        {
+            out << " full=" << full_name;
+        }
+
+        const std::string class_name = object_class_name(object);
+        if (!class_name.empty())
+        {
+            out << " class=" << class_name;
+        }
+
+        return out.str();
+    }
+
+    bool treecut_read_console_tag_property(Unreal::UObject* object, std::vector<std::string>& tags)
+    {
+        if (!is_live_uobject(object))
+        {
+            return false;
+        }
+
+        const size_t before = tags.size();
+        try
+        {
+            const Unreal::FName wanted_property_name{STR("ConsoleTag"), Unreal::FNAME_Find};
+            Unreal::FProperty* property = get_class_property_by_name_in_chain(object, wanted_property_name);
+            if (!property)
+            {
+                return false;
+            }
+
+            uint8_t* value = property->ContainerPtrToValuePtr<uint8_t>(object);
+            if (!value)
+            {
+                return false;
+            }
+
+            scan_fstring_like_console_tags(reinterpret_cast<uintptr_t>(value), 64, tags, true);
+        }
+        catch (...)
+        {
+            return false;
+        }
+        return tags.size() > before;
+    }
+
+    void treecut_collect_console_tags_from_object(TreeCutConsoleTagInfo& info,
+                                                  Unreal::UObject* object,
+                                                  std::string_view source,
+                                                  int depth)
+    {
+        if (!is_live_uobject(object))
+        {
+            return;
+        }
+
+        const size_t before = info.tags.size();
+        if (treecut_read_console_tag_property(object, info.tags) && info.tags.size() > before)
+        {
+            treecut_note_console_tag_source(info, source, object);
+        }
+
+        if (depth <= 0)
+        {
+            return;
+        }
+
+        int visited_refs = 0;
+        try
+        {
+            for (Unreal::FProperty* property : Unreal::TFieldRange<Unreal::FProperty>(
+                     object->GetClassPrivate(),
+                     Unreal::EFieldIterationFlags::IncludeSuper | Unreal::EFieldIterationFlags::IncludeDeprecated))
+            {
+                if (!property || !property_is_object_reference(property))
+                {
+                    continue;
+                }
+                if (visited_refs++ >= 16)
+                {
+                    break;
+                }
+
+                auto value = property->ContainerPtrToValuePtr<Unreal::UObject*>(object);
+                if (!value || !is_live_uobject(*value) || *value == object)
+                {
+                    continue;
+                }
+
+                const std::string property_name = narrow_string(property->GetName());
+                const std::string child_name = object_name(*value);
+                const std::string child_class = object_class_name(*value);
+                const bool likely_component =
+                    contains_ascii_case_insensitive(property_name, "component") ||
+                    contains_ascii_case_insensitive(property_name, "interact") ||
+                    contains_ascii_case_insensitive(child_name, "component") ||
+                    contains_ascii_case_insensitive(child_name, "interact") ||
+                    contains_ascii_case_insensitive(child_class, "component") ||
+                    contains_ascii_case_insensitive(child_class, "interact");
+                if (!likely_component)
+                {
+                    continue;
+                }
+
+                const size_t child_before = info.tags.size();
+                treecut_collect_console_tags_from_object(
+                    info,
+                    *value,
+                    std::string(source) + "." + property_name,
+                    depth - 1);
+                if (info.tags.size() > child_before && info.source.empty())
+                {
+                    treecut_note_console_tag_source(info, std::string(source) + "." + property_name, *value);
+                }
+            }
+        }
+        catch (...)
+        {
+        }
+    }
+
+    void treecut_collect_console_tags_from_locals(uintptr_t locals, TreeCutConsoleTagInfo& info)
+    {
+        if (locals == 0)
+        {
+            return;
+        }
+
+        const size_t before_scan = info.tags.size();
+        scan_fstring_like_console_tags(locals, 0x300, info.tags, false);
+        if (info.tags.size() > before_scan)
+        {
+            treecut_note_console_tag_source(info, "locals-fstring");
+        }
+
+        constexpr uintptr_t object_offsets[] = {
+            0x0,
+            0x8,
+            0x10,
+            0x18,
+            0x20,
+            0x28,
+            0x30,
+            0x38,
+            0xB0,
+            0xB8,
+            0xD8,
+            0x68 + 0xB0,
+            0x68 + 0xB8,
+            0x68 + 0xD8,
+        };
+
+        for (uintptr_t offset : object_offsets)
+        {
+            Unreal::UObject* object = read_uobject_at(locals + offset);
+            if (!is_live_uobject(object))
+            {
+                continue;
+            }
+
+            std::ostringstream source;
+            source << "locals+0x" << std::uppercase << std::hex << offset;
+            const size_t before_object = info.tags.size();
+            treecut_collect_console_tags_from_object(info, object, source.str(), 1);
+            if (info.tags.size() > before_object)
+            {
+                treecut_note_console_tag_source(info, source.str(), object);
+            }
+        }
+    }
+
+    void treecut_record_console_tag_info(const TreeCutConsoleTagInfo& info)
+    {
+        if (info.tags.empty())
+        {
+            g_treecut_console_tag_misses.fetch_add(1);
+            return;
+        }
+
+        g_treecut_console_tag_hits.fetch_add(1);
+        std::lock_guard lock(g_treecut_mutex);
+        g_treecut_last_console_tag = info.tags.front();
+        g_treecut_last_console_tag_source = info.source;
+    }
+
+    void write_treecut_console_tags_json(std::ostringstream& out, const TreeCutConsoleTagInfo& info)
+    {
+        if (info.tags.empty())
+        {
+            out << ",\"consoleTagResolved\":false";
+            return;
+        }
+
+        out << ",\"consoleTagResolved\":true"
+            << ",\"consoleTag\":\"" << json_escape(info.tags.front()) << "\""
+            << ",\"consoleTagSource\":\"" << json_escape(info.source) << "\"";
+        if (!info.source_object.empty())
+        {
+            out << ",\"consoleTagSourceObject\":\"" << json_escape(info.source_object) << "\"";
+        }
+
+        out << ",\"consoleTags\":[";
+        for (size_t index = 0; index < info.tags.size(); ++index)
+        {
+            if (index > 0)
+            {
+                out << ",";
+            }
+            out << "\"" << json_escape(info.tags[index]) << "\"";
+        }
+        out << "]"
+            << ",\"hitTags\":[";
+        for (size_t index = 0; index < info.tags.size(); ++index)
+        {
+            if (index > 0)
+            {
+                out << ",";
+            }
+            out << "\"" << json_escape(info.tags[index]) << "\"";
+        }
+        out << "]";
+    }
+
+    Unreal::UObject* resolve_hit_owner(Unreal::UObject* context)
+    {
+        Unreal::UObject* owner = get_object_property(context, STR("Owner"));
+        if (is_live_uobject(owner))
+        {
+            return owner;
+        }
+        return nullptr;
+    }
+
+    Unreal::UObject* resolve_hit_pawn(Unreal::UObject* context, Unreal::UObject* owner)
+    {
+        for (Unreal::UObject* candidate_source : {owner, context})
+        {
+            if (!is_live_uobject(candidate_source))
+            {
+                continue;
+            }
+            for (const CharType* property_name : {STR("Pawn"), STR("AcknowledgedPawn"), STR("Instigator")})
+            {
+                Unreal::UObject* pawn = get_object_property(candidate_source, property_name);
+                if (is_live_uobject(pawn))
+                {
+                    return pawn;
+                }
+            }
+        }
+        return nullptr;
+    }
+
+    Unreal::UObject* resolve_hit_player_state(Unreal::UObject* owner, Unreal::UObject* pawn)
+    {
+        for (Unreal::UObject* candidate_source : {owner, pawn})
+        {
+            if (!is_live_uobject(candidate_source))
+            {
+                continue;
+            }
+            Unreal::UObject* player_state = get_object_property(candidate_source, STR("PlayerState"));
+            if (is_live_uobject(player_state))
+            {
+                return player_state;
+            }
+        }
+        return nullptr;
+    }
+
+    Unreal::UObject* find_treecut_melee_function()
+    {
+        try
+        {
+            if (auto* function = Unreal::UObjectGlobals::FindObject(
+                    STR("Function"),
+                    STR("MulticastReplicateAcceleratedMeleeExplosion")))
+            {
+                return function;
+            }
+        }
+        catch (...)
+        {
+        }
+
+        for (const CharType* candidate : {
+                 STR("/Script/Brickadia.BRWeaponBase:MulticastReplicateAcceleratedMeleeExplosion"),
+                 STR("/Script/Brickadia.BRWeaponBase.MulticastReplicateAcceleratedMeleeExplosion"),
+             })
+        {
+            try
+            {
+                if (auto* function = Unreal::UObjectGlobals::StaticFindObject(nullptr, nullptr, candidate))
+                {
+                    return function;
+                }
+            }
+            catch (...)
+            {
+            }
+        }
+        return nullptr;
+    }
+
+    Unreal::UClass* uobject_as_uclass(Unreal::UObject* object)
+    {
+        if (!is_live_uobject(object))
+        {
+            return nullptr;
+        }
+
+        try
+        {
+            if (object->IsA<Unreal::UClass>())
+            {
+                return static_cast<Unreal::UClass*>(object);
+            }
+        }
+        catch (...)
+        {
+        }
+
+        try
+        {
+            auto object_class = object->GetClassPrivate();
+            if (object_class && object_class->HasAnyCastFlag(Unreal::CASTCLASS_UClass))
+            {
+                return static_cast<Unreal::UClass*>(object);
+            }
+        }
+        catch (...)
+        {
+        }
+        return nullptr;
+    }
+
+    void treecut_cache_handaxe_class_unlocked(Unreal::UClass* candidate, std::string source, std::string detail)
+    {
+        g_treecut_handaxe_class.store(reinterpret_cast<uintptr_t>(candidate));
+        g_treecut_handaxe_class_resolved.store(candidate != nullptr);
+        g_treecut_handaxe_class_attempted.store(true);
+        g_treecut_handaxe_class_source = std::move(source);
+        g_treecut_handaxe_class_detail = std::move(detail);
+        g_treecut_last_error = candidate ? "" : g_treecut_handaxe_class_detail;
+    }
+
+    Unreal::UClass* find_treecut_handaxe_class_candidate(const CharType* class_kind, const CharType* object_name)
+    {
+        if (!class_kind || !object_name)
+        {
+            return nullptr;
+        }
+
+        try
+        {
+            if (Unreal::UObject* object = Unreal::UObjectGlobals::FindObject(class_kind, object_name))
+            {
+                if (Unreal::UClass* class_object = uobject_as_uclass(object))
+                {
+                    return class_object;
+                }
+            }
+        }
+        catch (...)
+        {
+        }
+
+        try
+        {
+            if (Unreal::UObject* object = Unreal::UObjectGlobals::StaticFindObject(nullptr, nullptr, object_name))
+            {
+                if (Unreal::UClass* class_object = uobject_as_uclass(object))
+                {
+                    return class_object;
+                }
+            }
+        }
+        catch (...)
+        {
+        }
+        return nullptr;
+    }
+
+    bool set_treecut_handaxe_class_from_address(std::string_view source_address, std::string_view source_label)
+    {
+        const std::string label = source_label.empty() ? std::string("address") : std::string(source_label);
+        uintptr_t parsed_address = 0;
+        if (!parse_uobject_address(source_address, parsed_address))
+        {
+            std::lock_guard lock(g_treecut_mutex);
+            treecut_cache_handaxe_class_unlocked(
+                nullptr,
+                label,
+                "handaxe class address must be a non-zero UObject pointer");
+            return false;
+        }
+
+        Unreal::UObject* object = reinterpret_cast<Unreal::UObject*>(parsed_address);
+        if (!is_live_uobject(object))
+        {
+            std::lock_guard lock(g_treecut_mutex);
+            treecut_cache_handaxe_class_unlocked(
+                nullptr,
+                label,
+                "handaxe class address does not point to a live UObject");
+            return false;
+        }
+
+        Unreal::UClass* class_object = uobject_as_uclass(object);
+        if (!class_object)
+        {
+            std::lock_guard lock(g_treecut_mutex);
+            treecut_cache_handaxe_class_unlocked(
+                nullptr,
+                label,
+                "handaxe class address is live but is not a UClass");
+            return false;
+        }
+
+        std::lock_guard lock(g_treecut_mutex);
+        treecut_cache_handaxe_class_unlocked(
+            class_object,
+            label,
+            "handaxe class accepted from explicit address");
+        return true;
+    }
+
+    Unreal::UClass* resolve_treecut_handaxe_class()
+    {
+        if (const uintptr_t cached = g_treecut_handaxe_class.load())
+        {
+            return reinterpret_cast<Unreal::UClass*>(cached);
+        }
+
+        std::lock_guard lock(g_treecut_mutex);
+        if (const uintptr_t cached = g_treecut_handaxe_class.load())
+        {
+            return reinterpret_cast<Unreal::UClass*>(cached);
+        }
+
+        struct CandidateName
+        {
+            const CharType* name;
+            const char* label;
+        };
+
+        struct CandidateKind
+        {
+            const CharType* kind;
+            const char* label;
+        };
+
+        const CandidateName names[] = {
+            {STR("Weapon_Handaxe_C"), "Weapon_Handaxe_C"},
+            {STR("Weapon_Handaxe"), "Weapon_Handaxe"},
+            {STR("/Game/Weapons/Melee/Handaxe/Weapon_Handaxe.Weapon_Handaxe_C"), "/Game/Weapons/Melee/Handaxe/Weapon_Handaxe.Weapon_Handaxe_C"},
+            {STR("BlueprintGeneratedClass /Game/Weapons/Melee/Handaxe/Weapon_Handaxe.Weapon_Handaxe_C"), "BlueprintGeneratedClass /Game/Weapons/Melee/Handaxe/Weapon_Handaxe.Weapon_Handaxe_C"},
+            {STR("BlueprintGeneratedClass'/Game/Weapons/Melee/Handaxe/Weapon_Handaxe.Weapon_Handaxe_C'"), "BlueprintGeneratedClass'/Game/Weapons/Melee/Handaxe/Weapon_Handaxe.Weapon_Handaxe_C'"},
+            {STR("/Game/Weapons/Melee/Handaxe/Weapon_Handaxe"), "/Game/Weapons/Melee/Handaxe/Weapon_Handaxe"},
+            {STR("/Game/Brickadia/Weapons/Weapon_Handaxe.Weapon_Handaxe_C"), "/Game/Brickadia/Weapons/Weapon_Handaxe.Weapon_Handaxe_C"},
+            {STR("/Game/Brickadia/Gameplay/Weapons/Weapon_Handaxe.Weapon_Handaxe_C"), "/Game/Brickadia/Gameplay/Weapons/Weapon_Handaxe.Weapon_Handaxe_C"},
+            {STR("/Game/Weapons/Weapon_Handaxe.Weapon_Handaxe_C"), "/Game/Weapons/Weapon_Handaxe.Weapon_Handaxe_C"},
+        };
+        const CandidateKind kinds[] = {
+            {STR("BlueprintGeneratedClass"), "BlueprintGeneratedClass"},
+            {STR("Class"), "Class"},
+        };
+
+        for (const CandidateName& name : names)
+        {
+            for (const CandidateKind& kind : kinds)
+            {
+                if (Unreal::UClass* candidate = find_treecut_handaxe_class_candidate(kind.kind, name.name))
+                {
+                    treecut_cache_handaxe_class_unlocked(
+                        candidate,
+                        std::string("FindObject(") + kind.label + "," + name.label + ")",
+                        "handaxe class resolved by native object lookup");
+                    return candidate;
+                }
+            }
+        }
+
+        treecut_cache_handaxe_class_unlocked(
+            nullptr,
+            "native lookup",
+            "Weapon_Handaxe class could not be resolved");
+        return nullptr;
+    }
+
+    bool is_treecut_context_handaxe(void* context)
+    {
+        Unreal::UObject* object = reinterpret_cast<Unreal::UObject*>(context);
+        g_treecut_last_context.store(reinterpret_cast<uintptr_t>(context));
+        g_treecut_last_context_class.store(0);
+
+        if (!is_live_uobject(object))
+        {
+            std::lock_guard lock(g_treecut_mutex);
+            g_treecut_last_item_type = "unknown";
+            g_treecut_last_reject_reason = "context is not a live UObject";
+            return false;
+        }
+
+        Unreal::UClass* object_class = nullptr;
+        try
+        {
+            object_class = object->GetClassPrivate();
+        }
+        catch (...)
+        {
+            object_class = nullptr;
+        }
+        g_treecut_last_context_class.store(reinterpret_cast<uintptr_t>(object_class));
+
+        Unreal::UClass* handaxe_class = resolve_treecut_handaxe_class();
+        if (!handaxe_class)
+        {
+            std::lock_guard lock(g_treecut_mutex);
+            g_treecut_last_item_type = "unknown";
+            g_treecut_last_reject_reason = "handaxe class unresolved";
+            return false;
+        }
+
+        bool matches = false;
+        try
+        {
+            matches = object->IsA(handaxe_class);
+        }
+        catch (...)
+        {
+            matches = object_class == handaxe_class;
+        }
+
+        std::lock_guard lock(g_treecut_mutex);
+        if (matches)
+        {
+            g_treecut_last_item_type = "handaxe";
+            g_treecut_last_reject_reason.clear();
+        }
+        else
+        {
+            g_treecut_last_item_type = "non-handaxe";
+            g_treecut_last_reject_reason = "weapon context did not match Weapon_Handaxe";
+        }
+        return matches;
+    }
+
+    bool treecut_actor_text_is_tree_like(const TreeCutTargetCandidate& candidate)
+    {
+        const std::string text = ascii_lower(
+            candidate.name + " " +
+            candidate.full_name + " " +
+            candidate.class_name + " " +
+            candidate.class_full_name);
+        return text.find("tree") != std::string::npos;
+    }
+
+    bool treecut_object_text_may_have_console_tag(Unreal::UObject* object)
+    {
+        const std::string text = ascii_lower(
+            object_name(object) + " " +
+            object_full_name(object) + " " +
+            object_class_name(object) + " " +
+            object_class_full_name(object));
+        return text.find("interact") != std::string::npos ||
+               text.find("target") != std::string::npos ||
+               text.find("component") != std::string::npos ||
+               text.find("console") != std::string::npos ||
+               text.find("brick") != std::string::npos ||
+               text.find("tree") != std::string::npos;
+    }
+
+    bool treecut_try_actor_location(Unreal::UObject* actor, Unreal::FVector& out_vector, std::string& method)
+    {
+        method.clear();
+        if (try_actor_k2_location(actor, out_vector))
+        {
+            method = "K2_GetActorLocation";
+            return true;
+        }
+        if (try_actor_root_component_location(actor, out_vector, method))
+        {
+            return true;
+        }
+        return false;
+    }
+
+    bool treecut_try_object_location(Unreal::UObject* object, Unreal::FVector& out_vector, std::string& method)
+    {
+        method.clear();
+        if (!is_live_uobject(object))
+        {
+            return false;
+        }
+
+        if (object_is_actor(object) && treecut_try_actor_location(object, out_vector, method))
+        {
+            return true;
+        }
+
+        if (read_transform_translation_property(object, STR("ComponentToWorld"), out_vector))
+        {
+            method = "ComponentToWorld";
+            return true;
+        }
+
+        Unreal::UObject* outer = nullptr;
+        try
+        {
+            outer = object->GetOuterPrivate();
+        }
+        catch (...)
+        {
+            outer = nullptr;
+        }
+
+        for (int depth = 0; depth < 4 && is_live_uobject(outer) && outer != object; ++depth)
+        {
+            std::string outer_method;
+            if (object_is_actor(outer) && treecut_try_actor_location(outer, out_vector, outer_method))
+            {
+                method = "outer" + std::to_string(depth + 1) + "." + outer_method;
+                return true;
+            }
+
+            if (read_transform_translation_property(outer, STR("ComponentToWorld"), out_vector))
+            {
+                method = "outer" + std::to_string(depth + 1) + ".ComponentToWorld";
+                return true;
+            }
+
+            Unreal::UObject* next = nullptr;
+            try
+            {
+                next = outer->GetOuterPrivate();
+            }
+            catch (...)
+            {
+                next = nullptr;
+            }
+            if (next == outer)
+            {
+                break;
+            }
+            outer = next;
+        }
+
+        if (read_vector_property(object, STR("RelativeLocation"), out_vector))
+        {
+            method = "RelativeLocation";
+            return true;
+        }
+
+        return false;
+    }
+
+    bool treecut_try_direct_tree_id_console_tag(Unreal::UObject* object, TreeCutConsoleTagInfo& info)
+    {
+        if (!is_live_uobject(object))
+        {
+            return false;
+        }
+
+        const size_t before = info.tags.size();
+        if (!treecut_read_console_tag_property(object, info.tags))
+        {
+            return false;
+        }
+
+        if (info.tags.size() <= before)
+        {
+            return false;
+        }
+
+        const std::string tag = treecut_first_tree_id_console_tag(info.tags);
+        if (tag.empty())
+        {
+            return false;
+        }
+
+        treecut_note_console_tag_source(info, "target-cache.ConsoleTag", object);
+        return true;
+    }
+
+    void treecut_refresh_target_cache(std::string_view reason)
+    {
+        const ULONGLONG refresh_started_ms = GetTickCount64();
+        std::vector<TreeCutTargetCandidate> candidates;
+        candidates.reserve(64);
+        uint64_t scanned = 0;
+        uint64_t errors = 0;
+        uint64_t tagged_candidates = 0;
+        bool truncated = false;
+
+        Unreal::UObjectGlobals::ForEachUObject([&](Unreal::UObject* object, int32_t, int32_t) {
+            ++scanned;
+            if (candidates.size() >= kTreeCutTargetCacheMaxCandidates)
+            {
+                truncated = true;
+                return LoopAction::Break;
+            }
+
+            if (!is_live_uobject(object))
+            {
+                return LoopAction::Continue;
+            }
+
+            try
+            {
+                TreeCutConsoleTagInfo tag_info;
+                if (treecut_object_text_may_have_console_tag(object) &&
+                    treecut_try_direct_tree_id_console_tag(object, tag_info))
+                {
+                    TreeCutTargetCandidate candidate;
+                    candidate.actor = object;
+                    candidate.address = object_address_hex(object);
+                    candidate.name = object_name(object);
+                    candidate.full_name = object_full_name(object);
+                    candidate.class_name = object_class_name(object);
+                    candidate.class_full_name = object_class_full_name(object);
+                    candidate.console_tag = treecut_first_tree_id_console_tag(tag_info.tags);
+                    candidate.console_tag_source = tag_info.source;
+                    candidate.console_tag_source_object = tag_info.source_object;
+                    candidate.tagged_component = !object_is_actor(object);
+
+                    if (!candidate.console_tag.empty() &&
+                        treecut_try_object_location(object, candidate.location, candidate.location_method))
+                    {
+                        candidates.push_back(std::move(candidate));
+                        ++tagged_candidates;
+                        return LoopAction::Continue;
+                    }
+                }
+
+                if (!object_is_actor(object))
+                {
+                    return LoopAction::Continue;
+                }
+
+                TreeCutTargetCandidate candidate;
+                candidate.actor = object;
+                candidate.address = object_address_hex(object);
+                candidate.name = object_name(object);
+                candidate.full_name = object_full_name(object);
+                candidate.class_name = object_class_name(object);
+                candidate.class_full_name = object_class_full_name(object);
+
+                if (!treecut_actor_text_is_tree_like(candidate))
+                {
+                    return LoopAction::Continue;
+                }
+
+                if (!treecut_try_actor_location(object, candidate.location, candidate.location_method))
+                {
+                    return LoopAction::Continue;
+                }
+
+                candidates.push_back(std::move(candidate));
+            }
+            catch (...)
+            {
+                ++errors;
+            }
+
+            return LoopAction::Continue;
+        });
+
+        g_treecut_target_cache_refreshes.fetch_add(1);
+        g_treecut_target_cache_scanned_objects.store(scanned);
+        g_treecut_target_cache_errors.store(errors);
+        g_treecut_target_cache_last_refresh_ms.store(
+            static_cast<uint64_t>(GetTickCount64() - refresh_started_ms));
+
+        std::lock_guard lock(g_treecut_mutex);
+        g_treecut_target_cache = std::move(candidates);
+        g_treecut_last_target_detail =
+            "cache_refresh reason=" + std::string(reason) +
+            " candidates=" + std::to_string(g_treecut_target_cache.size()) +
+            " tagged=" + std::to_string(tagged_candidates) +
+            " scanned=" + std::to_string(scanned) +
+            " errors=" + std::to_string(errors) +
+            " duration_ms=" + std::to_string(g_treecut_target_cache_last_refresh_ms.load()) +
+            " truncated=" + (truncated ? "true" : "false");
+    }
+
+    struct TreeCutResolvedTarget
+    {
+        bool found{false};
+        TreeCutTargetCandidate candidate{};
+        double distance_sq{0.0};
+    };
+
+    void treecut_merge_target_console_tag(TreeCutConsoleTagInfo& info, const TreeCutResolvedTarget& target)
+    {
+        if (!target.found || target.candidate.console_tag.empty())
+        {
+            return;
+        }
+
+        const size_t before = info.tags.size();
+        push_console_tag_candidate(info.tags, target.candidate.console_tag, true);
+        if (info.tags.size() > before && info.source.empty())
+        {
+            info.source = target.candidate.console_tag_source.empty()
+                ? "target-cache"
+                : target.candidate.console_tag_source;
+            info.source_object = target.candidate.console_tag_source_object;
+        }
+    }
+
+    TreeCutResolvedTarget treecut_resolve_target_actor(const double values[7])
+    {
+        g_treecut_target_resolve_attempts.fetch_add(1);
+
+        std::vector<TreeCutTargetCandidate> candidates;
+        {
+            std::lock_guard lock(g_treecut_mutex);
+            candidates = g_treecut_target_cache;
+        }
+
+        TreeCutResolvedTarget best_any;
+        TreeCutResolvedTarget best_tagged;
+        double best_any_distance_sq = kTreeCutTargetResolveRadiusSq;
+        double best_tagged_distance_sq = kTreeCutTargetResolveRadiusSq;
+        for (const TreeCutTargetCandidate& candidate : candidates)
+        {
+            if (!is_live_uobject(candidate.actor))
+            {
+                continue;
+            }
+
+            const double dx = static_cast<double>(candidate.location.X()) - values[1];
+            const double dy = static_cast<double>(candidate.location.Y()) - values[2];
+            const double dz = static_cast<double>(candidate.location.Z()) - values[3];
+            const double distance_sq = dx * dx + dy * dy + dz * dz;
+            if (!std::isfinite(distance_sq) || distance_sq > kTreeCutTargetResolveRadiusSq)
+            {
+                continue;
+            }
+
+            if (!candidate.console_tag.empty())
+            {
+                if (distance_sq <= best_tagged_distance_sq)
+                {
+                    best_tagged.found = true;
+                    best_tagged.candidate = candidate;
+                    best_tagged.distance_sq = distance_sq;
+                    best_tagged_distance_sq = distance_sq;
+                }
+                continue;
+            }
+
+            if (distance_sq <= best_any_distance_sq)
+            {
+                best_any.found = true;
+                best_any.candidate = candidate;
+                best_any.distance_sq = distance_sq;
+                best_any_distance_sq = distance_sq;
+            }
+        }
+
+        TreeCutResolvedTarget best = best_tagged.found ? best_tagged : best_any;
+
+        {
+            std::lock_guard lock(g_treecut_mutex);
+            if (best.found)
+            {
+                g_treecut_target_resolve_hits.fetch_add(1);
+                g_treecut_last_target_name = best.candidate.name;
+                g_treecut_last_target_full_name = best.candidate.full_name;
+                g_treecut_last_target_class = best.candidate.class_name;
+                g_treecut_last_target_detail =
+                    "resolved distance=" + std::to_string(std::sqrt(best.distance_sq)) +
+                    " tagged=" + (best.candidate.console_tag.empty() ? "false" : "true") +
+                    " radius=" + std::to_string(kTreeCutTargetResolveRadius);
+            }
+            else
+            {
+                g_treecut_target_resolve_misses.fetch_add(1);
+                g_treecut_last_target_name.clear();
+                g_treecut_last_target_full_name.clear();
+                g_treecut_last_target_class.clear();
+                g_treecut_last_target_detail =
+                    "miss radius=" + std::to_string(kTreeCutTargetResolveRadius) +
+                    " candidates=" + std::to_string(candidates.size());
+            }
+        }
+
+        return best;
+    }
+
+    void write_treecut_target_json(std::ostringstream& out, const TreeCutResolvedTarget& target)
+    {
+        if (!target.found)
+        {
+            out << ",\"targetResolved\":false";
+            return;
+        }
+
+        const double distance = std::sqrt(target.distance_sq);
+        out << std::setprecision(17)
+            << ",\"targetResolved\":true"
+            << ",\"treeActorName\":\"" << json_escape(target.candidate.name) << "\""
+            << ",\"treeActorFullName\":\"" << json_escape(target.candidate.full_name) << "\""
+            << ",\"treeActorPath\":\"" << json_escape(target.candidate.full_name) << "\""
+            << ",\"targetActor\":{"
+            << "\"id\":\"" << json_escape(!target.candidate.full_name.empty() ? target.candidate.full_name : target.candidate.address) << "\","
+            << "\"address\":\"" << json_escape(target.candidate.address) << "\","
+            << "\"name\":\"" << json_escape(target.candidate.name) << "\","
+            << "\"fullName\":\"" << json_escape(target.candidate.full_name) << "\","
+            << "\"path\":\"" << json_escape(target.candidate.full_name) << "\","
+            << "\"className\":\"" << json_escape(target.candidate.class_name) << "\","
+            << "\"classFullName\":\"" << json_escape(target.candidate.class_full_name) << "\","
+            << "\"distance\":" << distance << ","
+            << "\"location\":{\"x\":" << static_cast<double>(target.candidate.location.X())
+            << ",\"y\":" << static_cast<double>(target.candidate.location.Y())
+            << ",\"z\":" << static_cast<double>(target.candidate.location.Z()) << "},"
+            << "\"locationMethod\":\"" << json_escape(target.candidate.location_method) << "\","
+            << "\"taggedComponent\":" << (target.candidate.tagged_component ? "true" : "false") << ",";
+        if (!target.candidate.console_tag.empty())
+        {
+            out << "\"consoleTag\":\"" << json_escape(target.candidate.console_tag) << "\","
+                << "\"consoleTagSource\":\"" << json_escape(target.candidate.console_tag_source) << "\",";
+        }
+        out << "\"resolver\":\"cached_nearest_tree_actor\""
+            << "}";
+    }
+
+    struct TreeCutProbeSlot
+    {
+        const char* label;
+        const CharType* short_name;
+        const CharType* path_a;
+        const CharType* path_b;
+        std::atomic<bool> installed{false};
+        std::atomic<uint64_t> hits{0};
+        std::atomic<uintptr_t> function{0};
+        std::atomic<uintptr_t> slot{0};
+        std::atomic<uintptr_t> original{0};
+        std::atomic<uintptr_t> last_context{0};
+        std::atomic<uintptr_t> last_stack{0};
+        std::atomic<uint64_t> last_tick_ms{0};
+
+        constexpr TreeCutProbeSlot(
+            const char* label_value,
+            const CharType* short_name_value,
+            const CharType* path_a_value,
+            const CharType* path_b_value)
+            : label(label_value),
+              short_name(short_name_value),
+              path_a(path_a_value),
+              path_b(path_b_value)
+        {
+        }
+    };
+
+    std::atomic<bool> g_treecut_probe_enabled{false};
+    std::mutex g_treecut_probe_mutex;
+    std::string g_treecut_probe_last_error;
+
+    TreeCutProbeSlot g_treecut_probe_slots[] = {
+        TreeCutProbeSlot{
+            "BRWeaponStateBehavior_MeleeBase.AdvanceState",
+            STR("AdvanceState"),
+            STR("/Script/Brickadia.BRWeaponStateBehavior_MeleeBase:AdvanceState"),
+            STR("/Script/Brickadia.BRWeaponStateBehavior_MeleeBase.AdvanceState")},
+        TreeCutProbeSlot{
+            "BRWeaponStateBehavior_MeleeAttack.AdvanceState",
+            STR("AdvanceState"),
+            STR("/Script/Brickadia.BRWeaponStateBehavior_MeleeAttack:AdvanceState"),
+            STR("/Script/Brickadia.BRWeaponStateBehavior_MeleeAttack.AdvanceState")},
+        TreeCutProbeSlot{
+            "BRWeaponBase.MulticastReplicateAcceleratedMeleeExplosion",
+            STR("MulticastReplicateAcceleratedMeleeExplosion"),
+            STR("/Script/Brickadia.BRWeaponBase:MulticastReplicateAcceleratedMeleeExplosion"),
+            STR("/Script/Brickadia.BRWeaponBase.MulticastReplicateAcceleratedMeleeExplosion")},
+        TreeCutProbeSlot{
+            "BRWeaponBase.OnWeaponFired",
+            STR("OnWeaponFired"),
+            STR("/Script/Brickadia.BRWeaponBase:OnWeaponFired"),
+            STR("/Script/Brickadia.BRWeaponBase.OnWeaponFired")},
+        TreeCutProbeSlot{
+            "BRWeaponProjectile.ProcessImpactDamageableObject",
+            STR("ProcessImpactDamageableObject"),
+            STR("/Script/Brickadia.BRWeaponProjectile:ProcessImpactDamageableObject"),
+            STR("/Script/Brickadia.BRWeaponProjectile.ProcessImpactDamageableObject")},
+        TreeCutProbeSlot{
+            "GameplayStatics.ApplyDamage",
+            STR("ApplyDamage"),
+            STR("/Script/Engine.GameplayStatics:ApplyDamage"),
+            STR("/Script/Engine.GameplayStatics.ApplyDamage")},
+        TreeCutProbeSlot{
+            "Actor.ReceiveActorBeginOverlap",
+            STR("ReceiveActorBeginOverlap"),
+            STR("/Script/Engine.Actor:ReceiveActorBeginOverlap"),
+            STR("/Script/Engine.Actor.ReceiveActorBeginOverlap")},
+        TreeCutProbeSlot{
+            "PrimitiveComponent.ReceiveComponentBeginOverlap",
+            STR("ReceiveComponentBeginOverlap"),
+            STR("/Script/Engine.PrimitiveComponent:ReceiveComponentBeginOverlap"),
+            STR("/Script/Engine.PrimitiveComponent.ReceiveComponentBeginOverlap")},
+        TreeCutProbeSlot{
+            "Actor.ReceiveHit",
+            STR("ReceiveHit"),
+            STR("/Script/Engine.Actor:ReceiveHit"),
+            STR("/Script/Engine.Actor.ReceiveHit")},
+    };
+
+    constexpr size_t kTreeCutProbeSlotCount = sizeof(g_treecut_probe_slots) / sizeof(g_treecut_probe_slots[0]);
+
+    using TreeCutProbeDetour = void(__fastcall*)(void*, void*, void*);
+    TreeCutProbeDetour g_treecut_probe_detours[kTreeCutProbeSlotCount] = {
+        treecut_probe_detour_0,
+        treecut_probe_detour_1,
+        treecut_probe_detour_2,
+        treecut_probe_detour_3,
+        treecut_probe_detour_4,
+        treecut_probe_detour_5,
+        treecut_probe_detour_6,
+        treecut_probe_detour_7,
+        treecut_probe_detour_8,
+    };
+
+    std::array<std::string, kTreeCutProbeSlotCount> g_treecut_probe_last_summary;
+    std::array<std::string, kTreeCutProbeSlotCount> g_treecut_probe_first_summary;
+    std::array<std::atomic<uintptr_t>, kTreeCutProbeSlotCount> g_treecut_probe_last_locals;
+
+    void treecut_probe_set_error(std::string value)
+    {
+        std::lock_guard lock(g_treecut_probe_mutex);
+        g_treecut_probe_last_error = std::move(value);
+    }
+
+    Unreal::UObject* find_treecut_probe_function(const TreeCutProbeSlot& probe)
+    {
+        for (const CharType* candidate : {probe.path_a, probe.path_b})
+        {
+            if (!candidate)
+            {
+                continue;
+            }
+            try
+            {
+                if (auto* function = Unreal::UObjectGlobals::StaticFindObject(nullptr, nullptr, candidate))
+                {
+                    return function;
+                }
+            }
+            catch (...)
+            {
+            }
+        }
+        if (probe.short_name)
+        {
+            try
+            {
+                if (auto* function = Unreal::UObjectGlobals::FindObject(STR("Function"), probe.short_name))
+                {
+                    return function;
+                }
+            }
+            catch (...)
+            {
+            }
+        }
+        return nullptr;
+    }
+
+    bool treecut_probe_install_slot(size_t index)
+    {
+        if (index >= kTreeCutProbeSlotCount)
+        {
+            return false;
+        }
+
+        TreeCutProbeSlot& probe = g_treecut_probe_slots[index];
+        if (probe.installed.load())
+        {
+            return true;
+        }
+
+        Unreal::UObject* function = find_treecut_probe_function(probe);
+        if (!function)
+        {
+            return false;
+        }
+
+        const uintptr_t function_address = reinterpret_cast<uintptr_t>(function);
+        const uintptr_t slot_address = function_address + kTreeCutFuncOffset;
+        probe.function.store(function_address);
+        probe.slot.store(slot_address);
+        if (!is_accessible_memory(slot_address, sizeof(void*)))
+        {
+            return false;
+        }
+
+        void** slot = reinterpret_cast<void**>(slot_address);
+        void* current = nullptr;
+        std::memcpy(&current, slot, sizeof(current));
+        if (current != reinterpret_cast<void*>(g_treecut_probe_detours[index]) &&
+            (!current || !is_executable_memory(reinterpret_cast<uintptr_t>(current))))
+        {
+            return false;
+        }
+
+        DWORD old_protect = 0;
+        if (!VirtualProtect(slot, sizeof(void*), PAGE_EXECUTE_READWRITE, &old_protect))
+        {
+            return false;
+        }
+
+        void* previous = InterlockedExchangePointer(slot, reinterpret_cast<void*>(g_treecut_probe_detours[index]));
+        DWORD ignored = 0;
+        VirtualProtect(slot, sizeof(void*), old_protect, &ignored);
+        FlushInstructionCache(GetCurrentProcess(), slot, sizeof(void*));
+
+        if (previous == reinterpret_cast<void*>(g_treecut_probe_detours[index]))
+        {
+            previous = reinterpret_cast<void*>(probe.original.load());
+        }
+        if (!previous)
+        {
+            return false;
+        }
+
+        probe.original.store(reinterpret_cast<uintptr_t>(previous));
+        probe.installed.store(true);
+        return true;
+    }
+
+    size_t treecut_probe_install_all()
+    {
+        size_t installed = 0;
+        for (size_t index = 0; index < kTreeCutProbeSlotCount; ++index)
+        {
+            if (treecut_probe_install_slot(index))
+            {
+                ++installed;
+            }
+        }
+        if (installed == 0)
+        {
+            treecut_probe_set_error("no tree-cut probe candidate functions resolved");
+        }
+        else
+        {
+            treecut_probe_set_error("");
+        }
+        return installed;
+    }
+
+    bool should_capture_treecut_probe_summary(const TreeCutProbeSlot& probe)
+    {
+        return std::strstr(probe.label, "ReceiveHit") != nullptr ||
+               std::strstr(probe.label, "ReceiveAnyDamage") != nullptr ||
+               std::strstr(probe.label, "ApplyDamage") != nullptr ||
+               std::strstr(probe.label, "ProcessImpactDamageableObject") != nullptr;
+    }
+
+    void append_probe_object(std::ostringstream& out, const char* label, Unreal::UObject* object)
+    {
+        if (!label || !is_live_uobject(object))
+        {
+            return;
+        }
+        out << "|" << label << "=" << compact_object_label(object);
+    }
+
+    std::string probe_param_token(std::string value)
+    {
+        if (value.empty())
+        {
+            return "unnamed";
+        }
+        for (char& ch : value)
+        {
+            const unsigned char uch = static_cast<unsigned char>(ch);
+            if (!std::isalnum(uch))
+            {
+                ch = '_';
+            }
+        }
+        return value;
+    }
+
+    std::string probe_property_class_label(Unreal::FProperty* property)
+    {
+        if (!property)
+        {
+            return "unknown";
+        }
+        try
+        {
+            const auto field_class = property->GetClass();
+            if (field_class.IsValid())
+            {
+                const std::string name = narrow_string(field_class.GetName());
+                if (!name.empty())
+                {
+                    return name;
+                }
+            }
+        }
+        catch (...)
+        {
+        }
+        return "unknown";
+    }
+
+    void append_probe_param_metadata(std::ostringstream& out, const TreeCutProbeSlot& probe, uintptr_t locals)
+    {
+        auto* function = reinterpret_cast<Unreal::UFunction*>(probe.function.load());
+        if (!is_live_uobject(function))
+        {
+            out << "|params_function_accessible=false";
+            return;
+        }
+
+        int param_index = 0;
+        int emitted = 0;
+        try
+        {
+            for (Unreal::FProperty* property : Unreal::TFieldRange<Unreal::FProperty>(
+                     function,
+                     Unreal::EFieldIterationFlags::IncludeDeprecated))
+            {
+                if (!property || !property->HasAnyPropertyFlags(Unreal::EPropertyFlags::CPF_Parm))
+                {
+                    continue;
+                }
+
+                ++param_index;
+                if (emitted >= 12)
+                {
+                    out << "|params_truncated=true";
+                    break;
+                }
+                ++emitted;
+
+                const std::string property_name = narrow_string(property->GetName());
+                const std::string token = "param" + std::to_string(param_index) + "_" + probe_param_token(property_name);
+                const int32_t offset = property->GetOffset_Internal();
+                const uintptr_t value_address = locals + static_cast<uintptr_t>(std::max(offset, 0));
+
+                out << "|" << token << "_offset=0x" << std::uppercase << std::hex << offset << std::dec
+                    << "|" << token << "_type=" << probe_property_class_label(property);
+
+                uint64_t raw_value = 0;
+                if (read_u64_at(value_address, raw_value))
+                {
+                    out << "|" << token << "_raw=" << hex_u64(raw_value);
+                }
+
+                if (property_is_object_reference(property))
+                {
+                    append_probe_object(out, (token + "_object").c_str(), read_uobject_at(value_address));
+                }
+            }
+        }
+        catch (...)
+        {
+            out << "|params_error=true";
+        }
+
+        if (emitted == 0)
+        {
+            out << "|params=0";
+        }
+    }
+
+    std::string build_treecut_probe_summary(const TreeCutProbeSlot& probe, void* context, uintptr_t locals)
+    {
+        std::ostringstream out;
+        out << "label=" << probe.label
+            << "|locals=" << pointer_hex(locals);
+        append_probe_object(out, "context", reinterpret_cast<Unreal::UObject*>(context));
+
+        if (!is_accessible_memory(locals, sizeof(uintptr_t)))
+        {
+            out << "|locals_accessible=false";
+            return out.str();
+        }
+
+        if (std::strstr(probe.label, "ReceiveHit") != nullptr)
+        {
+            append_probe_object(out, "my_component", read_uobject_at(locals + 0x0));
+            append_probe_object(out, "other_actor", read_uobject_at(locals + 0x8));
+            append_probe_object(out, "other_component", read_uobject_at(locals + 0x10));
+            append_probe_object(out, "hit_object_b0", read_uobject_at(locals + 0x68 + 0xB0));
+            append_probe_object(out, "hit_object_b8", read_uobject_at(locals + 0x68 + 0xB8));
+            append_probe_object(out, "hit_object_d8", read_uobject_at(locals + 0x68 + 0xD8));
+        }
+        else if (std::strstr(probe.label, "ReceiveAnyDamage") != nullptr)
+        {
+            append_probe_object(out, "damage_type_class", read_uobject_at(locals + 0x8));
+            append_probe_object(out, "event_instigator", read_uobject_at(locals + 0x10));
+            append_probe_object(out, "damage_causer", read_uobject_at(locals + 0x18));
+        }
+        else if (std::strstr(probe.label, "ApplyDamage") != nullptr)
+        {
+            append_probe_param_metadata(out, probe, locals);
+            append_probe_object(out, "damaged_actor", read_uobject_at(locals + 0x0));
+            append_probe_object(out, "event_instigator", read_uobject_at(locals + 0x10));
+            append_probe_object(out, "damage_causer", read_uobject_at(locals + 0x18));
+            append_probe_object(out, "damage_type_class", read_uobject_at(locals + 0x20));
+        }
+        else if (std::strstr(probe.label, "ProcessImpactDamageableObject") != nullptr)
+        {
+            append_probe_object(out, "hit_object_b0", read_uobject_at(locals + 0xB0));
+            append_probe_object(out, "hit_object_b8", read_uobject_at(locals + 0xB8));
+            append_probe_object(out, "hit_object_d8", read_uobject_at(locals + 0xD8));
+        }
+
+        return out.str();
+    }
+
+    void treecut_probe_handle(size_t index, void* context, void* stack, void* result)
+    {
+        NativeFunc original = nullptr;
+        if (index < kTreeCutProbeSlotCount)
+        {
+            TreeCutProbeSlot& probe = g_treecut_probe_slots[index];
+            if (g_treecut_probe_enabled.load())
+            {
+                probe.hits.fetch_add(1);
+                probe.last_context.store(reinterpret_cast<uintptr_t>(context));
+                probe.last_stack.store(reinterpret_cast<uintptr_t>(stack));
+                probe.last_tick_ms.store(GetTickCount64());
+
+                uintptr_t locals = 0;
+                if (read_process_event_locals(stack, locals))
+                {
+                    g_treecut_probe_last_locals[index].store(locals);
+                    if (should_capture_treecut_probe_summary(probe))
+                    {
+                        const std::string summary = build_treecut_probe_summary(probe, context, locals);
+                        std::lock_guard lock(g_treecut_probe_mutex);
+                        if (g_treecut_probe_first_summary[index].empty())
+                        {
+                            g_treecut_probe_first_summary[index] = summary;
+                        }
+                        g_treecut_probe_last_summary[index] = summary;
+                    }
+                }
+            }
+            original = reinterpret_cast<NativeFunc>(probe.original.load());
+        }
+        if (original && original != reinterpret_cast<NativeFunc>(g_treecut_probe_detours[index]))
+        {
+            original(context, stack, result);
+        }
+    }
+
+    void __fastcall treecut_probe_detour_0(void* context, void* stack, void* result)
+    {
+        treecut_probe_handle(0, context, stack, result);
+    }
+
+    void __fastcall treecut_probe_detour_1(void* context, void* stack, void* result)
+    {
+        treecut_probe_handle(1, context, stack, result);
+    }
+
+    void __fastcall treecut_probe_detour_2(void* context, void* stack, void* result)
+    {
+        treecut_probe_handle(2, context, stack, result);
+    }
+
+    void __fastcall treecut_probe_detour_3(void* context, void* stack, void* result)
+    {
+        treecut_probe_handle(3, context, stack, result);
+    }
+
+    void __fastcall treecut_probe_detour_4(void* context, void* stack, void* result)
+    {
+        treecut_probe_handle(4, context, stack, result);
+    }
+
+    void __fastcall treecut_probe_detour_5(void* context, void* stack, void* result)
+    {
+        treecut_probe_handle(5, context, stack, result);
+    }
+
+    void __fastcall treecut_probe_detour_6(void* context, void* stack, void* result)
+    {
+        treecut_probe_handle(6, context, stack, result);
+    }
+
+    void __fastcall treecut_probe_detour_7(void* context, void* stack, void* result)
+    {
+        treecut_probe_handle(7, context, stack, result);
+    }
+
+    void __fastcall treecut_probe_detour_8(void* context, void* stack, void* result)
+    {
+        treecut_probe_handle(8, context, stack, result);
+    }
+
+    std::string treecut_probe_status_text()
+    {
+        std::lock_guard lock(g_treecut_probe_mutex);
+        uint64_t total_hits = 0;
+        size_t installed = 0;
+        for (size_t index = 0; index < kTreeCutProbeSlotCount; ++index)
+        {
+            total_hits += g_treecut_probe_slots[index].hits.load();
+            if (g_treecut_probe_slots[index].installed.load())
+            {
+                ++installed;
+            }
+        }
+
+        std::ostringstream out;
+        out << "Tree-cut probe status\n"
+            << "source=BMFSocketTreeCutProbe\n"
+            << "enabled=" << (g_treecut_probe_enabled.load() ? "true" : "false") << "\n"
+            << "installed=" << installed << "\n"
+            << "candidates=" << kTreeCutProbeSlotCount << "\n"
+            << "total_hits=" << total_hits << "\n"
+            << "last_error=" << json_escape(g_treecut_probe_last_error) << "\n";
+
+        for (size_t index = 0; index < kTreeCutProbeSlotCount; ++index)
+        {
+            const TreeCutProbeSlot& probe = g_treecut_probe_slots[index];
+            out << "probe." << index << ".label=" << json_escape(probe.label) << "\n"
+                << "probe." << index << ".installed=" << (probe.installed.load() ? "true" : "false") << "\n"
+                << "probe." << index << ".hits=" << probe.hits.load() << "\n"
+                << "probe." << index << ".function=" << json_escape(pointer_hex(probe.function.load())) << "\n"
+                << "probe." << index << ".slot=" << json_escape(pointer_hex(probe.slot.load())) << "\n"
+                << "probe." << index << ".original=" << json_escape(pointer_hex(probe.original.load())) << "\n"
+                << "probe." << index << ".last_context=" << json_escape(pointer_hex(probe.last_context.load())) << "\n"
+                << "probe." << index << ".last_stack=" << json_escape(pointer_hex(probe.last_stack.load())) << "\n"
+                << "probe." << index << ".last_locals=" << json_escape(pointer_hex(g_treecut_probe_last_locals[index].load())) << "\n"
+                << "probe." << index << ".last_tick_ms=" << probe.last_tick_ms.load() << "\n"
+                << "probe." << index << ".first_summary=" << json_escape(g_treecut_probe_first_summary[index]) << "\n"
+                << "probe." << index << ".last_summary=" << json_escape(g_treecut_probe_last_summary[index]) << "\n";
+        }
+        return out.str();
+    }
+
+    std::string compact_tag_list(const std::vector<std::string>& tags)
+    {
+        std::ostringstream out;
+        for (size_t index = 0; index < tags.size(); ++index)
+        {
+            if (index > 0)
+            {
+                out << ",";
+            }
+            out << tags[index];
+        }
+        return out.str();
+    }
+
+    bool treecut_tags_include_exact(const std::vector<std::string>& tags, const std::string& wanted)
+    {
+        for (const std::string& tag : tags)
+        {
+            if (ascii_lower(trim_ascii(tag)) == wanted)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    std::string object_outer_chain(Unreal::UObject* object, int max_depth)
+    {
+        std::ostringstream out;
+        Unreal::UObject* current = object;
+        for (int depth = 0; depth < max_depth && is_live_uobject(current); ++depth)
+        {
+            if (depth > 0)
+            {
+                out << " > ";
+            }
+            out << depth << ":" << compact_object_label(current);
+
+            Unreal::UObject* next = nullptr;
+            try
+            {
+                next = current->GetOuterPrivate();
+            }
+            catch (...)
+            {
+                next = nullptr;
+            }
+            if (!is_live_uobject(next) || next == current)
+            {
+                break;
+            }
+            current = next;
+        }
+        return out.str();
+    }
+
+    std::string treecut_find_console_tag_text(std::string_view raw_tag, size_t max_results, uint64_t max_scan)
+    {
+        const std::string wanted = ascii_lower(trim_ascii(raw_tag));
+        std::ostringstream out;
+        out << "Tree-cut console tag lookup\n"
+            << "source=BMFSocketTreeCutFindTag\n"
+            << "ok=" << (!wanted.empty() ? "true" : "false") << "\n"
+            << "tag=" << json_escape(wanted) << "\n"
+            << "max_results=" << max_results << "\n"
+            << "max_scan=" << max_scan << "\n";
+
+        if (wanted.empty())
+        {
+            out << "code=TREE_CUT_FIND_TAG_REQUIRED\n"
+                << "detail=tag is required\n";
+            return out.str();
+        }
+
+        out << "code=TREE_CUT_FIND_TAG_DISABLED\n"
+            << "detail=disabled because broad UObject ConsoleTag scans held the game thread and triggered Brickadia hang detection\n"
+            << "matches=0\n"
+            << "scanned=0\n"
+            << "inspected=0\n"
+            << "errors=0\n"
+            << "truncated=false\n"
+            << "duration_ms=0\n";
+        return out.str();
+    }
+
+    constexpr uintptr_t kBrickLookupOffset = 0x430E8C0;
+    constexpr uintptr_t kBrickRegistryOffset = 0x788B098;
+    constexpr uintptr_t kBrickArrayBaseOffset = 0x788AFE0;
+    constexpr uintptr_t kBrickSetVisibilityOffset = 0x4355210;
+    constexpr uintptr_t kBrickSetCollisionChannelsOffset = 0x43548C0;
+    constexpr size_t kBrickRuntimeStride = 0x78;
+    constexpr uintptr_t kBrickOwnerOffset = 0x08;
+    constexpr uintptr_t kBrickCollisionChannelsOffset = 0x49;
+    constexpr uintptr_t kBrickVisibleOffset = 0x4B;
+    constexpr uintptr_t kBrickStateFlagsOffset = 0x76;
+    constexpr uint8_t kBrickDefaultCollisionChannels = 0x8F;
+
+    using BrickLookupFn = uintptr_t(__fastcall*)(uintptr_t, uint32_t);
+    using BrickSetVisibilityFn = void(__fastcall*)(uintptr_t, uintptr_t, uint8_t);
+    using BrickSetCollisionChannelsFn = void(__fastcall*)(uintptr_t, uintptr_t, uint8_t);
+
+    struct BrickPhysicalOriginal
+    {
+        bool captured{false};
+        uint8_t visible{1};
+        uint8_t collision_channels{kBrickDefaultCollisionChannels};
+    };
+
+    std::mutex g_brick_physical_mutex;
+    std::unordered_map<uint32_t, BrickPhysicalOriginal> g_brick_physical_originals;
+
+    uintptr_t brickadia_module_base()
+    {
+        return reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    }
+
+    bool brick_physical_lookup(uint32_t brick_id,
+                              uintptr_t& out_module_base,
+                              uintptr_t& out_registry_address,
+                              uintptr_t& out_brick_address,
+                              std::string& out_code,
+                              std::string& out_detail)
+    {
+        out_module_base = brickadia_module_base();
+        out_registry_address = 0;
+        out_brick_address = 0;
+        if (out_module_base == 0)
+        {
+            out_code = "BRICK_MODULE_UNAVAILABLE";
+            out_detail = "GetModuleHandleW(nullptr) returned no module base";
+            return false;
+        }
+
+        const uintptr_t lookup_address = out_module_base + kBrickLookupOffset;
+        out_registry_address = out_module_base + kBrickRegistryOffset;
+        if (!is_executable_memory(lookup_address))
+        {
+            out_code = "BRICK_LOOKUP_UNAVAILABLE";
+            out_detail = "brick lookup function address is not executable";
+            return false;
+        }
+        if (!is_accessible_memory(out_registry_address, sizeof(uintptr_t)))
+        {
+            out_code = "BRICK_REGISTRY_UNAVAILABLE";
+            out_detail = "brick registry global is not accessible";
+            return false;
+        }
+
+        auto lookup = reinterpret_cast<BrickLookupFn>(lookup_address);
+        uintptr_t brick_address = 0;
+        __try
+        {
+            brick_address = lookup(out_registry_address, brick_id);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            out_code = "BRICK_LOOKUP_EXCEPTION";
+            out_detail = "brick lookup raised a structured exception";
+            return false;
+        }
+
+        if (brick_address == 0)
+        {
+            out_code = "BRICK_NOT_FOUND";
+            out_detail = "brick lookup returned null";
+            return false;
+        }
+        if (!is_accessible_memory(brick_address, kBrickRuntimeStride))
+        {
+            out_code = "BRICK_MEMORY_UNAVAILABLE";
+            out_detail = "brick memory is not accessible";
+            return false;
+        }
+
+        out_brick_address = brick_address;
+        out_code = "OK";
+        out_detail = "";
+        return true;
+    }
+
+    std::string brick_physical_inspect_text(uint32_t brick_id)
+    {
+        std::ostringstream out;
+        out << "Brick physical state\n"
+            << "source=BMFSocketBrickPhysical\n"
+            << "operation=inspect\n"
+            << "brick_id=" << brick_id << "\n";
+
+        uintptr_t module_base = 0;
+        uintptr_t registry_address = 0;
+        uintptr_t brick_address = 0;
+        std::string code;
+        std::string detail;
+        const bool found = brick_physical_lookup(
+            brick_id, module_base, registry_address, brick_address, code, detail);
+
+        out << "ok=" << (found ? "true" : "false") << "\n"
+            << "code=" << code << "\n"
+            << "module_base=" << json_escape(pointer_hex(module_base)) << "\n"
+            << "registry_address=" << json_escape(pointer_hex(registry_address)) << "\n"
+            << "brick_address=" << json_escape(pointer_hex(brick_address)) << "\n";
+
+        if (!found)
+        {
+            out << "detail=" << json_escape(detail) << "\n";
+            return out.str();
+        }
+
+        uint64_t array_base = 0;
+        uint64_t owner_address = 0;
+        uint64_t grid_context_address = 0;
+        uint8_t visible = 0;
+        uint8_t collision_channels = 0;
+        uint8_t state_flags = 0;
+        uint32_t slot_id = 0;
+
+        read_u64_at(module_base + kBrickArrayBaseOffset, array_base);
+        read_u64_at(brick_address + kBrickOwnerOffset, owner_address);
+        if (owner_address != 0 && is_accessible_memory(static_cast<uintptr_t>(owner_address), 0x18))
+        {
+            read_u64_at(static_cast<uintptr_t>(owner_address) + 0x10, grid_context_address);
+        }
+        read_u8_at(brick_address + kBrickVisibleOffset, visible);
+        read_u8_at(brick_address + kBrickCollisionChannelsOffset, collision_channels);
+        read_u8_at(brick_address + kBrickStateFlagsOffset, state_flags);
+        if (array_base != 0 &&
+            brick_address >= static_cast<uintptr_t>(array_base) &&
+            ((brick_address - static_cast<uintptr_t>(array_base)) % kBrickRuntimeStride) == 0)
+        {
+            slot_id = static_cast<uint32_t>(
+                (brick_address - static_cast<uintptr_t>(array_base)) / kBrickRuntimeStride);
+        }
+
+        bool has_original = false;
+        BrickPhysicalOriginal original{};
+        {
+            std::lock_guard lock(g_brick_physical_mutex);
+            const auto found_original = g_brick_physical_originals.find(brick_id);
+            if (found_original != g_brick_physical_originals.end())
+            {
+                has_original = found_original->second.captured;
+                original = found_original->second;
+            }
+        }
+
+        out << "array_base_address=" << json_escape(pointer_hex(static_cast<uintptr_t>(array_base))) << "\n"
+            << "runtime_slot=" << slot_id << "\n"
+            << "slot_matches_id=" << (slot_id == brick_id ? "true" : "false") << "\n"
+            << "owner_address=" << json_escape(pointer_hex(static_cast<uintptr_t>(owner_address))) << "\n"
+            << "grid_context_address=" << json_escape(pointer_hex(static_cast<uintptr_t>(grid_context_address))) << "\n"
+            << "grid_context_accessible=" << (
+                   grid_context_address != 0 &&
+                   is_accessible_memory(static_cast<uintptr_t>(grid_context_address), 0x2D0)
+                   ? "true"
+                   : "false") << "\n"
+            << "visible=" << static_cast<unsigned int>(visible) << "\n"
+            << "collision_channels=" << static_cast<unsigned int>(collision_channels) << "\n"
+            << "state_flags=" << static_cast<unsigned int>(state_flags) << "\n"
+            << "original_captured=" << (has_original ? "true" : "false") << "\n"
+            << "original_visible=" << static_cast<unsigned int>(original.visible) << "\n"
+            << "original_collision_channels=" << static_cast<unsigned int>(original.collision_channels) << "\n";
+        return out.str();
+    }
+
+    bool brick_physical_apply_visibility(uintptr_t set_visibility_address,
+                                         uintptr_t brick_address,
+                                         uintptr_t grid_context_address,
+                                         uint8_t visible)
+    {
+        auto set_visibility = reinterpret_cast<BrickSetVisibilityFn>(set_visibility_address);
+        __try
+        {
+            set_visibility(brick_address, grid_context_address, visible);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+        return true;
+    }
+
+    bool brick_physical_apply_collision(uintptr_t set_collision_address,
+                                        uintptr_t brick_address,
+                                        uintptr_t grid_context_address,
+                                        uint8_t collision_channels)
+    {
+        auto set_collision = reinterpret_cast<BrickSetCollisionChannelsFn>(set_collision_address);
+        __try
+        {
+            set_collision(brick_address, grid_context_address, collision_channels);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+        return true;
+    }
+
+    std::string brick_physical_set_text(uint32_t brick_id, bool visible, int64_t collision_channels_arg)
+    {
+        std::ostringstream out;
+        out << "Brick physical state\n"
+            << "source=BMFSocketBrickPhysical\n"
+            << "operation=set\n"
+            << "brick_id=" << brick_id << "\n"
+            << "requested_visible=" << (visible ? "true" : "false") << "\n"
+            << "requested_collision_channels=" << collision_channels_arg << "\n";
+
+        if (!env_flag_enabled("BMF_TREE_PHYSICAL_SET_ENABLED"))
+        {
+            out << "ok=false\n"
+                << "code=BRICK_PHYSICAL_SET_DISABLED\n"
+                << "detail=set BMF_TREE_PHYSICAL_SET_ENABLED=1 to allow explicit brick visibility/collision mutation\n";
+            return out.str();
+        }
+
+        uintptr_t module_base = 0;
+        uintptr_t registry_address = 0;
+        uintptr_t brick_address = 0;
+        std::string code;
+        std::string detail;
+        const bool found = brick_physical_lookup(
+            brick_id, module_base, registry_address, brick_address, code, detail);
+        out << "module_base=" << json_escape(pointer_hex(module_base)) << "\n"
+            << "registry_address=" << json_escape(pointer_hex(registry_address)) << "\n"
+            << "brick_address=" << json_escape(pointer_hex(brick_address)) << "\n";
+        if (!found)
+        {
+            out << "ok=false\n"
+                << "code=" << code << "\n"
+                << "detail=" << json_escape(detail) << "\n";
+            return out.str();
+        }
+
+        uint64_t owner_address = 0;
+        uint64_t grid_context_address = 0;
+        uint8_t before_visible = 0;
+        uint8_t before_collision_channels = 0;
+        read_u64_at(brick_address + kBrickOwnerOffset, owner_address);
+        if (owner_address != 0 && is_accessible_memory(static_cast<uintptr_t>(owner_address), 0x18))
+        {
+            read_u64_at(static_cast<uintptr_t>(owner_address) + 0x10, grid_context_address);
+        }
+        read_u8_at(brick_address + kBrickVisibleOffset, before_visible);
+        read_u8_at(brick_address + kBrickCollisionChannelsOffset, before_collision_channels);
+
+        if (grid_context_address == 0 ||
+            !is_accessible_memory(static_cast<uintptr_t>(grid_context_address), 0x2D0))
+        {
+            out << "ok=false\n"
+                << "code=BRICK_GRID_CONTEXT_UNAVAILABLE\n"
+                << "owner_address=" << json_escape(pointer_hex(static_cast<uintptr_t>(owner_address))) << "\n"
+                << "grid_context_address=" << json_escape(pointer_hex(static_cast<uintptr_t>(grid_context_address))) << "\n"
+                << "detail=brick grid context pointer is required by Brickadia physical-state setters\n";
+            return out.str();
+        }
+
+        BrickPhysicalOriginal original{};
+        {
+            std::lock_guard lock(g_brick_physical_mutex);
+            auto& stored = g_brick_physical_originals[brick_id];
+            if (!stored.captured)
+            {
+                stored.captured = true;
+                stored.visible = before_visible;
+                stored.collision_channels = before_collision_channels;
+            }
+            original = stored;
+        }
+
+        uint8_t next_collision_channels = kBrickDefaultCollisionChannels;
+        std::string collision_source = "default";
+        if (collision_channels_arg >= 0)
+        {
+            next_collision_channels = static_cast<uint8_t>(std::min<int64_t>(255, collision_channels_arg));
+            collision_source = "argument";
+        }
+        else if (original.captured)
+        {
+            next_collision_channels = original.collision_channels;
+            collision_source = "captured";
+        }
+
+        const uintptr_t set_visibility_address = module_base + kBrickSetVisibilityOffset;
+        const uintptr_t set_collision_address = module_base + kBrickSetCollisionChannelsOffset;
+        if (!is_executable_memory(set_visibility_address))
+        {
+            out << "ok=false\n"
+                << "code=BRICK_VISIBILITY_SETTER_UNAVAILABLE\n"
+                << "set_visibility_address=" << json_escape(pointer_hex(set_visibility_address)) << "\n"
+                << "detail=Brickadia visibility setter function address is not executable\n";
+            return out.str();
+        }
+
+        const uint8_t target_visible = visible ? 1 : 0;
+        const bool visibility_call_succeeded = brick_physical_apply_visibility(
+                set_visibility_address,
+                brick_address,
+                static_cast<uintptr_t>(grid_context_address),
+                target_visible);
+        bool visibility_exception_after_apply = false;
+        if (!visibility_call_succeeded)
+        {
+            uint8_t probed_visible = 0;
+            read_u8_at(brick_address + kBrickVisibleOffset, probed_visible);
+            if (probed_visible == target_visible)
+            {
+                visibility_exception_after_apply = true;
+            }
+            else
+            {
+                out << "ok=false\n"
+                    << "code=BRICK_VISIBILITY_SET_EXCEPTION\n"
+                    << "detail=Brickadia visibility setter raised a structured exception before applying the requested state\n"
+                    << "after_visible=" << static_cast<unsigned int>(probed_visible) << "\n";
+                return out.str();
+            }
+        }
+
+        bool collision_attempted = false;
+        bool collision_succeeded = false;
+        bool collision_skipped = true;
+        const char* collision_method = "";
+        if (env_flag_enabled("BMF_BRICK_COLLISION_SET_ENABLED"))
+        {
+            collision_attempted = true;
+            collision_skipped = false;
+            collision_method = "brickadia-setter";
+            if (!is_executable_memory(set_collision_address))
+            {
+                out << "ok=false\n"
+                    << "code=BRICK_COLLISION_SETTER_UNAVAILABLE\n"
+                    << "set_collision_channels_address=" << json_escape(pointer_hex(set_collision_address)) << "\n"
+                    << "detail=Brickadia collision setter function address is not executable\n";
+                return out.str();
+            }
+            collision_succeeded = brick_physical_apply_collision(
+                set_collision_address,
+                brick_address,
+                static_cast<uintptr_t>(grid_context_address),
+                next_collision_channels);
+            if (!collision_succeeded)
+            {
+                out << "ok=false\n"
+                    << "code=BRICK_COLLISION_SET_EXCEPTION\n"
+                    << "detail=Brickadia collision setter raised a structured exception\n";
+                return out.str();
+            }
+        }
+        else if (
+            env_flag_enabled("BMF_BRICK_COLLISION_DIRECT_WRITE_ENABLED") &&
+            !env_flag_enabled("BMF_BRICK_COLLISION_DIRECT_WRITE_DISABLED"))
+        {
+            collision_attempted = true;
+            collision_skipped = false;
+            collision_method = "direct-byte-write";
+            collision_succeeded = write_u8_at(
+                brick_address + kBrickCollisionChannelsOffset,
+                next_collision_channels);
+            if (!collision_succeeded)
+            {
+                out << "ok=false\n"
+                    << "code=BRICK_COLLISION_DIRECT_WRITE_FAILED\n"
+                    << "detail=direct collision-channel byte write failed\n";
+                return out.str();
+            }
+        }
+
+        uint8_t after_visible = 0;
+        uint8_t after_collision_channels = 0;
+        read_u8_at(brick_address + kBrickVisibleOffset, after_visible);
+        read_u8_at(brick_address + kBrickCollisionChannelsOffset, after_collision_channels);
+
+        out << "ok=true\n"
+            << "code=OK\n"
+            << "owner_address=" << json_escape(pointer_hex(static_cast<uintptr_t>(owner_address))) << "\n"
+            << "grid_context_address=" << json_escape(pointer_hex(static_cast<uintptr_t>(grid_context_address))) << "\n"
+            << "before_visible=" << static_cast<unsigned int>(before_visible) << "\n"
+            << "before_collision_channels=" << static_cast<unsigned int>(before_collision_channels) << "\n"
+            << "after_visible=" << static_cast<unsigned int>(after_visible) << "\n"
+            << "after_collision_channels=" << static_cast<unsigned int>(after_collision_channels) << "\n"
+            << "visibility_set_succeeded=" << (visibility_call_succeeded ? "true" : "false") << "\n"
+            << "visibility_exception_after_apply=" << (visibility_exception_after_apply ? "true" : "false") << "\n"
+            << "collision_set_attempted=" << (collision_attempted ? "true" : "false") << "\n"
+            << "collision_set_succeeded=" << (collision_succeeded ? "true" : "false") << "\n"
+            << "collision_set_skipped=" << (collision_skipped ? "true" : "false") << "\n"
+            << "collision_set_method=" << collision_method << "\n"
+            << "collision_set_skip_reason=" << (collision_skipped ? "no safe collision setter flag is enabled" : "") << "\n"
+            << "collision_channels_source=" << collision_source << "\n"
+            << "original_visible=" << static_cast<unsigned int>(original.visible) << "\n"
+            << "original_collision_channels=" << static_cast<unsigned int>(original.collision_channels) << "\n";
+        return out.str();
+    }
+
+    void treecut_set_error(std::string value)
+    {
+        std::lock_guard lock(g_treecut_mutex);
+        g_treecut_last_error = std::move(value);
+    }
+
+    bool treecut_native_install()
+    {
+        if (g_treecut_installed.load())
+        {
+            return true;
+        }
+
+        Unreal::UObject* function = find_treecut_melee_function();
+        if (!function)
+        {
+            treecut_set_error("MulticastReplicateAcceleratedMeleeExplosion UFunction not found");
+            return false;
+        }
+
+        const uintptr_t function_address = reinterpret_cast<uintptr_t>(function);
+        const uintptr_t slot_address = function_address + kTreeCutFuncOffset;
+        if (!is_accessible_memory(slot_address, sizeof(void*)))
+        {
+            treecut_set_error("UFunction Func slot is not accessible");
+            g_treecut_function.store(function_address);
+            g_treecut_slot.store(slot_address);
+            return false;
+        }
+
+        void** slot = reinterpret_cast<void**>(slot_address);
+        void* current = nullptr;
+        std::memcpy(&current, slot, sizeof(current));
+        if (current != reinterpret_cast<void*>(&treecut_native_detour) &&
+            (!current || !is_executable_memory(reinterpret_cast<uintptr_t>(current))))
+        {
+            treecut_set_error("UFunction Func slot target is not executable");
+            g_treecut_function.store(function_address);
+            g_treecut_slot.store(slot_address);
+            return false;
+        }
+
+        DWORD old_protect = 0;
+        if (!VirtualProtect(slot, sizeof(void*), PAGE_EXECUTE_READWRITE, &old_protect))
+        {
+            treecut_set_error("VirtualProtect failed for UFunction Func slot: " + std::to_string(GetLastError()));
+            g_treecut_function.store(function_address);
+            g_treecut_slot.store(slot_address);
+            return false;
+        }
+
+        void* previous = InterlockedExchangePointer(slot, reinterpret_cast<void*>(&treecut_native_detour));
+        DWORD ignored = 0;
+        VirtualProtect(slot, sizeof(void*), old_protect, &ignored);
+        FlushInstructionCache(GetCurrentProcess(), slot, sizeof(void*));
+
+        if (previous == reinterpret_cast<void*>(&treecut_native_detour))
+        {
+            previous = reinterpret_cast<void*>(g_treecut_original.load());
+        }
+        if (!previous)
+        {
+            treecut_set_error("UFunction Func slot had no original function");
+            g_treecut_function.store(function_address);
+            g_treecut_slot.store(slot_address);
+            return false;
+        }
+
+        g_treecut_function.store(function_address);
+        g_treecut_slot.store(slot_address);
+        g_treecut_original.store(reinterpret_cast<uintptr_t>(previous));
+        g_treecut_installed.store(true);
+        treecut_set_error("");
+        return true;
+    }
+
+    void enqueue_treecut_event(std::string event_json)
+    {
+        std::lock_guard lock(g_treecut_mutex);
+        if (g_treecut_queue.size() >= 512)
+        {
+            g_treecut_queue.pop_front();
+            g_treecut_queue_drops.fetch_add(1);
+        }
+        g_treecut_queue.push_back(std::move(event_json));
+    }
+
+    std::string build_treecut_event_json(
+        uint64_t sequence,
+        void* context,
+        uintptr_t locals,
+        const double values[7])
+    {
+        const TreeCutResolvedTarget target = treecut_resolve_target_actor(values);
+        TreeCutConsoleTagInfo console_tag_info;
+        treecut_collect_console_tags_from_locals(locals, console_tag_info);
+        treecut_merge_target_console_tag(console_tag_info, target);
+        treecut_record_console_tag_info(console_tag_info);
+
+        std::ostringstream out;
+        out << std::setprecision(17)
+            << "{"
+            << "\"type\":\"treecut_hit\","
+            << "\"source\":\"BMFSocketTreeCutNative\","
+            << "\"event\":\"cityrpg.treecut.hit\","
+            << "\"sequence\":" << sequence << ","
+            << "\"timestamp\":\"" << json_escape(system_utc_iso()) << "\","
+            << "\"function\":\"MulticastReplicateAcceleratedMeleeExplosion\","
+            << "\"itemType\":\"handaxe\","
+            << "\"itemVerified\":true,"
+            << "\"contextAddress\":\"" << json_escape(pointer_hex(reinterpret_cast<uintptr_t>(context))) << "\","
+            << "\"contextClassAddress\":\"" << json_escape(pointer_hex(g_treecut_last_context_class.load())) << "\","
+            << "\"handaxeClassAddress\":\"" << json_escape(pointer_hex(g_treecut_handaxe_class.load())) << "\","
+            << "\"localsAddress\":\"" << json_escape(pointer_hex(locals)) << "\","
+            << "\"impact\":{\"x\":" << values[1] << ",\"y\":" << values[2] << ",\"z\":" << values[3] << "},"
+            << "\"normal\":{\"x\":" << values[4] << ",\"y\":" << values[5] << ",\"z\":" << values[6] << "},"
+            << "\"raw0\":" << values[0];
+        write_treecut_console_tags_json(out, console_tag_info);
+        write_treecut_target_json(out, target);
+        out << "}";
+        return out.str();
+    }
+
+    void __fastcall treecut_native_detour(void* context, void* stack, void* result)
+    {
+        g_treecut_hits.fetch_add(1);
+
+        uintptr_t locals = 0;
+        double values[7]{};
+        const bool params_ok = read_treecut_params(stack, locals, values);
+        if (!params_ok)
+        {
+            g_treecut_param_failures.fetch_add(1);
+        }
+
+        NativeFunc original = reinterpret_cast<NativeFunc>(g_treecut_original.load());
+        if (original)
+        {
+            original(context, stack, result);
+        }
+
+        if (g_treecut_enabled.load() && params_ok)
+        {
+            if (!is_treecut_context_handaxe(context))
+            {
+                g_treecut_rejected_non_handaxe.fetch_add(1);
+                return;
+            }
+
+            g_treecut_verified_handaxe_hits.fetch_add(1);
+            const uint64_t sequence = g_treecut_events.fetch_add(1) + 1;
+            try
+            {
+                enqueue_treecut_event(build_treecut_event_json(sequence, context, locals, values));
+            }
+            catch (...)
+            {
+                treecut_set_error("treecut event serialization failed");
+            }
+        }
+    }
+
+    std::vector<std::string> drain_treecut_native_events(size_t max_count)
+    {
+        if (max_count < 1)
+        {
+            max_count = 1;
+        }
+        if (max_count > 256)
+        {
+            max_count = 256;
+        }
+
+        std::vector<std::string> events;
+        std::lock_guard lock(g_treecut_mutex);
+        while (!g_treecut_queue.empty() && events.size() < max_count)
+        {
+            events.push_back(std::move(g_treecut_queue.front()));
+            g_treecut_queue.pop_front();
+        }
+        return events;
+    }
+
+    std::string treecut_native_status_text()
+    {
+        std::lock_guard lock(g_treecut_mutex);
+        std::ostringstream out;
+        out << "Tree-cut native status\n"
+            << "source=BMFSocketTreeCutNative\n"
+            << "enabled=" << (g_treecut_enabled.load() ? "true" : "false") << "\n"
+            << "installed=" << (g_treecut_installed.load() ? "true" : "false") << "\n"
+            << "function=" << json_escape(pointer_hex(g_treecut_function.load())) << "\n"
+            << "slot=" << json_escape(pointer_hex(g_treecut_slot.load())) << "\n"
+            << "original=" << json_escape(pointer_hex(g_treecut_original.load())) << "\n"
+            << "detour=" << json_escape(pointer_hex(reinterpret_cast<uintptr_t>(&treecut_native_detour))) << "\n"
+            << "hits=" << g_treecut_hits.load() << "\n"
+            << "events=" << g_treecut_events.load() << "\n"
+            << "verified_handaxe_hits=" << g_treecut_verified_handaxe_hits.load() << "\n"
+            << "rejected_non_handaxe=" << g_treecut_rejected_non_handaxe.load() << "\n"
+            << "queued=" << g_treecut_queue.size() << "\n"
+            << "queue_drops=" << g_treecut_queue_drops.load() << "\n"
+            << "param_failures=" << g_treecut_param_failures.load() << "\n"
+            << "target_resolve_radius=" << kTreeCutTargetResolveRadius << "\n"
+            << "target_cache_candidates=" << g_treecut_target_cache.size() << "\n"
+            << "target_cache_refreshes=" << g_treecut_target_cache_refreshes.load() << "\n"
+            << "target_cache_scanned_objects=" << g_treecut_target_cache_scanned_objects.load() << "\n"
+            << "target_cache_errors=" << g_treecut_target_cache_errors.load() << "\n"
+            << "target_cache_last_refresh_ms=" << g_treecut_target_cache_last_refresh_ms.load() << "\n"
+            << "target_resolve_attempts=" << g_treecut_target_resolve_attempts.load() << "\n"
+            << "target_resolve_hits=" << g_treecut_target_resolve_hits.load() << "\n"
+            << "target_resolve_misses=" << g_treecut_target_resolve_misses.load() << "\n"
+            << "console_tag_hits=" << g_treecut_console_tag_hits.load() << "\n"
+            << "console_tag_misses=" << g_treecut_console_tag_misses.load() << "\n"
+            << "last_console_tag=" << json_escape(g_treecut_last_console_tag) << "\n"
+            << "last_console_tag_source=" << json_escape(g_treecut_last_console_tag_source) << "\n"
+            << "last_target_name=" << json_escape(g_treecut_last_target_name) << "\n"
+            << "last_target_full_name=" << json_escape(g_treecut_last_target_full_name) << "\n"
+            << "last_target_class=" << json_escape(g_treecut_last_target_class) << "\n"
+            << "last_target_detail=" << json_escape(g_treecut_last_target_detail) << "\n"
+            << "handaxe_class=" << json_escape(pointer_hex(g_treecut_handaxe_class.load())) << "\n"
+            << "handaxe_class_resolved=" << (g_treecut_handaxe_class_resolved.load() ? "true" : "false") << "\n"
+            << "handaxe_class_attempted=" << (g_treecut_handaxe_class_attempted.load() ? "true" : "false") << "\n"
+            << "handaxe_class_source=" << json_escape(g_treecut_handaxe_class_source) << "\n"
+            << "handaxe_class_detail=" << json_escape(g_treecut_handaxe_class_detail) << "\n"
+            << "last_context=" << json_escape(pointer_hex(g_treecut_last_context.load())) << "\n"
+            << "last_context_class=" << json_escape(pointer_hex(g_treecut_last_context_class.load())) << "\n"
+            << "last_item_type=" << json_escape(g_treecut_last_item_type) << "\n"
+            << "last_reject_reason=" << json_escape(g_treecut_last_reject_reason) << "\n"
+            << "last_error=" << json_escape(g_treecut_last_error) << "\n";
+        return out.str();
+    }
+
+    std::string treecut_resolve_handaxe_status_text()
+    {
+        resolve_treecut_handaxe_class();
+        return treecut_native_status_text();
     }
 
     bool is_object_property(Unreal::FProperty* property)
@@ -1509,6 +4428,244 @@ namespace
         return 1;
     }
 
+    int lua_socket_describe_uobject(const LuaMadeSimple::Lua& lua)
+    {
+        lua_State* state = lua.get_lua_state();
+        size_t address_length = 0;
+        const char* address = lua_isstring(state, 1) ? lua_tolstring(state, 1, &address_length) : "";
+        lua.set_string(build_native_uobject_description_text(
+            address ? std::string_view(address, address_length) : std::string_view()));
+        return 1;
+    }
+
+    int lua_socket_treecut_start(const LuaMadeSimple::Lua& lua)
+    {
+        const bool installed = treecut_native_install();
+        g_treecut_enabled.store(installed);
+        lua.set_bool(installed);
+        lua.set_string(treecut_native_status_text());
+        return 2;
+    }
+
+    int lua_socket_treecut_stop(const LuaMadeSimple::Lua& lua)
+    {
+        g_treecut_enabled.store(false);
+        lua.set_bool(true);
+        lua.set_string(treecut_native_status_text());
+        return 2;
+    }
+
+    int lua_socket_treecut_status(const LuaMadeSimple::Lua& lua)
+    {
+        lua.set_string(treecut_native_status_text());
+        return 1;
+    }
+
+    int lua_socket_treecut_find_tag(const LuaMadeSimple::Lua& lua)
+    {
+        lua_State* state = lua.get_lua_state();
+        size_t tag_length = 0;
+        const char* tag = lua_isstring(state, 1) ? lua_tolstring(state, 1, &tag_length) : "";
+        int64_t max_results = 8;
+        int64_t max_scan = 250000;
+        if (lua_isnumber(state, 2))
+        {
+            max_results = static_cast<int64_t>(lua_tointeger(state, 2));
+        }
+        if (lua_isnumber(state, 3))
+        {
+            max_scan = static_cast<int64_t>(lua_tointeger(state, 3));
+        }
+        if (max_results < 1)
+        {
+            max_results = 1;
+        }
+        if (max_results > 32)
+        {
+            max_results = 32;
+        }
+        if (max_scan < 1)
+        {
+            max_scan = 250000;
+        }
+
+        lua.set_string(treecut_find_console_tag_text(
+            tag ? std::string_view(tag, tag_length) : std::string_view(),
+            static_cast<size_t>(max_results),
+            static_cast<uint64_t>(max_scan)));
+        return 1;
+    }
+
+    int lua_socket_brick_physical_inspect(const LuaMadeSimple::Lua& lua)
+    {
+        lua_State* state = lua.get_lua_state();
+        int64_t brick_id = 0;
+        if (lua_isnumber(state, 1))
+        {
+            brick_id = static_cast<int64_t>(lua_tointeger(state, 1));
+        }
+        if (brick_id < 0)
+        {
+            brick_id = 0;
+        }
+        lua.set_string(brick_physical_inspect_text(static_cast<uint32_t>(brick_id)));
+        return 1;
+    }
+
+    int lua_socket_brick_physical_set(const LuaMadeSimple::Lua& lua)
+    {
+        lua_State* state = lua.get_lua_state();
+        int64_t brick_id = 0;
+        if (lua_isnumber(state, 1))
+        {
+            brick_id = static_cast<int64_t>(lua_tointeger(state, 1));
+        }
+        if (brick_id < 0)
+        {
+            brick_id = 0;
+        }
+
+        bool visible = false;
+        if (lua_isboolean(state, 2))
+        {
+            visible = lua_toboolean(state, 2) != 0;
+        }
+        else if (lua_isnumber(state, 2))
+        {
+            visible = lua_tointeger(state, 2) != 0;
+        }
+        else if (lua_isstring(state, 2))
+        {
+            size_t length = 0;
+            const char* raw = lua_tolstring(state, 2, &length);
+            const std::string value = ascii_lower(trim_ascii(raw ? std::string_view(raw, length) : std::string_view()));
+            visible = value == "1" || value == "true" || value == "yes" || value == "on" || value == "visible";
+        }
+
+        int64_t collision_channels = -1;
+        if (lua_isnumber(state, 3))
+        {
+            collision_channels = static_cast<int64_t>(lua_tointeger(state, 3));
+        }
+        if (collision_channels > 255)
+        {
+            collision_channels = 255;
+        }
+
+        lua.set_string(brick_physical_set_text(
+            static_cast<uint32_t>(brick_id),
+            visible,
+            collision_channels));
+        return 1;
+    }
+
+    int lua_socket_treecut_refresh_targets(const LuaMadeSimple::Lua& lua)
+    {
+        if (!env_flag_enabled("BMF_TREECUT_TARGET_REFRESH_ENABLED"))
+        {
+            treecut_set_error(
+                "tree-cut target cache refresh disabled; set BMF_TREECUT_TARGET_REFRESH_ENABLED=1 "
+                "only for manual diagnostics because it scans live UObjects");
+            lua.set_bool(false);
+            lua.set_string(treecut_native_status_text());
+            return 2;
+        }
+
+        treecut_refresh_target_cache("lua-command");
+        treecut_set_error("");
+        lua.set_bool(true);
+        lua.set_string(treecut_native_status_text());
+        return 2;
+    }
+
+    int lua_socket_treecut_resolve_handaxe(const LuaMadeSimple::Lua& lua)
+    {
+        Unreal::UClass* handaxe_class = resolve_treecut_handaxe_class();
+        lua.set_bool(handaxe_class != nullptr);
+        lua.set_string(treecut_native_status_text());
+        return 2;
+    }
+
+    int lua_socket_treecut_set_handaxe_class(const LuaMadeSimple::Lua& lua)
+    {
+        lua_State* state = lua.get_lua_state();
+        size_t address_length = 0;
+        size_t source_length = 0;
+        const char* address = lua_isstring(state, 1) ? lua_tolstring(state, 1, &address_length) : "";
+        const char* source = lua_isstring(state, 2) ? lua_tolstring(state, 2, &source_length) : "";
+        const bool accepted = set_treecut_handaxe_class_from_address(
+            address ? std::string_view(address, address_length) : std::string_view(),
+            source ? std::string_view(source, source_length) : std::string_view());
+        lua.set_bool(accepted);
+        lua.set_string(treecut_native_status_text());
+        return 2;
+    }
+
+    int lua_socket_treecut_drain(const LuaMadeSimple::Lua& lua)
+    {
+        lua_State* state = lua.get_lua_state();
+        int64_t max_count = 64;
+        if (lua_isnumber(state, 1))
+        {
+            max_count = static_cast<int64_t>(lua_tointeger(state, 1));
+        }
+        if (max_count < 1)
+        {
+            max_count = 1;
+        }
+        if (max_count > 256)
+        {
+            max_count = 256;
+        }
+
+        const auto events = drain_treecut_native_events(static_cast<size_t>(max_count));
+        lua_newtable(state);
+        int index = 1;
+        for (const std::string& event : events)
+        {
+            lua_pushlstring(state, event.data(), event.size());
+            lua_rawseti(state, -2, index++);
+        }
+        return 1;
+    }
+
+    int lua_socket_treecut_probe_start(const LuaMadeSimple::Lua& lua)
+    {
+        {
+            std::lock_guard lock(g_treecut_probe_mutex);
+            for (size_t index = 0; index < kTreeCutProbeSlotCount; ++index)
+            {
+                TreeCutProbeSlot& probe = g_treecut_probe_slots[index];
+                probe.hits.store(0);
+                probe.last_context.store(0);
+                probe.last_stack.store(0);
+                probe.last_tick_ms.store(0);
+                g_treecut_probe_last_locals[index].store(0);
+                g_treecut_probe_first_summary[index].clear();
+                g_treecut_probe_last_summary[index].clear();
+            }
+        }
+        const size_t installed = treecut_probe_install_all();
+        g_treecut_probe_enabled.store(installed > 0);
+        lua.set_bool(installed > 0);
+        lua.set_string(treecut_probe_status_text());
+        return 2;
+    }
+
+    int lua_socket_treecut_probe_stop(const LuaMadeSimple::Lua& lua)
+    {
+        g_treecut_probe_enabled.store(false);
+        lua.set_bool(true);
+        lua.set_string(treecut_probe_status_text());
+        return 2;
+    }
+
+    int lua_socket_treecut_probe_status(const LuaMadeSimple::Lua& lua)
+    {
+        lua.set_string(treecut_probe_status_text());
+        return 1;
+    }
+
     class BMFSocketMod : public CppUserModBase
     {
       public:
@@ -1538,6 +4695,20 @@ namespace
             lua.register_function("BMFSocketReceive", lua_socket_receive);
             lua.register_function("BMFSocketStatus", lua_socket_status);
             lua.register_function("BMFSocketPlayerLocation", lua_socket_player_location);
+            lua.register_function("BMFSocketDescribeUObject", lua_socket_describe_uobject);
+            lua.register_function("BMFSocketTreeCutStart", lua_socket_treecut_start);
+            lua.register_function("BMFSocketTreeCutStop", lua_socket_treecut_stop);
+            lua.register_function("BMFSocketTreeCutStatus", lua_socket_treecut_status);
+            lua.register_function("BMFSocketTreeCutFindTag", lua_socket_treecut_find_tag);
+            lua.register_function("BMFSocketBrickPhysicalInspect", lua_socket_brick_physical_inspect);
+            lua.register_function("BMFSocketBrickPhysicalSet", lua_socket_brick_physical_set);
+            lua.register_function("BMFSocketTreeCutRefreshTargets", lua_socket_treecut_refresh_targets);
+            lua.register_function("BMFSocketTreeCutResolveHandaxe", lua_socket_treecut_resolve_handaxe);
+            lua.register_function("BMFSocketTreeCutSetHandaxeClass", lua_socket_treecut_set_handaxe_class);
+            lua.register_function("BMFSocketTreeCutDrain", lua_socket_treecut_drain);
+            lua.register_function("BMFSocketTreeCutProbeStart", lua_socket_treecut_probe_start);
+            lua.register_function("BMFSocketTreeCutProbeStop", lua_socket_treecut_probe_stop);
+            lua.register_function("BMFSocketTreeCutProbeStatus", lua_socket_treecut_probe_status);
         }
     };
 } // namespace

@@ -100,6 +100,12 @@ level so automation can choose appropriate work:
   CL13530 because it crashes while marshaling a struct parameter;
 - `BMF.tools.applicator.status` is labeled experimental and reports the live
   applicator handler/cache state plus the unsafe Lua hook opt-in state;
+- `BMF.bricks.setRuntimeState` is labeled experimental, `unsafe-native`,
+  `bricks.runtimeState` capability gated, and env-gated for explicit runtime
+  brick visibility/collision mutation. It uses Brickadia's native setters when a
+  plausible sparse-grid context is cached, captured, or found by the background
+  resolver. Direct byte-write gates remain diagnostic-only and should stay off
+  for gameplay;
 - `BMF.server.exec` is labeled `restricted` and `unsafe-native`;
 - `BMF.world.loadAdditive` and `BMF.vehicles.spawnSet` remain experimental;
 - `bmf.apis` can filter by name, risk, stability, and player requirement.

@@ -232,6 +232,11 @@ local state = {
       physical_sequence = 0,
       last_physical_result = nil,
     },
+    brick_runtime = {
+      sequence = 0,
+      last_result = nil,
+      last_error = "",
+    },
   },
   config = {
     allowPluginServerExec = false,
@@ -1806,6 +1811,9 @@ API_REGISTRY = {
   { name = "BMF.tools.applicator.scanObjects", namespace = "tools", kind = "function", stability = "experimental", risk = "low", validation = "L3 Live Server read-only reflection scan", requiresPlayer = false, capability = "", summary = "Scan live UE objects for applicator/component function discovery." },
   { name = "BMF.tools.applicator.refreshComponentCache", namespace = "tools", kind = "function", stability = "experimental", risk = "unsafe-native", validation = "L2 Headless safe failure; L3 Live Player for reflected component type addresses", requiresPlayer = false, capability = "", summary = "Resolve denied Brickadia component type objects such as ItemSpawn for live applicator enforcement." },
   { name = "BMF.tools.uobject.describe", namespace = "tools", kind = "function", stability = "diagnostic", risk = "low", validation = "L3 Live Server address-only native diagnostic", requiresPlayer = false, capability = "", summary = "Describe one explicit live UObject pointer without global scans; used to decode native trace context pointers." },
+  { name = "BMF.bricks.inspectRuntimeState", namespace = "bricks", kind = "function", stability = "diagnostic", risk = "medium", validation = "L3 Live Server explicit brick id inspect", requiresPlayer = false, capability = "", summary = "Inspect one explicit runtime brick id for visible/collision state without scanning live UObjects." },
+  { name = "BMF.bricks.setRuntimeState", namespace = "bricks", kind = "function", stability = "experimental", risk = "unsafe-native", validation = "Env-gated L3 Live Server canary only", requiresPlayer = false, capability = "bricks.runtimeState", summary = "Set one explicit runtime brick id visibility and/or collision state through BMFSocket." },
+  { name = "BMF.bricks.runtimeStateStatus", namespace = "bricks", kind = "function", stability = "diagnostic", risk = "low", validation = "L2 Headless safe failure; L3 Live Server result inspection", requiresPlayer = false, capability = "", summary = "Inspect the last queued runtime brick state operation result." },
   { name = "BMF.tools.treeCutTrace.enable", namespace = "tools", kind = "function", stability = "diagnostic", risk = "unsafe-native", validation = "L3 Live Player handaxe/tree trace", requiresPlayer = true, capability = "", summary = "Temporarily register bounded native hooks that summarize handaxe/tree-cut evidence." },
   { name = "BMF.tools.treeCutTrace.disable", namespace = "tools", kind = "function", stability = "diagnostic", risk = "unsafe-native", validation = "L3 Live Server cleanup", requiresPlayer = false, capability = "", summary = "Unregister active tree-cut trace hooks." },
   { name = "BMF.tools.treeCutTrace.status", namespace = "tools", kind = "function", stability = "diagnostic", risk = "low", validation = "L2 Headless command; L3 Live Player for event counts", requiresPlayer = false, capability = "", summary = "Inspect tree-cut trace hook state and counters." },
@@ -1817,8 +1825,8 @@ API_REGISTRY = {
   { name = "BMF.tools.treeCutNative.resolveHandaxe", namespace = "tools", kind = "function", stability = "experimental", risk = "medium", validation = "L3 Live Server game-thread asset resolve", requiresPlayer = false, capability = "", summary = "Load and resolve the handaxe generated class for strict native tree-cut item checks." },
   { name = "BMF.tools.treeCutNative.refreshTargets", namespace = "tools", kind = "function", stability = "diagnostic", risk = "unsafe-native", validation = "Disabled by default; manual native diagnostics only", requiresPlayer = false, capability = "", summary = "Opt-in unsafe native tree actor cache refresh for diagnostics; CityRPG should prefer bounded runtime anchors." },
   { name = "BMF.tools.treeCutNative.findTag", namespace = "tools", kind = "function", stability = "diagnostic", risk = "unsafe-native", validation = "L3 Live Server bounded exact ConsoleTag lookup", requiresPlayer = false, capability = "", summary = "Find live UObject candidates that directly carry a specific treeid ConsoleTag for physical-state research." },
-  { name = "BMF.tools.treeCutNative.inspectPhysical", namespace = "tools", kind = "function", stability = "diagnostic", risk = "medium", validation = "L3 Live Server explicit brick id inspect", requiresPlayer = false, capability = "", summary = "Inspect one explicit runtime brick id for visible/collision state without scanning live UObjects." },
-  { name = "BMF.tools.treeCutNative.setPhysical", namespace = "tools", kind = "function", stability = "experimental", risk = "unsafe-native", validation = "Env-gated L3 Live Server explicit tagged tree hide/restore", requiresPlayer = false, capability = "", summary = "Set one explicit runtime brick id visible/collision state for tagged tree chopping." },
+  { name = "BMF.tools.treeCutNative.inspectPhysical", namespace = "tools", kind = "function", stability = "experimental", risk = "medium", validation = "Delegates to BMF.bricks.inspectRuntimeState", requiresPlayer = false, capability = "", summary = "Compatibility wrapper for explicit runtime brick visible/collision inspection." },
+  { name = "BMF.tools.treeCutNative.setPhysical", namespace = "tools", kind = "function", stability = "experimental", risk = "unsafe-native", validation = "Delegates to BMF.bricks.setRuntimeState", requiresPlayer = false, capability = "", summary = "Compatibility wrapper for tagged-tree runtime brick visible/collision mutation." },
   { name = "BMF.tools.treeCutNative.drain", namespace = "tools", kind = "function", stability = "experimental", risk = "medium", validation = "L3 Live Player socket relay", requiresPlayer = false, capability = "", summary = "Drain queued native tree-cut hit events and emit them into the BMF event bus." },
   { name = "BMF.tools.treeCutProbe.start", namespace = "tools", kind = "function", stability = "diagnostic", risk = "unsafe-native", validation = "L3 Live Player handaxe/tree function attribution", requiresPlayer = true, capability = "", summary = "Install and enable bounded native counters for likely Brickadia melee/tree-hit UFunctions." },
   { name = "BMF.tools.treeCutProbe.stop", namespace = "tools", kind = "function", stability = "diagnostic", risk = "low", validation = "L3 Live Server cleanup", requiresPlayer = false, capability = "", summary = "Disable tree-cut probe counting without unloading the native detours." },
@@ -3894,6 +3902,20 @@ local function register_builtin_commands()
       limit = option_number(options, "limit", option_number(options, "maxresults", 8)),
       maxScan = option_number(options, "maxscan", option_number(options, "max", 250000)),
     })
+  end)
+
+  BMF.commands.register("bmf.bricks.runtime.inspect", "Inspect one explicit runtime brick id for visible/collision state.", function(args)
+    local options = parse_command_options(args)
+    return BMF.bricks.inspectRuntimeState(options)
+  end)
+
+  BMF.commands.register("bmf.bricks.runtime.set", "Set one explicit runtime brick id visible/collision state.", function(args)
+    local options = parse_command_options(args)
+    return BMF.bricks.setRuntimeState(options)
+  end)
+
+  BMF.commands.register("bmf.bricks.runtime.status", "Show last runtime brick-state operation.", function()
+    return BMF.bricks.runtimeStateStatus()
   end)
 
   BMF.commands.register("bmf.tools.treecut.physical.inspect", "Inspect one explicit runtime brick id for visible/collision state.", function(args)
@@ -7485,6 +7507,7 @@ end
 
 local remove_tool_handlers_for_owner
 
+BMF.bricks = {}
 BMF.tools = {}
 BMF.tools.uobject = {}
 BMF.tools.applicator = {}
@@ -9506,6 +9529,273 @@ local function tree_cut_parse_brick_id(options)
   return math.floor(brick_id)
 end
 
+local function brick_runtime_available()
+  return tree_cut_physical_available()
+end
+
+local function brick_runtime_next_sequence()
+  local runtime = state.tools.brick_runtime
+  runtime.sequence = (tonumber(runtime.sequence) or 0) + 1
+  return runtime.sequence
+end
+
+local function brick_runtime_store_result(sequence, operation, brick_id, ok, response_or_error)
+  local runtime = state.tools.brick_runtime
+  local text = tostring(response_or_error or "")
+  local lines, fields = tree_cut_native_status_lines(text)
+  local native_ok = ok == true and tostring(fields.ok or "") == "true"
+  runtime.last_result = {
+    sequence = sequence,
+    operation = tostring(operation or ""),
+    brickId = tonumber(brick_id) or 0,
+    ok = native_ok,
+    code = tostring(fields.code or (ok and "" or "LUA_ERROR")),
+    fields = fields,
+    lines = lines,
+    response = text,
+    at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+  }
+  if not native_ok then
+    runtime.last_error = tostring(fields.detail or fields.code or text or "")
+  else
+    runtime.last_error = ""
+  end
+  state.tools.tree_cut_native.last_physical_result = runtime.last_result
+  write_status()
+  return runtime.last_result
+end
+
+local function brick_runtime_parse_visible_arg(options, default_value)
+  options = type(options) == "table" and options or {}
+  local raw = options.visible
+  if raw == nil then raw = options.visibility end
+  if raw == nil then raw = options.isVisible end
+  if raw == nil then
+    return default_value or -1
+  end
+  if type(raw) == "boolean" then
+    return raw and 1 or 0
+  end
+  local text = trim_string(raw)
+  local lower = text:lower()
+  if lower == "" or lower == "unchanged" or lower == "skip" or lower == "same" then
+    return -1
+  end
+  if lower == "restore" or lower == "captured" then
+    return -2
+  end
+  if lower == "1" or lower == "true" or lower == "yes" or lower == "on" or lower == "visible" then
+    return 1
+  end
+  return 0
+end
+
+local function brick_runtime_parse_collision_arg(options, default_value)
+  options = type(options) == "table" and options or {}
+  local raw = options.collision
+  if raw == nil then raw = options.collisionchannels end
+  if raw == nil then raw = options.collisionChannels end
+  if raw == nil then raw = options.channels end
+  if raw == nil then
+    return default_value or -2
+  end
+  local text = trim_string(raw)
+  local lower = text:lower()
+  if lower == "" or lower == "restore" or lower == "captured" then
+    return -1
+  end
+  if lower == "unchanged" or lower == "skip" or lower == "same" then
+    return -2
+  end
+  local value = tonumber(text) or 0
+  if value < -2 then
+    value = -2
+  elseif value > 255 then
+    value = 255
+  end
+  return math.floor(value)
+end
+
+local function brick_runtime_parse_context_arg(options)
+  options = type(options) == "table" and options or {}
+  local raw = options.context
+  if raw == nil then raw = options.gridcontext end
+  if raw == nil then raw = options.grid_context end
+  if raw == nil then raw = options.gridcontextaddress end
+  if raw == nil then raw = options.grid_context_address end
+  local text = trim_string(raw or "")
+  if text == "" or text:lower() == "none" then
+    return ""
+  end
+  return text
+end
+
+function BMF.bricks.inspectRuntimeState(options)
+  options = type(options) == "table" and options or {}
+  local runtime = state.tools.brick_runtime
+  local brick_id = tree_cut_parse_brick_id(options)
+  if brick_id <= 0 then
+    return result(false, "BRICK_RUNTIME_ID_REQUIRED", "brickid is required for runtime brick-state inspect", {
+      lines = {
+        "ok=false",
+        "code=BRICK_RUNTIME_ID_REQUIRED",
+        "brick_id=" .. tostring(brick_id),
+      },
+    })
+  end
+  if not brick_runtime_available() then
+    runtime.last_error = "BMFSocket brick runtime helpers are unavailable"
+    return result(false, "BRICK_RUNTIME_UNAVAILABLE", runtime.last_error, {
+      brickId = brick_id,
+      lines = {
+        "ok=false",
+        "code=BRICK_RUNTIME_UNAVAILABLE",
+        "brick_id=" .. tostring(brick_id),
+      },
+    })
+  end
+
+  local sequence = brick_runtime_next_sequence()
+  run_on_game_thread(function()
+    local ok, response = pcall(BMFSocketBrickPhysicalInspect, brick_id)
+    brick_runtime_store_result(sequence, "inspect", brick_id, ok, ok and response or tostring(response))
+  end)
+
+  return result(true, "OK", "Runtime brick-state inspect queued on the game thread", {
+    queued = true,
+    sequence = sequence,
+    brickId = brick_id,
+    lines = {
+      "ok=true",
+      "code=OK",
+      "queued=true",
+      "operation=inspect",
+      "sequence=" .. tostring(sequence),
+      "brick_id=" .. tostring(brick_id),
+    },
+  })
+end
+
+function BMF.bricks.setRuntimeState(options)
+  options = type(options) == "table" and options or {}
+  local runtime = state.tools.brick_runtime
+  local brick_id = tree_cut_parse_brick_id(options)
+  if brick_id <= 0 then
+    return result(false, "BRICK_RUNTIME_ID_REQUIRED", "brickid is required for runtime brick-state set", {
+      lines = {
+        "ok=false",
+        "code=BRICK_RUNTIME_ID_REQUIRED",
+        "brick_id=" .. tostring(brick_id),
+      },
+    })
+  end
+
+  local confirm = tostring(options.confirm or "")
+  local legacy_tree_confirm = options.legacyTreePhysical == true
+  local required_confirm = legacy_tree_confirm and "tree-physical" or "brick-runtime"
+  if confirm ~= required_confirm then
+    return result(false, "BRICK_RUNTIME_CONFIRM_REQUIRED", "confirm=" .. required_confirm .. " is required for runtime brick-state set", {
+      brickId = brick_id,
+      lines = {
+        "ok=false",
+        "code=BRICK_RUNTIME_CONFIRM_REQUIRED",
+        "brick_id=" .. tostring(brick_id),
+        "required_confirm=" .. required_confirm,
+      },
+    })
+  end
+  if not brick_runtime_available() then
+    runtime.last_error = "BMFSocket brick runtime helpers are unavailable"
+    return result(false, "BRICK_RUNTIME_UNAVAILABLE", runtime.last_error, {
+      brickId = brick_id,
+      lines = {
+        "ok=false",
+        "code=BRICK_RUNTIME_UNAVAILABLE",
+        "brick_id=" .. tostring(brick_id),
+      },
+    })
+  end
+
+  local visible = brick_runtime_parse_visible_arg(options, legacy_tree_confirm and 0 or -1)
+  local collision = brick_runtime_parse_collision_arg(options, legacy_tree_confirm and -1 or -2)
+  local context = brick_runtime_parse_context_arg(options)
+  if context ~= "" and tostring(options.contextconfirm or options.context_confirm or "") ~= "brick-runtime-context" then
+    return result(false, "BRICK_RUNTIME_CONTEXT_CONFIRM_REQUIRED", "contextConfirm=brick-runtime-context is required for explicit diagnostic grid contexts", {
+      brickId = brick_id,
+      lines = {
+        "ok=false",
+        "code=BRICK_RUNTIME_CONTEXT_CONFIRM_REQUIRED",
+        "brick_id=" .. tostring(brick_id),
+        "required_context_confirm=brick-runtime-context",
+      },
+    })
+  end
+  if visible == -1 and collision == -2 then
+    return result(false, "BRICK_RUNTIME_STATE_NOOP", "Provide visible or collision to change runtime brick state", {
+      brickId = brick_id,
+      lines = {
+        "ok=false",
+        "code=BRICK_RUNTIME_STATE_NOOP",
+        "brick_id=" .. tostring(brick_id),
+        "visible_arg=" .. tostring(visible),
+        "collision_channels=" .. tostring(collision),
+      },
+    })
+  end
+
+  local sequence = brick_runtime_next_sequence()
+  run_on_game_thread(function()
+    local ok, response = pcall(BMFSocketBrickPhysicalSet, brick_id, visible, collision, context)
+    brick_runtime_store_result(sequence, "set", brick_id, ok, ok and response or tostring(response))
+  end)
+
+  return result(true, "OK", "Runtime brick-state set queued on the game thread", {
+    queued = true,
+    sequence = sequence,
+    brickId = brick_id,
+    visible = visible,
+    collision = collision,
+    context = context,
+    lines = {
+      "ok=true",
+      "code=OK",
+      "queued=true",
+      "operation=set",
+      "sequence=" .. tostring(sequence),
+      "brick_id=" .. tostring(brick_id),
+      "visible_arg=" .. tostring(visible),
+      "collision_channels=" .. tostring(collision),
+      "grid_context_override=" .. tostring(context),
+    },
+  })
+end
+
+function BMF.bricks.runtimeStateStatus()
+  local last = state.tools.brick_runtime.last_result
+  if type(last) ~= "table" then
+    return result(false, "BRICK_RUNTIME_NO_RESULT", "No runtime brick-state operation has completed yet.", {
+      lines = {
+        "ok=false",
+        "code=BRICK_RUNTIME_NO_RESULT",
+      },
+    })
+  end
+  local lines = {
+    "sequence=" .. tostring(last.sequence or ""),
+    "operation=" .. tostring(last.operation or ""),
+    "brick_id=" .. tostring(last.brickId or ""),
+    "completed_at=" .. tostring(last.at or ""),
+  }
+  for _, line in ipairs(last.lines or {}) do
+    lines[#lines + 1] = tostring(line)
+  end
+  return result(last.ok == true, last.ok == true and "OK" or tostring(last.code or "BRICK_RUNTIME_FAILED"), "Last runtime brick-state operation result", {
+    last = copy_table(last),
+    fields = copy_table(last.fields or {}),
+    lines = lines,
+  })
+end
+
 function BMF.tools.treeCutNative.start(options)
   options = type(options) == "table" and options or {}
   local native = state.tools.tree_cut_native
@@ -9739,140 +10029,18 @@ function BMF.tools.treeCutNative.findTag(options)
 end
 
 function BMF.tools.treeCutNative.inspectPhysical(options)
-  options = type(options) == "table" and options or {}
-  local native = state.tools.tree_cut_native
-  native.available = tree_cut_native_available()
-  local brick_id = tree_cut_parse_brick_id(options)
-  if brick_id <= 0 then
-    return result(false, "BRICK_PHYSICAL_ID_REQUIRED", "brickid is required for physical-state inspect", {
-      lines = {
-        "ok=false",
-        "code=BRICK_PHYSICAL_ID_REQUIRED",
-        "brick_id=" .. tostring(brick_id),
-      },
-    })
-  end
-  if not tree_cut_physical_available() then
-    native.last_error = "BMFSocket brick physical helpers are unavailable"
-    return result(false, "BRICK_PHYSICAL_UNAVAILABLE", native.last_error, {
-      brickId = brick_id,
-      lines = {
-        "ok=false",
-        "code=BRICK_PHYSICAL_UNAVAILABLE",
-        "brick_id=" .. tostring(brick_id),
-      },
-    })
-  end
-
-  local sequence = tree_cut_native_next_physical_sequence()
-  run_on_game_thread(function()
-    local ok, response = pcall(BMFSocketBrickPhysicalInspect, brick_id)
-    tree_cut_native_store_physical_result(sequence, "inspect", brick_id, ok, ok and response or tostring(response))
-  end)
-
-  return result(true, "OK", "Brick physical inspect queued on the game thread", {
-    queued = true,
-    sequence = sequence,
-    brickId = brick_id,
-    lines = {
-      "ok=true",
-      "code=OK",
-      "queued=true",
-      "operation=inspect",
-      "sequence=" .. tostring(sequence),
-      "brick_id=" .. tostring(brick_id),
-    },
-  })
+  return BMF.bricks.inspectRuntimeState(options)
 end
 
 function BMF.tools.treeCutNative.setPhysical(options)
   options = type(options) == "table" and options or {}
-  local native = state.tools.tree_cut_native
-  native.available = tree_cut_native_available()
-  local brick_id = tree_cut_parse_brick_id(options)
-  if brick_id <= 0 then
-    return result(false, "BRICK_PHYSICAL_ID_REQUIRED", "brickid is required for physical-state set", {
-      lines = {
-        "ok=false",
-        "code=BRICK_PHYSICAL_ID_REQUIRED",
-        "brick_id=" .. tostring(brick_id),
-      },
-    })
-  end
-  if tostring(options.confirm or "") ~= "tree-physical" then
-    return result(false, "BRICK_PHYSICAL_CONFIRM_REQUIRED", "confirm=tree-physical is required for physical-state set", {
-      brickId = brick_id,
-      lines = {
-        "ok=false",
-        "code=BRICK_PHYSICAL_CONFIRM_REQUIRED",
-        "brick_id=" .. tostring(brick_id),
-      },
-    })
-  end
-  if not tree_cut_physical_available() then
-    native.last_error = "BMFSocket brick physical helpers are unavailable"
-    return result(false, "BRICK_PHYSICAL_UNAVAILABLE", native.last_error, {
-      brickId = brick_id,
-      lines = {
-        "ok=false",
-        "code=BRICK_PHYSICAL_UNAVAILABLE",
-        "brick_id=" .. tostring(brick_id),
-      },
-    })
-  end
-
-  local visible = option_boolean(options, "visible", false)
-  local collision_raw = trim_string(options.collision or options.collisionchannels or options.channels or "restore")
-  local collision = -1
-  if collision_raw ~= "" and collision_raw:lower() ~= "restore" and collision_raw:lower() ~= "captured" then
-    collision = tonumber(collision_raw) or -1
-    if collision < -1 then
-      collision = -1
-    elseif collision > 255 then
-      collision = 255
-    end
-  end
-
-  local sequence = tree_cut_native_next_physical_sequence()
-  run_on_game_thread(function()
-    local ok, response = pcall(BMFSocketBrickPhysicalSet, brick_id, visible, collision)
-    tree_cut_native_store_physical_result(sequence, "set", brick_id, ok, ok and response or tostring(response))
-  end)
-
-  return result(true, "OK", "Brick physical set queued on the game thread", {
-    queued = true,
-    sequence = sequence,
-    brickId = brick_id,
-    visible = visible,
-    collision = collision,
-    lines = {
-      "ok=true",
-      "code=OK",
-      "queued=true",
-      "operation=set",
-      "sequence=" .. tostring(sequence),
-      "brick_id=" .. tostring(brick_id),
-      "visible=" .. tostring(visible == true),
-      "collision_channels=" .. tostring(collision),
-    },
-  })
+  local forwarded = copy_table(options)
+  forwarded.legacyTreePhysical = true
+  return BMF.bricks.setRuntimeState(forwarded)
 end
 
 function BMF.tools.treeCutNative.physicalStatus()
-  local last = state.tools.tree_cut_native.last_physical_result
-  if type(last) ~= "table" then
-    return result(false, "BRICK_PHYSICAL_NO_RESULT", "No brick physical operation has completed yet.", {
-      lines = {
-        "ok=false",
-        "code=BRICK_PHYSICAL_NO_RESULT",
-      },
-    })
-  end
-  return result(last.ok == true, last.ok == true and "OK" or tostring(last.code or "BRICK_PHYSICAL_FAILED"), "Last brick physical operation result", {
-    last = copy_table(last),
-    fields = copy_table(last.fields or {}),
-    lines = copy_table(last.lines or {}),
-  })
+  return BMF.bricks.runtimeStateStatus()
 end
 
 function BMF.tools.treeCutNative.resolveHandaxe(options)
@@ -18139,6 +18307,18 @@ local function create_plugin_api(plugin_name, manifest)
     return require_capability(plugin_name, manifest, "world.saveAs", function()
       return run_plugin_action(function()
         return BMF.world.saveAs(name)
+      end)
+    end)
+  end
+
+  api.bricks = {}
+  for key, value in pairs(BMF.bricks) do
+    api.bricks[key] = value
+  end
+  api.bricks.setRuntimeState = function(options)
+    return require_capability(plugin_name, manifest, "bricks.runtimeState", function()
+      return run_plugin_action(function()
+        return BMF.bricks.setRuntimeState(options)
       end)
     end)
   end

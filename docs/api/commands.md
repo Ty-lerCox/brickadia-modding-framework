@@ -113,6 +113,24 @@ telemetry when they read or mutate Brickadia state.
 - `bmf.brickassetguard.check asset=<brick-asset> roles=<role>`: evaluates one
   brick asset against the configured placement policy. This is policy-only until
   a live placement/paste hook calls the evaluator before world mutation.
+- `bmf.bricks.runtime.inspect brickid=<id>`: queues a game-thread inspection of
+  one explicit runtime brick id and reports its visible/collision bytes,
+  registry address, owner, and grid-context pointer.
+- `bmf.bricks.runtime.set brickid=<id> confirm=brick-runtime
+  [visible=true|false|restore|unchanged] [collision=<0-255>|restore|unchanged]`:
+  queues an experimental BMFSocket runtime brick mutation. It is disabled unless
+  `BMF_BRICK_RUNTIME_SET_ENABLED=1` is set. Visibility and collision mutation
+  are separately gated with `BMF_BRICK_VISIBILITY_SET_ENABLED=1` and
+  `BMF_BRICK_COLLISION_SET_ENABLED=1`. The Brickadia setter path also requires a
+  plausible sparse-grid context; BMF first uses a cached/captured context, then a
+  bounded owner scan, and can start an off-game-thread background resolver when
+  `BMF_BRICK_CONTEXT_BACKGROUND_SCAN_ENABLED=1`. While that cold-start resolver
+  is running, the completed result reports `BRICK_GRID_CONTEXT_SCAN_PENDING` and
+  callers should retry the same low-frequency mutation. Direct byte-write gates
+  remain diagnostic-only and should stay disabled for gameplay.
+- `bmf.bricks.runtime.status`: prints the last queued runtime brick-state
+  operation result, including queue `sequence`, sparse-grid context source,
+  background resolver counters, and before/after visible/collision bytes.
 - `bmf.minigames.list`: reports `UNSAFE_MINIGAME_COMMAND_DISABLED` by default
   because Brickadia CL13530 can crash while formatting `Server.Minigames.List`.
 - `bmf.minigames.loadpreset name=<preset> [owner=<name>]`: runs

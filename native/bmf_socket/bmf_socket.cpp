@@ -2860,6 +2860,10 @@ namespace
     constexpr uintptr_t kBrickArrayBaseOffset = 0x788AFE0;
     constexpr uintptr_t kBrickSetVisibilityOffset = 0x4355210;
     constexpr uintptr_t kBrickSetCollisionChannelsOffset = 0x43548C0;
+    constexpr uintptr_t kBrickPlaceActionMethodBlockOffset = 0x6C77CE0;
+    constexpr uintptr_t kBrickVisibilityActionMethodBlockOffset = 0x6C78230;
+    constexpr uintptr_t kBrickCollisionActionMethodBlockOffset = 0x6C78450;
+    constexpr uintptr_t kBrickActionApplySlotOffset = 0x18;
     constexpr size_t kBrickRuntimeStride = 0x78;
     constexpr uintptr_t kBrickOwnerOffset = 0x08;
     constexpr uintptr_t kBrickCollisionChannelsOffset = 0x49;
@@ -2870,6 +2874,16 @@ namespace
     using BrickLookupFn = uintptr_t(__fastcall*)(uintptr_t, uint32_t);
     using BrickSetVisibilityFn = void(__fastcall*)(uintptr_t, uintptr_t, uint8_t);
     using BrickSetCollisionChannelsFn = void(__fastcall*)(uintptr_t, uintptr_t, uint8_t);
+    using BrickActionApplyFn = void(__fastcall*)(void*, void*, void*, void*, void*, void*);
+    using BrickLowSetterFn = void(__fastcall*)(uintptr_t, uintptr_t, uint8_t);
+
+    struct InlineDetour
+    {
+        std::atomic<bool> installed{false};
+        std::atomic<uintptr_t> target{0};
+        std::atomic<uintptr_t> trampoline{0};
+        size_t overwrite_length{0};
+    };
 
     struct BrickPhysicalOriginal
     {
@@ -2880,10 +2894,428 @@ namespace
 
     std::mutex g_brick_physical_mutex;
     std::unordered_map<uint32_t, BrickPhysicalOriginal> g_brick_physical_originals;
+    std::atomic<uintptr_t> g_brick_grid_context_cached{0};
+    std::string g_brick_grid_context_cached_source;
+    std::string g_brick_runtime_context_hook_error;
+    std::atomic<bool> g_brick_runtime_context_hooks_installed{false};
+    std::atomic<uintptr_t> g_brick_place_action_apply_slot{0};
+    std::atomic<uintptr_t> g_brick_visibility_action_apply_slot{0};
+    std::atomic<uintptr_t> g_brick_collision_action_apply_slot{0};
+    std::atomic<uintptr_t> g_brick_place_action_apply_original{0};
+    std::atomic<uintptr_t> g_brick_visibility_action_apply_original{0};
+    std::atomic<uintptr_t> g_brick_collision_action_apply_original{0};
+    InlineDetour g_brick_visibility_low_setter_hook;
+    InlineDetour g_brick_collision_low_setter_hook;
+    std::atomic<uint64_t> g_brick_place_action_apply_hits{0};
+    std::atomic<uint64_t> g_brick_visibility_action_apply_hits{0};
+    std::atomic<uint64_t> g_brick_collision_action_apply_hits{0};
+    std::atomic<uint64_t> g_brick_visibility_low_setter_hits{0};
+    std::atomic<uint64_t> g_brick_collision_low_setter_hits{0};
+    std::atomic<uint64_t> g_brick_context_capture_hits{0};
+    std::atomic<uint64_t> g_brick_context_capture_rejects{0};
+    std::atomic<bool> g_brick_grid_context_background_scan_running{false};
+    std::atomic<uint64_t> g_brick_grid_context_background_scan_requests{0};
+    std::atomic<uint64_t> g_brick_grid_context_background_scan_completions{0};
+    std::atomic<uint64_t> g_brick_grid_context_background_scan_failures{0};
+    std::atomic<uint64_t> g_brick_grid_context_background_scan_duration_ms{0};
+    std::atomic<uintptr_t> g_brick_grid_context_background_scan_address{0};
+    std::atomic<uint32_t> g_brick_grid_context_background_scan_cell_index{0};
+    std::atomic<uint32_t> g_brick_grid_context_background_scan_sub_index{0};
+    std::string g_brick_grid_context_background_scan_detail;
+
+    bool brick_grid_context_record_for_brick(uintptr_t brick_address,
+                                             uintptr_t raw_context,
+                                             const char* source);
+
+    bool brick_physical_set_enabled()
+    {
+        return env_flag_enabled("BMF_BRICK_RUNTIME_SET_ENABLED") ||
+               env_flag_enabled("BMF_TREE_PHYSICAL_SET_ENABLED");
+    }
 
     uintptr_t brickadia_module_base()
     {
         return reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    }
+
+    bool brick_runtime_context_hooks_enabled()
+    {
+        return env_flag_enabled("BMF_BRICK_RUNTIME_CONTEXT_HOOK_ENABLED") ||
+               env_flag_enabled("BMF_BRICK_CONTEXT_HOOK_ENABLED");
+    }
+
+    bool brick_runtime_place_context_hook_enabled()
+    {
+        return env_flag_enabled("BMF_BRICK_RUNTIME_PLACE_CONTEXT_HOOK_ENABLED") ||
+               env_flag_enabled("BMF_BRICK_PLACE_CONTEXT_HOOK_ENABLED");
+    }
+
+    bool brick_runtime_low_setter_context_hook_enabled()
+    {
+        return env_flag_enabled("BMF_BRICK_RUNTIME_LOW_SETTER_HOOK_ENABLED") ||
+               env_flag_enabled("BMF_BRICK_LOW_SETTER_HOOK_ENABLED");
+    }
+
+    void brick_runtime_context_set_error(std::string value)
+    {
+        std::lock_guard lock(g_brick_physical_mutex);
+        g_brick_runtime_context_hook_error = std::move(value);
+    }
+
+    bool brick_grid_context_record(void* raw_context, const char* source)
+    {
+        const uintptr_t address = reinterpret_cast<uintptr_t>(raw_context);
+        if (address == 0 || !is_accessible_memory(address, 0x2E8))
+        {
+            g_brick_context_capture_rejects.fetch_add(1);
+            return false;
+        }
+
+        g_brick_grid_context_cached.store(address);
+        g_brick_context_capture_hits.fetch_add(1);
+        {
+            std::lock_guard lock(g_brick_physical_mutex);
+            g_brick_grid_context_cached_source = source ? source : "unknown";
+            g_brick_runtime_context_hook_error.clear();
+        }
+        return true;
+    }
+
+    void __fastcall brick_place_action_apply_detour(
+        void* action,
+        void* grid_context,
+        void* context,
+        void* target,
+        void* errors,
+        void* permissions)
+    {
+        g_brick_place_action_apply_hits.fetch_add(1);
+        brick_grid_context_record(grid_context, "place-brick-action-apply");
+
+        auto original = reinterpret_cast<BrickActionApplyFn>(
+            g_brick_place_action_apply_original.load());
+        if (original && original != &brick_place_action_apply_detour)
+        {
+            original(action, grid_context, context, target, errors, permissions);
+        }
+    }
+
+    void __fastcall brick_visibility_action_apply_detour(
+        void* action,
+        void* grid_context,
+        void* context,
+        void* target,
+        void* errors,
+        void* permissions)
+    {
+        g_brick_visibility_action_apply_hits.fetch_add(1);
+        brick_grid_context_record(grid_context, "visibility-action-apply");
+
+        auto original = reinterpret_cast<BrickActionApplyFn>(
+            g_brick_visibility_action_apply_original.load());
+        if (original && original != &brick_visibility_action_apply_detour)
+        {
+            original(action, grid_context, context, target, errors, permissions);
+        }
+    }
+
+    void __fastcall brick_collision_action_apply_detour(
+        void* action,
+        void* grid_context,
+        void* context,
+        void* target,
+        void* errors,
+        void* permissions)
+    {
+        g_brick_collision_action_apply_hits.fetch_add(1);
+        brick_grid_context_record(grid_context, "collision-action-apply");
+
+        auto original = reinterpret_cast<BrickActionApplyFn>(
+            g_brick_collision_action_apply_original.load());
+        if (original && original != &brick_collision_action_apply_detour)
+        {
+            original(action, grid_context, context, target, errors, permissions);
+        }
+    }
+
+    void __fastcall brick_visibility_low_setter_detour(
+        uintptr_t brick_address,
+        uintptr_t grid_context,
+        uint8_t visible)
+    {
+        g_brick_visibility_low_setter_hits.fetch_add(1);
+        brick_grid_context_record_for_brick(
+            brick_address,
+            grid_context,
+            "visibility-low-setter");
+
+        auto original = reinterpret_cast<BrickLowSetterFn>(
+            g_brick_visibility_low_setter_hook.trampoline.load());
+        if (original && original != &brick_visibility_low_setter_detour)
+        {
+            original(brick_address, grid_context, visible);
+        }
+    }
+
+    void __fastcall brick_collision_low_setter_detour(
+        uintptr_t brick_address,
+        uintptr_t grid_context,
+        uint8_t collision_channels)
+    {
+        g_brick_collision_low_setter_hits.fetch_add(1);
+        brick_grid_context_record_for_brick(
+            brick_address,
+            grid_context,
+            "collision-low-setter");
+
+        auto original = reinterpret_cast<BrickLowSetterFn>(
+            g_brick_collision_low_setter_hook.trampoline.load());
+        if (original && original != &brick_collision_low_setter_detour)
+        {
+            original(brick_address, grid_context, collision_channels);
+        }
+    }
+
+    bool brick_runtime_context_hook_slot(
+        uintptr_t module_base,
+        uintptr_t method_block_offset,
+        const char* name,
+        void* detour,
+        std::atomic<uintptr_t>& slot_store,
+        std::atomic<uintptr_t>& original_store)
+    {
+        const uintptr_t method_block = module_base + method_block_offset;
+        const uintptr_t slot_address = method_block + kBrickActionApplySlotOffset;
+        if (!is_accessible_memory(slot_address, sizeof(void*)))
+        {
+            brick_runtime_context_set_error(
+                std::string(name) + " action apply slot is not accessible");
+            return false;
+        }
+
+        void** slot = reinterpret_cast<void**>(slot_address);
+        void* current = nullptr;
+        std::memcpy(&current, slot, sizeof(current));
+        if (current == detour)
+        {
+            slot_store.store(slot_address);
+            return true;
+        }
+        if (!current || !is_executable_memory(reinterpret_cast<uintptr_t>(current)))
+        {
+            brick_runtime_context_set_error(
+                std::string(name) + " action apply original is not executable");
+            return false;
+        }
+
+        DWORD old_protect = 0;
+        if (!VirtualProtect(slot, sizeof(void*), PAGE_EXECUTE_READWRITE, &old_protect))
+        {
+            brick_runtime_context_set_error(
+                std::string(name) + " action apply VirtualProtect failed: " +
+                std::to_string(GetLastError()));
+            return false;
+        }
+
+        void* previous = InterlockedExchangePointer(slot, detour);
+        DWORD ignored = 0;
+        VirtualProtect(slot, sizeof(void*), old_protect, &ignored);
+        FlushInstructionCache(GetCurrentProcess(), slot, sizeof(void*));
+
+        if (previous == detour)
+        {
+            previous = reinterpret_cast<void*>(original_store.load());
+        }
+        if (!previous)
+        {
+            brick_runtime_context_set_error(
+                std::string(name) + " action apply slot had no original");
+            return false;
+        }
+
+        slot_store.store(slot_address);
+        original_store.store(reinterpret_cast<uintptr_t>(previous));
+        return true;
+    }
+
+    void write_absolute_jump(uint8_t* destination, uintptr_t target, size_t length)
+    {
+        std::memset(destination, 0x90, length);
+        destination[0] = 0xFF;
+        destination[1] = 0x25;
+        destination[2] = 0x00;
+        destination[3] = 0x00;
+        destination[4] = 0x00;
+        destination[5] = 0x00;
+        std::memcpy(destination + 6, &target, sizeof(target));
+    }
+
+    bool install_inline_detour(uintptr_t target,
+                               void* detour,
+                               size_t overwrite_length,
+                               const char* name,
+                               InlineDetour& state)
+    {
+        constexpr size_t kAbsoluteJumpLength = 14;
+        if (state.installed.load())
+        {
+            return true;
+        }
+        if (overwrite_length < kAbsoluteJumpLength)
+        {
+            brick_runtime_context_set_error(
+                std::string(name) + " inline detour overwrite length is too short");
+            return false;
+        }
+        if (!is_executable_memory(target) ||
+            !is_accessible_memory(target, overwrite_length))
+        {
+            brick_runtime_context_set_error(
+                std::string(name) + " inline detour target is not executable/readable");
+            return false;
+        }
+
+        const size_t trampoline_size = overwrite_length + kAbsoluteJumpLength;
+        auto* trampoline = static_cast<uint8_t*>(
+            VirtualAlloc(
+                nullptr,
+                trampoline_size,
+                MEM_RESERVE | MEM_COMMIT,
+                PAGE_EXECUTE_READWRITE));
+        if (!trampoline)
+        {
+            brick_runtime_context_set_error(
+                std::string(name) + " inline detour trampoline allocation failed: " +
+                std::to_string(GetLastError()));
+            return false;
+        }
+
+        std::memcpy(trampoline, reinterpret_cast<void*>(target), overwrite_length);
+        write_absolute_jump(
+            trampoline + overwrite_length,
+            target + overwrite_length,
+            kAbsoluteJumpLength);
+        FlushInstructionCache(GetCurrentProcess(), trampoline, trampoline_size);
+
+        DWORD old_protect = 0;
+        if (!VirtualProtect(
+                reinterpret_cast<void*>(target),
+                overwrite_length,
+                PAGE_EXECUTE_READWRITE,
+                &old_protect))
+        {
+            VirtualFree(trampoline, 0, MEM_RELEASE);
+            brick_runtime_context_set_error(
+                std::string(name) + " inline detour VirtualProtect failed: " +
+                std::to_string(GetLastError()));
+            return false;
+        }
+
+        write_absolute_jump(
+            reinterpret_cast<uint8_t*>(target),
+            reinterpret_cast<uintptr_t>(detour),
+            overwrite_length);
+        DWORD ignored = 0;
+        VirtualProtect(
+            reinterpret_cast<void*>(target),
+            overwrite_length,
+            old_protect,
+            &ignored);
+        FlushInstructionCache(
+            GetCurrentProcess(),
+            reinterpret_cast<void*>(target),
+            overwrite_length);
+
+        state.target.store(target);
+        state.trampoline.store(reinterpret_cast<uintptr_t>(trampoline));
+        state.overwrite_length = overwrite_length;
+        state.installed.store(true);
+        return true;
+    }
+
+    bool brick_low_setter_context_hook_install(uintptr_t module_base)
+    {
+        if (!brick_runtime_low_setter_context_hook_enabled())
+        {
+            return false;
+        }
+
+        const uintptr_t visibility_target = module_base + kBrickSetVisibilityOffset + 0x20;
+        const uintptr_t collision_target = module_base + kBrickSetCollisionChannelsOffset + 0x20;
+        const bool visibility_ok = install_inline_detour(
+            visibility_target,
+            reinterpret_cast<void*>(&brick_visibility_low_setter_detour),
+            16,
+            "visibility low-setter",
+            g_brick_visibility_low_setter_hook);
+        const bool collision_ok = install_inline_detour(
+            collision_target,
+            reinterpret_cast<void*>(&brick_collision_low_setter_detour),
+            14,
+            "collision low-setter",
+            g_brick_collision_low_setter_hook);
+        return visibility_ok || collision_ok;
+    }
+
+    bool brick_runtime_context_hook_install()
+    {
+        if (!brick_runtime_context_hooks_enabled() &&
+            !brick_runtime_low_setter_context_hook_enabled())
+        {
+            return false;
+        }
+        if (g_brick_runtime_context_hooks_installed.load())
+        {
+            return true;
+        }
+
+        const uintptr_t module_base = brickadia_module_base();
+        if (module_base == 0)
+        {
+            brick_runtime_context_set_error("Brickadia module base unavailable");
+            return false;
+        }
+
+        bool place_ok = false;
+        if (brick_runtime_context_hooks_enabled() &&
+            brick_runtime_place_context_hook_enabled())
+        {
+            place_ok = brick_runtime_context_hook_slot(
+                module_base,
+                kBrickPlaceActionMethodBlockOffset,
+                "place-brick",
+                reinterpret_cast<void*>(&brick_place_action_apply_detour),
+                g_brick_place_action_apply_slot,
+                g_brick_place_action_apply_original);
+        }
+        bool visibility_ok = false;
+        bool collision_ok = false;
+        if (brick_runtime_context_hooks_enabled())
+        {
+            visibility_ok = brick_runtime_context_hook_slot(
+                module_base,
+                kBrickVisibilityActionMethodBlockOffset,
+                "visibility",
+                reinterpret_cast<void*>(&brick_visibility_action_apply_detour),
+                g_brick_visibility_action_apply_slot,
+                g_brick_visibility_action_apply_original);
+            collision_ok = brick_runtime_context_hook_slot(
+                module_base,
+                kBrickCollisionActionMethodBlockOffset,
+                "collision",
+                reinterpret_cast<void*>(&brick_collision_action_apply_detour),
+                g_brick_collision_action_apply_slot,
+                g_brick_collision_action_apply_original);
+        }
+        const bool low_setter_ok = brick_low_setter_context_hook_install(module_base);
+
+        const bool installed = place_ok || visibility_ok || collision_ok || low_setter_ok;
+        g_brick_runtime_context_hooks_installed.store(installed);
+        if (installed)
+        {
+            brick_runtime_context_set_error("");
+        }
+        return installed;
     }
 
     bool brick_physical_lookup(uint32_t brick_id,
@@ -2950,6 +3382,803 @@ namespace
         return true;
     }
 
+    bool read_sparse_bit(uintptr_t inline_bits_address,
+                         uintptr_t heap_bits_address,
+                         uint32_t index,
+                         bool& out_active,
+                         uintptr_t& out_bits_address)
+    {
+        out_active = false;
+        out_bits_address = heap_bits_address != 0 ? heap_bits_address : inline_bits_address;
+        const uintptr_t word_address = out_bits_address + static_cast<uintptr_t>(index >> 5) * sizeof(uint32_t);
+        uint32_t word = 0;
+        if (out_bits_address == 0 || !read_u32_at(word_address, word))
+        {
+            return false;
+        }
+        out_active = ((word >> (index & 0x1F)) & 1U) != 0;
+        return true;
+    }
+
+    bool safe_offset(uintptr_t base, uintptr_t offset, uintptr_t& out_address)
+    {
+        if (base > UINTPTR_MAX - offset)
+        {
+            out_address = 0;
+            return false;
+        }
+        out_address = base + offset;
+        return true;
+    }
+
+    bool brick_grid_context_is_plausible(uintptr_t address,
+                                         uint32_t brick_cell_index,
+                                         uint32_t brick_sub_index)
+    {
+        if (address == 0 || !is_accessible_memory(address, 0x2E8))
+        {
+            return false;
+        }
+
+        uint64_t group_array = 0;
+        uint64_t group_bits_heap = 0;
+        uint64_t cell_array = 0;
+        uint64_t cell_bits_heap = 0;
+        int32_t group_count = -1;
+        int32_t group_active_limit = -1;
+        int32_t cell_count = -1;
+        int32_t cell_active_limit = -1;
+        if (!read_u64_at(address + 0x210, group_array) ||
+            !read_i32_at(address + 0x218, group_count) ||
+            !read_u64_at(address + 0x230, group_bits_heap) ||
+            !read_i32_at(address + 0x238, group_active_limit) ||
+            !read_u64_at(address + 0x2B8, cell_array) ||
+            !read_i32_at(address + 0x2C0, cell_count) ||
+            !read_u64_at(address + 0x2D8, cell_bits_heap) ||
+            !read_i32_at(address + 0x2E0, cell_active_limit))
+        {
+            return false;
+        }
+
+        if (cell_count <= 0 ||
+            cell_active_limit <= 0 ||
+            group_count <= 0 ||
+            group_active_limit <= 0 ||
+            brick_cell_index >= static_cast<uint32_t>(cell_count) ||
+            brick_cell_index >= static_cast<uint32_t>(cell_active_limit))
+        {
+            return false;
+        }
+
+        bool cell_active = false;
+        uintptr_t cell_bits_address = 0;
+        if (!read_sparse_bit(
+                address + 0x2C8,
+                static_cast<uintptr_t>(cell_bits_heap),
+                brick_cell_index,
+                cell_active,
+                cell_bits_address) ||
+            !cell_active)
+        {
+            return false;
+        }
+
+        uintptr_t cell_entry_address = 0;
+        const uintptr_t cell_entry_offset = static_cast<uintptr_t>(brick_cell_index) * 0x28;
+        if (!safe_offset(static_cast<uintptr_t>(cell_array), cell_entry_offset, cell_entry_address) ||
+            !is_accessible_memory(cell_entry_address, 0x28))
+        {
+            return false;
+        }
+
+        uint32_t group_index = UINT32_MAX;
+        int32_t cell_sub_limit = -1;
+        if (!read_u32_at(cell_entry_address, group_index) ||
+            !read_i32_at(cell_entry_address + 0x20, cell_sub_limit))
+        {
+            return false;
+        }
+        if (cell_sub_limit <= 0 ||
+            brick_sub_index >= static_cast<uint32_t>(cell_sub_limit) ||
+            group_index >= static_cast<uint32_t>(group_count) ||
+            group_index >= static_cast<uint32_t>(group_active_limit))
+        {
+            return false;
+        }
+
+        bool group_active = false;
+        uintptr_t group_bits_address = 0;
+        if (!read_sparse_bit(
+                address + 0x220,
+                static_cast<uintptr_t>(group_bits_heap),
+                group_index,
+                group_active,
+                group_bits_address) ||
+            !group_active)
+        {
+            return false;
+        }
+
+        uintptr_t group_entry_address = 0;
+        const uintptr_t group_entry_offset = static_cast<uintptr_t>(group_index) * 0x370;
+        return safe_offset(static_cast<uintptr_t>(group_array), group_entry_offset, group_entry_address) &&
+               is_accessible_memory(group_entry_address, 0x370);
+    }
+
+    bool brick_grid_context_record_for_brick(uintptr_t brick_address,
+                                             uintptr_t raw_context,
+                                             const char* source)
+    {
+        if (brick_address == 0 || raw_context == 0 ||
+            !is_accessible_memory(brick_address, kBrickRuntimeStride))
+        {
+            g_brick_context_capture_rejects.fetch_add(1);
+            return false;
+        }
+
+        uint32_t brick_cell_index = 0;
+        uint32_t brick_sub_index = 0;
+        if (!read_u32_at(brick_address, brick_cell_index) ||
+            !read_u32_at(brick_address + 0x04, brick_sub_index) ||
+            !brick_grid_context_is_plausible(raw_context, brick_cell_index, brick_sub_index))
+        {
+            g_brick_context_capture_rejects.fetch_add(1);
+            return false;
+        }
+
+        g_brick_grid_context_cached.store(raw_context);
+        g_brick_context_capture_hits.fetch_add(1);
+        {
+            std::lock_guard lock(g_brick_physical_mutex);
+            g_brick_grid_context_cached_source = source ? source : "unknown";
+            g_brick_runtime_context_hook_error.clear();
+        }
+        return true;
+    }
+
+    struct BrickGridContextScanResult
+    {
+        bool enabled{false};
+        bool found{false};
+        uintptr_t address{0};
+        uint64_t regions{0};
+        uint64_t scanned_bytes{0};
+        uint64_t probes{0};
+        uint64_t plausible_checks{0};
+        uint64_t duration_ms{0};
+        std::string detail;
+    };
+
+    struct BrickOwnerContextScanResult
+    {
+        bool enabled{false};
+        bool found{false};
+        uintptr_t address{0};
+        uint64_t direct_candidates{0};
+        uint64_t pointer_candidates{0};
+        uint64_t nested_pointer_candidates{0};
+        uint64_t plausible_checks{0};
+        uint64_t duration_ms{0};
+        std::string source;
+        std::string detail;
+    };
+
+    bool memory_region_readable(const MEMORY_BASIC_INFORMATION& mbi)
+    {
+        if (mbi.State != MEM_COMMIT || (mbi.Protect & PAGE_GUARD) || (mbi.Protect & PAGE_NOACCESS))
+        {
+            return false;
+        }
+        const DWORD readable_flags =
+            PAGE_READONLY |
+            PAGE_READWRITE |
+            PAGE_WRITECOPY |
+            PAGE_EXECUTE_READ |
+            PAGE_EXECUTE_READWRITE |
+            PAGE_EXECUTE_WRITECOPY;
+        return (mbi.Protect & readable_flags) != 0;
+    }
+
+    bool read_scan_candidate_fields(uintptr_t address,
+                                    int32_t& group_count,
+                                    int32_t& group_active_limit,
+                                    uint64_t& cell_array,
+                                    int32_t& cell_count,
+                                    int32_t& cell_active_limit)
+    {
+        __try
+        {
+            std::memcpy(&group_count, reinterpret_cast<void*>(address + 0x218), sizeof(group_count));
+            std::memcpy(&group_active_limit, reinterpret_cast<void*>(address + 0x238), sizeof(group_active_limit));
+            std::memcpy(&cell_array, reinterpret_cast<void*>(address + 0x2B8), sizeof(cell_array));
+            std::memcpy(&cell_count, reinterpret_cast<void*>(address + 0x2C0), sizeof(cell_count));
+            std::memcpy(&cell_active_limit, reinterpret_cast<void*>(address + 0x2E0), sizeof(cell_active_limit));
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+        return true;
+    }
+
+    BrickGridContextScanResult brick_grid_context_scan_memory(uint32_t brick_cell_index,
+                                                              uint32_t brick_sub_index)
+    {
+        BrickGridContextScanResult result{};
+        result.enabled = true;
+
+        const auto started = std::chrono::steady_clock::now();
+        uintptr_t cursor = 0x10000;
+        constexpr uint64_t kMaxScannedBytes = 2048ULL * 1024ULL * 1024ULL;
+        constexpr uint64_t kMaxRegions = 32768;
+        constexpr uintptr_t kScanAlignment = 0x8;
+        constexpr int32_t kMaxSparseCount = 500000;
+
+        while (cursor < UINTPTR_MAX && result.regions < kMaxRegions && result.scanned_bytes < kMaxScannedBytes)
+        {
+            MEMORY_BASIC_INFORMATION mbi{};
+            if (VirtualQuery(reinterpret_cast<void*>(cursor), &mbi, sizeof(mbi)) == 0)
+            {
+                break;
+            }
+
+            const uintptr_t region_start = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+            const uintptr_t region_end = region_start + mbi.RegionSize;
+            cursor = region_end > cursor ? region_end : cursor + 0x1000;
+            if (!memory_region_readable(mbi) || mbi.Type != MEM_PRIVATE || mbi.RegionSize < 0x2E8)
+            {
+                continue;
+            }
+
+            result.regions++;
+            uintptr_t scan_start = (region_start + (kScanAlignment - 1)) & ~(kScanAlignment - 1);
+            const uintptr_t scan_end = region_end > 0x2E8 ? region_end - 0x2E8 : region_start;
+            for (uintptr_t address = scan_start;
+                 address <= scan_end && result.scanned_bytes < kMaxScannedBytes;
+                 address += kScanAlignment)
+            {
+                result.probes++;
+                result.scanned_bytes += kScanAlignment;
+
+                int32_t group_count = -1;
+                int32_t group_active_limit = -1;
+                uint64_t cell_array = 0;
+                int32_t cell_count = -1;
+                int32_t cell_active_limit = -1;
+                if (!read_scan_candidate_fields(
+                        address,
+                        group_count,
+                        group_active_limit,
+                        cell_array,
+                        cell_count,
+                        cell_active_limit))
+                {
+                    continue;
+                }
+
+                if (group_count <= 0 ||
+                    group_active_limit <= 0 ||
+                    cell_count <= 0 ||
+                    cell_active_limit <= 0 ||
+                    group_count > kMaxSparseCount ||
+                    group_active_limit > kMaxSparseCount ||
+                    cell_count > kMaxSparseCount ||
+                    cell_active_limit > kMaxSparseCount ||
+                    brick_cell_index >= static_cast<uint32_t>(cell_count) ||
+                    brick_cell_index >= static_cast<uint32_t>(cell_active_limit) ||
+                    cell_array == 0)
+                {
+                    continue;
+                }
+
+                result.plausible_checks++;
+                if (brick_grid_context_is_plausible(address, brick_cell_index, brick_sub_index))
+                {
+                    result.found = true;
+                    result.address = address;
+                    result.detail = "matched sparse brick-grid context layout";
+                    g_brick_grid_context_cached.store(address);
+                    break;
+                }
+            }
+            if (result.found)
+            {
+                break;
+            }
+        }
+
+        result.duration_ms = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - started)
+                .count());
+        if (!result.found && result.detail.empty())
+        {
+            result.detail = "no plausible sparse brick-grid context found within scan bounds";
+        }
+        return result;
+    }
+
+    BrickGridContextScanResult brick_grid_context_scan(uint32_t brick_cell_index, uint32_t brick_sub_index)
+    {
+        BrickGridContextScanResult result{};
+        result.enabled = env_flag_enabled("BMF_BRICK_CONTEXT_SCAN_ENABLED");
+        if (!result.enabled)
+        {
+            result.detail = "set BMF_BRICK_CONTEXT_SCAN_ENABLED=1 to run the explicit context scan";
+            return result;
+        }
+
+        if (!env_flag_enabled("BMF_BRICK_CONTEXT_SCAN_SYNC_ENABLED"))
+        {
+            result.detail =
+                "disabled because process-wide context scans can stall the dedicated server when run synchronously; "
+                "use BMF_BRICK_CONTEXT_BACKGROUND_SCAN_ENABLED=1 to prime the cache off the game thread";
+            return result;
+        }
+
+        return brick_grid_context_scan_memory(brick_cell_index, brick_sub_index);
+    }
+
+    bool brick_owner_context_scan_enabled()
+    {
+        return env_flag_enabled("BMF_BRICK_OWNER_CONTEXT_SCAN_ENABLED") ||
+               env_flag_enabled("BMF_BRICK_CONTEXT_OWNER_SCAN_ENABLED");
+    }
+
+    bool brick_owner_context_check_candidate(BrickOwnerContextScanResult& result,
+                                             uintptr_t address,
+                                             std::string_view source,
+                                             uint32_t brick_cell_index,
+                                             uint32_t brick_sub_index)
+    {
+        if (address == 0 || !is_accessible_memory(address, 0x2E8))
+        {
+            return false;
+        }
+
+        result.plausible_checks++;
+        if (!brick_grid_context_is_plausible(address, brick_cell_index, brick_sub_index))
+        {
+            return false;
+        }
+
+        result.found = true;
+        result.address = address;
+        result.source = std::string(source);
+        result.detail = "matched sparse brick-grid context from bounded owner scan";
+        g_brick_grid_context_cached.store(address);
+        {
+            std::lock_guard lock(g_brick_physical_mutex);
+            g_brick_grid_context_cached_source = result.source;
+        }
+        return true;
+    }
+
+    BrickOwnerContextScanResult brick_owner_context_scan(uintptr_t owner_address,
+                                                         uint32_t brick_cell_index,
+                                                         uint32_t brick_sub_index)
+    {
+        BrickOwnerContextScanResult result{};
+        result.enabled = brick_owner_context_scan_enabled();
+        if (!result.enabled)
+        {
+            result.detail = "set BMF_BRICK_OWNER_CONTEXT_SCAN_ENABLED=1 to run the bounded owner context scan";
+            return result;
+        }
+        if (owner_address == 0 || !is_accessible_memory(owner_address, 0x100))
+        {
+            result.detail = "brick owner memory is not accessible";
+            return result;
+        }
+
+        const auto started = std::chrono::steady_clock::now();
+        constexpr uintptr_t kOwnerDirectBytes = 0x1000;
+        constexpr uintptr_t kNestedPointerBytes = 0x400;
+        constexpr uintptr_t kStep = sizeof(uintptr_t);
+
+        for (uintptr_t offset = 0; offset < kOwnerDirectBytes && !result.found; offset += kStep)
+        {
+            uintptr_t direct_address = 0;
+            if (safe_offset(owner_address, offset, direct_address))
+            {
+                result.direct_candidates++;
+                std::ostringstream source;
+                source << "owner+0x" << std::uppercase << std::hex << offset;
+                brick_owner_context_check_candidate(
+                    result,
+                    direct_address,
+                    source.str(),
+                    brick_cell_index,
+                    brick_sub_index);
+            }
+
+            uint64_t pointer_value = 0;
+            if (!read_u64_at(owner_address + offset, pointer_value))
+            {
+                continue;
+            }
+            const uintptr_t pointer_address = static_cast<uintptr_t>(pointer_value);
+            if (pointer_address == 0)
+            {
+                continue;
+            }
+
+            result.pointer_candidates++;
+            {
+                std::ostringstream source;
+                source << "owner.qword+0x" << std::uppercase << std::hex << offset;
+                if (brick_owner_context_check_candidate(
+                        result,
+                        pointer_address,
+                        source.str(),
+                        brick_cell_index,
+                        brick_sub_index))
+                {
+                    break;
+                }
+            }
+
+            if (!is_accessible_memory(pointer_address, kNestedPointerBytes))
+            {
+                continue;
+            }
+
+            for (uintptr_t nested_offset = 0;
+                 nested_offset < kNestedPointerBytes && !result.found;
+                 nested_offset += kStep)
+            {
+                uint64_t nested_value = 0;
+                if (!read_u64_at(pointer_address + nested_offset, nested_value))
+                {
+                    continue;
+                }
+                const uintptr_t nested_address = static_cast<uintptr_t>(nested_value);
+                if (nested_address == 0)
+                {
+                    continue;
+                }
+
+                result.nested_pointer_candidates++;
+                std::ostringstream source;
+                source << "owner.qword+0x" << std::uppercase << std::hex << offset
+                       << ".qword+0x" << nested_offset;
+                brick_owner_context_check_candidate(
+                    result,
+                    nested_address,
+                    source.str(),
+                    brick_cell_index,
+                    brick_sub_index);
+            }
+        }
+
+        result.duration_ms = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - started)
+                .count());
+        if (!result.found && result.detail.empty())
+        {
+            result.detail = "no plausible sparse brick-grid context found from bounded owner scan";
+        }
+        return result;
+    }
+
+    bool brick_grid_context_background_scan_enabled()
+    {
+        return env_flag_enabled("BMF_BRICK_CONTEXT_BACKGROUND_SCAN_ENABLED") ||
+               env_flag_enabled("BMF_BRICK_RUNTIME_CONTEXT_BACKGROUND_SCAN_ENABLED");
+    }
+
+    bool brick_grid_context_background_scan_start(uint32_t brick_cell_index,
+                                                  uint32_t brick_sub_index)
+    {
+        if (!brick_grid_context_background_scan_enabled())
+        {
+            return false;
+        }
+
+        const uintptr_t cached_grid_context = g_brick_grid_context_cached.load();
+        if (brick_grid_context_is_plausible(
+                cached_grid_context,
+                brick_cell_index,
+                brick_sub_index))
+        {
+            return false;
+        }
+
+        bool expected = false;
+        if (!g_brick_grid_context_background_scan_running.compare_exchange_strong(expected, true))
+        {
+            return false;
+        }
+
+        g_brick_grid_context_background_scan_requests.fetch_add(1);
+        g_brick_grid_context_background_scan_cell_index.store(brick_cell_index);
+        g_brick_grid_context_background_scan_sub_index.store(brick_sub_index);
+        g_brick_grid_context_background_scan_address.store(0);
+        g_brick_grid_context_background_scan_duration_ms.store(0);
+        {
+            std::lock_guard lock(g_brick_physical_mutex);
+            g_brick_grid_context_background_scan_detail =
+                "background sparse-grid context scan is running";
+        }
+
+        std::thread([brick_cell_index, brick_sub_index]() {
+            const BrickGridContextScanResult scan =
+                brick_grid_context_scan_memory(brick_cell_index, brick_sub_index);
+            g_brick_grid_context_background_scan_duration_ms.store(scan.duration_ms);
+            g_brick_grid_context_background_scan_address.store(scan.address);
+            if (scan.found)
+            {
+                g_brick_grid_context_cached.store(scan.address);
+                g_brick_grid_context_background_scan_completions.fetch_add(1);
+                {
+                    std::lock_guard lock(g_brick_physical_mutex);
+                    g_brick_grid_context_cached_source = "background-scan";
+                    g_brick_grid_context_background_scan_detail = scan.detail;
+                }
+            }
+            else
+            {
+                g_brick_grid_context_background_scan_failures.fetch_add(1);
+                {
+                    std::lock_guard lock(g_brick_physical_mutex);
+                    g_brick_grid_context_background_scan_detail = scan.detail;
+                }
+            }
+            g_brick_grid_context_background_scan_running.store(false);
+        }).detach();
+
+        return true;
+    }
+
+    void append_brick_grid_context_candidate(std::ostringstream& out,
+                                             size_t index,
+                                             std::string_view name,
+                                             uintptr_t address,
+                                             uint32_t brick_cell_index,
+                                             uint32_t brick_sub_index)
+    {
+        const std::string prefix = "grid_context_candidate." + std::to_string(index);
+        out << prefix << ".name=" << json_escape(name) << "\n"
+            << prefix << ".address=" << json_escape(pointer_hex(address)) << "\n";
+        if (address == 0)
+        {
+            out << prefix << ".accessible=false\n"
+                << prefix << ".plausible=false\n";
+            return;
+        }
+
+        const bool accessible = is_accessible_memory(address, 0x2E8);
+        out << prefix << ".accessible=" << (accessible ? "true" : "false") << "\n";
+        if (!accessible)
+        {
+            out << prefix << ".plausible=false\n";
+            return;
+        }
+
+        uint64_t group_array = 0;
+        uint64_t group_bits_heap = 0;
+        uint64_t cell_array = 0;
+        uint64_t cell_bits_heap = 0;
+        int32_t group_count = -1;
+        int32_t group_active_limit = -1;
+        int32_t cell_count = -1;
+        int32_t cell_active_limit = -1;
+        read_u64_at(address + 0x210, group_array);
+        read_i32_at(address + 0x218, group_count);
+        read_u64_at(address + 0x230, group_bits_heap);
+        read_i32_at(address + 0x238, group_active_limit);
+        read_u64_at(address + 0x2B8, cell_array);
+        read_i32_at(address + 0x2C0, cell_count);
+        read_u64_at(address + 0x2D8, cell_bits_heap);
+        read_i32_at(address + 0x2E0, cell_active_limit);
+
+        const bool cell_index_in_count =
+            cell_count > 0 && brick_cell_index < static_cast<uint32_t>(cell_count);
+        const bool cell_index_in_active_limit =
+            cell_active_limit > 0 && brick_cell_index < static_cast<uint32_t>(cell_active_limit);
+        bool cell_active = false;
+        uintptr_t cell_bits_address = 0;
+        const bool cell_bit_read = read_sparse_bit(
+            address + 0x2C8,
+            static_cast<uintptr_t>(cell_bits_heap),
+            brick_cell_index,
+            cell_active,
+            cell_bits_address);
+
+        uint32_t cell_group_index = UINT32_MAX;
+        int32_t cell_sub_limit = -1;
+        bool cell_entry_accessible = false;
+        if (cell_index_in_count && cell_array != 0)
+        {
+            const uintptr_t cell_entry_address =
+                static_cast<uintptr_t>(cell_array) + static_cast<uintptr_t>(brick_cell_index) * 0x28;
+            cell_entry_accessible = is_accessible_memory(cell_entry_address, 0x28);
+            if (cell_entry_accessible)
+            {
+                read_u32_at(cell_entry_address, cell_group_index);
+                read_i32_at(cell_entry_address + 0x20, cell_sub_limit);
+            }
+        }
+
+        const bool group_index_in_count =
+            cell_group_index != UINT32_MAX &&
+            group_count > 0 &&
+            cell_group_index < static_cast<uint32_t>(group_count);
+        const bool group_index_in_active_limit =
+            cell_group_index != UINT32_MAX &&
+            group_active_limit > 0 &&
+            cell_group_index < static_cast<uint32_t>(group_active_limit);
+        bool group_active = false;
+        uintptr_t group_bits_address = 0;
+        const bool group_bit_read =
+            cell_group_index != UINT32_MAX &&
+            read_sparse_bit(
+                address + 0x220,
+                static_cast<uintptr_t>(group_bits_heap),
+                cell_group_index,
+                group_active,
+                group_bits_address);
+        const bool sub_index_in_limit =
+            cell_sub_limit > 0 && brick_sub_index < static_cast<uint32_t>(cell_sub_limit);
+        const bool plausible =
+            cell_index_in_count &&
+            cell_index_in_active_limit &&
+            cell_bit_read &&
+            cell_active &&
+            cell_entry_accessible &&
+            group_index_in_count &&
+            group_index_in_active_limit &&
+            group_bit_read &&
+            group_active &&
+            sub_index_in_limit &&
+            group_array != 0 &&
+            is_accessible_memory(static_cast<uintptr_t>(group_array), 0x370);
+
+        out << prefix << ".group_array=" << json_escape(pointer_hex(static_cast<uintptr_t>(group_array))) << "\n"
+            << prefix << ".group_count=" << group_count << "\n"
+            << prefix << ".group_active_limit=" << group_active_limit << "\n"
+            << prefix << ".group_bits_address=" << json_escape(pointer_hex(group_bits_address)) << "\n"
+            << prefix << ".cell_array=" << json_escape(pointer_hex(static_cast<uintptr_t>(cell_array))) << "\n"
+            << prefix << ".cell_count=" << cell_count << "\n"
+            << prefix << ".cell_active_limit=" << cell_active_limit << "\n"
+            << prefix << ".cell_bits_address=" << json_escape(pointer_hex(cell_bits_address)) << "\n"
+            << prefix << ".brick_cell_index_in_count=" << (cell_index_in_count ? "true" : "false") << "\n"
+            << prefix << ".brick_cell_index_in_active_limit=" << (cell_index_in_active_limit ? "true" : "false") << "\n"
+            << prefix << ".cell_bit_read=" << (cell_bit_read ? "true" : "false") << "\n"
+            << prefix << ".cell_active=" << (cell_active ? "true" : "false") << "\n"
+            << prefix << ".cell_entry_accessible=" << (cell_entry_accessible ? "true" : "false") << "\n"
+            << prefix << ".cell_group_index=" << (cell_group_index == UINT32_MAX ? -1 : static_cast<int64_t>(cell_group_index)) << "\n"
+            << prefix << ".cell_sub_limit=" << cell_sub_limit << "\n"
+            << prefix << ".brick_sub_index_in_limit=" << (sub_index_in_limit ? "true" : "false") << "\n"
+            << prefix << ".group_index_in_count=" << (group_index_in_count ? "true" : "false") << "\n"
+            << prefix << ".group_index_in_active_limit=" << (group_index_in_active_limit ? "true" : "false") << "\n"
+            << prefix << ".group_bit_read=" << (group_bit_read ? "true" : "false") << "\n"
+            << prefix << ".group_active=" << (group_active ? "true" : "false") << "\n"
+            << prefix << ".plausible=" << (plausible ? "true" : "false") << "\n";
+    }
+
+    void append_brick_grid_context_diagnostics(std::ostringstream& out,
+                                               uintptr_t brick_address,
+                                               uintptr_t owner_address,
+                                               uintptr_t grid_context_address)
+    {
+        uint32_t brick_cell_index = 0;
+        uint32_t brick_sub_index = 0;
+        uint32_t brick_runtime_id = 0;
+        read_u32_at(brick_address, brick_cell_index);
+        read_u32_at(brick_address + 0x04, brick_sub_index);
+        read_u32_at(brick_address + 0x24, brick_runtime_id);
+        out << "brick_cell_index=" << brick_cell_index << "\n"
+            << "brick_sub_index=" << brick_sub_index << "\n"
+            << "brick_runtime_id_field=" << brick_runtime_id << "\n";
+
+        std::vector<std::pair<std::string, uintptr_t>> candidates;
+        auto add_candidate = [&candidates](std::string name, uintptr_t address)
+        {
+            if (address == 0)
+            {
+                return;
+            }
+            for (const auto& candidate : candidates)
+            {
+                if (candidate.second == address)
+                {
+                    return;
+                }
+            }
+            candidates.emplace_back(std::move(name), address);
+        };
+
+        add_candidate("owner", owner_address);
+        if (owner_address != 0)
+        {
+            for (uintptr_t offset = 0; offset <= 0x180; offset += 0x10)
+            {
+                add_candidate("owner+0x" + [&offset]()
+                {
+                    std::ostringstream s;
+                    s << std::uppercase << std::hex << offset;
+                    return s.str();
+                }(), owner_address + offset);
+            }
+            for (uintptr_t offset = 0; offset <= 0x180; offset += 0x08)
+            {
+                uint64_t value = 0;
+                if (read_u64_at(owner_address + offset, value) &&
+                    value != 0 &&
+                    is_accessible_memory(static_cast<uintptr_t>(value), 0x20))
+                {
+                    std::ostringstream name;
+                    name << "owner.qword+0x" << std::uppercase << std::hex << offset;
+                    add_candidate(name.str(), static_cast<uintptr_t>(value));
+                }
+            }
+        }
+        add_candidate("owner.qword+0x10.current", grid_context_address);
+
+        const size_t max_candidates = std::min<size_t>(candidates.size(), 48);
+        out << "grid_context_candidate_count=" << max_candidates << "\n";
+        for (size_t index = 0; index < max_candidates; ++index)
+        {
+            append_brick_grid_context_candidate(
+                out,
+                index,
+                candidates[index].first,
+                candidates[index].second,
+                brick_cell_index,
+                brick_sub_index);
+        }
+    }
+
+    void append_brick_grid_context_scan_result(std::ostringstream& out,
+                                               const BrickGridContextScanResult& scan)
+    {
+        out << "grid_context_scan_enabled=" << (scan.enabled ? "true" : "false") << "\n"
+            << "grid_context_scan_found=" << (scan.found ? "true" : "false") << "\n"
+            << "grid_context_scan_address=" << json_escape(pointer_hex(scan.address)) << "\n"
+            << "grid_context_scan_regions=" << scan.regions << "\n"
+            << "grid_context_scan_scanned_bytes=" << scan.scanned_bytes << "\n"
+            << "grid_context_scan_probes=" << scan.probes << "\n"
+            << "grid_context_scan_plausible_checks=" << scan.plausible_checks << "\n"
+            << "grid_context_scan_duration_ms=" << scan.duration_ms << "\n"
+            << "grid_context_scan_detail=" << json_escape(scan.detail) << "\n";
+    }
+
+    void append_brick_owner_context_scan_result(std::ostringstream& out,
+                                                const BrickOwnerContextScanResult& scan)
+    {
+        out << "owner_context_scan_enabled=" << (scan.enabled ? "true" : "false") << "\n"
+            << "owner_context_scan_found=" << (scan.found ? "true" : "false") << "\n"
+            << "owner_context_scan_address=" << json_escape(pointer_hex(scan.address)) << "\n"
+            << "owner_context_scan_source=" << json_escape(scan.source) << "\n"
+            << "owner_context_scan_direct_candidates=" << scan.direct_candidates << "\n"
+            << "owner_context_scan_pointer_candidates=" << scan.pointer_candidates << "\n"
+            << "owner_context_scan_nested_pointer_candidates=" << scan.nested_pointer_candidates << "\n"
+            << "owner_context_scan_plausible_checks=" << scan.plausible_checks << "\n"
+            << "owner_context_scan_duration_ms=" << scan.duration_ms << "\n"
+            << "owner_context_scan_detail=" << json_escape(scan.detail) << "\n";
+    }
+
+    void append_brick_background_context_scan_status(std::ostringstream& out)
+    {
+        std::string detail;
+        {
+            std::lock_guard lock(g_brick_physical_mutex);
+            detail = g_brick_grid_context_background_scan_detail;
+        }
+        out << "background_context_scan_enabled=" << (brick_grid_context_background_scan_enabled() ? "true" : "false") << "\n"
+            << "background_context_scan_running=" << (g_brick_grid_context_background_scan_running.load() ? "true" : "false") << "\n"
+            << "background_context_scan_requests=" << g_brick_grid_context_background_scan_requests.load() << "\n"
+            << "background_context_scan_completions=" << g_brick_grid_context_background_scan_completions.load() << "\n"
+            << "background_context_scan_failures=" << g_brick_grid_context_background_scan_failures.load() << "\n"
+            << "background_context_scan_address=" << json_escape(pointer_hex(g_brick_grid_context_background_scan_address.load())) << "\n"
+            << "background_context_scan_cell_index=" << g_brick_grid_context_background_scan_cell_index.load() << "\n"
+            << "background_context_scan_sub_index=" << g_brick_grid_context_background_scan_sub_index.load() << "\n"
+            << "background_context_scan_duration_ms=" << g_brick_grid_context_background_scan_duration_ms.load() << "\n"
+            << "background_context_scan_detail=" << json_escape(detail) << "\n";
+    }
+
     std::string brick_physical_inspect_text(uint32_t brick_id)
     {
         std::ostringstream out;
@@ -2984,6 +4213,8 @@ namespace
         uint8_t visible = 0;
         uint8_t collision_channels = 0;
         uint8_t state_flags = 0;
+        uint32_t brick_cell_index = 0;
+        uint32_t brick_sub_index = 0;
         uint32_t slot_id = 0;
 
         read_u64_at(module_base + kBrickArrayBaseOffset, array_base);
@@ -2995,6 +4226,8 @@ namespace
         read_u8_at(brick_address + kBrickVisibleOffset, visible);
         read_u8_at(brick_address + kBrickCollisionChannelsOffset, collision_channels);
         read_u8_at(brick_address + kBrickStateFlagsOffset, state_flags);
+        read_u32_at(brick_address, brick_cell_index);
+        read_u32_at(brick_address + 0x04, brick_sub_index);
         if (array_base != 0 &&
             brick_address >= static_cast<uintptr_t>(array_base) &&
             ((brick_address - static_cast<uintptr_t>(array_base)) % kBrickRuntimeStride) == 0)
@@ -3005,6 +4238,9 @@ namespace
 
         bool has_original = false;
         BrickPhysicalOriginal original{};
+        const uintptr_t cached_grid_context = g_brick_grid_context_cached.load();
+        std::string cached_grid_context_source;
+        std::string context_hook_error;
         {
             std::lock_guard lock(g_brick_physical_mutex);
             const auto found_original = g_brick_physical_originals.find(brick_id);
@@ -3013,6 +4249,8 @@ namespace
                 has_original = found_original->second.captured;
                 original = found_original->second;
             }
+            cached_grid_context_source = g_brick_grid_context_cached_source;
+            context_hook_error = g_brick_runtime_context_hook_error;
         }
 
         out << "array_base_address=" << json_escape(pointer_hex(static_cast<uintptr_t>(array_base))) << "\n"
@@ -3031,6 +4269,51 @@ namespace
             << "original_captured=" << (has_original ? "true" : "false") << "\n"
             << "original_visible=" << static_cast<unsigned int>(original.visible) << "\n"
             << "original_collision_channels=" << static_cast<unsigned int>(original.collision_channels) << "\n";
+        out << "context_hook_enabled=" << (brick_runtime_context_hooks_enabled() ? "true" : "false") << "\n"
+            << "context_hooks_installed=" << (g_brick_runtime_context_hooks_installed.load() ? "true" : "false") << "\n"
+            << "context_hook_error=" << json_escape(context_hook_error) << "\n"
+            << "cached_grid_context_address=" << json_escape(pointer_hex(cached_grid_context)) << "\n"
+            << "cached_grid_context_source=" << json_escape(cached_grid_context_source) << "\n"
+            << "cached_grid_context_accessible=" << (
+                   cached_grid_context != 0 && is_accessible_memory(cached_grid_context, 0x2E8)
+                   ? "true"
+                   : "false") << "\n"
+            << "cached_grid_context_plausible=" << (
+                   brick_grid_context_is_plausible(cached_grid_context, brick_cell_index, brick_sub_index)
+                   ? "true"
+                   : "false") << "\n"
+            << "context_capture_hits=" << g_brick_context_capture_hits.load() << "\n"
+            << "context_capture_rejects=" << g_brick_context_capture_rejects.load() << "\n"
+            << "place_action_apply_hits=" << g_brick_place_action_apply_hits.load() << "\n"
+            << "visibility_action_apply_hits=" << g_brick_visibility_action_apply_hits.load() << "\n"
+            << "collision_action_apply_hits=" << g_brick_collision_action_apply_hits.load() << "\n"
+            << "low_setter_hook_enabled=" << (brick_runtime_low_setter_context_hook_enabled() ? "true" : "false") << "\n"
+            << "visibility_low_setter_hook_installed=" << (g_brick_visibility_low_setter_hook.installed.load() ? "true" : "false") << "\n"
+            << "collision_low_setter_hook_installed=" << (g_brick_collision_low_setter_hook.installed.load() ? "true" : "false") << "\n"
+            << "visibility_low_setter_hits=" << g_brick_visibility_low_setter_hits.load() << "\n"
+            << "collision_low_setter_hits=" << g_brick_collision_low_setter_hits.load() << "\n";
+        append_brick_background_context_scan_status(out);
+
+        append_brick_grid_context_diagnostics(
+            out,
+            brick_address,
+            static_cast<uintptr_t>(owner_address),
+            static_cast<uintptr_t>(grid_context_address));
+        if (brick_owner_context_scan_enabled())
+        {
+            append_brick_owner_context_scan_result(
+                out,
+                brick_owner_context_scan(
+                    static_cast<uintptr_t>(owner_address),
+                    brick_cell_index,
+                    brick_sub_index));
+        }
+        if (env_flag_enabled("BMF_BRICK_CONTEXT_SCAN_ENABLED"))
+        {
+            append_brick_grid_context_scan_result(
+                out,
+                brick_grid_context_scan(brick_cell_index, brick_sub_index));
+        }
         return out.str();
     }
 
@@ -3068,21 +4351,25 @@ namespace
         return true;
     }
 
-    std::string brick_physical_set_text(uint32_t brick_id, bool visible, int64_t collision_channels_arg)
+    std::string brick_physical_set_text(uint32_t brick_id,
+                                        int64_t visible_arg,
+                                        int64_t collision_channels_arg,
+                                        uintptr_t explicit_grid_context)
     {
         std::ostringstream out;
         out << "Brick physical state\n"
             << "source=BMFSocketBrickPhysical\n"
             << "operation=set\n"
             << "brick_id=" << brick_id << "\n"
-            << "requested_visible=" << (visible ? "true" : "false") << "\n"
-            << "requested_collision_channels=" << collision_channels_arg << "\n";
+            << "requested_visible_arg=" << visible_arg << "\n"
+            << "requested_collision_channels=" << collision_channels_arg << "\n"
+            << "requested_grid_context_override=" << json_escape(pointer_hex(explicit_grid_context)) << "\n";
 
-        if (!env_flag_enabled("BMF_TREE_PHYSICAL_SET_ENABLED"))
+        if (!brick_physical_set_enabled())
         {
             out << "ok=false\n"
                 << "code=BRICK_PHYSICAL_SET_DISABLED\n"
-                << "detail=set BMF_TREE_PHYSICAL_SET_ENABLED=1 to allow explicit brick visibility/collision mutation\n";
+                << "detail=set BMF_BRICK_RUNTIME_SET_ENABLED=1 to allow explicit brick visibility/collision mutation; BMF_TREE_PHYSICAL_SET_ENABLED=1 is accepted as a legacy alias\n";
             return out.str();
         }
 
@@ -3106,26 +4393,89 @@ namespace
 
         uint64_t owner_address = 0;
         uint64_t grid_context_address = 0;
+        std::string grid_context_source = "none";
         uint8_t before_visible = 0;
         uint8_t before_collision_channels = 0;
+        uint32_t brick_cell_index = 0;
+        uint32_t brick_sub_index = 0;
         read_u64_at(brick_address + kBrickOwnerOffset, owner_address);
         if (owner_address != 0 && is_accessible_memory(static_cast<uintptr_t>(owner_address), 0x18))
         {
             read_u64_at(static_cast<uintptr_t>(owner_address) + 0x10, grid_context_address);
+            if (grid_context_address != 0)
+            {
+                grid_context_source = "owner.qword+0x10";
+            }
         }
         read_u8_at(brick_address + kBrickVisibleOffset, before_visible);
         read_u8_at(brick_address + kBrickCollisionChannelsOffset, before_collision_channels);
+        read_u32_at(brick_address, brick_cell_index);
+        read_u32_at(brick_address + 0x04, brick_sub_index);
 
-        if (grid_context_address == 0 ||
-            !is_accessible_memory(static_cast<uintptr_t>(grid_context_address), 0x2D0))
+        const bool context_hook_install_attempted = brick_runtime_context_hooks_enabled();
+        const bool context_hook_install_ok = context_hook_install_attempted
+            ? brick_runtime_context_hook_install()
+            : false;
+        const uintptr_t cached_grid_context = g_brick_grid_context_cached.load();
+        if (explicit_grid_context != 0)
         {
-            out << "ok=false\n"
-                << "code=BRICK_GRID_CONTEXT_UNAVAILABLE\n"
-                << "owner_address=" << json_escape(pointer_hex(static_cast<uintptr_t>(owner_address))) << "\n"
-                << "grid_context_address=" << json_escape(pointer_hex(static_cast<uintptr_t>(grid_context_address))) << "\n"
-                << "detail=brick grid context pointer is required by Brickadia physical-state setters\n";
-            return out.str();
+            if (!env_flag_enabled("BMF_BRICK_RUNTIME_CONTEXT_OVERRIDE_ENABLED") &&
+                !brick_runtime_low_setter_context_hook_enabled())
+            {
+                out << "ok=false\n"
+                    << "code=BRICK_GRID_CONTEXT_OVERRIDE_DISABLED\n"
+                    << "detail=set BMF_BRICK_RUNTIME_CONTEXT_OVERRIDE_ENABLED=1 or BMF_BRICK_RUNTIME_LOW_SETTER_HOOK_ENABLED=1 to use explicit diagnostic grid contexts\n";
+                return out.str();
+            }
+            if (!brick_grid_context_is_plausible(explicit_grid_context, brick_cell_index, brick_sub_index))
+            {
+                out << "ok=false\n"
+                    << "code=BRICK_GRID_CONTEXT_OVERRIDE_INVALID\n"
+                    << "grid_context_address=" << json_escape(pointer_hex(explicit_grid_context)) << "\n"
+                    << "brick_cell_index=" << brick_cell_index << "\n"
+                    << "brick_sub_index=" << brick_sub_index << "\n"
+                    << "detail=explicit diagnostic grid context did not match the requested brick\n";
+                return out.str();
+            }
+            grid_context_address = explicit_grid_context;
+            grid_context_source = "explicit-override";
+            g_brick_grid_context_cached.store(explicit_grid_context);
+            {
+                std::lock_guard lock(g_brick_physical_mutex);
+                g_brick_grid_context_cached_source = grid_context_source;
+            }
         }
+        else if (brick_grid_context_is_plausible(cached_grid_context, brick_cell_index, brick_sub_index))
+        {
+            grid_context_address = cached_grid_context;
+            grid_context_source = "cached-action-context";
+        }
+        else if (brick_owner_context_scan_enabled())
+        {
+            const BrickOwnerContextScanResult scan = brick_owner_context_scan(
+                static_cast<uintptr_t>(owner_address),
+                brick_cell_index,
+                brick_sub_index);
+            if (scan.found)
+            {
+                grid_context_address = scan.address;
+                grid_context_source = scan.source.empty() ? "owner-scan" : scan.source;
+            }
+        }
+        else if (env_flag_enabled("BMF_BRICK_CONTEXT_SCAN_ENABLED"))
+        {
+            const BrickGridContextScanResult scan = brick_grid_context_scan(brick_cell_index, brick_sub_index);
+            if (scan.found)
+            {
+                grid_context_address = scan.address;
+                grid_context_source = "scan";
+            }
+        }
+        const bool grid_context_available =
+            brick_grid_context_is_plausible(
+                static_cast<uintptr_t>(grid_context_address),
+                brick_cell_index,
+                brick_sub_index);
 
         BrickPhysicalOriginal original{};
         {
@@ -3140,64 +4490,184 @@ namespace
             original = stored;
         }
 
-        uint8_t next_collision_channels = kBrickDefaultCollisionChannels;
-        std::string collision_source = "default";
+        uint8_t target_visible = before_visible;
+        bool visibility_requested = false;
+        std::string visible_source = "unchanged";
+        if (visible_arg >= 0)
+        {
+            visibility_requested = true;
+            target_visible = visible_arg != 0 ? 1 : 0;
+            visible_source = "argument";
+        }
+        else if (visible_arg == -2)
+        {
+            visibility_requested = true;
+            target_visible = original.visible;
+            visible_source = "captured";
+        }
+
+        uint8_t next_collision_channels = before_collision_channels;
+        bool collision_requested = false;
+        std::string collision_source = "unchanged";
         if (collision_channels_arg >= 0)
         {
+            collision_requested = true;
             next_collision_channels = static_cast<uint8_t>(std::min<int64_t>(255, collision_channels_arg));
             collision_source = "argument";
         }
-        else if (original.captured)
+        else if (collision_channels_arg == -1 && original.captured)
         {
+            collision_requested = true;
             next_collision_channels = original.collision_channels;
             collision_source = "captured";
         }
 
         const uintptr_t set_visibility_address = module_base + kBrickSetVisibilityOffset;
         const uintptr_t set_collision_address = module_base + kBrickSetCollisionChannelsOffset;
-        if (!is_executable_memory(set_visibility_address))
+        bool visibility_attempted = false;
+        bool visibility_succeeded = false;
+        bool visibility_skipped = true;
+        bool visibility_exception_after_apply = false;
+        std::string visibility_skip_reason = "visibility unchanged";
+        const char* visibility_method = "";
+        if (visibility_requested && target_visible == before_visible)
         {
-            out << "ok=false\n"
-                << "code=BRICK_VISIBILITY_SETTER_UNAVAILABLE\n"
-                << "set_visibility_address=" << json_escape(pointer_hex(set_visibility_address)) << "\n"
-                << "detail=Brickadia visibility setter function address is not executable\n";
-            return out.str();
+            visibility_skip_reason = "already target visible state";
         }
-
-        const uint8_t target_visible = visible ? 1 : 0;
-        const bool visibility_call_succeeded = brick_physical_apply_visibility(
+        else if (visibility_requested &&
+            env_flag_enabled("BMF_BRICK_VISIBILITY_SET_ENABLED") &&
+            !env_flag_enabled("BMF_BRICK_VISIBILITY_SET_DISABLED"))
+        {
+            if (!grid_context_available)
+            {
+                const bool background_context_scan_started =
+                    brick_grid_context_background_scan_start(brick_cell_index, brick_sub_index);
+                const bool background_context_scan_pending =
+                    background_context_scan_started ||
+                    g_brick_grid_context_background_scan_running.load();
+                out << "ok=false\n"
+                    << "code=" << (background_context_scan_pending
+                           ? "BRICK_GRID_CONTEXT_SCAN_PENDING"
+                           : "BRICK_GRID_CONTEXT_UNAVAILABLE") << "\n"
+                    << "owner_address=" << json_escape(pointer_hex(static_cast<uintptr_t>(owner_address))) << "\n"
+                    << "grid_context_address=" << json_escape(pointer_hex(static_cast<uintptr_t>(grid_context_address))) << "\n"
+                    << "grid_context_source=" << json_escape(grid_context_source) << "\n"
+                    << "background_context_scan_started=" << (background_context_scan_started ? "true" : "false") << "\n"
+                    << "low_setter_hook_enabled=" << (brick_runtime_low_setter_context_hook_enabled() ? "true" : "false") << "\n"
+                    << "visibility_low_setter_hook_installed=" << (g_brick_visibility_low_setter_hook.installed.load() ? "true" : "false") << "\n"
+                    << "collision_low_setter_hook_installed=" << (g_brick_collision_low_setter_hook.installed.load() ? "true" : "false") << "\n"
+                    << "visibility_low_setter_hits=" << g_brick_visibility_low_setter_hits.load() << "\n"
+                    << "collision_low_setter_hits=" << g_brick_collision_low_setter_hits.load() << "\n"
+                    << "context_capture_hits=" << g_brick_context_capture_hits.load() << "\n"
+                    << "context_capture_rejects=" << g_brick_context_capture_rejects.load() << "\n";
+                append_brick_background_context_scan_status(out);
+                out << "detail=brick grid context pointer is required by Brickadia physical-state setters\n";
+                return out.str();
+            }
+            if (!is_executable_memory(set_visibility_address))
+            {
+                out << "ok=false\n"
+                    << "code=BRICK_VISIBILITY_SETTER_UNAVAILABLE\n"
+                    << "set_visibility_address=" << json_escape(pointer_hex(set_visibility_address)) << "\n"
+                    << "detail=Brickadia visibility setter function address is not executable\n";
+                return out.str();
+            }
+            visibility_attempted = true;
+            visibility_skipped = false;
+            visibility_skip_reason.clear();
+            visibility_method = "brickadia-setter";
+            visibility_succeeded = brick_physical_apply_visibility(
                 set_visibility_address,
                 brick_address,
                 static_cast<uintptr_t>(grid_context_address),
                 target_visible);
-        bool visibility_exception_after_apply = false;
-        if (!visibility_call_succeeded)
-        {
-            uint8_t probed_visible = 0;
-            read_u8_at(brick_address + kBrickVisibleOffset, probed_visible);
-            if (probed_visible == target_visible)
+            if (!visibility_succeeded)
             {
-                visibility_exception_after_apply = true;
+                uint8_t probed_visible = 0;
+                read_u8_at(brick_address + kBrickVisibleOffset, probed_visible);
+                if (probed_visible == target_visible)
+                {
+                    visibility_exception_after_apply = true;
+                    visibility_succeeded = true;
+                }
+                else
+                {
+                    out << "ok=false\n"
+                        << "code=BRICK_VISIBILITY_SET_EXCEPTION\n"
+                        << "detail=Brickadia visibility setter raised a structured exception before applying the requested state\n"
+                        << "after_visible=" << static_cast<unsigned int>(probed_visible) << "\n";
+                    return out.str();
+                }
             }
-            else
+        }
+        else if (visibility_requested &&
+            env_flag_enabled("BMF_BRICK_VISIBILITY_DIRECT_WRITE_ENABLED") &&
+            !env_flag_enabled("BMF_BRICK_VISIBILITY_DIRECT_WRITE_DISABLED"))
+        {
+            visibility_attempted = true;
+            visibility_skipped = false;
+            visibility_skip_reason.clear();
+            visibility_method = "direct-byte-write";
+            visibility_succeeded = write_u8_at(
+                brick_address + kBrickVisibleOffset,
+                target_visible);
+            if (!visibility_succeeded)
             {
                 out << "ok=false\n"
-                    << "code=BRICK_VISIBILITY_SET_EXCEPTION\n"
-                    << "detail=Brickadia visibility setter raised a structured exception before applying the requested state\n"
-                    << "after_visible=" << static_cast<unsigned int>(probed_visible) << "\n";
+                    << "code=BRICK_VISIBILITY_DIRECT_WRITE_FAILED\n"
+                    << "detail=direct visibility byte write failed\n";
                 return out.str();
             }
         }
+        else if (visibility_requested)
+        {
+            out << "ok=false\n"
+                << "code=BRICK_VISIBILITY_SET_DISABLED\n"
+                << "detail=set BMF_BRICK_VISIBILITY_DIRECT_WRITE_ENABLED=1 for diagnostic byte writes or BMF_BRICK_VISIBILITY_SET_ENABLED=1 for the unsafe Brickadia setter\n";
+            return out.str();
+        }
 
+        bool collision_skipped = true;
         bool collision_attempted = false;
         bool collision_succeeded = false;
-        bool collision_skipped = true;
+        std::string collision_skip_reason = collision_requested ? "no safe collision setter flag is enabled" : "collision unchanged";
         const char* collision_method = "";
-        if (env_flag_enabled("BMF_BRICK_COLLISION_SET_ENABLED"))
+        if (collision_requested && next_collision_channels == before_collision_channels)
+        {
+            collision_skip_reason = "already target collision state";
+        }
+        else if (collision_requested && env_flag_enabled("BMF_BRICK_COLLISION_SET_ENABLED"))
         {
             collision_attempted = true;
             collision_skipped = false;
+            collision_skip_reason.clear();
             collision_method = "brickadia-setter";
+            if (!grid_context_available)
+            {
+                const bool background_context_scan_started =
+                    brick_grid_context_background_scan_start(brick_cell_index, brick_sub_index);
+                const bool background_context_scan_pending =
+                    background_context_scan_started ||
+                    g_brick_grid_context_background_scan_running.load();
+                out << "ok=false\n"
+                    << "code=" << (background_context_scan_pending
+                           ? "BRICK_GRID_CONTEXT_SCAN_PENDING"
+                           : "BRICK_GRID_CONTEXT_UNAVAILABLE") << "\n"
+                    << "owner_address=" << json_escape(pointer_hex(static_cast<uintptr_t>(owner_address))) << "\n"
+                    << "grid_context_address=" << json_escape(pointer_hex(static_cast<uintptr_t>(grid_context_address))) << "\n"
+                    << "grid_context_source=" << json_escape(grid_context_source) << "\n"
+                    << "background_context_scan_started=" << (background_context_scan_started ? "true" : "false") << "\n"
+                    << "low_setter_hook_enabled=" << (brick_runtime_low_setter_context_hook_enabled() ? "true" : "false") << "\n"
+                    << "visibility_low_setter_hook_installed=" << (g_brick_visibility_low_setter_hook.installed.load() ? "true" : "false") << "\n"
+                    << "collision_low_setter_hook_installed=" << (g_brick_collision_low_setter_hook.installed.load() ? "true" : "false") << "\n"
+                    << "visibility_low_setter_hits=" << g_brick_visibility_low_setter_hits.load() << "\n"
+                    << "collision_low_setter_hits=" << g_brick_collision_low_setter_hits.load() << "\n"
+                    << "context_capture_hits=" << g_brick_context_capture_hits.load() << "\n"
+                    << "context_capture_rejects=" << g_brick_context_capture_rejects.load() << "\n";
+                append_brick_background_context_scan_status(out);
+                out << "detail=brick grid context pointer is required by Brickadia physical-state setters\n";
+                return out.str();
+            }
             if (!is_executable_memory(set_collision_address))
             {
                 out << "ok=false\n"
@@ -3219,12 +4689,13 @@ namespace
                 return out.str();
             }
         }
-        else if (
+        else if (collision_requested &&
             env_flag_enabled("BMF_BRICK_COLLISION_DIRECT_WRITE_ENABLED") &&
             !env_flag_enabled("BMF_BRICK_COLLISION_DIRECT_WRITE_DISABLED"))
         {
             collision_attempted = true;
             collision_skipped = false;
+            collision_skip_reason.clear();
             collision_method = "direct-byte-write";
             collision_succeeded = write_u8_at(
                 brick_address + kBrickCollisionChannelsOffset,
@@ -3247,17 +4718,46 @@ namespace
             << "code=OK\n"
             << "owner_address=" << json_escape(pointer_hex(static_cast<uintptr_t>(owner_address))) << "\n"
             << "grid_context_address=" << json_escape(pointer_hex(static_cast<uintptr_t>(grid_context_address))) << "\n"
+            << "grid_context_source=" << json_escape(grid_context_source) << "\n"
+            << "grid_context_available=" << (grid_context_available ? "true" : "false") << "\n"
+            << "context_hook_enabled=" << (brick_runtime_context_hooks_enabled() ? "true" : "false") << "\n"
+            << "context_hook_install_attempted=" << (context_hook_install_attempted ? "true" : "false") << "\n"
+            << "context_hook_install_ok=" << (context_hook_install_ok ? "true" : "false") << "\n"
+            << "context_hooks_installed=" << (g_brick_runtime_context_hooks_installed.load() ? "true" : "false") << "\n"
+            << "cached_grid_context_address=" << json_escape(pointer_hex(cached_grid_context)) << "\n"
+            << "context_capture_hits=" << g_brick_context_capture_hits.load() << "\n"
+            << "context_capture_rejects=" << g_brick_context_capture_rejects.load() << "\n"
+            << "place_action_apply_hits=" << g_brick_place_action_apply_hits.load() << "\n"
+            << "visibility_action_apply_hits=" << g_brick_visibility_action_apply_hits.load() << "\n"
+            << "collision_action_apply_hits=" << g_brick_collision_action_apply_hits.load() << "\n"
+            << "low_setter_hook_enabled=" << (brick_runtime_low_setter_context_hook_enabled() ? "true" : "false") << "\n"
+            << "visibility_low_setter_hook_installed=" << (g_brick_visibility_low_setter_hook.installed.load() ? "true" : "false") << "\n"
+            << "collision_low_setter_hook_installed=" << (g_brick_collision_low_setter_hook.installed.load() ? "true" : "false") << "\n"
+            << "visibility_low_setter_hits=" << g_brick_visibility_low_setter_hits.load() << "\n"
+            << "collision_low_setter_hits=" << g_brick_collision_low_setter_hits.load() << "\n";
+        append_brick_background_context_scan_status(out);
+        out << "brick_cell_index=" << brick_cell_index << "\n"
+            << "brick_sub_index=" << brick_sub_index << "\n"
             << "before_visible=" << static_cast<unsigned int>(before_visible) << "\n"
             << "before_collision_channels=" << static_cast<unsigned int>(before_collision_channels) << "\n"
+            << "target_visible=" << static_cast<unsigned int>(target_visible) << "\n"
+            << "target_collision_channels=" << static_cast<unsigned int>(next_collision_channels) << "\n"
             << "after_visible=" << static_cast<unsigned int>(after_visible) << "\n"
             << "after_collision_channels=" << static_cast<unsigned int>(after_collision_channels) << "\n"
-            << "visibility_set_succeeded=" << (visibility_call_succeeded ? "true" : "false") << "\n"
+            << "visibility_set_requested=" << (visibility_requested ? "true" : "false") << "\n"
+            << "visibility_set_attempted=" << (visibility_attempted ? "true" : "false") << "\n"
+            << "visibility_set_succeeded=" << (visibility_succeeded ? "true" : "false") << "\n"
+            << "visibility_set_skipped=" << (visibility_skipped ? "true" : "false") << "\n"
+            << "visibility_set_skip_reason=" << json_escape(visibility_skip_reason) << "\n"
+            << "visibility_set_method=" << visibility_method << "\n"
             << "visibility_exception_after_apply=" << (visibility_exception_after_apply ? "true" : "false") << "\n"
+            << "visible_source=" << visible_source << "\n"
+            << "collision_set_requested=" << (collision_requested ? "true" : "false") << "\n"
             << "collision_set_attempted=" << (collision_attempted ? "true" : "false") << "\n"
             << "collision_set_succeeded=" << (collision_succeeded ? "true" : "false") << "\n"
             << "collision_set_skipped=" << (collision_skipped ? "true" : "false") << "\n"
             << "collision_set_method=" << collision_method << "\n"
-            << "collision_set_skip_reason=" << (collision_skipped ? "no safe collision setter flag is enabled" : "") << "\n"
+            << "collision_set_skip_reason=" << json_escape(collision_skip_reason) << "\n"
             << "collision_channels_source=" << collision_source << "\n"
             << "original_visible=" << static_cast<unsigned int>(original.visible) << "\n"
             << "original_collision_channels=" << static_cast<unsigned int>(original.collision_channels) << "\n";
@@ -4525,21 +6025,33 @@ namespace
             brick_id = 0;
         }
 
-        bool visible = false;
+        int64_t visible = -1;
         if (lua_isboolean(state, 2))
         {
-            visible = lua_toboolean(state, 2) != 0;
+            visible = lua_toboolean(state, 2) != 0 ? 1 : 0;
         }
         else if (lua_isnumber(state, 2))
         {
-            visible = lua_tointeger(state, 2) != 0;
+            const int64_t raw_visible = static_cast<int64_t>(lua_tointeger(state, 2));
+            visible = raw_visible < -1 ? -2 : raw_visible < 0 ? -1 : raw_visible != 0 ? 1 : 0;
         }
         else if (lua_isstring(state, 2))
         {
             size_t length = 0;
             const char* raw = lua_tolstring(state, 2, &length);
             const std::string value = ascii_lower(trim_ascii(raw ? std::string_view(raw, length) : std::string_view()));
-            visible = value == "1" || value == "true" || value == "yes" || value == "on" || value == "visible";
+            if (value == "restore" || value == "captured")
+            {
+                visible = -2;
+            }
+            else if (value == "unchanged" || value == "skip" || value == "same" || value == "")
+            {
+                visible = -1;
+            }
+            else
+            {
+                visible = value == "1" || value == "true" || value == "yes" || value == "on" || value == "visible" ? 1 : 0;
+            }
         }
 
         int64_t collision_channels = -1;
@@ -4547,15 +6059,59 @@ namespace
         {
             collision_channels = static_cast<int64_t>(lua_tointeger(state, 3));
         }
+        else if (lua_isstring(state, 3))
+        {
+            size_t length = 0;
+            const char* raw = lua_tolstring(state, 3, &length);
+            const std::string value = ascii_lower(trim_ascii(raw ? std::string_view(raw, length) : std::string_view()));
+            if (value == "unchanged" || value == "skip" || value == "same")
+            {
+                collision_channels = -2;
+            }
+            else if (value == "restore" || value == "captured" || value == "")
+            {
+                collision_channels = -1;
+            }
+            else
+            {
+                collision_channels = std::strtoll(value.c_str(), nullptr, 10);
+            }
+        }
+        if (collision_channels < -2)
+        {
+            collision_channels = -2;
+        }
         if (collision_channels > 255)
         {
             collision_channels = 255;
         }
 
+        uintptr_t explicit_grid_context = 0;
+        if (lua_isnumber(state, 4))
+        {
+            const lua_Integer raw_context = lua_tointeger(state, 4);
+            if (raw_context > 0)
+            {
+                explicit_grid_context = static_cast<uintptr_t>(raw_context);
+            }
+        }
+        else if (lua_isstring(state, 4))
+        {
+            size_t length = 0;
+            const char* raw = lua_tolstring(state, 4, &length);
+            const std::string value = trim_ascii(raw ? std::string_view(raw, length) : std::string_view());
+            if (!value.empty())
+            {
+                explicit_grid_context = static_cast<uintptr_t>(
+                    std::strtoull(value.c_str(), nullptr, 0));
+            }
+        }
+
         lua.set_string(brick_physical_set_text(
             static_cast<uint32_t>(brick_id),
             visible,
-            collision_channels));
+            collision_channels,
+            explicit_grid_context));
         return 1;
     }
 
@@ -4709,6 +6265,10 @@ namespace
             lua.register_function("BMFSocketTreeCutProbeStart", lua_socket_treecut_probe_start);
             lua.register_function("BMFSocketTreeCutProbeStop", lua_socket_treecut_probe_stop);
             lua.register_function("BMFSocketTreeCutProbeStatus", lua_socket_treecut_probe_status);
+            if (brick_runtime_context_hooks_enabled())
+            {
+                brick_runtime_context_hook_install();
+            }
         }
     };
 } // namespace

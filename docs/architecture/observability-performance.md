@@ -175,6 +175,20 @@ Use these rules:
 Do not rely only on average frame time. The local telemetry investigation showed
 that max frame time can remain high even after command volume improves.
 
+Runtime brick state mutation is an experimental native control path, not a
+polling path. `BMF.bricks.setRuntimeState` must stay behind
+`BMF_BRICK_RUNTIME_SET_ENABLED=1`, target one explicit runtime brick id, and be
+tested after restart on a known canary brick before gameplay use. The validated
+path uses Brickadia's visibility/collision setters with a plausible sparse-grid
+context. Context discovery must prefer cached or hook-captured context; if a
+cold-start scan is needed, it must run through
+`BMF_BRICK_CONTEXT_BACKGROUND_SCAN_ENABLED=1` off the game thread. Do not enable
+synchronous process-wide context scans for gameplay. Callers should treat
+`BRICK_GRID_CONTEXT_SCAN_PENDING` as a bounded retry signal and avoid continuous
+polling. Direct byte-write gates are diagnostic-only. Include `L6 Frame Time`
+evidence before broader gameplay systems such as CityRPG tree chopping promote
+the path.
+
 ## L6 Frame Time Validation
 
 `L6 Frame Time` is the status-stage gate for performance-sensitive features.

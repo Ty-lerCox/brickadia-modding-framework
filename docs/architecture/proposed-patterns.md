@@ -246,6 +246,50 @@ Review questions:
 - When should saved `brickIndex` be rejected as a runtime id candidate?
 - Is a future tag-only resolver worth the game-thread scan risk?
 
+## 8. Hooked Brickadia Events Into Lua
+
+BMF gets gameplay events into Lua through a small number of hook ingress paths.
+The key architectural rule is that hooks should capture the minimum Brickadia
+state needed, then hand a normalized event to BMF Lua. Lua owns policy,
+capability checks, event naming, plugin dispatch, and audit output.
+
+```mermaid
+sequenceDiagram
+    participant Server as Brickadia runtime
+    participant LuaHook as UE4SS Lua hook/callback
+    participant NativeHook as Native C++ hook/detour
+    participant Queue as Safe handoff queue
+    participant BMF as BMF Lua runtime
+    participant Bus as BMF.events
+    participant Plugin as Lua plugin handler
+    participant Audit as JSONL/socket/audit output
+
+    alt UE4SS Lua hook path
+        Server->>LuaHook: Invoke registered Lua callback
+        LuaHook->>BMF: Pass raw hook payload
+    else native hook path
+        Server->>NativeHook: Hit native detour or function hook
+        NativeHook->>NativeHook: Capture minimal fields only
+        NativeHook->>Queue: Enqueue event payload for Lua/game-thread drain
+        Queue->>BMF: Drain payload through BMF Lua bridge
+    end
+
+    BMF->>BMF: Normalize payload and assign event name
+    BMF->>BMF: Apply feature gates, rate limits, and safety checks
+    BMF->>Bus: BMF.events.emit(name, normalizedPayload)
+    Bus->>Plugin: Invoke plugin-owned handlers
+    Bus->>Audit: Append event record and optional socket envelope
+    Bus-->>BMF: Return handler count and errors
+```
+
+Review questions:
+
+- Which hook paths are safe to call Lua directly, and which must queue first?
+- What is the minimal payload each hook should capture before returning?
+- Which layer owns policy decisions: the hook, BMF normalization, or plugins?
+- How are duplicate native callbacks coalesced before they become gameplay
+  events?
+
 ## Consolidation Rule
 
 Detailed API pages should document exact parameters, flags, and validation

@@ -12,7 +12,15 @@ supervisor and UE4SS bridge environment that BMF canaries and some live-player
 APIs depend on.
 
 For high-level sequence diagrams of the Omegga/BMF split, see
-[Proposed Patterns](proposed-patterns.md).
+[Architecture Patterns](architecture-patterns.md).
+
+## Who Should Read This?
+
+Server operators should use this page to understand why the supported Omegga
+fork is part of the runtime contract. Plugin authors and Omegga integrators
+should use it to understand transport, player sync, and helper ownership.
+BMF maintainers should use it when deciding whether a capability belongs in BMF
+or the fork.
 
 ## Current Contract
 

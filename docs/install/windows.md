@@ -1,9 +1,15 @@
 # Windows Install
 
-Status: experimental.
+**Labels:** `experimental`, `windows`, `installer`
 
 BMF is installed into the UE4SS working directory for a Windows Brickadia
 dedicated server.
+
+## Who Should Read This?
+
+Server operators should use this page to install or verify BMF on Windows.
+BMF maintainers should use it when checking release-package and rollback
+behavior.
 
 ## Prerequisites
 
@@ -15,13 +21,9 @@ dedicated server.
 - BMF release package.
 - File-system access to the server `Binaries\Win64` directory.
 
-Do not assume an arbitrary upstream Omegga install is enough. The supported
-target is the fork above, including its BMF Windows/UE4SS compatibility work,
-command bridge, helper globals, and adapters used by the current canaries.
-Stock upstream Omegga and `npm i -g omegga` are Linux/WSL-oriented paths, not
-the supported Windows runtime for BMF. The fork intentionally trails the latest
-upstream builds; do not replace it with a newer upstream release until BMF has
-validated that release.
+Do not assume an arbitrary upstream Omegga install is enough. See the
+[Supported Runtime Matrix](../reference/supported-runtime.md) for the current
+fork contract.
 
 ## Release Package
 

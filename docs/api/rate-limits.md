@@ -1,5 +1,11 @@
 # Rate Limits API
 
+**Labels:** `stable`, `L2 Headless`, `L5 Negative`
+
+## Who Should Read This?
+
+Plugin authors should use this page before adding spam-prone or dangerous commands. Maintainers should use it when changing default protected actions.
+
 BMF includes lightweight per-subject rate limits for dangerous or spam-prone
 actions.
 
@@ -19,7 +25,7 @@ are counted separately under `framework`.
 
 ## Examples
 
-- [RateLimitedCommand](../examples/index.md#ratelimitedcommand): complete
+- [RateLimitedCommand](../examples/rate-limited-command.md): complete
   plugin command guarded by `BMF.rateLimits.check`.
 
 Plugins can use custom limits for their own features:
@@ -56,10 +62,5 @@ Omegga.Bridge.BMF bmf.ratelimits
 
 ## Validation
 
-- `L0 Static`: package validator checks rate-limit API markers, docs, and
-  canary.
-- `L2 Headless + L5 Negative`: `scripts/validate-bmf-rate-limits.ps1` loads a
-  temporary plugin, proves a custom one-per-window limit denies the second call,
-  proves default `chat.whisper` rate limiting denies the 21st plugin call, then
-  verifies `bmf.ratelimits`, `bmf.audit.tail`, `audit.jsonl`, and runtime status
-  evidence.
+Rate-limit proof is tracked in
+[API Validation Evidence](../validation/api-validation.md#framework-utilities).

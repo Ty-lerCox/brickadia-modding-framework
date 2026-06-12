@@ -1,29 +1,28 @@
 # Prefabs API
 
+## Who Should Read This?
+
+Plugin authors should use this page for BRZ-derived staged world bundles. Maintainers should use it when changing prefab staging or load validation.
+
 Prefab support is currently a tooling lane that feeds the world API. The goal is
 to turn `.brz` prefab archives into `.brdb` world bundles that a server can load
 with `BR.World.LoadAdditive`, then later wrap that path with Lua helpers such as
 `BMF.prefabs.loadBrz(options)`.
 
+**Labels:** `experimental`, `file-backed`, `L2 Headless`, `L3 pending`
+
 ## Examples
 
-- [LoadCarBrz](../examples/index.md#loadcarbrz): complete plugin that loads a
+- [LoadCarBrz](../examples/load-car-brz.md): complete plugin that loads a
   staged BRZ-derived world bundle and saves the running world.
 
 ## Current Shape
 
-`scripts/stage-brz-prefab.ps1` is the safe staging entry point:
+`scripts/stage-brz-prefab.ps1` is the safe staging entry point. Exact commands
+live in the
+[CLI And Script Reference](../reference/cli-and-script-reference.md#prefab-and-dynamic-actor-staging).
 
-```powershell
-.\scripts\stage-brz-prefab.ps1 `
-  -InputBrz ..\Brickadia\Car.brz `
-  -OutputBrdb .\artifacts\local\Car.world.brdb `
-  -StageToServerWorlds `
-  -WorldName BMF_CarPrefab `
-  -Force
-```
-
-It produces:
+The staging path produces:
 
 - a prefab diagnosis report;
 - a hash report with the inferred Brickadia prefab hash candidate;
@@ -36,10 +35,11 @@ and saved by a disposable headless server.
 
 ## Safe Defaults
 
-The normal path does not patch `Meta/Prefab.json` physics metadata. Local
-evidence for `Car.brz` shows the source prefab has dynamic entity/joint data
-while `bIsPhysicsGrid=false`; forcing that field to true is useful for diagnosis
-but can crash the dedicated server at `TVariant.h:148`.
+!!! warning
+    The normal path does not patch `Meta/Prefab.json` physics metadata. Local
+    evidence for `Car.brz` shows the source prefab has dynamic entity/joint data
+    while `bIsPhysicsGrid=false`; forcing that field to true is useful for
+    diagnosis but can crash the dedicated server at `TVariant.h:148`.
 
 The current safe staging path leaves coordinates unbaked. Placement belongs to
 `BR.World.LoadAdditive`, which is the shape BMF should eventually expose to Lua.
@@ -50,8 +50,8 @@ in graph-closure dynamic-actor slices. Loading the same raw staged BRDB twice
 can coalesce into one graph, and remapping that raw bundle can disconnect the
 second car's dynamic actors from the body grid. For duplicate spawned-car tests,
 use the dynamic-actor slice plus `scripts/remap-staged-vehicle-brdb.js`.
-`scripts/validate-server-vehicle-spawn-set.ps1` is the current headless canary
-for turning that slice into several isolated staged car copies.
+The [CLI And Script Reference](../reference/cli-and-script-reference.md#vehicle-validation)
+lists the current spawn-set canaries.
 
 ## Lua API
 
@@ -104,17 +104,5 @@ only loads the staged world name.
 Both functions return the standard BMF result shape and include the exact
 console command in `result.data.command` when command execution is attempted.
 
-Validation:
-
-- `L2 Headless`: `validate-bmf-prefab-runtime.ps1` stages `Car.brz`, loads it
-  through `BMF.prefabs.loadBrz`, saves the world, and parses the saved BRDB.
-- `L2 Headless`: `validate-bmf-prefab-command.ps1` stages `Car.brz`, invokes
-  `bmf.prefabs.loadbrz` through `Omegga.Bridge.BMF`, saves the loaded map,
-  parses the saved BRDB, and exports `vehicle-inventory.txt` proving one
-  vehicle-like group.
-- `L2 Headless`: `validate-bmf-prefab-brdb-command.ps1` stages the known
-  `threecars.brdb` fixture, invokes `bmf.prefabs.loadbrdb` through
-  `Omegga.Bridge.BMF`, saves the loaded map, parses the saved BRDB, and exports
-  `vehicle-inventory.txt` proving three vehicle-like groups.
-- `L3 Live Player`: still required before claiming the staged dynamic vehicle is
-  visually correct or drivable.
+Validation proof is tracked in
+[API Validation Evidence](../validation/api-validation.md#archives-vehicles-and-prefabs).

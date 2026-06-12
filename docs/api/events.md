@@ -1,13 +1,19 @@
 # Events API
 
+**Labels:** `stable`, `event-bus`, `L2 Headless`
+
+## Who Should Read This?
+
+Plugin authors should use this page for in-process BMF events. Omegga integrators should use it to understand the socket and JSONL relay contract.
+
 BMF exposes a small event bus for plugins:
 
 For the high-level in-process and Omegga socket event flows, see
-[Proposed Patterns](../architecture/proposed-patterns.md).
+[Architecture Patterns](../architecture/architecture-patterns.md).
 
 ## Examples
 
-- [EventAudit](../examples/index.md#eventaudit): complete plugin that
+- [EventAudit](../examples/event-audit.md): complete plugin that
   subscribes to `serverReady` and records an audit event.
 
 ```lua
@@ -88,12 +94,5 @@ in about 51ms.
 
 ## Validation
 
-- `L0 Static`: package validator checks event API markers, docs, and canary.
-- `L2 Headless`: `scripts/validate-bmf-events.ps1` loads a temporary plugin,
-  proves `serverReady` and `pluginLoaded`, emits a custom event with
-  registration/removal, verifies emitted records in `runtime/events.jsonl`,
-  saves the world through BMF, proves `worldSaved`, then reloads plugins to
-  prove plugin-owned handlers do not duplicate.
-  The validator stages an `EventCanary` plugin into the UE4SS BMF runtime and
-  refuses to mutate the shared Omegga runtime while another Brickadia server is
-  active unless `-AllowSharedRuntimeMutation` is explicitly supplied.
+Event-bus proof is tracked in
+[API Validation Evidence](../validation/api-validation.md#framework-utilities).

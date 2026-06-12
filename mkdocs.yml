@@ -44,9 +44,34 @@ nav:
       - First Plugin: getting-started/first-plugin.md
       - Windows Install: install/windows.md
   - Examples:
-      - Lua Examples: examples/index.md
+      - Catalog: examples/index.md
+      - HelloBroadcast: examples/hello-broadcast.md
+      - TimedBroadcast: examples/timed-broadcast.md
+      - Plugin Command: examples/plugin-command.md
+      - Plugin Storage: examples/plugin-storage.md
+      - WelcomeMessage: examples/welcome-message.md
+      - LoadThreeCars: examples/load-three-cars.md
+      - LoadCarBrz: examples/load-car-brz.md
+      - SpawnVehicleSet: examples/spawn-vehicle-set.md
+      - ListMinigames: examples/list-minigames.md
+      - AssignRole: examples/assign-role.md
+      - Placement Guards: examples/placement-guards.md
+      - InspectApiLabels: examples/inspect-api-labels.md
+      - PlayerSummary: examples/player-summary.md
+      - HealthCheck: examples/health-check.md
+      - EventAudit: examples/event-audit.md
+      - RateLimitedCommand: examples/rate-limited-command.md
+  - Guides:
+      - Common Workflows: guides/common-workflows.md
+  - Reference:
+      - Glossary: reference/glossary.md
+      - Supported Runtime Matrix: reference/supported-runtime.md
+      - Dangerous Surfaces: reference/dangerous-surfaces.md
+      - Current Safe Defaults: reference/current-safe-defaults.md
+      - CLI And Script Reference: reference/cli-and-script-reference.md
+      - Runtime Files: reference/runtime-files.md
   - Architecture:
-      - Proposed Patterns: architecture/proposed-patterns.md
+      - Architecture Patterns: architecture/architecture-patterns.md
       - Omegga-Supported Runtime: architecture/omegga-supported-runtime.md
       - Observability and Performance: architecture/observability-performance.md
       - Standalone Runtime: architecture/standalone-runtime.md
@@ -55,14 +80,43 @@ nav:
       - API Registry: api/apis.md
       - Chat: api/chat.md
       - Commands: api/commands.md
-      - Plugins: api/plugins.md
-      - Players: api/players.md
-      - Permissions: api/permissions.md
-      - Server: api/server.md
+      - Runtime Brick State: api/runtime-bricks.md
+      - Plugins:
+          - Overview: api/plugins.md
+          - Lifecycle: api/plugins/lifecycle.md
+          - Capabilities: api/plugins/capabilities.md
+          - Sandbox: api/plugins/sandbox.md
+          - Storage: api/plugins/storage.md
+          - Watchdog: api/plugins/watchdog.md
+      - Players:
+          - Overview: api/players.md
+          - Identity Sources: api/players/identity-sources.md
+          - Normalize And Lookup: api/players/normalize-and-lookup.md
+          - Summaries And Messaging: api/players/summaries-and-messaging.md
+          - Fixtures And Validation: api/players/fixtures-and-validation.md
+      - Permissions:
+          - Overview: api/permissions.md
+          - Role Files: api/permissions/role-files.md
+          - Tool Guards: api/permissions/tool-guards.md
+          - Applicator Policy: api/permissions/applicator-policy.md
+          - Interactable Tags: api/permissions/interactable-tags.md
+          - Brick Assets: api/permissions/brick-assets.md
+          - Command Access: api/permissions/command-access.md
+      - Server:
+          - Overview: api/server.md
+          - Status And Save: api/server/status-and-save.md
+          - Shutdown: api/server/shutdown.md
+          - Restricted Exec: api/server/restricted-exec.md
+          - Settings Patching: api/server/settings-patching.md
       - World: api/world.md
       - Prefabs: api/prefabs.md
       - Vehicles: api/vehicles.md
-      - Minigames: api/minigames.md
+      - Minigames:
+          - Overview: api/minigames.md
+          - Desired Definitions: api/minigames/definitions.md
+          - Events: api/minigames/events.md
+          - Data Snapshot: api/minigames/data.md
+          - Unsafe Commands: api/minigames/unsafe-commands.md
       - Timers: api/timers.md
       - Events: api/events.md
       - Audit: api/audit.md
@@ -70,6 +124,15 @@ nav:
       - Health: api/health.md
       - Rate Limits: api/rate-limits.md
       - Compatibility: api/compatibility.md
-      - Archives: api/archives.md
+      - Archives:
+          - Overview: api/archives.md
+          - Offline Tooling: api/archives/tooling.md
+          - Vehicle Snapshots: api/archives/vehicle-snapshots.md
+          - Prefab Staging: api/archives/prefab-staging.md
+          - Dynamic Actors: api/archives/dynamic-actors.md
   - Validation:
       - Canary Contract: validation/canary-contract.md
+      - API Validation Evidence: validation/api-validation.md
+  - Maintainers:
+      - Documentation Style Guide: maintainers/docs-style-guide.md
+      - Native Hook Notes: maintainers/native-hooks.md

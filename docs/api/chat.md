@@ -1,15 +1,21 @@
 # Chat API
 
-BMF chat APIs are implemented inside BMF, but the supported Windows runtime is
-currently BMF-compatible Omegga plus UE4SS. Omegga supplies the server wrapper,
-command bridge, and helper globals BMF uses to reach live Brickadia
-`PlayerController` objects.
+## Who Should Read This?
+
+Plugin authors should use this page for broadcast, whisper, and status-message behavior. Server operators should read the validation caveats before treating chat delivery as production-ready.
+
+BMF chat APIs are implemented inside BMF. The supported Windows runtime supplies
+the server wrapper, bridge, and helper globals BMF uses to reach live Brickadia
+`PlayerController` objects; see the
+[Supported Runtime Matrix](../reference/supported-runtime.md).
+
+**Labels:** `experimental`, `live-player`, `L3 Live Player`
 
 ## Examples
 
-- [HelloBroadcast](../examples/index.md#hellobroadcast): complete load-time
+- [HelloBroadcast](../examples/hello-broadcast.md): complete load-time
   broadcast plugin.
-- [TimedBroadcast](../examples/index.md#timedbroadcast): delayed broadcast with
+- [TimedBroadcast](../examples/timed-broadcast.md): delayed broadcast with
   `BMF.timers.after`.
 
 ## `BMF.chat.broadcast(message)`
@@ -18,19 +24,13 @@ Broadcasts a message by finding a live player controller and calling
 `ClientPushChatMessage(message)`. This is the preferred live-player route for
 CL13530.
 
-Important: this path intentionally avoids `PlayerState` and `PlayerArray`
-property reads. A live test on June 4, 2026 proved those UE4SS property reads
-can crash the server while pushing struct properties into Lua.
+!!! warning
+    This path intentionally avoids `PlayerState` and `PlayerArray` property
+    reads. A live test on June 4, 2026 proved those UE4SS property reads can
+    crash the server while pushing struct properties into Lua.
 
-Status: experimental.
-
-Validation levels:
-
-- `L3 Live Player UI confirmed`: visible delivery confirmed on CL13530 with
-  one joined player.
-- `L2 Headless`: if no live controllers are available, BMF may fall back to
-  legacy console command acceptance. That fallback does not imply visible
-  delivery.
+Current chat delivery proof is tracked in
+[API Validation Evidence](../validation/api-validation.md#chat).
 
 Server-console command route:
 
@@ -84,10 +84,5 @@ Omegga.Bridge.BMF bmf.chat.statusmessage target=<uuid-or-name> message=<text>
 
 ## Validation
 
-- `L3 Live Player`: `ClientPushChatMessage` visible UI delivery is confirmed
-  for broadcast and one-target whisper-style delivery.
-- The validated route avoids live `PlayerState` reflection. Player names and
-  UUIDs should come from Omegga player sync and/or Brickadia saved/log context.
-- Two-player negative targeting still needs a safe identity adapter and a
-  second joined player before we can claim only the intended recipient sees a
-  whisper.
+Chat proof and remaining live-player gaps are tracked in
+[API Validation Evidence](../validation/api-validation.md#chat).

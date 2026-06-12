@@ -1,5 +1,11 @@
 # Audit API
 
+**Labels:** `stable`, `L2 Headless`
+
+## Who Should Read This?
+
+Plugin authors should use this page for structured mutation and security records. Server operators should use it when tracing admin actions and denials.
+
 BMF writes an admin-oriented audit stream under:
 
 ```text
@@ -8,7 +14,7 @@ Mods/BMF/runtime/audit.jsonl
 
 ## Examples
 
-- [EventAudit](../examples/index.md#eventaudit): complete plugin that records
+- [EventAudit](../examples/event-audit.md): complete plugin that records
   structured audit data from an event handler.
 
 Each line is a JSON object with stable fields:
@@ -49,8 +55,5 @@ delivery, and private-message target/delivery failures.
 
 ## Validation
 
-- `L0 Static`: package validator checks audit API markers, docs, and canary.
-- `L2 Headless`: `scripts/validate-bmf-audit-log.ps1` loads a temporary plugin,
-  writes a custom plugin audit record, triggers capability denial, triggers
-  private-message target-not-found behavior, invokes `bmf.audit.tail`, and
-  parses `runtime/audit.jsonl`.
+Audit proof is tracked in
+[API Validation Evidence](../validation/api-validation.md#framework-utilities).

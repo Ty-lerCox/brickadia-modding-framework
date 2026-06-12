@@ -1,11 +1,17 @@
 # World API
 
+**Labels:** `experimental`, `L2 Headless`, `L3 pending`
+
+## Who Should Read This?
+
+Plugin authors should use this page for staged world loads and SaveAs snapshots. Maintainers should use it when changing command-backed world wrappers or canaries.
+
 The first BMF world API wraps Brickadia console commands that have local
 headless evidence on CL13530.
 
 ## Examples
 
-- [LoadThreeCars](../examples/index.md#loadthreecars): complete plugin that
+- [LoadThreeCars](../examples/load-three-cars.md): complete plugin that
   loads a staged world bundle and saves the result.
 
 ## `BMF.world.loadAdditive(options)`
@@ -31,11 +37,8 @@ exact console command in the result data. On the current Windows bridge it uses
 the console-manager executor because that is the proven path for `BR.World.*`
 commands.
 
-Validation:
-
-- `L2 Headless`: `threecars-additive-canary.json` proves command transport,
-  additive load log success, SaveAs output, and parsed dynamic actor groups.
-- `L3 Live Player`: still needed to prove whether loaded vehicles are drivable.
+Validation proof is tracked in
+[API Validation Evidence](../validation/api-validation.md#archives-vehicles-and-prefabs).
 
 ## `BMF.world.saveAs(name)`
 
@@ -52,12 +55,8 @@ worker:
 Omegga.Bridge.BMF bmf.world.saveas name=BMF_AfterThreeCarsAdditive
 ```
 
-Validation:
-
-- `L2 Headless`: `threecars-additive-canary.json` proves SaveAs wrote a BRDB
-  that could be parsed afterward.
-- `L2 Headless`: `validate-bmf-vehicle-spawn-set-command.ps1` proves the
-  command route can save a world after command-driven vehicle loads.
+Save proof is tracked in
+[API Validation Evidence](../validation/api-validation.md#archives-vehicles-and-prefabs).
 
 ## Notes
 

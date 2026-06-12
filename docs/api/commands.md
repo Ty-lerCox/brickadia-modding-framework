@@ -1,23 +1,44 @@
 # Commands API
 
-BMF has a small server-console command registry for headless administration.
-Commands are registered through UE4SS `RegisterConsoleCommandGlobalHandler` when
-that helper is available. The current headless bridge route is:
+BMF exposes a server-console command registry for headless administration,
+canaries, and Omegga bridge calls. Commands are registered through UE4SS
+`RegisterConsoleCommandGlobalHandler` when that helper is available.
 
-For the high-level command, socket, and Omegga bridge flows, see
-[Proposed Patterns](../architecture/proposed-patterns.md).
+For high-level command and socket flow, see
+[Architecture Patterns](../architecture/architecture-patterns.md). For canary coverage,
+see [API Validation Evidence](../validation/api-validation.md#commands).
+
+**Labels:** `experimental`, `L2 Headless`, `L5 Negative`
+
+## Who Should Read This?
+
+Plugin authors should use this page when registering or calling BMF commands.
+Omegga integrators should use it for bridge command routes. Server operators
+should use it for admin and validation commands.
+
+## When To Use
+
+Use command routes for admin actions, validation, and external integrations that
+need a console-shaped result. Use direct Lua APIs inside BMF plugins when the
+caller is already in-process.
+
+## Transport
+
+The current bridge route is:
 
 ```text
 Omegga.Bridge.BMF bmf.status
 ```
 
-That route queues a request under `Mods/BMF/runtime/commands`. The BMF command
-worker dispatches the command and writes a matching `.response.txt` file with
-console-style output.
+The file-backed worker queues requests under `Mods/BMF/runtime/commands`,
+dispatches them in BMF, and writes matching `.response.txt` files.
 
-The command worker is performance-sensitive because command dispatch often
-crosses onto the Brickadia game thread. Current defaults keep the worker
-bounded:
+Latency-sensitive Omegga plugins should prefer the socket bridge when available;
+see the [Supported Runtime Matrix](../reference/supported-runtime.md) for the
+transport contract. The command result shape is the same; socket responses
+include `bmf_command_transport=socket`.
+
+Current bounded worker defaults:
 
 ```text
 BMF_COMMAND_WORKER_POLL_MS=250
@@ -26,245 +47,58 @@ BMF_COMMAND_WORKER_MAX_FILES_PER_POLL=1
 BMF_COMMAND_WORKER_ASYNC=1
 ```
 
-When `LoopAsync` is available, BMF enumerates command files from the async loop
-and schedules only claimed dispatch work onto the game thread. If async polling
-is disabled or unavailable, BMF can fall back to game-thread loops or delayed
-callbacks. Check `bmf_command_worker_info`, `bmf_worker_items_total`, and
-`bmf_worker_poll_duration_milliseconds` in Prometheus/Grafana when command
-traffic changes.
-
-On the BMF-supported Omegga Windows fork, latency-sensitive plugin traffic can
-use the socket bridge instead of the file-backed worker. Omegga starts a
-loopback broker, the optional `BMFSocket` native UE4SS mod connects from inside
-the Brickadia server process, and Omegga plugins send newline-delimited JSON
-command envelopes to the broker. The command result shape is the same; socket
-responses include `bmf_command_transport=socket`. The file-backed command
-worker remains the fallback and the durable repair path.
-
-For high-frequency plugin traffic, prefer the socket bridge or an event-fed
-cache over repeated command-file requests. A socket reduces transport latency,
-but command handlers still need batching, caching, idempotency, and frame-time
-telemetry when they read or mutate Brickadia state.
+For high-frequency traffic, prefer the socket bridge or an event-fed cache over
+repeated command-file requests.
 
 ## Examples
 
-- [Plugin Command](../examples/index.md#plugin-command): complete Lua plugin
+- [Plugin Command](../examples/plugin-command.md): complete Lua plugin
   that registers a server-console command.
-- [RateLimitedCommand](../examples/index.md#ratelimitedcommand): command
+- [RateLimitedCommand](../examples/rate-limited-command.md): command
   handler with `BMF.rateLimits.check`.
 
-## Built-In Commands
+## Built-In Command Reference
 
-- `bmf.status`: prints BMF health, version, loaded plugin count, and runtime
-  artifact paths.
-- `bmf.health`: alias of `bmf.status` for automation that expects an explicit
-  health command.
-- `bmf.version`: prints the BMF runtime version, target Brickadia build,
-  Windows dedicated-server platform, server executable, compatibility status,
-  and build-detection mode.
-- `bmf.plugins`: lists loaded BMF plugins and plugin error count.
-- `bmf.commands`: lists registered BMF console commands.
-- `bmf.socket.status`: prints socket transport configuration, counters,
-  native status, and last error. This is the primary health check for
-  socket-first Omegga plugin integrations.
-- `bmf.load`: loads BMF plugins from disk without restarting the server.
-- `bmf.unload`: unloads currently loaded BMF plugins, removing plugin-owned
-  commands and event handlers.
-- `bmf.reload`: reloads BMF plugins from disk.
-- `bmf.server.status`: prints structured BMF server/runtime status as
-  key/value lines.
-- `bmf.server.save name=<world>`: saves the current running world through
-  `BMF.server.save`.
-- `bmf.server.shutdown confirm=BMF_SHUTDOWN [delayms=<ms>] [reason=<text>]`:
-  attempts a guarded graceful server exit. Without the exact confirmation token
-  it returns `CONFIRMATION_REQUIRED`; on CL13530 the confirmed path currently
-  returns `SHUTDOWN_UNAVAILABLE` with `executor_code=CONSOLE_EXEC_FAILED`.
-- `bmf.chat.broadcast message=<text>`: broadcasts a server chat message through
-  `BMF.chat.broadcast`. Live validation proves visible delivery through
-  `ClientPushChatMessage`; headless validation proves command acceptance only.
-- `bmf.chat.whisper target=<uuid-or-name> message=<text>`: sends a private
-  message through `BMF.chat.whisper`. With one live controller this is
-  live-confirmed; exact UUID/name targeting depends on safe identity records
-  from Omegga player sync or Brickadia saved/log context.
-- `bmf.players.list`: prints the current BMF player adapter count. On a
-  no-player headless server this should safely report `players_count=0`.
-- `bmf.players.sync players=<json>`: syncs safe external/Omegga player identity
-  records into `runtime/players.json`.
-- `bmf.interact.console message=<percent-encoded-tag> player=<uuid>
-  name=<percent-encoded-name>`: forwards an Omegga Interactable
-  Print-to-Console event into the BMF `interactConsole` event bus. This is the
-  audit/feedback event path used by `examples/InteractConsolePrefixGuard`; the
-  live save-time blocker is the experimental native `ServerModifyComponent`
-  hook driven by that plugin's control file.
-- `bmf.players.summary target=<uuid-or-name> [whisper=true]`: resolves one
-  cached player, prints username/display/id plus known-player and live-controller
-  counts, and optionally whispers that summary to the target.
-- `bmf.permissions.enforce-nospawnitem [path=<RoleSetup2.json>]`: patches
-  `RoleSetup2.json` so the applicator permissions stay allowed while
-  `BR.Permission.SpawnItems` is forbidden on the default role and named roles
-  cannot explicitly allow it. If `path` is omitted, BMF uses
-  `brickadiaSavedDir` from config. Changed files require a server restart for
-  reliable live enforcement.
-- `bmf.tools.applicator.status [refresh=true]`: prints the applicator policy
-  handler state, unsafe Lua hook opt-in state, registered handler count, recent
-  event counters, denied component cache, trace path, and last error.
-- `bmf.tools.applicator.refresh`: refreshes the denied applicator component
-  type cache used by applicator policy experiments.
-- `bmf.brickassetguard.status`: prints `BrickAssetPlacementGuard` policy
-  status, including denied brick assets, bypass roles, and current enforcement
-  level.
-- `bmf.brickassetguard.check asset=<brick-asset> roles=<role>`: evaluates one
-  brick asset against the configured placement policy. This is policy-only until
-  a live placement/paste hook calls the evaluator before world mutation.
-### Runtime Brick State Commands
-
-These commands are experimental native controls for one live runtime brick id.
-They are useful for canaries and CityRPG tagged-tree validation, but they are
-not a general tag resolver and they must stay behind explicit feature gates.
-
-- `bmf.bricks.runtime.inspect brickid=<id> [tag=<treeid:...>]`: queues a
-  game-thread inspection and reports visible/collision bytes plus native
-  runtime state. Runtime lookup is disabled unless
-  `BMF_BRICK_RUNTIME_LOOKUP_ENABLED=1` is set. Set
-  `BMF_BRICK_RUNTIME_DIAGNOSTICS_ENABLED=1` when owner or sparse-grid pointer
-  diagnostics are needed; those fields chase volatile native pointers and are
-  not always safe to read.
-- `bmf.bricks.runtime.set brickid=<id> [tag=<treeid:...>]
-  confirm=brick-runtime [visible=true|false|restore|unchanged]
-  [collision=<0-255>|restore|unchanged]`: queues a visibility/collision
-  mutation for the explicit candidate id.
-- `bmf.bricks.runtime.status`: prints the last queued runtime brick-state
-  result. Use `sequence`, `brick_id`, and optional `tag` to correlate status
-  output with a queued inspect/set command.
-
-Required gates:
-
-```text
-BMF_BRICK_RUNTIME_SET_ENABLED=1
-BMF_BRICK_RUNTIME_LOOKUP_ENABLED=1     only with a verified live runtime id
-BMF_BRICK_VISIBILITY_SET_ENABLED=1      required for visible=...
-BMF_BRICK_COLLISION_SET_ENABLED=1       required for collision=...
-BMF_BRICK_CONTEXT_BACKGROUND_SCAN_ENABLED=1  optional cold-start resolver
-```
-
-Rules for callers:
-
-- Always pass a live runtime `brickid` candidate. `tag=<treeid:...>` is only
-  echoed for `ConsoleTag` correlation.
-- Do not send tag-only mutations. They return `BRICK_RUNTIME_TAG_ID_REQUIRED`.
-- Do not assume saved BRS `brickIndex` or `brickId` values are live runtime ids
-  unless a runtime probe has confirmed them in the active server process.
-- Keep `BMF_BRICK_RUNTIME_LOOKUP_ENABLED=0` for saved indices; enabling lookup
-  for an unverified id can crash the dedicated server before BMF can return a
-  status response.
-- Wait for the matching `sequence` in `bmf.bricks.runtime.status` before
-  retrying a queued mutation.
-- Retry only after a completed `BRICK_GRID_CONTEXT_SCAN_PENDING` result, and
-  keep retries low-frequency.
-- Keep direct byte-write gates off for gameplay. They are diagnostic only.
-
-Native validation rejects candidates whose internal runtime id field is
-unreadable or does not match the requested id (`BRICK_ID_UNAVAILABLE` or
-`BRICK_ID_MISMATCH`). The setter path also needs a plausible sparse-grid
-context. BMF tries cached or hook-captured context first, then bounded fallback
-work, then the optional off-game-thread background resolver.
-- `bmf.minigames.list`: reports `UNSAFE_MINIGAME_COMMAND_DISABLED` by default
-  because Brickadia CL13530 can crash while formatting `Server.Minigames.List`.
-- `bmf.minigames.loadpreset name=<preset> [owner=<name>]`: runs
-  `BMF.minigames.loadPreset`.
-- `bmf.minigames.savepreset index=<n> name=<preset>`: runs
-  `BMF.minigames.savePreset`.
-- `bmf.minigames.nextround index=<n>`: runs `BMF.minigames.nextRound`.
-- `bmf.minigames.reset index=<n>`: runs `BMF.minigames.reset`.
-- `bmf.minigames.delete index=<n>`: runs `BMF.minigames.delete`.
-- `bmf.minigames.definitions.status`: prints BMF-owned desired-definition
-  registry counts and persistence path.
-- `bmf.minigames.definitions.set name=<name> [index=<n>] [teams=A,B]
-  [persistent=true|false] [owneronly=true|false] [includedbrickmode=<mode>]`:
-  upserts a BMF-owned desired minigame definition without mutating Brickadia.
-- `bmf.minigames.definitions.list [name=<name>] [index=<n>]`: lists desired
-  minigame definitions.
-- `bmf.minigames.definitions.get key=<key>|name=<name> [index=<n>]`: returns
-  one desired minigame definition.
-- `bmf.minigames.definitions.delete key=<key>|name=<name> [index=<n>]
-  confirm=DELETE_MINIGAME_DEFINITION`: deletes one desired definition.
-- `bmf.minigames.definitions.reconcile [name=<name>] [index=<n>]`: compares
-  desired definitions with the BMF-owned observed minigame data snapshot and
-  reports `present`, `missing`, and team mismatch counts.
-- `bmf.minigames.events.emit event=<name> ...`: emits one namespaced
-  `minigames.<name>` event into the BMF event bus and event-fed data cache.
-- `bmf.minigames.events.status`: prints event relay counters and last-event
-  metadata.
-- `bmf.minigames.events.recent [event=<name>] [player=<id-or-name>]
-  [minigame=<name>] [limit=<n>]`: prints recent accepted minigame events.
-- `bmf.minigames.events.canary [event=<name>]`: registers a temporary
-  minigame event subscription, emits one event, verifies normalized metadata,
-  and unsubscribes.
-- `bmf.minigames.events.synthetic-flow`: emits a BMF-owned create, join, team,
-  round, leaderboard, kill, leave, and delete flow, verifies reducer
-  checkpoints, and restores the previous minigame data cache by default.
-- `bmf.minigames.data.status`: prints compact BMF-owned minigame cache counts.
-- `bmf.minigames.data.snapshot`: prints the full BMF-owned minigame cache as
-  `snapshot_json=<json>`.
-- `bmf.minigames.data.apply-snapshot payload=<json>|name=<name> [index=<n>]
-  [teams=A,B]`: applies a BMF-owned observed minigame snapshot without emitting
-  a framework event.
-- `bmf.minigames.data.list [key=<key>|name=<name>] [index=<n>]`: lists
-  BMF-owned event-fed minigame records.
-- `bmf.minigames.data.get key=<key>|name=<name> [index=<n>]`: returns one
-  minigame plus known members, teams, team memberships, leaderboard records, and
-  round state.
-- `bmf.minigames.data.players [player=<id-or-name>] [minigame=<name>]`:
-  lists known minigame player contexts.
-- `bmf.minigames.data.teams [team=<id-or-name>] [minigame=<name>]`: lists
-  known minigame teams.
-- `bmf.minigames.data.leaderboard [player=<id-or-name>] [minigame=<name>]`:
-  lists known event-fed leaderboard rows with derived rank/score and raw
-  leaderboard JSON values.
-- `bmf.minigames.data.player player=<id-or-name>`: returns one player's known
-  minigame membership, team, leaderboard, and minigame context.
-- `bmf.minigames.data.playerstate player=<id-or-name>`: resolves whether one
-  known player is currently in a minigame. `minigame_key` is current
-  membership; `activity_minigame_key` can reflect historical leaderboard
-  context after the player leaves.
-- `bmf.minigames.data.membership player=<id-or-name>`: returns one player's
-  current known minigame membership or `MINIGAME_MEMBERSHIP_NOT_FOUND`.
-- `bmf.minigames.data.clear confirm=CLEAR_MINIGAME_DATA`: clears the in-memory
-  minigame data cache for validation and troubleshooting.
-- `bmf.minigames.objects.snapshot [limit=<n>] [includeProperties=true]`:
-  fail-closed live `BP_Ruleset_C`/`BP_Team_C` object probe. It returns
-  metadata/counts by default when the explicit unsafe object snapshot opt-in is
-  enabled; direct Unreal property reads require `includeProperties=true`.
-- `bmf.world.saveas name=<world>`: saves the current running world as a named
-  `.brdb`.
-- `bmf.prefabs.loadbrz source=<file.brz> name=<staged-world> x=<x> y=<y>
-  z=<z> yaw=<yaw>`: loads a BRZ-derived world that has already been staged into
-  Brickadia `Saved/Worlds` by `scripts/stage-brz-prefab.ps1`.
-- `bmf.prefabs.loadbrdb name=<staged-world> x=<x> y=<y> z=<z> yaw=<yaw>`:
-  loads an already staged `.brdb` world bundle through `BMF.prefabs.loadBrdb`.
-- `bmf.vehicles.spawnset prefix=<world-prefix> count=<n> startX=<x> stepX=<x>
-  y=<y> z=<z> yaw=<yaw>`: loads a pre-staged vehicle spawn set through
-  `BMF.vehicles.spawnSet`.
-- `bmf.vehicles.snapshot name=<world>`: saves the current running world through
-  BMF so external tooling can parse and render vehicle inventory.
+| Area | Command | Purpose | More |
+| --- | --- | --- | --- |
+| Health | `bmf.status` | Prints health, version, loaded plugin count, and runtime paths. | [Health](health.md) |
+| Health | `bmf.health` | Alias of `bmf.status` for automation. | [Health](health.md) |
+| Health | `bmf.version` | Prints runtime version, target build, server executable, and compatibility status. | [Compatibility](compatibility.md) |
+| Framework | `bmf.plugins` | Lists loaded plugins and plugin error count. | [Plugin Lifecycle](plugins/lifecycle.md) |
+| Framework | `bmf.commands` | Lists registered BMF console commands. | This page |
+| Socket | `bmf.socket.status` | Prints socket transport configuration, counters, native status, and last error. | [Omegga runtime](../architecture/omegga-supported-runtime.md) |
+| Plugin lifecycle | `bmf.load` | Loads BMF plugins from disk without restarting the server. | [Plugin Lifecycle](plugins/lifecycle.md) |
+| Plugin lifecycle | `bmf.unload` | Unloads plugins and removes plugin-owned commands and event handlers. | [Plugin Lifecycle](plugins/lifecycle.md) |
+| Plugin lifecycle | `bmf.reload` | Reloads BMF plugins from disk. | [Plugin Lifecycle](plugins/lifecycle.md) |
+| Server | `bmf.server.status` | Prints structured server/runtime status as key/value lines. | [Server](server.md) |
+| Server | `bmf.server.save name=<world>` | Saves the running world through `BMF.server.save`. | [Server](server.md) |
+| Server | `bmf.server.shutdown confirm=BMF_SHUTDOWN [delayms=<ms>] [reason=<text>]` | Attempts a guarded graceful server exit. | [Server](server.md) |
+| Chat | `bmf.chat.broadcast message=<text>` | Broadcasts a server chat message. | [Chat](chat.md) |
+| Chat | `bmf.chat.whisper target=<uuid-or-name> message=<text>` | Sends a private message to a resolved live target. | [Chat](chat.md) |
+| Players | `bmf.players.list` | Prints the current BMF player adapter count. | [Player Identity Sources](players/identity-sources.md) |
+| Players | `bmf.players.sync players=<json>` | Syncs safe external/Omegga player identity records. | [Player Identity Sources](players/identity-sources.md) |
+| Players | `bmf.players.summary target=<uuid-or-name> [whisper=true]` | Resolves one cached player and optionally whispers a summary. | [Summaries And Messaging](players/summaries-and-messaging.md) |
+| Interactable | `bmf.interact.console message=<tag> player=<uuid> name=<name>` | Forwards an Omegga Interactable Print-to-Console event into BMF. | [Interactable tags](permissions/interactable-tags.md) |
+| Permissions | `bmf.permissions.enforce-nospawnitem [path=<RoleSetup2.json>]` | Patches role setup so `BR.Permission.SpawnItems` is forbidden. | [Role files](permissions/role-files.md) |
+| Permissions | `bmf.tools.applicator.status [refresh=true]` | Prints Applicator hook/cache/policy state. | [Applicator policy](permissions/applicator-policy.md) |
+| Permissions | `bmf.tools.applicator.refresh` | Refreshes denied Applicator component type cache. | [Applicator policy](permissions/applicator-policy.md) |
+| Permissions | `bmf.brickassetguard.status` | Prints brick asset guard policy status. | [Brick assets](permissions/brick-assets.md) |
+| Permissions | `bmf.brickassetguard.check asset=<asset> roles=<role>` | Evaluates one brick asset against configured policy. | [Brick assets](permissions/brick-assets.md) |
+| Runtime bricks | `bmf.bricks.runtime.inspect ...` | Inspects one explicit live runtime brick id. | [Runtime Brick State](runtime-bricks.md) |
+| Runtime bricks | `bmf.bricks.runtime.set ...` | Mutates visibility/collision for one explicit live runtime brick id. | [Runtime Brick State](runtime-bricks.md) |
+| Runtime bricks | `bmf.bricks.runtime.status` | Prints the last queued runtime brick result. | [Runtime Brick State](runtime-bricks.md) |
+| Minigames | `bmf.minigames.*` | Desired definitions, events, data cache, and guarded unsafe wrappers. | [Minigames](minigames.md) |
+| World | `bmf.world.saveas name=<world>` | Saves the current running world as a named `.brdb`. | [World](world.md) |
+| Prefabs | `bmf.prefabs.loadbrz source=<file.brz> name=<world> x=<x> y=<y> z=<z> yaw=<yaw>` | Loads a staged BRZ-derived world. | [Prefabs](prefabs.md) |
+| Prefabs | `bmf.prefabs.loadbrdb name=<world> x=<x> y=<y> z=<z> yaw=<yaw>` | Loads an already staged `.brdb` world bundle. | [Prefabs](prefabs.md) |
+| Vehicles | `bmf.vehicles.spawnset prefix=<prefix> count=<n> ...` | Loads a pre-staged vehicle spawn set. | [Vehicles](vehicles.md) |
+| Vehicles | `bmf.vehicles.snapshot name=<world>` | Saves the running world for external vehicle inventory tooling. | [Vehicles](vehicles.md) |
 
 These commands are intended for server console or bridge `console.exec` use, not
-player chat. Chat-command routing still requires player identity and chat
-interception validation.
+player chat. Chat-command routing still requires authenticated player identity
+and chat interception validation.
 
-Role-based command access can be evaluated with
-`BMF.permissions.evaluateCommandAccess(policy, actor, command)`. That helper is
-documented in `docs/api/permissions.md` and is intentionally evaluator-only for
-now; `BMF.commands.dispatch` does not enforce player permissions until a live
-authenticated player command route is proven.
-
-`BMF.commands.dispatchWithAccess(policy, actor, name, args, ar)` is the opt-in
-wrapper for routes that do have actor identity. It evaluates policy first,
-prints/audits `ACCESS_DENIED` when blocked, and delegates to
-`BMF.commands.dispatch` only when allowed. Existing console dispatch behavior is
-unchanged.
-
-## `BMF.commands.register(name, description, handler)`
+## Plugin Command Registration
 
 Plugins can register additional `bmf.*` console commands:
 
@@ -282,22 +116,21 @@ return {
 }
 ```
 
-The handler receives the raw argument text when UE4SS provides it. Return the
+The handler receives raw argument text when UE4SS provides it. Return the
 standard BMF result shape and include optional `data.lines` for console output.
-The BMF command worker writes those lines to the response file and to
-`runtime/bmf.log`.
+The worker writes those lines to the response file and to `runtime/bmf.log`.
 
 When writing request files directly from Windows PowerShell, use a no-BOM
-encoding. Omegga's bridge and the bundled Omegga adapter already write no-BOM
-request files.
+encoding. Omegga's bridge and bundled adapters already write no-BOM request
+files.
 
 Commands registered through a plugin's scoped `BMF` facade are owned by that
 plugin and are automatically removed when the plugin unloads or reloads.
 
-## `BMF.commands.dispatchWithAccess(policy, actor, name, args, ar)`
+## Access-Checked Dispatch
 
-Dispatch a registered command only if the command access policy allows the
-actor:
+`BMF.commands.dispatchWithAccess(policy, actor, name, args, ar)` dispatches a
+registered command only if the command access policy allows the actor:
 
 ```lua
 local handled = BMF.commands.dispatchWithAccess(
@@ -319,52 +152,12 @@ matched_roles=
 ```
 
 The wrapper writes `command.access_granted` and `command.denied` audit records.
-It is intended for future chat/staff command routing once an authenticated
-player actor is available.
+It is intended for future chat/staff command routing once authenticated player
+identity is available. See
+[Command Access Policy](permissions/command-access.md).
 
-## Validation
+## Result Shape
 
-- `L0 Static`: package validator checks command API markers and docs.
-- `L2 Headless`: `scripts/validate-bmf-console-commands.ps1` starts a disposable
-  bridge server and invokes `bmf.status`, `bmf.health`, `bmf.version`,
-  `bmf.plugins`, `bmf.commands`, `bmf.canary`, `bmf.unload`, `bmf.load`, the
-  reloaded `bmf.canary`, and `bmf.reload` through `Omegga.Bridge.BMF`, then
-  verifies the BMF response files.
-- `L2 Headless`: `scripts/validate-bmf-admin-commands.ps1` invokes
-  `bmf.players.list`, `bmf.chat.broadcast`, and the fail-closed
-  `bmf.minigames.list` command through the same command worker.
-- `L2 Headless + L5 Negative`:
-  `scripts/validate-bmf-minigame-commands.ps1` invokes minigame lifecycle
-  command routes, proves they fail closed by default, proves BMF-owned
-  desired-definition set/list/get/delete, and proves invalid preset/index
-  rejection.
-- `L2 Headless`: `scripts/validate-bmf-vehicle-spawn-set-command.ps1` stages
-  vehicle worlds, invokes `bmf.vehicles.spawnset`, invokes `bmf.world.saveas`,
-  then parses the saved world and exports a matched vehicle inventory.
-- `L2 Headless`: `scripts/validate-bmf-vehicle-snapshot-command.ps1` stages and
-  spawns vehicles, invokes `bmf.vehicles.snapshot`, then parses the saved world
-  and exports the matched car inventory.
-- `L2 Headless`: `scripts/validate-bmf-prefab-command.ps1` stages `Car.brz`,
-  invokes `bmf.prefabs.loadbrz`, invokes `bmf.world.saveas`, then parses the
-  saved world and exports a one-car inventory text report.
-- `L2 Headless`: `scripts/validate-bmf-prefab-brdb-command.ps1` stages the
-  known `threecars.brdb` fixture, invokes `bmf.prefabs.loadbrdb`, invokes
-  `bmf.world.saveas`, then parses the saved world and exports a three-car
-  inventory text report.
-- `L2 Headless + L5 Negative`:
-  `scripts/validate-bmf-server-shutdown.ps1` proves
-  `bmf.server.shutdown` refuses to run without `confirm=BMF_SHUTDOWN`, then
-  proves the confirmed CL13530 console-manager exit path fails safely with
-  `SHUTDOWN_UNAVAILABLE` and an audit record.
-- `L2 Headless`: `scripts/validate-bmf-plugin-command-cleanup.ps1` proves a
-  plugin command works before reload and returns `UNKNOWN_COMMAND` after the
-  plugin directory is removed and BMF reloads.
-- `L2 Headless + L5 Negative`:
-  `scripts/validate-bmf-command-access-policy.ps1` proves role/default/console
-  command access decisions from file-shaped assignment data.
-- `L2 Headless + L5 Negative`:
-  `scripts/validate-bmf-command-dispatch-access.ps1` proves opt-in
-  access-checked dispatch, denial output, console allow, invalid command
-  rejection, and grant/deny audit records.
-- `L3 Live Player`: required before mapping these commands into chat commands
-  or player-authenticated staff commands.
+Command handlers should return a standard BMF result table. Console output comes
+from `data.lines`; automation should rely on machine-readable key/value fields
+where available.

@@ -3,77 +3,70 @@
 BMF is a server-side Lua modding framework for Brickadia, built on UE4SS.
 
 Goal: make modded servers easier to build without every modder needing to
-reverse-engineer the game. Long term, BMF should extend Brickadia's existing
-mod support with more powerful server-side APIs.
+reverse-engineer the game.
 
-## Runtime Direction
+## Who Should Read This?
 
-BMF currently supports the BMF-supported Omegga Windows fork:
-<https://github.com/Ty-lerCox/bmf-omegga-fork>. In practice that means this
-fork is part of the supported Windows server stack for launch, UE4SS
-compatibility setup, command transport, player identity sync, live helper calls,
-logs, and unattended validation. Stock upstream Omegga and the global npm
-package are not the supported Windows runtime for BMF. The fork intentionally
-trails the latest upstream Omegga builds because BMF validates against that
-fork's Windows/UE4SS bridge surfaces.
+Server operators should use this page to understand what is safe to rely on
+today. Plugin authors should use it to avoid depending on unvalidated behavior.
+BMF maintainers should use it as the public capability dashboard.
 
-## Status Legend
+## Executive Summary
 
-| Status | Meaning |
+| Area | Current state |
 | --- | --- |
-| Planned | Designed but not implemented. |
-| Coded, needs validation | Implemented but not proven in a running server. |
-| Live tested, experimental | Validated in a live/headless test, but still subject to change. |
-| Production ready | Stable API and validation coverage. |
+| Supported runtime | Windows Brickadia dedicated server through the BMF-supported Omegga fork. |
+| Stability | Experimental framework bring-up; no production-ready API claim yet. |
+| Best-supported plugin path | Lua plugins, capability gates, storage, events, timers, audit/logging, and command registration. |
+| Best-supported integration path | Omegga bridge plus BMFSocket when available, with file-backed command/event fallback. |
+| Highest-risk lane | Native hooks, runtime brick mutation, unsafe console/object probes, and live-player identity paths. |
+| Required performance gate | `L6 Frame Time` for polling, native mutation, bursty events, live scans, or frequent commands. |
+
+See the [Supported Runtime Matrix](reference/supported-runtime.md) for runtime
+ownership and [API Validation Evidence](validation/api-validation.md) for proof
+history.
+
+## Capability Dashboard
+
+| Capability | Status | Validation | Primary docs |
+| --- | --- | --- | --- |
+| Plugin loading, lifecycle, storage | Coded, needs validation | `L2`, `L5` for sandbox/watchdog | [Plugins](api/plugins.md) |
+| Events, audit, logging, timers, rate limits | Coded, needs validation | `L2`, selected `L5` | [Events](api/events.md), [Audit](api/audit.md), [Logging](api/logging.md), [Timers](api/timers.md), [Rate Limits](api/rate-limits.md) |
+| Server-console command registry | Live tested, experimental | `L2`, `L5` | [Commands](api/commands.md) |
+| Broadcast and whisper delivery | Live tested, experimental | `L3` single-player | [Chat](api/chat.md) |
+| Player identity cache | Live tested, experimental | `L2`; targeted live identity still needs `L3+` | [Players](api/players.md) |
+| World save/load helpers | Coded, needs validation | `L2` | [World](api/world.md) |
+| Prefab and vehicle staging/loading | Live tested, experimental | `L2`; drivable/visual proof still needs `L3` | [Prefabs](api/prefabs.md), [Vehicles](api/vehicles.md), [Archives](api/archives.md) |
+| Minigame events and data cache | Live tested, experimental | `L2`, `L5`; gameplay effects need `L3+` | [Minigames](api/minigames.md) |
+| BMF socket bridge | Live tested, experimental | `L2`, CityRPG live integration evidence | [Supported Runtime Matrix](reference/supported-runtime.md) |
+| Observability and frame telemetry | Live tested, experimental | `L6` required for performance-sensitive features | [Observability and Performance](architecture/observability-performance.md) |
+| Role files and command access policy | Coded, needs validation | `L2`, `L5` | [Permissions](api/permissions.md) |
+| Applicator and Interactable live guards | Live tested, experimental | `L3`, selected `L5`; native hook lane | [Applicator Policy](api/permissions/applicator-policy.md), [Interactable Tags](api/permissions/interactable-tags.md) |
+| Brick asset placement policy | Policy-ready | `L2`, `L5`; live hook still pending | [Brick Assets](api/permissions/brick-assets.md) |
+| Runtime brick state API | Live tested, experimental | `L2`; broader gameplay needs `L6` | [Runtime Brick State](api/runtime-bricks.md) |
+
+## Current Blockers
+
+| Blocker | Impact | Owner path |
+| --- | --- | --- |
+| Two-player identity targeting | Whisper and player-bound policy cannot claim isolation yet. | Player identity adapter and `L4 Multiplayer` validation. |
+| Native hook pointer refresh | Applicator/Interactable hooks are per-process and restart-sensitive. | [Native Hook Notes](maintainers/native-hooks.md). |
+| Runtime brick mutation frame-time proof | Tagged tree physical hide/restore cannot be promoted broadly without frame evidence. | [Observability and Performance](architecture/observability-performance.md). |
+| Live placement/paste cancellation | Brick asset policy is not live-enforced before world mutation. | Future cancellable native hook. |
+| Unsafe minigame console/object probes | Some legacy routes can crash the server. | Prefer [Minigame Events](api/minigames/events.md) and [Data Snapshot](api/minigames/data.md). |
 
 ## Validation Stages
 
-Every feature should state the highest validation stage it has passed. Stages
-are cumulative for functional proof, while `L5 Negative` and `L6 Frame Time`
-can be added to the relevant live/headless stage when the feature has failure
-or performance risk.
-
-| Stage | Meaning |
-| --- | --- |
-| `L0 Static` | Package layout, manifests, docs, scripts, fixtures, and static checks pass without starting Brickadia. |
-| `L1 Boot` | Brickadia dedicated server starts with UE4SS and BMF loaded, and `status.json` is written. |
-| `L2 Headless` | A canary passes on a dedicated server without a connected player/controller. |
-| `L3 Live Player` | A canary passes with one connected player and proves player-visible or player-bound behavior. |
-| `L4 Multiplayer` | A canary passes with two or more players, proving targeting, isolation, or multiplayer interactions. |
-| `L5 Negative` | Failure, denial, exploit, or abuse-prevention behavior is tested, not only the happy path. |
-| `L6 Frame Time` | A feature is exercised while native frame telemetry is captured before, during, and after the test. Evidence must include average/max frame time, slow-frame counters, command/worker attribution, and whether disabling the feature returns frame time toward baseline. |
+Validation labels are defined in the [Glossary](reference/glossary.md). Use
+[Canary Contract](validation/canary-contract.md) when adding new evidence.
 
 Run `L6 Frame Time` for any feature that polls, loops over players, sends
 frequent BMF commands, reads live player positions, scans UObjects, mutates
-Brickadia state, or handles bursty minigame traffic. See
-[Observability and Performance](architecture/observability-performance.md) for
-the metric names and acceptance workflow.
+Brickadia state, or handles bursty minigame traffic.
 
-## Current Capabilities
+## Near-Term Documentation Direction
 
-| Status | Capability | Notes |
-| --- | --- | --- |
-| Live tested, experimental | Server broadcast messages | Send chat messages to connected players. Confirmed visible in-game, but still experimental. |
-| Live tested, experimental | Private messages / whispers | `BMF.chat.whisper` can deliver to a live PlayerController with one joined player. Two-player exact targeting still needs safe identity binding validation. |
-| Coded, needs validation | Lua plugin loading | Load server-side Lua plugins through BMF. |
-| Coded, needs validation | Plugin permissions | Plugins can request access to features like chat, storage, world loading, and server commands. |
-| Coded, needs validation | Plugin storage | Plugins can save and read their own config/data files. |
-| Coded, needs validation | Timers | Plugins can run delayed or repeating tasks. |
-| Coded, needs validation | Audit logs | BMF records framework and plugin actions for debugging. |
-| Coded, needs validation | Rate limits | Basic protection against spammy plugin calls. |
-| Coded, needs validation | Server status commands | Basic server/framework status reporting. |
-| Coded, needs validation | World load/save helpers | Early helpers for loading and saving world/prefab data. |
-| Coded, needs validation | Player data API | Safe normalized identity records, summary formatting, and Omegga sync exist. Health, pawn, role effects, and controller identity binding still need validation. |
-| Live tested, experimental | BMF socket bridge | Optional `BMFSocket` native UE4SS mod plus Omegga loopback broker deliver BMF event records and command responses to plugins without multi-second file polling. CityRPG minigame team assignment was live-validated at about 51ms command response time with file-backed commands retained as fallback. |
-| Live tested, experimental | Runtime observability and frame-time validation | The supported Omegga fork exports BMF status, BMF telemetry, command-worker metrics, and optional native `BMFFrameTelemetry` samples through `/metrics` for Grafana Alloy/Grafana Cloud. Performance-sensitive features should add `L6 Frame Time` evidence before promotion. |
-| Live tested, experimental | Runtime brick state API | `BMF.bricks.inspectRuntimeState` and `BMF.bricks.setRuntimeState` can inspect or mutate one explicit runtime brick id through BMFSocket. Optional `tag` metadata helps correlate status output with a saved `ConsoleTag`, but tag-only mutation is rejected. Native validation checks the returned brick's internal runtime id before using Brickadia's visibility/collision setters. A clean-restart canary hid and restored brick `56357`; broader gameplay use still needs conservative gates and frame-time evidence. |
-| Planned | Better permission controls | More detailed control over tools, roles, and restricted actions. |
-| Live tested, experimental | Applicator SpawnItem restriction | `NoSpawnItemApplicator` keeps the file-backed role policy compliant, but live validation proved `BR.Permission.SpawnItems` does not block Applicator `ItemSpawn`. The working path is an experimental native `ServerAddComponent` `UFunction::Func` blocker that denies the `ItemSpawn` component pointer and emits events consumed by BMF/Omegga chat feedback. The direct UE4SS Lua hook remains disabled after a `push_structproperty` crash. |
-| Live tested, experimental | Interactable Print-to-Console prefix policy | `InteractConsolePrefixGuard` lets Owner/Admin use any prefix while everyone else is limited to whitelisted prefixes such as `buyweapon:`. Current enforcement uses an experimental native `ServerModifyComponent` `UFunction::Func` hook to block denied Interactable console tags at save time, with BMF/Omegga player identity and chat feedback where available. Live validation proved Owner allow for `teleport:` and denied-role block feedback for `teleport:deny-sim`. |
-| Policy-ready | Brick asset placement policy | `scripts/list-brick-assets.js` inventories `.brdb`/`.brz` brick assets. `BMF.permissions.evaluateBrickAssetAccess` and `BrickAssetPlacementGuard` can deny assets such as `B_Joint_Wheel_Micro`, `B_Seat`, and `B_1x1_Gate_WheelEngineSlim` for non-admin roles. Live placement/paste blocking still needs a cancellable native hook. |
-| Live tested, experimental | Minigame event/data API | BMF-owned minigame event emission, event-fed data snapshots, and socket-first CityRPG team assignment are validated. Creating/configuring minigames directly from Lua remains future work. |
-| Planned | Avatar/player appearance API | Read or modify player appearance from server-side Lua. |
-| Live tested, experimental | Omegga player sync adapter | Feeds safe Omegga player records into `BMF.players` cache after restart. On the current Windows runtime it uses a Brickadia-log fallback when Omegga's PlayerState matcher leaves the live player list empty. |
-| Planned | BMF-supported Omegga Windows fork package | Make releases/install shape explicit for the supported fork, UE4SS bridge, helper globals, and BMF adapters. |
-| Future research | BMF standalone supervisor | Possible long-term replacement for Omegga launch, logs, command injection, and canary orchestration. |
-| Planned | Stable release package | Drag-and-drop BMF install package for UE4SS-powered Brickadia servers. |
+- Keep API pages focused on contracts, parameters, labels, and examples.
+- Keep validation history in [API Validation Evidence](validation/api-validation.md).
+- Keep native hook implementation notes in [Native Hook Notes](maintainers/native-hooks.md).
+- Keep architecture explanations in [Architecture Patterns](architecture/architecture-patterns.md).

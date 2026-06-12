@@ -1,5 +1,11 @@
 # Logging API
 
+**Labels:** `stable`, `L2 Headless`
+
+## Who Should Read This?
+
+Plugin authors should use this page for text logs and structured JSONL event records. Maintainers should use it when changing log paths or plugin log routing.
+
 BMF writes framework logs and structured event logs under:
 
 ```text
@@ -12,9 +18,9 @@ Mods/BMF/runtime/
 
 ## Examples
 
-- [EventAudit](../examples/index.md#eventaudit): complete plugin that combines
+- [EventAudit](../examples/event-audit.md): complete plugin that combines
   `BMF.logInfo` with `BMF.audit.record`.
-- [HelloBroadcast](../examples/index.md#hellobroadcast): minimal plugin logging
+- [HelloBroadcast](../examples/hello-broadcast.md): minimal plugin logging
   during `onLoad`.
 
 Framework code can use:
@@ -55,7 +61,5 @@ actions, security denials, and mutation history; see `docs/api/audit.md`.
 
 ## Validation
 
-- `L0 Static`: package validator checks logging API markers, docs, and canary.
-- `L2 Headless`: `scripts/validate-bmf-logging.ps1` loads a temporary plugin,
-  invokes a BMF command, then verifies the framework log, plugin log, and
-  JSONL event records without a connected player.
+Logging proof is tracked in
+[API Validation Evidence](../validation/api-validation.md#framework-utilities).

@@ -1,0 +1,46 @@
+name: Documentation checks
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/docs-checks.yml
+      - docs/**
+      - mkdocs.yml
+      - README.md
+      - requirements-docs.txt
+      - scripts/validate-docs-style.py
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/docs-checks.yml
+      - docs/**
+      - mkdocs.yml
+      - README.md
+      - requirements-docs.txt
+      - scripts/validate-docs-style.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install documentation dependencies
+        run: pip install -r requirements-docs.txt
+
+      - name: Validate documentation style
+        run: python scripts/validate-docs-style.py
+
+      - name: Build documentation
+        run: python -m mkdocs build --strict

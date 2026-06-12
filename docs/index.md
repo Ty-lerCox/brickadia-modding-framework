@@ -7,21 +7,23 @@ written without every plugin author reverse-engineering the game.
 Current target: Brickadia EA2 `PC-Shipping-CL13530`.
 
 BMF currently targets the BMF-supported Omegga Windows fork for Windows server
-operation, UE4SS setup, command transport, live helper calls, and validation:
-<https://github.com/Ty-lerCox/bmf-omegga-fork>. Stock upstream Omegga is not
-the supported Windows runtime for BMF.
+operation, UE4SS setup, command transport, live helper calls, and validation.
 
-The current Omegga-supported runtime includes an optional `BMFSocket` native
-UE4SS transport and authenticated loopback broker. Plugins can receive BMF
-events and command responses over sockets, with `runtime/events.jsonl` and the
-file-backed command worker retained as fallback. Live CityRPG validation reduced
-minigame team assignment from a multi-second polling path to about 51ms command
-response time.
+See the [Supported Runtime Matrix](reference/supported-runtime.md) for what the
+fork owns, what BMF can do without it, and which native paths are still
+experimental.
 
-BMF also writes runtime telemetry that the supported Omegga fork exports through
-Prometheus for Grafana Cloud dashboards. The current telemetry stack covers BMF
-runtime health, command/event/plugin timings, command-worker throughput, and
-optional native frame-time samples from `BMFFrameTelemetry`.
+BMF also writes runtime telemetry for health, command/event/plugin timings,
+command-worker throughput, and optional native frame-time samples. See
+[Observability and Performance](architecture/observability-performance.md) for
+the exporter path and metric details.
+
+## Who Should Read This?
+
+Plugin authors should start here before writing Lua against BMF. Server
+operators should use it to find install, status, and validation pages.
+Architects and maintainers should jump from here into the architecture and API
+sections.
 
 ## What BMF Provides
 
@@ -34,9 +36,12 @@ optional native frame-time samples from `BMFFrameTelemetry`.
 ## Start Here
 
 - [First plugin](getting-started/first-plugin.md)
+- [Common workflows](guides/common-workflows.md)
 - [Lua examples](examples/index.md)
 - [Windows install](install/windows.md)
-- [Proposed patterns](architecture/proposed-patterns.md)
+- [Supported runtime matrix](reference/supported-runtime.md)
+- [Glossary](reference/glossary.md)
+- [Architecture patterns](architecture/architecture-patterns.md)
 - [Omegga-supported runtime](architecture/omegga-supported-runtime.md)
 - [Observability and performance](architecture/observability-performance.md)
 - [API overview](api/index.md)

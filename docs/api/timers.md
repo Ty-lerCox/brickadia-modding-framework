@@ -1,10 +1,16 @@
 # Timers API
 
+**Labels:** `stable`, `L2 Headless`
+
+## Who Should Read This?
+
+Plugin authors should use this page for delayed and recurring tasks. Maintainers should use it when changing lifecycle timer behavior.
+
 BMF timers schedule callbacks on the server runtime without requiring a player.
 
 ## Examples
 
-- [TimedBroadcast](../examples/index.md#timedbroadcast): complete plugin that
+- [TimedBroadcast](../examples/timed-broadcast.md): complete plugin that
   schedules a delayed chat broadcast.
 
 ```lua
@@ -44,7 +50,5 @@ Returns the current number of scheduled timer records.
 
 ## Validation
 
-- `L0 Static`: package validator checks timer API markers, docs, and canary.
-- `L2 Headless`: `scripts/validate-bmf-timers.ps1` loads a temporary plugin,
-  verifies `after`, `every`, cancellation, and timer logging without a connected
-  player.
+Timer proof is tracked in
+[API Validation Evidence](../validation/api-validation.md#framework-utilities).

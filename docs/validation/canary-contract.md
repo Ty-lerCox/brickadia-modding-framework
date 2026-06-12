@@ -3,6 +3,12 @@
 Each BMF canary writes a JSON artifact with enough evidence to decide whether a
 feature is complete, blocked, or unsafe to promote.
 
+## Who Should Read This?
+
+BMF maintainers should use this page when adding or reviewing validation
+scripts. Architects should use it to understand what proof is expected before a
+feature is promoted.
+
 Required fields:
 
 - `feature`

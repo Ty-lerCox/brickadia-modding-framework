@@ -1,8 +1,15 @@
-# Proposed Patterns
+# Architecture Patterns
 
-These diagrams are a critique surface for the BMF/Omegga architecture. They are
-intentionally high level: enough to show ownership, message flow, and trust
-boundaries without repeating every API detail.
+These proposed patterns are a critique surface for the BMF/Omegga architecture.
+They are intentionally high level: enough to show ownership, message flow, and
+trust boundaries without repeating every API detail.
+
+## Who Should Read This?
+
+Architects should use this page to challenge ownership and trust boundaries.
+BMF maintainers should use it when deciding where a capability belongs. Plugin
+authors and Omegga integrators should use it to understand which side owns a
+message, command, or hook.
 
 Use this page when reviewing whether a capability should live in BMF, in the
 BMF-supported Omegga fork, in a Lua plugin, or in an external Omegga plugin.

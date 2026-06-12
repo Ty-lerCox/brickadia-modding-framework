@@ -9,6 +9,12 @@ some live player calls.
 Standalone BMF remains possible, but it would mean replacing those Omegga-owned
 responsibilities with BMF-owned runtime surfaces.
 
+## Who Should Read This?
+
+Architects and BMF maintainers should use this page when reviewing a future
+non-Omegga runtime. Server operators should treat it as future direction, not
+current install guidance.
+
 ## Target Shape
 
 BMF has four runtime layers:

@@ -1,8 +1,14 @@
 # Health API
 
+**Labels:** `stable`, `diagnostic`, `L1 Boot`, `L2 Headless`
+
+## Who Should Read This?
+
+Server operators should use this page for health, status, and version checks. Plugin authors should use it when exposing runtime diagnostics.
+
 ## Examples
 
-- [HealthCheck](../examples/index.md#healthcheck): complete plugin that logs
+- [HealthCheck](../examples/health-check.md): complete plugin that logs
   `BMF.health()`, `BMF.version`, and `BMF.compatibility.check()`.
 
 ## `BMF.health()`
@@ -57,11 +63,5 @@ Frame-time health is intentionally not inferred from `bmf.status` alone. Use
 the Omegga `/metrics` exporter plus `BMFFrameTelemetry` for `L6 Frame Time`
 validation; see [Observability and Performance](../architecture/observability-performance.md).
 
-Validation levels:
-
-- `L0 Static`: package contains the API.
-- `L1 Boot`: `status.json` is written.
-- `L2 Headless`: health and version commands can be inspected without a
-  connected player.
-- `L6 Frame Time`: native frame telemetry is readable and tested around the
-  feature path when performance risk is part of the status decision.
+Validation proof is tracked in
+[API Validation Evidence](../validation/api-validation.md#framework-utilities).

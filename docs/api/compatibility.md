@@ -1,12 +1,18 @@
 # Compatibility API
 
+**Labels:** `diagnostic`, `L0 Static`, `L2 Headless`
+
+## Who Should Read This?
+
+Server operators should use this page to confirm the supported Brickadia build and UE4SS helper assumptions. Maintainers should use it when changing build gates.
+
 BMF currently targets Windows dedicated servers for Brickadia EA2
 `PC-Shipping-CL13530` with the patched UE4SS runtime from the Brickadia
 reverse-engineering workspace.
 
 ## Examples
 
-- [HealthCheck](../examples/index.md#healthcheck): complete plugin that logs
+- [HealthCheck](../examples/health-check.md): complete plugin that logs
   compatibility status with runtime health.
 
 ## `BMF.compatibility.check()`
@@ -74,9 +80,5 @@ does not refuse unknown future builds. Unsupported-build handling is currently
 diagnostic/report-only. A later compatibility gate should switch this to
 refuse-by-default once runtime build detection is proven.
 
-Validation:
-
-- `L0 Static`: package contains the API, docs, and canary.
-- `L2 Headless`: `scripts/validate-bmf-compatibility.ps1` checks API labels,
-  command output, status JSON, health output, and helper availability without a
-  connected player.
+Validation proof is tracked in
+[API Validation Evidence](../validation/api-validation.md#framework-utilities).

@@ -4,6 +4,13 @@ BMF exposes performance telemetry through runtime JSON files that the
 BMF-supported Omegga fork exports as Prometheus metrics. Grafana Alloy can then
 scrape Omegga locally and remote-write the data to Grafana Cloud.
 
+## Who Should Read This?
+
+BMF maintainers should use this page before changing polling, hooks, command
+traffic, event volume, or native mutation. Server operators should use it to
+wire metrics and evaluate frame-time risk. Plugin authors should use it when a
+plugin might create frequent server work.
+
 ## Runtime Files
 
 BMF writes the following files under the managed UE4SS runtime:

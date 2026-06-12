@@ -136,6 +136,31 @@ namespace
         return value == "1" || value == "true" || value == "yes" || value == "on";
     }
 
+    uint64_t env_u64(const char* name, uint64_t fallback, uint64_t min_value, uint64_t max_value)
+    {
+        const char* raw = std::getenv(name);
+        if (!raw)
+        {
+            return fallback;
+        }
+
+        const std::string value = trim_ascii(raw);
+        if (value.empty())
+        {
+            return fallback;
+        }
+
+        char* end = nullptr;
+        const unsigned long long parsed = std::strtoull(value.c_str(), &end, 0);
+        if (end == value.c_str() || (end && *end != '\0'))
+        {
+            return fallback;
+        }
+
+        const uint64_t clamped = static_cast<uint64_t>(parsed);
+        return std::min<uint64_t>(max_value, std::max<uint64_t>(min_value, clamped));
+    }
+
     bool contains_ascii_case_insensitive(std::string_view value, std::string_view needle)
     {
         std::string value_lower = ascii_lower(std::string(value));
@@ -2858,6 +2883,7 @@ namespace
     constexpr uintptr_t kBrickLookupOffset = 0x430E8C0;
     constexpr uintptr_t kBrickRegistryOffset = 0x788B098;
     constexpr uintptr_t kBrickArrayBaseOffset = 0x788AFE0;
+    constexpr uintptr_t kBrickActiveFlagsArrayOffset = 0x788B050;
     constexpr uintptr_t kBrickSetVisibilityOffset = 0x4355210;
     constexpr uintptr_t kBrickSetCollisionChannelsOffset = 0x43548C0;
     constexpr uintptr_t kBrickPlaceActionMethodBlockOffset = 0x6C77CE0;
@@ -2866,10 +2892,19 @@ namespace
     constexpr uintptr_t kBrickActionApplySlotOffset = 0x18;
     constexpr size_t kBrickRuntimeStride = 0x78;
     constexpr uintptr_t kBrickOwnerOffset = 0x08;
+    constexpr uintptr_t kBrickRuntimeIdOffset = 0x24;
+    constexpr uintptr_t kBrickPositionXOffset = 0x34;
+    constexpr uintptr_t kBrickPositionYOffset = 0x38;
+    constexpr uintptr_t kBrickPositionZOffset = 0x3C;
     constexpr uintptr_t kBrickCollisionChannelsOffset = 0x49;
     constexpr uintptr_t kBrickVisibleOffset = 0x4B;
     constexpr uintptr_t kBrickStateFlagsOffset = 0x76;
     constexpr uint8_t kBrickDefaultCollisionChannels = 0x8F;
+    constexpr uint32_t kBrickRuntimeResolveDefaultRadius = 512;
+    constexpr uint32_t kBrickRuntimeResolveDefaultMaxScan = 120000;
+    constexpr uint32_t kBrickRuntimeResolveMaxScanLimit = 4000000;
+    constexpr uint32_t kBrickRuntimeResolveDefaultHintWindow = 256;
+    constexpr uint32_t kBrickRuntimeResolveMaxHintWindow = 10000;
 
     using BrickLookupFn = uintptr_t(__fastcall*)(uintptr_t, uint32_t);
     using BrickSetVisibilityFn = void(__fastcall*)(uintptr_t, uintptr_t, uint8_t);
@@ -2892,8 +2927,19 @@ namespace
         uint8_t collision_channels{kBrickDefaultCollisionChannels};
     };
 
+    struct BrickRuntimeVerifiedCandidate
+    {
+        uint32_t brick_id{0};
+        uint32_t slot{0};
+        int32_t x{0};
+        int32_t y{0};
+        int32_t z{0};
+        uint64_t verified_tick_ms{0};
+    };
+
     std::mutex g_brick_physical_mutex;
     std::unordered_map<uint32_t, BrickPhysicalOriginal> g_brick_physical_originals;
+    std::unordered_map<uint32_t, BrickRuntimeVerifiedCandidate> g_brick_runtime_verified_candidates;
     std::atomic<uintptr_t> g_brick_grid_context_cached{0};
     std::string g_brick_grid_context_cached_source;
     std::string g_brick_runtime_context_hook_error;
@@ -2919,6 +2965,7 @@ namespace
     std::atomic<uint64_t> g_brick_grid_context_background_scan_failures{0};
     std::atomic<uint64_t> g_brick_grid_context_background_scan_duration_ms{0};
     std::atomic<uintptr_t> g_brick_grid_context_background_scan_address{0};
+    std::atomic<uintptr_t> g_brick_grid_context_background_scan_hint{0};
     std::atomic<uint32_t> g_brick_grid_context_background_scan_cell_index{0};
     std::atomic<uint32_t> g_brick_grid_context_background_scan_sub_index{0};
     std::string g_brick_grid_context_background_scan_detail;
@@ -2931,6 +2978,18 @@ namespace
     {
         return env_flag_enabled("BMF_BRICK_RUNTIME_SET_ENABLED") ||
                env_flag_enabled("BMF_TREE_PHYSICAL_SET_ENABLED");
+    }
+
+    bool brick_runtime_lookup_enabled()
+    {
+        return env_flag_enabled("BMF_BRICK_RUNTIME_LOOKUP_ENABLED") ||
+               env_flag_enabled("BMF_BRICK_RUNTIME_UNSAFE_LOOKUP_ENABLED");
+    }
+
+    bool brick_runtime_resolve_enabled()
+    {
+        return env_flag_enabled("BMF_BRICK_RUNTIME_RESOLVE_ENABLED") ||
+               env_flag_enabled("BMF_TREE_PHYSICAL_RESOLVE_ENABLED");
     }
 
     uintptr_t brickadia_module_base()
@@ -3318,6 +3377,537 @@ namespace
         return installed;
     }
 
+    bool brick_runtime_region_readable(const MEMORY_BASIC_INFORMATION& mbi)
+    {
+        if (mbi.State != MEM_COMMIT || (mbi.Protect & PAGE_GUARD) || (mbi.Protect & PAGE_NOACCESS))
+        {
+            return false;
+        }
+        const DWORD readable_flags =
+            PAGE_READONLY |
+            PAGE_READWRITE |
+            PAGE_WRITECOPY |
+            PAGE_EXECUTE_READ |
+            PAGE_EXECUTE_READWRITE |
+            PAGE_EXECUTE_WRITECOPY;
+        return (mbi.Protect & readable_flags) != 0;
+    }
+
+    bool read_u32_direct(uintptr_t address, uint32_t& out_value)
+    {
+        __try
+        {
+            std::memcpy(&out_value, reinterpret_cast<void*>(address), sizeof(out_value));
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+        return true;
+    }
+
+    bool read_i32_direct(uintptr_t address, int32_t& out_value)
+    {
+        __try
+        {
+            std::memcpy(&out_value, reinterpret_cast<void*>(address), sizeof(out_value));
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+        return true;
+    }
+
+    bool read_u8_direct(uintptr_t address, uint8_t& out_value)
+    {
+        __try
+        {
+            std::memcpy(&out_value, reinterpret_cast<void*>(address), sizeof(out_value));
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+        return true;
+    }
+
+    struct BrickRuntimeArraySnapshot
+    {
+        uintptr_t module_base{0};
+        uintptr_t array_base{0};
+        uintptr_t active_flags_base{0};
+        uint32_t accessible_slots{0};
+        bool sparse{false};
+        std::string code;
+        std::string detail;
+    };
+
+    bool brick_runtime_array_snapshot(uint32_t requested_slots, BrickRuntimeArraySnapshot& out_snapshot)
+    {
+        out_snapshot = BrickRuntimeArraySnapshot{};
+        out_snapshot.module_base = brickadia_module_base();
+        if (out_snapshot.module_base == 0)
+        {
+            out_snapshot.code = "BRICK_MODULE_UNAVAILABLE";
+            out_snapshot.detail = "GetModuleHandleW(nullptr) returned no module base";
+            return false;
+        }
+
+        uint64_t array_base = 0;
+        uint64_t active_flags_base = 0;
+        if (!read_u64_at(out_snapshot.module_base + kBrickArrayBaseOffset, array_base) || array_base == 0)
+        {
+            out_snapshot.code = "BRICK_RUNTIME_ARRAY_UNAVAILABLE";
+            out_snapshot.detail = "runtime brick array base global is not readable";
+            return false;
+        }
+        if (!read_u64_at(out_snapshot.module_base + kBrickActiveFlagsArrayOffset, active_flags_base) ||
+            active_flags_base == 0)
+        {
+            out_snapshot.code = "BRICK_RUNTIME_ACTIVE_FLAGS_UNAVAILABLE";
+            out_snapshot.detail = "runtime brick active-flags global is not readable";
+            return false;
+        }
+
+        out_snapshot.array_base = static_cast<uintptr_t>(array_base);
+        out_snapshot.active_flags_base = static_cast<uintptr_t>(active_flags_base);
+
+        MEMORY_BASIC_INFORMATION array_mbi{};
+        MEMORY_BASIC_INFORMATION active_mbi{};
+        if (VirtualQuery(reinterpret_cast<void*>(static_cast<uintptr_t>(array_base)), &array_mbi, sizeof(array_mbi)) == 0)
+        {
+            out_snapshot.code = "BRICK_RUNTIME_ARRAY_MEMORY_UNAVAILABLE";
+            out_snapshot.detail = "runtime brick array base address is not mapped";
+            return false;
+        }
+        if (VirtualQuery(reinterpret_cast<void*>(static_cast<uintptr_t>(active_flags_base)), &active_mbi, sizeof(active_mbi)) == 0)
+        {
+            out_snapshot.code = "BRICK_RUNTIME_ACTIVE_FLAGS_MEMORY_UNAVAILABLE";
+            out_snapshot.detail = "runtime brick active-flags base address is not mapped";
+            return false;
+        }
+
+        if (requested_slots == 0)
+        {
+            requested_slots = kBrickRuntimeResolveDefaultMaxScan;
+        }
+        requested_slots = std::min<uint32_t>(requested_slots, kBrickRuntimeResolveMaxScanLimit);
+        if (requested_slots == 0)
+        {
+            out_snapshot.code = "BRICK_RUNTIME_SCAN_EMPTY";
+            out_snapshot.detail = "runtime brick scan limit is zero";
+            return false;
+        }
+
+        out_snapshot.accessible_slots = requested_slots;
+        out_snapshot.sparse = true;
+        out_snapshot.code = "OK";
+        return true;
+    }
+
+    struct BrickRuntimeSlotCandidate
+    {
+        uint32_t slot{0};
+        uint32_t brick_id{0};
+        int32_t x{0};
+        int32_t y{0};
+        int32_t z{0};
+        uint8_t visible{0};
+        uint8_t collision_channels{0};
+        uint64_t distance_sq{0};
+        uintptr_t address{0};
+    };
+
+    bool brick_runtime_read_slot_candidate(const BrickRuntimeArraySnapshot& snapshot,
+                                           uint32_t slot,
+                                           int64_t target_x,
+                                           int64_t target_y,
+                                           int64_t target_z,
+                                           BrickRuntimeSlotCandidate& out_candidate)
+    {
+        if (slot >= snapshot.accessible_slots ||
+            snapshot.array_base > UINTPTR_MAX - static_cast<uintptr_t>(slot) * kBrickRuntimeStride ||
+            snapshot.active_flags_base > UINTPTR_MAX - static_cast<uintptr_t>(slot) * sizeof(uint32_t))
+        {
+            return false;
+        }
+
+        const uintptr_t brick_address =
+            snapshot.array_base + static_cast<uintptr_t>(slot) * kBrickRuntimeStride;
+        uint32_t brick_id = 0;
+        int32_t x = 0;
+        int32_t y = 0;
+        int32_t z = 0;
+        uint8_t visible = 0;
+        uint8_t collision_channels = 0;
+        if (!read_u32_direct(brick_address + kBrickRuntimeIdOffset, brick_id) ||
+            brick_id == 0 || brick_id == 0xFFFFFFFF ||
+            !read_i32_direct(brick_address + kBrickPositionXOffset, x) ||
+            !read_i32_direct(brick_address + kBrickPositionYOffset, y) ||
+            !read_i32_direct(brick_address + kBrickPositionZOffset, z) ||
+            !read_u8_direct(brick_address + kBrickVisibleOffset, visible) ||
+            !read_u8_direct(brick_address + kBrickCollisionChannelsOffset, collision_channels))
+        {
+            return false;
+        }
+
+        uint32_t active_flags = 0;
+        const uintptr_t active_address =
+            snapshot.active_flags_base + static_cast<uintptr_t>(slot) * sizeof(uint32_t);
+        if (!read_u32_direct(active_address, active_flags) || (active_flags & 1U) == 0)
+        {
+            return false;
+        }
+
+        const int64_t dx = static_cast<int64_t>(x) - target_x;
+        const int64_t dy = static_cast<int64_t>(y) - target_y;
+        const int64_t dz = static_cast<int64_t>(z) - target_z;
+        const uint64_t distance_sq =
+            static_cast<uint64_t>(dx * dx) +
+            static_cast<uint64_t>(dy * dy) +
+            static_cast<uint64_t>(dz * dz);
+
+        out_candidate.slot = slot;
+        out_candidate.brick_id = brick_id;
+        out_candidate.x = x;
+        out_candidate.y = y;
+        out_candidate.z = z;
+        out_candidate.visible = visible;
+        out_candidate.collision_channels = collision_channels;
+        out_candidate.distance_sq = distance_sq;
+        out_candidate.address = brick_address;
+        return true;
+    }
+
+    void brick_runtime_cache_verified_candidate(const BrickRuntimeSlotCandidate& candidate)
+    {
+        BrickRuntimeVerifiedCandidate verified{};
+        verified.brick_id = candidate.brick_id;
+        verified.slot = candidate.slot;
+        verified.x = candidate.x;
+        verified.y = candidate.y;
+        verified.z = candidate.z;
+        verified.verified_tick_ms = GetTickCount64();
+
+        std::lock_guard lock(g_brick_physical_mutex);
+        g_brick_runtime_verified_candidates[candidate.brick_id] = verified;
+    }
+
+    bool brick_physical_lookup_verified_cache(uint32_t brick_id,
+                                              uintptr_t module_base,
+                                              uintptr_t& out_brick_address,
+                                              std::string& out_code,
+                                              std::string& out_detail)
+    {
+        BrickRuntimeVerifiedCandidate verified{};
+        {
+            std::lock_guard lock(g_brick_physical_mutex);
+            const auto found = g_brick_runtime_verified_candidates.find(brick_id);
+            if (found == g_brick_runtime_verified_candidates.end())
+            {
+                out_code = "BRICK_RUNTIME_LOOKUP_DISABLED";
+                out_detail =
+                    "BMF_BRICK_RUNTIME_LOOKUP_ENABLED=1 is required unless the brick id was verified by bmf.bricks.runtime.resolve in this server process";
+                return false;
+            }
+            verified = found->second;
+        }
+
+        BrickRuntimeArraySnapshot snapshot{};
+        if (!brick_runtime_array_snapshot(verified.slot + 1, snapshot))
+        {
+            out_code = snapshot.code;
+            out_detail = snapshot.detail;
+            return false;
+        }
+        if (snapshot.module_base != module_base)
+        {
+            out_code = "BRICK_MODULE_MISMATCH";
+            out_detail = "verified runtime brick cache belongs to a different module base";
+            return false;
+        }
+
+        BrickRuntimeSlotCandidate candidate{};
+        if (!brick_runtime_read_slot_candidate(
+                snapshot,
+                verified.slot,
+                verified.x,
+                verified.y,
+                verified.z,
+                candidate) ||
+            candidate.brick_id != brick_id ||
+            candidate.x != verified.x ||
+            candidate.y != verified.y ||
+            candidate.z != verified.z)
+        {
+            out_code = "BRICK_RUNTIME_VERIFIED_CACHE_STALE";
+            out_detail = "verified runtime brick slot is no longer active with the same id and position";
+            return false;
+        }
+
+        out_brick_address = candidate.address;
+        out_code = "OK";
+        out_detail = "resolved through verified runtime brick cache";
+        return true;
+    }
+
+    struct BrickRuntimeResolveResult
+    {
+        bool found{false};
+        std::string code{"BRICK_RUNTIME_NOT_FOUND"};
+        std::string detail;
+        BrickRuntimeSlotCandidate best{};
+        uint64_t scanned_slots{0};
+        uint64_t active_slots{0};
+        uint64_t candidates{0};
+        bool used_hint{false};
+        bool full_scan{false};
+        bool truncated{false};
+    };
+
+    void brick_runtime_scan_slots(const BrickRuntimeArraySnapshot& snapshot,
+                                  uint32_t start_slot,
+                                  uint32_t end_slot,
+                                  int64_t target_x,
+                                  int64_t target_y,
+                                  int64_t target_z,
+                                  uint64_t radius_sq,
+                                  BrickRuntimeResolveResult& result)
+    {
+        if (start_slot >= snapshot.accessible_slots)
+        {
+            return;
+        }
+        end_slot = std::min<uint32_t>(end_slot, snapshot.accessible_slots);
+        if (end_slot <= start_slot)
+        {
+            return;
+        }
+
+        const uint64_t start_offset = static_cast<uint64_t>(start_slot) * kBrickRuntimeStride;
+        const uint64_t end_offset = static_cast<uint64_t>(end_slot) * kBrickRuntimeStride;
+        if (snapshot.array_base > UINTPTR_MAX - start_offset ||
+            snapshot.array_base > UINTPTR_MAX - end_offset)
+        {
+            result.truncated = true;
+            return;
+        }
+
+        const uintptr_t scan_start = snapshot.array_base + static_cast<uintptr_t>(start_offset);
+        const uintptr_t scan_end = snapshot.array_base + static_cast<uintptr_t>(end_offset);
+        uintptr_t cursor = scan_start;
+        while (cursor < scan_end)
+        {
+            MEMORY_BASIC_INFORMATION mbi{};
+            if (VirtualQuery(reinterpret_cast<void*>(cursor), &mbi, sizeof(mbi)) == 0)
+            {
+                result.truncated = true;
+                return;
+            }
+
+            const uintptr_t region_start_raw = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+            uintptr_t region_end = region_start_raw + mbi.RegionSize;
+            if (region_end <= cursor)
+            {
+                result.truncated = true;
+                return;
+            }
+
+            const uintptr_t region_start = std::max<uintptr_t>(cursor, region_start_raw);
+            region_end = std::min<uintptr_t>(region_end, scan_end);
+            if (brick_runtime_region_readable(mbi) &&
+                region_end > region_start &&
+                region_end - region_start >= kBrickRuntimeStride)
+            {
+                uint64_t first_slot = 0;
+                if (region_start > snapshot.array_base)
+                {
+                    const uint64_t delta = region_start - snapshot.array_base;
+                    first_slot = (delta + kBrickRuntimeStride - 1) / kBrickRuntimeStride;
+                }
+                const uint64_t last_slot_exclusive =
+                    (static_cast<uint64_t>(region_end - snapshot.array_base) - kBrickRuntimeStride) /
+                        kBrickRuntimeStride +
+                    1;
+
+                const uint32_t first = static_cast<uint32_t>(
+                    std::max<uint64_t>(first_slot, start_slot));
+                const uint32_t last = static_cast<uint32_t>(
+                    std::min<uint64_t>(last_slot_exclusive, end_slot));
+
+                for (uint32_t slot = first; slot < last; ++slot)
+                {
+                    result.scanned_slots++;
+                    BrickRuntimeSlotCandidate candidate{};
+                    if (!brick_runtime_read_slot_candidate(
+                            snapshot,
+                            slot,
+                            target_x,
+                            target_y,
+                            target_z,
+                            candidate))
+                    {
+                        continue;
+                    }
+                    result.active_slots++;
+                    if (candidate.distance_sq > radius_sq)
+                    {
+                        continue;
+                    }
+                    result.candidates++;
+                    if (!result.found || candidate.distance_sq < result.best.distance_sq)
+                    {
+                        result.found = true;
+                        result.best = candidate;
+                    }
+                }
+            }
+
+            cursor = region_end;
+        }
+    }
+
+    std::string brick_physical_resolve_near_text(int64_t target_x,
+                                                 int64_t target_y,
+                                                 int64_t target_z,
+                                                 uint32_t radius,
+                                                 uint32_t max_scan,
+                                                 uint32_t hint_slot,
+                                                 uint32_t hint_window)
+    {
+        if (radius == 0)
+        {
+            radius = kBrickRuntimeResolveDefaultRadius;
+        }
+        if (max_scan == 0)
+        {
+            max_scan = kBrickRuntimeResolveDefaultMaxScan;
+        }
+        max_scan = std::min<uint32_t>(max_scan, kBrickRuntimeResolveMaxScanLimit);
+        hint_window = std::min<uint32_t>(hint_window, kBrickRuntimeResolveMaxHintWindow);
+
+        const auto started = std::chrono::steady_clock::now();
+        std::ostringstream out;
+        out << "Brick physical state\n"
+            << "source=BMFSocketBrickPhysical\n"
+            << "operation=resolve\n"
+            << "target_x=" << target_x << "\n"
+            << "target_y=" << target_y << "\n"
+            << "target_z=" << target_z << "\n"
+            << "radius=" << radius << "\n"
+            << "max_scan=" << max_scan << "\n"
+            << "hint_slot=" << hint_slot << "\n"
+            << "hint_window=" << hint_window << "\n";
+
+        if (!brick_runtime_resolve_enabled())
+        {
+            out << "ok=false\n"
+                << "code=BRICK_RUNTIME_RESOLVE_DISABLED\n"
+                << "detail=set BMF_BRICK_RUNTIME_RESOLVE_ENABLED=1 to allow bounded runtime brick array resolution by position\n";
+            return out.str();
+        }
+
+        const uint32_t requested_slots =
+            hint_slot > 0
+                ? std::max<uint32_t>(
+                      max_scan,
+                      hint_slot > UINT32_MAX - hint_window - 1 ? UINT32_MAX : hint_slot + hint_window + 1)
+                : max_scan;
+        BrickRuntimeArraySnapshot snapshot{};
+        if (!brick_runtime_array_snapshot(requested_slots, snapshot))
+        {
+            out << "ok=false\n"
+                << "code=" << snapshot.code << "\n"
+                << "module_base=" << json_escape(pointer_hex(snapshot.module_base)) << "\n"
+                << "array_base_address=" << json_escape(pointer_hex(snapshot.array_base)) << "\n"
+                << "active_flags_address=" << json_escape(pointer_hex(snapshot.active_flags_base)) << "\n"
+                << "detail=" << json_escape(snapshot.detail) << "\n";
+            return out.str();
+        }
+
+        BrickRuntimeResolveResult resolve{};
+        const uint64_t radius_sq = static_cast<uint64_t>(radius) * static_cast<uint64_t>(radius);
+        if (hint_slot > 0 && hint_window > 0)
+        {
+            resolve.used_hint = true;
+            const uint32_t start_slot = hint_slot > hint_window ? hint_slot - hint_window : 0;
+            const uint32_t end_slot =
+                hint_slot > UINT32_MAX - hint_window - 1 ? UINT32_MAX : hint_slot + hint_window + 1;
+            brick_runtime_scan_slots(
+                snapshot,
+                start_slot,
+                end_slot,
+                target_x,
+                target_y,
+                target_z,
+                radius_sq,
+                resolve);
+        }
+
+        if (!resolve.found)
+        {
+            resolve.full_scan = true;
+            const uint32_t full_end = std::min<uint32_t>(max_scan, snapshot.accessible_slots);
+            brick_runtime_scan_slots(
+                snapshot,
+                0,
+                full_end,
+                target_x,
+                target_y,
+                target_z,
+                radius_sq,
+                resolve);
+            resolve.truncated = full_end < snapshot.accessible_slots;
+        }
+
+        const uint64_t duration_ms = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - started)
+                .count());
+
+        if (resolve.found)
+        {
+            brick_runtime_cache_verified_candidate(resolve.best);
+            resolve.code = "OK";
+            resolve.detail = "matched active runtime brick position within radius";
+        }
+        else
+        {
+            resolve.code = "BRICK_RUNTIME_NOT_FOUND";
+            resolve.detail = "no active runtime brick matched the requested position within radius";
+        }
+
+        out << "ok=" << (resolve.found ? "true" : "false") << "\n"
+            << "code=" << resolve.code << "\n"
+            << "module_base=" << json_escape(pointer_hex(snapshot.module_base)) << "\n"
+            << "array_base_address=" << json_escape(pointer_hex(snapshot.array_base)) << "\n"
+            << "active_flags_address=" << json_escape(pointer_hex(snapshot.active_flags_base)) << "\n"
+            << "accessible_slots=" << snapshot.accessible_slots << "\n"
+            << "scanned_slots=" << resolve.scanned_slots << "\n"
+            << "active_slots=" << resolve.active_slots << "\n"
+            << "candidates=" << resolve.candidates << "\n"
+            << "used_hint=" << (resolve.used_hint ? "true" : "false") << "\n"
+            << "full_scan=" << (resolve.full_scan ? "true" : "false") << "\n"
+            << "truncated=" << (resolve.truncated ? "true" : "false") << "\n"
+            << "duration_ms=" << duration_ms << "\n"
+            << "detail=" << json_escape(resolve.detail) << "\n";
+        if (resolve.found)
+        {
+            out << "brick_id=" << resolve.best.brick_id << "\n"
+                << "best_brick_id=" << resolve.best.brick_id << "\n"
+                << "best_slot=" << resolve.best.slot << "\n"
+                << "best_x=" << resolve.best.x << "\n"
+                << "best_y=" << resolve.best.y << "\n"
+                << "best_z=" << resolve.best.z << "\n"
+                << "best_distance_sq=" << resolve.best.distance_sq << "\n"
+                << "best_visible=" << static_cast<unsigned int>(resolve.best.visible) << "\n"
+                << "best_collision_channels=" << static_cast<unsigned int>(resolve.best.collision_channels) << "\n"
+                << "verified_cached=true\n";
+        }
+        return out.str();
+    }
+
     bool brick_physical_lookup(uint32_t brick_id,
                               uintptr_t& out_module_base,
                               uintptr_t& out_registry_address,
@@ -3335,8 +3925,27 @@ namespace
             return false;
         }
 
-        const uintptr_t lookup_address = out_module_base + kBrickLookupOffset;
         out_registry_address = out_module_base + kBrickRegistryOffset;
+        if (!brick_runtime_lookup_enabled())
+        {
+            if (brick_physical_lookup_verified_cache(
+                    brick_id,
+                    out_module_base,
+                    out_brick_address,
+                    out_code,
+                    out_detail))
+            {
+                return true;
+            }
+            out_code = "BRICK_RUNTIME_LOOKUP_DISABLED";
+            out_detail =
+                "set BMF_BRICK_RUNTIME_LOOKUP_ENABLED=1 only when brickid is a verified live runtime id; "
+                "saved BRS brickIndex values are not safe runtime ids; "
+                "or resolve the id first with bmf.bricks.runtime.resolve";
+            return false;
+        }
+
+        const uintptr_t lookup_address = out_module_base + kBrickLookupOffset;
         if (!is_executable_memory(lookup_address))
         {
             out_code = "BRICK_LOOKUP_UNAVAILABLE";
@@ -3373,6 +3982,20 @@ namespace
         {
             out_code = "BRICK_MEMORY_UNAVAILABLE";
             out_detail = "brick memory is not accessible";
+            return false;
+        }
+
+        uint32_t brick_runtime_id = 0;
+        if (!read_u32_at(brick_address + 0x24, brick_runtime_id))
+        {
+            out_code = "BRICK_ID_UNAVAILABLE";
+            out_detail = "brick runtime id field is not readable";
+            return false;
+        }
+        if (brick_runtime_id != brick_id)
+        {
+            out_code = "BRICK_ID_MISMATCH";
+            out_detail = "brick lookup returned a brick with a different runtime id field";
             return false;
         }
 
@@ -3601,20 +4224,29 @@ namespace
         return true;
     }
 
-    BrickGridContextScanResult brick_grid_context_scan_memory(uint32_t brick_cell_index,
-                                                              uint32_t brick_sub_index)
+    BrickGridContextScanResult brick_grid_context_scan_memory_range(uint32_t brick_cell_index,
+                                                                    uint32_t brick_sub_index,
+                                                                    uintptr_t range_start,
+                                                                    uintptr_t range_end,
+                                                                    uint64_t max_scanned_bytes,
+                                                                    uint64_t max_regions)
     {
         BrickGridContextScanResult result{};
         result.enabled = true;
 
         const auto started = std::chrono::steady_clock::now();
-        uintptr_t cursor = 0x10000;
-        constexpr uint64_t kMaxScannedBytes = 2048ULL * 1024ULL * 1024ULL;
-        constexpr uint64_t kMaxRegions = 32768;
-        constexpr uintptr_t kScanAlignment = 0x8;
+        uintptr_t cursor = std::max<uintptr_t>(0x10000, range_start);
         constexpr int32_t kMaxSparseCount = 500000;
+        const uintptr_t scan_alignment = static_cast<uintptr_t>(
+            env_u64("BMF_BRICK_CONTEXT_SCAN_ALIGNMENT", 0x10, 0x8, 0x1000));
 
-        while (cursor < UINTPTR_MAX && result.regions < kMaxRegions && result.scanned_bytes < kMaxScannedBytes)
+        if (range_end <= cursor)
+        {
+            result.detail = "empty sparse brick-grid context scan range";
+            return result;
+        }
+
+        while (cursor < range_end && result.regions < max_regions && result.scanned_bytes < max_scanned_bytes)
         {
             MEMORY_BASIC_INFORMATION mbi{};
             if (VirtualQuery(reinterpret_cast<void*>(cursor), &mbi, sizeof(mbi)) == 0)
@@ -3623,22 +4255,39 @@ namespace
             }
 
             const uintptr_t region_start = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
-            const uintptr_t region_end = region_start + mbi.RegionSize;
+            const uintptr_t region_end =
+                region_start > UINTPTR_MAX - mbi.RegionSize
+                    ? UINTPTR_MAX
+                    : region_start + mbi.RegionSize;
             cursor = region_end > cursor ? region_end : cursor + 0x1000;
+            if (region_end <= range_start)
+            {
+                continue;
+            }
+            if (region_start >= range_end)
+            {
+                break;
+            }
             if (!memory_region_readable(mbi) || mbi.Type != MEM_PRIVATE || mbi.RegionSize < 0x2E8)
             {
                 continue;
             }
 
             result.regions++;
-            uintptr_t scan_start = (region_start + (kScanAlignment - 1)) & ~(kScanAlignment - 1);
-            const uintptr_t scan_end = region_end > 0x2E8 ? region_end - 0x2E8 : region_start;
+            const uintptr_t bounded_start = std::max(region_start, range_start);
+            const uintptr_t bounded_end = std::min(region_end, range_end);
+            if (bounded_end <= bounded_start || bounded_end - bounded_start < 0x2E8)
+            {
+                continue;
+            }
+            uintptr_t scan_start = (bounded_start + (scan_alignment - 1)) & ~(scan_alignment - 1);
+            const uintptr_t scan_end = bounded_end - 0x2E8;
             for (uintptr_t address = scan_start;
-                 address <= scan_end && result.scanned_bytes < kMaxScannedBytes;
-                 address += kScanAlignment)
+                 address <= scan_end && result.scanned_bytes < max_scanned_bytes;
+                 address += scan_alignment)
             {
                 result.probes++;
-                result.scanned_bytes += kScanAlignment;
+                result.scanned_bytes += scan_alignment;
 
                 int32_t group_count = -1;
                 int32_t group_active_limit = -1;
@@ -3696,6 +4345,62 @@ namespace
             result.detail = "no plausible sparse brick-grid context found within scan bounds";
         }
         return result;
+    }
+
+    BrickGridContextScanResult brick_grid_context_scan_memory(uint32_t brick_cell_index,
+                                                              uint32_t brick_sub_index,
+                                                              uintptr_t hint_address = 0)
+    {
+        constexpr uint64_t kFullMaxScannedBytes = 2048ULL * 1024ULL * 1024ULL;
+        constexpr uint64_t kFullMaxRegions = 32768;
+        constexpr uint64_t kDefaultNearBeforeBytes = 192ULL * 1024ULL * 1024ULL;
+        constexpr uint64_t kDefaultNearAfterBytes = 32ULL * 1024ULL * 1024ULL;
+        constexpr uint64_t kMaxNearWindowBytes = 1024ULL * 1024ULL * 1024ULL;
+
+        if (hint_address != 0)
+        {
+            const uint64_t near_before = env_u64(
+                "BMF_BRICK_CONTEXT_NEAR_SCAN_BEFORE_BYTES",
+                kDefaultNearBeforeBytes,
+                0,
+                kMaxNearWindowBytes);
+            const uint64_t near_after = env_u64(
+                "BMF_BRICK_CONTEXT_NEAR_SCAN_AFTER_BYTES",
+                kDefaultNearAfterBytes,
+                0,
+                kMaxNearWindowBytes);
+            const uintptr_t near_start =
+                hint_address > near_before
+                    ? hint_address - static_cast<uintptr_t>(near_before)
+                    : 0x10000;
+            const uintptr_t near_end =
+                hint_address > UINTPTR_MAX - static_cast<uintptr_t>(near_after)
+                    ? UINTPTR_MAX
+                    : hint_address + static_cast<uintptr_t>(near_after);
+            const uint64_t near_max_bytes = std::min<uint64_t>(
+                kFullMaxScannedBytes,
+                std::max<uint64_t>(8ULL * 1024ULL * 1024ULL, near_before + near_after));
+            BrickGridContextScanResult near_scan = brick_grid_context_scan_memory_range(
+                brick_cell_index,
+                brick_sub_index,
+                near_start,
+                near_end,
+                near_max_bytes,
+                kFullMaxRegions);
+            if (near_scan.found)
+            {
+                near_scan.detail = "matched sparse brick-grid context layout near owner hint";
+                return near_scan;
+            }
+        }
+
+        return brick_grid_context_scan_memory_range(
+            brick_cell_index,
+            brick_sub_index,
+            0x10000,
+            UINTPTR_MAX,
+            kFullMaxScannedBytes,
+            kFullMaxRegions);
     }
 
     BrickGridContextScanResult brick_grid_context_scan(uint32_t brick_cell_index, uint32_t brick_sub_index)
@@ -3869,7 +4574,8 @@ namespace
     }
 
     bool brick_grid_context_background_scan_start(uint32_t brick_cell_index,
-                                                  uint32_t brick_sub_index)
+                                                  uint32_t brick_sub_index,
+                                                  uintptr_t hint_address = 0)
     {
         if (!brick_grid_context_background_scan_enabled())
         {
@@ -3895,6 +4601,7 @@ namespace
         g_brick_grid_context_background_scan_cell_index.store(brick_cell_index);
         g_brick_grid_context_background_scan_sub_index.store(brick_sub_index);
         g_brick_grid_context_background_scan_address.store(0);
+        g_brick_grid_context_background_scan_hint.store(hint_address);
         g_brick_grid_context_background_scan_duration_ms.store(0);
         {
             std::lock_guard lock(g_brick_physical_mutex);
@@ -3902,9 +4609,9 @@ namespace
                 "background sparse-grid context scan is running";
         }
 
-        std::thread([brick_cell_index, brick_sub_index]() {
+        std::thread([brick_cell_index, brick_sub_index, hint_address]() {
             const BrickGridContextScanResult scan =
-                brick_grid_context_scan_memory(brick_cell_index, brick_sub_index);
+                brick_grid_context_scan_memory(brick_cell_index, brick_sub_index, hint_address);
             g_brick_grid_context_background_scan_duration_ms.store(scan.duration_ms);
             g_brick_grid_context_background_scan_address.store(scan.address);
             if (scan.found)
@@ -4173,10 +4880,17 @@ namespace
             << "background_context_scan_completions=" << g_brick_grid_context_background_scan_completions.load() << "\n"
             << "background_context_scan_failures=" << g_brick_grid_context_background_scan_failures.load() << "\n"
             << "background_context_scan_address=" << json_escape(pointer_hex(g_brick_grid_context_background_scan_address.load())) << "\n"
+            << "background_context_scan_hint=" << json_escape(pointer_hex(g_brick_grid_context_background_scan_hint.load())) << "\n"
             << "background_context_scan_cell_index=" << g_brick_grid_context_background_scan_cell_index.load() << "\n"
             << "background_context_scan_sub_index=" << g_brick_grid_context_background_scan_sub_index.load() << "\n"
             << "background_context_scan_duration_ms=" << g_brick_grid_context_background_scan_duration_ms.load() << "\n"
             << "background_context_scan_detail=" << json_escape(detail) << "\n";
+    }
+
+    bool brick_runtime_inspect_diagnostics_enabled()
+    {
+        return env_flag_enabled("BMF_BRICK_RUNTIME_DIAGNOSTICS_ENABLED") ||
+               env_flag_enabled("BMF_BRICK_RUNTIME_INSPECT_DIAGNOSTICS_ENABLED");
     }
 
     std::string brick_physical_inspect_text(uint32_t brick_id)
@@ -4294,25 +5008,30 @@ namespace
             << "collision_low_setter_hits=" << g_brick_collision_low_setter_hits.load() << "\n";
         append_brick_background_context_scan_status(out);
 
-        append_brick_grid_context_diagnostics(
-            out,
-            brick_address,
-            static_cast<uintptr_t>(owner_address),
-            static_cast<uintptr_t>(grid_context_address));
-        if (brick_owner_context_scan_enabled())
+        const bool diagnostics_enabled = brick_runtime_inspect_diagnostics_enabled();
+        out << "diagnostics_enabled=" << (diagnostics_enabled ? "true" : "false") << "\n";
+        if (diagnostics_enabled)
         {
-            append_brick_owner_context_scan_result(
+            append_brick_grid_context_diagnostics(
                 out,
-                brick_owner_context_scan(
-                    static_cast<uintptr_t>(owner_address),
-                    brick_cell_index,
-                    brick_sub_index));
-        }
-        if (env_flag_enabled("BMF_BRICK_CONTEXT_SCAN_ENABLED"))
-        {
-            append_brick_grid_context_scan_result(
-                out,
-                brick_grid_context_scan(brick_cell_index, brick_sub_index));
+                brick_address,
+                static_cast<uintptr_t>(owner_address),
+                static_cast<uintptr_t>(grid_context_address));
+            if (brick_owner_context_scan_enabled())
+            {
+                append_brick_owner_context_scan_result(
+                    out,
+                    brick_owner_context_scan(
+                        static_cast<uintptr_t>(owner_address),
+                        brick_cell_index,
+                        brick_sub_index));
+            }
+            if (env_flag_enabled("BMF_BRICK_CONTEXT_SCAN_ENABLED"))
+            {
+                append_brick_grid_context_scan_result(
+                    out,
+                    brick_grid_context_scan(brick_cell_index, brick_sub_index));
+            }
         }
         return out.str();
     }
@@ -4541,7 +5260,10 @@ namespace
             if (!grid_context_available)
             {
                 const bool background_context_scan_started =
-                    brick_grid_context_background_scan_start(brick_cell_index, brick_sub_index);
+                    brick_grid_context_background_scan_start(
+                        brick_cell_index,
+                        brick_sub_index,
+                        static_cast<uintptr_t>(grid_context_address));
                 const bool background_context_scan_pending =
                     background_context_scan_started ||
                     g_brick_grid_context_background_scan_running.load();
@@ -4645,7 +5367,10 @@ namespace
             if (!grid_context_available)
             {
                 const bool background_context_scan_started =
-                    brick_grid_context_background_scan_start(brick_cell_index, brick_sub_index);
+                    brick_grid_context_background_scan_start(
+                        brick_cell_index,
+                        brick_sub_index,
+                        static_cast<uintptr_t>(grid_context_address));
                 const bool background_context_scan_pending =
                     background_context_scan_started ||
                     g_brick_grid_context_background_scan_running.load();
@@ -6012,6 +6737,69 @@ namespace
         return 1;
     }
 
+    int lua_socket_brick_physical_resolve_near(const LuaMadeSimple::Lua& lua)
+    {
+        lua_State* state = lua.get_lua_state();
+        int64_t x = 0;
+        int64_t y = 0;
+        int64_t z = 0;
+        uint32_t radius = kBrickRuntimeResolveDefaultRadius;
+        uint32_t max_scan = kBrickRuntimeResolveDefaultMaxScan;
+        uint32_t hint_slot = 0;
+        uint32_t hint_window = kBrickRuntimeResolveDefaultHintWindow;
+
+        if (lua_isnumber(state, 1))
+        {
+            x = static_cast<int64_t>(lua_tointeger(state, 1));
+        }
+        if (lua_isnumber(state, 2))
+        {
+            y = static_cast<int64_t>(lua_tointeger(state, 2));
+        }
+        if (lua_isnumber(state, 3))
+        {
+            z = static_cast<int64_t>(lua_tointeger(state, 3));
+        }
+        if (lua_isnumber(state, 4))
+        {
+            const int64_t raw_radius = static_cast<int64_t>(lua_tointeger(state, 4));
+            radius = raw_radius <= 0
+                ? kBrickRuntimeResolveDefaultRadius
+                : static_cast<uint32_t>(std::min<int64_t>(raw_radius, 100000));
+        }
+        if (lua_isnumber(state, 5))
+        {
+            const int64_t raw_max_scan = static_cast<int64_t>(lua_tointeger(state, 5));
+            max_scan = raw_max_scan <= 0
+                ? kBrickRuntimeResolveDefaultMaxScan
+                : static_cast<uint32_t>(std::min<int64_t>(raw_max_scan, kBrickRuntimeResolveMaxScanLimit));
+        }
+        if (lua_isnumber(state, 6))
+        {
+            const int64_t raw_hint_slot = static_cast<int64_t>(lua_tointeger(state, 6));
+            hint_slot = raw_hint_slot <= 0
+                ? 0
+                : static_cast<uint32_t>(std::min<int64_t>(raw_hint_slot, UINT32_MAX));
+        }
+        if (lua_isnumber(state, 7))
+        {
+            const int64_t raw_hint_window = static_cast<int64_t>(lua_tointeger(state, 7));
+            hint_window = raw_hint_window <= 0
+                ? 0
+                : static_cast<uint32_t>(std::min<int64_t>(raw_hint_window, kBrickRuntimeResolveMaxHintWindow));
+        }
+
+        lua.set_string(brick_physical_resolve_near_text(
+            x,
+            y,
+            z,
+            radius,
+            max_scan,
+            hint_slot,
+            hint_window));
+        return 1;
+    }
+
     int lua_socket_brick_physical_set(const LuaMadeSimple::Lua& lua)
     {
         lua_State* state = lua.get_lua_state();
@@ -6257,6 +7045,7 @@ namespace
             lua.register_function("BMFSocketTreeCutStatus", lua_socket_treecut_status);
             lua.register_function("BMFSocketTreeCutFindTag", lua_socket_treecut_find_tag);
             lua.register_function("BMFSocketBrickPhysicalInspect", lua_socket_brick_physical_inspect);
+            lua.register_function("BMFSocketBrickPhysicalResolveNear", lua_socket_brick_physical_resolve_near);
             lua.register_function("BMFSocketBrickPhysicalSet", lua_socket_brick_physical_set);
             lua.register_function("BMFSocketTreeCutRefreshTargets", lua_socket_treecut_refresh_targets);
             lua.register_function("BMFSocketTreeCutResolveHandaxe", lua_socket_treecut_resolve_handaxe);

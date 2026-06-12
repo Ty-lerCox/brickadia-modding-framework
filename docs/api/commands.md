@@ -4,6 +4,9 @@ BMF has a small server-console command registry for headless administration.
 Commands are registered through UE4SS `RegisterConsoleCommandGlobalHandler` when
 that helper is available. The current headless bridge route is:
 
+For the high-level command, socket, and Omegga bridge flows, see
+[Proposed Patterns](../architecture/proposed-patterns.md).
+
 ```text
 Omegga.Bridge.BMF bmf.status
 ```
@@ -113,24 +116,58 @@ telemetry when they read or mutate Brickadia state.
 - `bmf.brickassetguard.check asset=<brick-asset> roles=<role>`: evaluates one
   brick asset against the configured placement policy. This is policy-only until
   a live placement/paste hook calls the evaluator before world mutation.
-- `bmf.bricks.runtime.inspect brickid=<id>`: queues a game-thread inspection of
-  one explicit runtime brick id and reports its visible/collision bytes,
-  registry address, owner, and grid-context pointer.
-- `bmf.bricks.runtime.set brickid=<id> confirm=brick-runtime
-  [visible=true|false|restore|unchanged] [collision=<0-255>|restore|unchanged]`:
-  queues an experimental BMFSocket runtime brick mutation. It is disabled unless
-  `BMF_BRICK_RUNTIME_SET_ENABLED=1` is set. Visibility and collision mutation
-  are separately gated with `BMF_BRICK_VISIBILITY_SET_ENABLED=1` and
-  `BMF_BRICK_COLLISION_SET_ENABLED=1`. The Brickadia setter path also requires a
-  plausible sparse-grid context; BMF first uses a cached/captured context, then a
-  bounded owner scan, and can start an off-game-thread background resolver when
-  `BMF_BRICK_CONTEXT_BACKGROUND_SCAN_ENABLED=1`. While that cold-start resolver
-  is running, the completed result reports `BRICK_GRID_CONTEXT_SCAN_PENDING` and
-  callers should retry the same low-frequency mutation. Direct byte-write gates
-  remain diagnostic-only and should stay disabled for gameplay.
+### Runtime Brick State Commands
+
+These commands are experimental native controls for one live runtime brick id.
+They are useful for canaries and CityRPG tagged-tree validation, but they are
+not a general tag resolver and they must stay behind explicit feature gates.
+
+- `bmf.bricks.runtime.inspect brickid=<id> [tag=<treeid:...>]`: queues a
+  game-thread inspection and reports visible/collision bytes plus native
+  runtime state. Runtime lookup is disabled unless
+  `BMF_BRICK_RUNTIME_LOOKUP_ENABLED=1` is set. Set
+  `BMF_BRICK_RUNTIME_DIAGNOSTICS_ENABLED=1` when owner or sparse-grid pointer
+  diagnostics are needed; those fields chase volatile native pointers and are
+  not always safe to read.
+- `bmf.bricks.runtime.set brickid=<id> [tag=<treeid:...>]
+  confirm=brick-runtime [visible=true|false|restore|unchanged]
+  [collision=<0-255>|restore|unchanged]`: queues a visibility/collision
+  mutation for the explicit candidate id.
 - `bmf.bricks.runtime.status`: prints the last queued runtime brick-state
-  operation result, including queue `sequence`, sparse-grid context source,
-  background resolver counters, and before/after visible/collision bytes.
+  result. Use `sequence`, `brick_id`, and optional `tag` to correlate status
+  output with a queued inspect/set command.
+
+Required gates:
+
+```text
+BMF_BRICK_RUNTIME_SET_ENABLED=1
+BMF_BRICK_RUNTIME_LOOKUP_ENABLED=1     only with a verified live runtime id
+BMF_BRICK_VISIBILITY_SET_ENABLED=1      required for visible=...
+BMF_BRICK_COLLISION_SET_ENABLED=1       required for collision=...
+BMF_BRICK_CONTEXT_BACKGROUND_SCAN_ENABLED=1  optional cold-start resolver
+```
+
+Rules for callers:
+
+- Always pass a live runtime `brickid` candidate. `tag=<treeid:...>` is only
+  echoed for `ConsoleTag` correlation.
+- Do not send tag-only mutations. They return `BRICK_RUNTIME_TAG_ID_REQUIRED`.
+- Do not assume saved BRS `brickIndex` or `brickId` values are live runtime ids
+  unless a runtime probe has confirmed them in the active server process.
+- Keep `BMF_BRICK_RUNTIME_LOOKUP_ENABLED=0` for saved indices; enabling lookup
+  for an unverified id can crash the dedicated server before BMF can return a
+  status response.
+- Wait for the matching `sequence` in `bmf.bricks.runtime.status` before
+  retrying a queued mutation.
+- Retry only after a completed `BRICK_GRID_CONTEXT_SCAN_PENDING` result, and
+  keep retries low-frequency.
+- Keep direct byte-write gates off for gameplay. They are diagnostic only.
+
+Native validation rejects candidates whose internal runtime id field is
+unreadable or does not match the requested id (`BRICK_ID_UNAVAILABLE` or
+`BRICK_ID_MISMATCH`). The setter path also needs a plausible sparse-grid
+context. BMF tries cached or hook-captured context first, then bounded fallback
+work, then the optional off-game-thread background resolver.
 - `bmf.minigames.list`: reports `UNSAFE_MINIGAME_COMMAND_DISABLED` by default
   because Brickadia CL13530 can crash while formatting `Server.Minigames.List`.
 - `bmf.minigames.loadpreset name=<preset> [owner=<name>]`: runs

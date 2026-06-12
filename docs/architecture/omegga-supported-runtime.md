@@ -11,6 +11,9 @@ That runtime is more than a convenience wrapper: it is the current server
 supervisor and UE4SS bridge environment that BMF canaries and some live-player
 APIs depend on.
 
+For high-level sequence diagrams of the Omegga/BMF split, see
+[Proposed Patterns](proposed-patterns.md).
+
 ## Current Contract
 
 The supported runtime is not "any upstream Omegga install." It is the fork
@@ -54,12 +57,12 @@ The bridge has two authenticated client roles:
 - `cityrpg` or `plugin`: Omegga plugin clients that subscribe to BMF event
   records and send BMF command requests.
 
-When the socket bridge is available, BMF writes every framework event to
-`runtime/events.jsonl` and also sends an event envelope over the broker.
-Commands from plugins use the socket first and fall back to the existing
-file-backed `runtime/commands` worker when the socket is unavailable. This
-keeps older validation and repair workflows working while making latency
-sensitive gameplay paths independent of multi-second file polling.
+When the socket bridge is available, integrations should use it first for BMF
+events and command responses. BMF still writes every framework event to
+`runtime/events.jsonl`, and plugins can still fall back to the file-backed
+`runtime/commands` worker when the socket is unavailable. That keeps validation
+and repair workflows durable while letting latency-sensitive gameplay avoid
+multi-second file polling.
 
 Live validation on June 7, 2026 proved the CityRPG minigame team-assignment
 path using the socket bridge: a `joinminigame` event reached CityRPG and the

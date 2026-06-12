@@ -93,8 +93,12 @@ API documentation is published with GitHub Pages after pushes to `main`:
 
 <https://ty-lercox.github.io/brickadia-modding-framework/>
 
-Start with `docs/architecture/observability-performance.md` for the current
-BMF telemetry model, command-worker performance guardrails, native frame sampler
+Start with `docs/architecture/proposed-patterns.md` for high-level sequence
+diagrams that explain how BMF, Lua plugins, the event bus, ConsoleTag lookup,
+and the BMF-supported Omegga fork fit together.
+
+Use `docs/architecture/observability-performance.md` for the current BMF
+telemetry model, command-worker performance guardrails, native frame sampler
 details, Grafana/Omegga data path, and the player-position polling lesson from
 CityRPG validation.
 

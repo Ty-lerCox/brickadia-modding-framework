@@ -175,19 +175,34 @@ Use these rules:
 Do not rely only on average frame time. The local telemetry investigation showed
 that max frame time can remain high even after command volume improves.
 
+### Runtime Brick State Guardrails
+
 Runtime brick state mutation is an experimental native control path, not a
-polling path. `BMF.bricks.setRuntimeState` must stay behind
-`BMF_BRICK_RUNTIME_SET_ENABLED=1`, target one explicit runtime brick id, and be
-tested after restart on a known canary brick before gameplay use. The validated
-path uses Brickadia's visibility/collision setters with a plausible sparse-grid
-context. Context discovery must prefer cached or hook-captured context; if a
-cold-start scan is needed, it must run through
-`BMF_BRICK_CONTEXT_BACKGROUND_SCAN_ENABLED=1` off the game thread. Do not enable
-synchronous process-wide context scans for gameplay. Callers should treat
-`BRICK_GRID_CONTEXT_SCAN_PENDING` as a bounded retry signal and avoid continuous
-polling. Direct byte-write gates are diagnostic-only. Include `L6 Frame Time`
-evidence before broader gameplay systems such as CityRPG tree chopping promote
-the path.
+polling path. Keep it narrow:
+
+- Enable it only with `BMF_BRICK_RUNTIME_SET_ENABLED=1`.
+- Target one explicit live runtime brick id.
+- Treat `tag=<treeid:...>` as correlation metadata, not as a resolver.
+- Reject tag-only workflows; they would require broad live UObject scans.
+- Test after restart on a known canary brick before using the path for gameplay.
+
+The setter uses Brickadia's visibility/collision setters and needs a plausible
+sparse-grid context. Native lookup accepts a candidate id only when the returned
+brick reports the same internal runtime id field. Context lookup should prefer
+cached or hook-captured context. If cold-start lookup is needed, use
+`BMF_BRICK_CONTEXT_BACKGROUND_SCAN_ENABLED=1` so the resolver runs off the game
+thread.
+
+Caller behavior matters as much as native behavior:
+
+- Wait for the matching queued `sequence` in `bmf.bricks.runtime.status`.
+- Treat `BRICK_GRID_CONTEXT_SCAN_PENDING` as a bounded retry signal.
+- Sleep between retries and cap the total result wait.
+- Avoid continuous polling.
+- Keep direct byte-write gates off for gameplay.
+
+Before a gameplay system such as CityRPG tree chopping promotes this path,
+capture `L6 Frame Time` evidence and keep a rollback flag available.
 
 ## L6 Frame Time Validation
 

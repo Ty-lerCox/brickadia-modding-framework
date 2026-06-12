@@ -36,6 +36,7 @@ optional native frame-time samples from `BMFFrameTelemetry`.
 - [First plugin](getting-started/first-plugin.md)
 - [Lua examples](examples/index.md)
 - [Windows install](install/windows.md)
+- [Proposed patterns](architecture/proposed-patterns.md)
 - [Omegga-supported runtime](architecture/omegga-supported-runtime.md)
 - [Observability and performance](architecture/observability-performance.md)
 - [API overview](api/index.md)

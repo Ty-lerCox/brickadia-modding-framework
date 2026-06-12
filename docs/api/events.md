@@ -2,6 +2,9 @@
 
 BMF exposes a small event bus for plugins:
 
+For the high-level in-process and Omegga socket event flows, see
+[Proposed Patterns](../architecture/proposed-patterns.md).
+
 ## Examples
 
 - [EventAudit](../examples/index.md#eventaudit): complete plugin that
@@ -62,20 +65,20 @@ Returns the number of currently registered handlers for an event.
 
 The socket event stream is the preferred live bridge for integrations that need
 BMF events outside UE4SS Lua. The JSONL event stream remains the fallback and
-audit trail. For CityRPG minigame work, this replaces the legacy
-`omegga-minigameevents` polling plugin: BMF should produce minigame
-lifecycle/combat events, and CityRPG should consume socket event records first,
-tailing `runtime/events.jsonl` only when the socket is unavailable. The first
-supported producer is the Omegga adapter at
-`integrations/omegga/bmf-minigame-events/`, which writes BMF command files for
-`BMF.minigames.emitEvent`. The event surface uses namespaced BMF event names
-such as `minigames.joinminigame`, `minigames.kill`, and `minigames.death`;
-relays map those back to CityRPG's legacy event names at the application
-boundary. BMF-native data events such as `minigames.snapshot`,
-`minigames.created`, `minigames.deleted`, and `minigames.teamchange` update
-`BMF.minigames.data()` and do not require CityRPG to depend on Omegga's legacy
-minigame event plugin. The packaged adapter defaults to log-events-only;
-snapshot, team, and leaderboard polling remain unsafe opt-ins until BMF has a
+audit trail.
+
+Current CityRPG pattern:
+
+- BMF emits namespaced event records such as `minigames.joinminigame`,
+  `minigames.kill`, and `minigames.death`.
+- CityRPG consumes socket events first and tails `runtime/events.jsonl` only
+  when the socket is unavailable.
+- External relays map BMF event names back to CityRPG's legacy application
+  event names at the boundary.
+- The packaged Omegga adapter lives at
+  `integrations/omegga/bmf-minigame-events/`.
+
+Snapshot, team, and leaderboard polling remain unsafe opt-ins until BMF has a
 proven native hook or another safe Brickadia data source.
 
 Live validation on June 7, 2026 proved this bridge with CityRPG: a

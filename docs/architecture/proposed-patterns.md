@@ -290,6 +290,77 @@ Review questions:
 - How are duplicate native callbacks coalesced before they become gameplay
   events?
 
+## 9. CityRPG Native Tree Cutting
+
+Tree cutting is the current concrete example of the hook-ingress pattern. BMF
+does not get this event from Omegga logs first. It captures the Brickadia melee
+impact in native code, drains the native queue into BMF Lua, emits a BMF event,
+and lets CityRPG consume that event over the socket or JSONL fallback.
+
+```mermaid
+sequenceDiagram
+    participant Player as Player with handaxe
+    participant Server as Brickadia melee runtime
+    participant Native as BMFSocket treecut detour
+    participant Queue as Native treecut queue
+    participant BMF as BMF Lua runtime
+    participant Bus as BMF.events
+    participant Relay as CityRPG BMF relay
+    participant Tree as CityRPG TreeService
+    participant Physical as BMF runtime brick state
+
+    BMF->>Native: Start treecut native capture
+    Native->>Server: Install detour on melee impact function
+    Player->>Server: Swing handaxe at tree
+    Server->>Native: Call detoured melee impact
+    Native->>Server: Call original Brickadia function
+    Native->>Native: Read impact, normal, context, ConsoleTag candidates
+    Native->>Native: Verify weapon context is handaxe
+    Native->>Queue: Enqueue cityrpg.treecut.hit JSON payload
+
+    BMF->>Queue: Drain with BMFSocketTreeCutDrain
+    Queue-->>BMF: Return queued native payloads
+    BMF->>BMF: Decode payload and mark source BMFSocketTreeCutNative
+    BMF->>Bus: Emit cityrpg.treecut.hit
+    Bus->>Bus: Append runtime/events.jsonl and optional socket envelope
+    Bus-->>Relay: Deliver event by socket or JSONL fallback
+    Relay->>Tree: Emit local treecut event
+
+    Tree->>Tree: Verify itemType=handaxe and itemVerified=true
+    Tree->>Tree: Resolve player from payload
+    Tree->>Tree: Resolve treeid tag or cached anchor
+    Tree->>Tree: Apply per-player/per-tree duplicate-hit cooldown
+    Tree->>Tree: Process chop, health, XP, and drops
+
+    alt tree still has health
+        Tree-->>Player: Show progress or feedback
+    else tree is depleted
+        Tree-->>Player: Award lumber, seed chance, and XP
+        Tree->>Tree: Save tree state and schedule respawn
+        opt physical state enabled
+            Tree->>Physical: bmf.bricks.runtime.set brickid candidate plus treeid tag
+            Physical->>Physical: Validate runtime brick id and sparse-grid context
+            alt context ready
+                Physical-->>Tree: visible=false result OK
+            else background context scan pending
+                Physical-->>Tree: BRICK_GRID_CONTEXT_SCAN_PENDING
+                Tree->>Physical: Wait for matching status sequence and retry later
+            end
+        end
+    end
+```
+
+Review questions:
+
+- Should BMF emit a more generic event than `cityrpg.treecut.hit` before
+  CityRPG-specific naming?
+- Which fields in the native payload are stable enough to document as a
+  contract?
+- Where should duplicate-hit coalescing live: native queue, BMF Lua, or
+  CityRPG?
+- Should physical hide/restore be part of tree-cut handling, or a separate
+  resource-node lifecycle pattern?
+
 ## Consolidation Rule
 
 Detailed API pages should document exact parameters, flags, and validation

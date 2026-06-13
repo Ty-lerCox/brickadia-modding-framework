@@ -79,6 +79,8 @@ BMF_BRICK_RUNTIME_LOOKUP_ENABLED=1     only with a verified live runtime id
 BMF_BRICK_VISIBILITY_SET_ENABLED=1      required for visible=...
 BMF_BRICK_COLLISION_SET_ENABLED=1       required for collision=...
 BMF_BRICK_CONTEXT_BACKGROUND_SCAN_ENABLED=1  optional cold-start resolver
+BMF_BRICK_GRID_CONTEXT_CACHE_TTL_MS=5000      max sparse-grid context cache age
+BMF_BRICK_OWNER_CONTEXT_SCAN_FOR_SET_ENABLED=0  keep owner scan out of gameplay setters
 ```
 
 Set `BMF_BRICK_RUNTIME_DIAGNOSTICS_ENABLED=1` only when owner or sparse-grid
@@ -95,6 +97,13 @@ are not always safe to read.
 - Keep `BMF_BRICK_RUNTIME_LOOKUP_ENABLED=0` for saved indices.
 - Wait for the matching `sequence` in `bmf.bricks.runtime.status` before
   retrying a queued mutation.
+- Keep cached sparse-grid context short-lived. The default
+  `BMF_BRICK_GRID_CONTEXT_CACHE_TTL_MS=5000` prevents long-running servers from
+  reusing stale native context pointers for later visibility/collision setters.
+- Keep direct owner-context scan disabled for gameplay setters. If no fresh
+  cached context is available, let the setter return
+  `BRICK_GRID_CONTEXT_SCAN_PENDING` and retry after the background scan primes
+  the cache.
 - Retry only after a completed `BRICK_GRID_CONTEXT_SCAN_PENDING` result, and
   keep retries low-frequency.
 - Keep direct byte-write gates off for gameplay. They are diagnostic only.

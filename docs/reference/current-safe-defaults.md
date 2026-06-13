@@ -62,6 +62,14 @@ Keep these disabled unless a targeted runtime-brick validation is active:
 - `BMF_BRICK_RUNTIME_DIAGNOSTICS_ENABLED`
 - `BMF_BRICK_CONTEXT_BACKGROUND_SCAN_ENABLED`
 
+Use `BMF_BRICK_GRID_CONTEXT_CACHE_TTL_MS=5000` when runtime mutation is enabled.
+The setter should refresh stale sparse-grid context instead of trusting a
+pointer captured earlier in the server lifetime.
+
+Keep `BMF_BRICK_OWNER_CONTEXT_SCAN_FOR_SET_ENABLED` unset or `0` outside
+diagnostic canaries. Gameplay setters should use cached/background-scanned
+context, not an owner-memory scan result directly.
+
 Runtime brick mutation also requires `L6 Frame Time` evidence before being
 treated as a gameplay path.
 

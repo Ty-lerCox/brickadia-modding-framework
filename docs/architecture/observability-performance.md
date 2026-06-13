@@ -192,6 +192,12 @@ polling path. Keep it narrow:
 - Target one explicit live runtime brick id.
 - Treat `tag=<treeid:...>` as correlation metadata, not as a resolver.
 - Reject tag-only workflows; they would require broad live UObject scans.
+- Keep `BMF_BRICK_GRID_CONTEXT_CACHE_TTL_MS` short, currently `5000`, so
+  visibility/collision setters do not reuse native grid-context pointers long
+  after they were captured.
+- Keep `BMF_BRICK_OWNER_CONTEXT_SCAN_FOR_SET_ENABLED=0` for gameplay. Owner
+  memory scans are diagnostic evidence only; the setter should wait for a
+  background scan and retry with a fresh cached context.
 - Test after restart on a known canary brick before using the path for gameplay.
 
 The setter uses Brickadia's visibility/collision setters and needs a plausible

@@ -161,6 +161,11 @@ namespace
         return std::min<uint64_t>(max_value, std::max<uint64_t>(min_value, clamped));
     }
 
+    uint64_t monotonic_ms()
+    {
+        return static_cast<uint64_t>(GetTickCount64());
+    }
+
     bool contains_ascii_case_insensitive(std::string_view value, std::string_view needle)
     {
         std::string value_lower = ascii_lower(std::string(value));
@@ -3070,6 +3075,7 @@ namespace
     std::unordered_map<uint32_t, BrickPhysicalOriginal> g_brick_physical_originals;
     std::unordered_map<uint32_t, BrickRuntimeVerifiedCandidate> g_brick_runtime_verified_candidates;
     std::atomic<uintptr_t> g_brick_grid_context_cached{0};
+    std::atomic<uint64_t> g_brick_grid_context_cached_at_ms{0};
     std::string g_brick_grid_context_cached_source;
     std::string g_brick_runtime_context_hook_error;
     std::atomic<bool> g_brick_runtime_context_hooks_installed{false};
@@ -3174,6 +3180,51 @@ namespace
                env_flag_enabled("BMF_BRICK_LOW_SETTER_HOOK_ENABLED");
     }
 
+    bool brick_grid_context_is_plausible(uintptr_t address,
+                                         uint32_t brick_cell_index,
+                                         uint32_t brick_sub_index);
+
+    uint64_t brick_grid_context_cache_ttl_ms()
+    {
+        return env_u64(
+            "BMF_BRICK_GRID_CONTEXT_CACHE_TTL_MS",
+            5000,
+            1,
+            600000);
+    }
+
+    uint64_t brick_grid_context_cached_age_ms()
+    {
+        const uint64_t cached_at = g_brick_grid_context_cached_at_ms.load();
+        if (cached_at == 0)
+        {
+            return UINT64_MAX;
+        }
+        const uint64_t now = monotonic_ms();
+        return now >= cached_at ? now - cached_at : 0;
+    }
+
+    bool brick_grid_context_cache_fresh()
+    {
+        return brick_grid_context_cached_age_ms() <= brick_grid_context_cache_ttl_ms();
+    }
+
+    void brick_grid_context_cache_store(uintptr_t address, const char* source)
+    {
+        g_brick_grid_context_cached.store(address);
+        g_brick_grid_context_cached_at_ms.store(monotonic_ms());
+        std::lock_guard lock(g_brick_physical_mutex);
+        g_brick_grid_context_cached_source = source ? source : "unknown";
+    }
+
+    bool brick_grid_context_cached_is_usable(uint32_t brick_cell_index, uint32_t brick_sub_index)
+    {
+        const uintptr_t cached = g_brick_grid_context_cached.load();
+        return cached != 0 &&
+               brick_grid_context_cache_fresh() &&
+               brick_grid_context_is_plausible(cached, brick_cell_index, brick_sub_index);
+    }
+
     void brick_runtime_context_set_error(std::string value)
     {
         std::lock_guard lock(g_brick_physical_mutex);
@@ -3189,11 +3240,10 @@ namespace
             return false;
         }
 
-        g_brick_grid_context_cached.store(address);
+        brick_grid_context_cache_store(address, source);
         g_brick_context_capture_hits.fetch_add(1);
         {
             std::lock_guard lock(g_brick_physical_mutex);
-            g_brick_grid_context_cached_source = source ? source : "unknown";
             g_brick_runtime_context_hook_error.clear();
         }
         return true;
@@ -5113,11 +5163,10 @@ namespace
             return false;
         }
 
-        g_brick_grid_context_cached.store(raw_context);
+        brick_grid_context_cache_store(raw_context, source);
         g_brick_context_capture_hits.fetch_add(1);
         {
             std::lock_guard lock(g_brick_physical_mutex);
-            g_brick_grid_context_cached_source = source ? source : "unknown";
             g_brick_runtime_context_hook_error.clear();
         }
         return true;
@@ -5290,7 +5339,7 @@ namespace
                     result.found = true;
                     result.address = address;
                     result.detail = "matched sparse brick-grid context layout";
-                    g_brick_grid_context_cached.store(address);
+                    brick_grid_context_cache_store(address, "scan");
                     break;
                 }
             }
@@ -5394,6 +5443,12 @@ namespace
                env_flag_enabled("BMF_BRICK_CONTEXT_OWNER_SCAN_ENABLED");
     }
 
+    bool brick_owner_context_scan_for_set_enabled()
+    {
+        return env_flag_enabled("BMF_BRICK_OWNER_CONTEXT_SCAN_FOR_SET_ENABLED") ||
+               env_flag_enabled("BMF_BRICK_CONTEXT_OWNER_SCAN_FOR_SET_ENABLED");
+    }
+
     bool brick_owner_context_check_candidate(BrickOwnerContextScanResult& result,
                                              uintptr_t address,
                                              std::string_view source,
@@ -5415,11 +5470,7 @@ namespace
         result.address = address;
         result.source = std::string(source);
         result.detail = "matched sparse brick-grid context from bounded owner scan";
-        g_brick_grid_context_cached.store(address);
-        {
-            std::lock_guard lock(g_brick_physical_mutex);
-            g_brick_grid_context_cached_source = result.source;
-        }
+        brick_grid_context_cache_store(address, result.source.c_str());
         return true;
     }
 
@@ -5546,9 +5597,7 @@ namespace
             return false;
         }
 
-        const uintptr_t cached_grid_context = g_brick_grid_context_cached.load();
-        if (brick_grid_context_is_plausible(
-                cached_grid_context,
+        if (brick_grid_context_cached_is_usable(
                 brick_cell_index,
                 brick_sub_index))
         {
@@ -5580,11 +5629,10 @@ namespace
             g_brick_grid_context_background_scan_address.store(scan.address);
             if (scan.found)
             {
-                g_brick_grid_context_cached.store(scan.address);
+                brick_grid_context_cache_store(scan.address, "background-scan");
                 g_brick_grid_context_background_scan_completions.fetch_add(1);
                 {
                     std::lock_guard lock(g_brick_physical_mutex);
-                    g_brick_grid_context_cached_source = "background-scan";
                     g_brick_grid_context_background_scan_detail = scan.detail;
                 }
             }
@@ -5917,6 +5965,11 @@ namespace
         bool has_original = false;
         BrickPhysicalOriginal original{};
         const uintptr_t cached_grid_context = g_brick_grid_context_cached.load();
+        const uint64_t cached_grid_context_age_ms = brick_grid_context_cached_age_ms();
+        const uint64_t cached_grid_context_ttl_ms = brick_grid_context_cache_ttl_ms();
+        const bool cached_grid_context_fresh =
+            cached_grid_context_age_ms != UINT64_MAX &&
+            cached_grid_context_age_ms <= cached_grid_context_ttl_ms;
         std::string cached_grid_context_source;
         std::string context_hook_error;
         {
@@ -5954,11 +6007,15 @@ namespace
             << "context_hook_error=" << json_escape(context_hook_error) << "\n"
             << "cached_grid_context_address=" << json_escape(pointer_hex(cached_grid_context)) << "\n"
             << "cached_grid_context_source=" << json_escape(cached_grid_context_source) << "\n"
+            << "cached_grid_context_age_ms=" << (cached_grid_context_age_ms == UINT64_MAX ? 0 : cached_grid_context_age_ms) << "\n"
+            << "cached_grid_context_ttl_ms=" << cached_grid_context_ttl_ms << "\n"
+            << "cached_grid_context_fresh=" << (cached_grid_context_fresh ? "true" : "false") << "\n"
             << "cached_grid_context_accessible=" << (
                    cached_grid_context != 0 && is_accessible_memory(cached_grid_context, 0x2E8)
                    ? "true"
                    : "false") << "\n"
             << "cached_grid_context_plausible=" << (
+                   cached_grid_context_fresh &&
                    brick_grid_context_is_plausible(cached_grid_context, brick_cell_index, brick_sub_index)
                    ? "true"
                    : "false") << "\n"
@@ -6102,6 +6159,11 @@ namespace
             ? brick_runtime_context_hook_install()
             : false;
         const uintptr_t cached_grid_context = g_brick_grid_context_cached.load();
+        const uint64_t cached_grid_context_age_ms = brick_grid_context_cached_age_ms();
+        const uint64_t cached_grid_context_ttl_ms = brick_grid_context_cache_ttl_ms();
+        const bool cached_grid_context_fresh =
+            cached_grid_context_age_ms != UINT64_MAX &&
+            cached_grid_context_age_ms <= cached_grid_context_ttl_ms;
         if (explicit_grid_context != 0)
         {
             if (!env_flag_enabled("BMF_BRICK_RUNTIME_CONTEXT_OVERRIDE_ENABLED") &&
@@ -6124,18 +6186,14 @@ namespace
             }
             grid_context_address = explicit_grid_context;
             grid_context_source = "explicit-override";
-            g_brick_grid_context_cached.store(explicit_grid_context);
-            {
-                std::lock_guard lock(g_brick_physical_mutex);
-                g_brick_grid_context_cached_source = grid_context_source;
-            }
+            brick_grid_context_cache_store(explicit_grid_context, grid_context_source.c_str());
         }
-        else if (brick_grid_context_is_plausible(cached_grid_context, brick_cell_index, brick_sub_index))
+        else if (brick_grid_context_cached_is_usable(brick_cell_index, brick_sub_index))
         {
             grid_context_address = cached_grid_context;
             grid_context_source = "cached-action-context";
         }
-        else if (brick_owner_context_scan_enabled())
+        else if (brick_owner_context_scan_for_set_enabled())
         {
             const BrickOwnerContextScanResult scan = brick_owner_context_scan(
                 static_cast<uintptr_t>(owner_address),
@@ -6416,6 +6474,9 @@ namespace
             << "context_hook_install_ok=" << (context_hook_install_ok ? "true" : "false") << "\n"
             << "context_hooks_installed=" << (g_brick_runtime_context_hooks_installed.load() ? "true" : "false") << "\n"
             << "cached_grid_context_address=" << json_escape(pointer_hex(cached_grid_context)) << "\n"
+            << "cached_grid_context_age_ms=" << (cached_grid_context_age_ms == UINT64_MAX ? 0 : cached_grid_context_age_ms) << "\n"
+            << "cached_grid_context_ttl_ms=" << cached_grid_context_ttl_ms << "\n"
+            << "cached_grid_context_fresh=" << (cached_grid_context_fresh ? "true" : "false") << "\n"
             << "context_capture_hits=" << g_brick_context_capture_hits.load() << "\n"
             << "context_capture_rejects=" << g_brick_context_capture_rejects.load() << "\n"
             << "place_action_apply_hits=" << g_brick_place_action_apply_hits.load() << "\n"

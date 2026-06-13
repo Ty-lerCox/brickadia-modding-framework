@@ -18041,6 +18041,41 @@ function BMF_command_worker_max_files_per_poll()
   )
 end
 
+function BMF_drain_command_worker_native_events(limit, defer_emit)
+  if state.socket.started then
+    return true, 0
+  end
+  if not state.tools.tree_cut_native or state.tools.tree_cut_native.enabled ~= true then
+    return true, 0
+  end
+
+  local native_ok, native_code, native_message, raw_events = BMF_tree_cut_native_drain_raw(limit or 64)
+  if not native_ok then
+    state.tools.tree_cut_native.last_error = tostring(native_message or native_code or "native tree-cut drain failed")
+    return false, 0
+  end
+  if type(raw_events) ~= "table" or #raw_events == 0 then
+    return true, 0
+  end
+
+  local native_drained = #raw_events
+  local function emit_native_events()
+    local emitted, err = pcall(BMF_tree_cut_native_emit_raw, raw_events, {
+      silent = true,
+    })
+    if not emitted then
+      state.tools.tree_cut_native.last_error = "native tree-cut emit failed: " .. tostring(err)
+    end
+  end
+
+  if defer_emit then
+    run_on_game_thread(emit_native_events)
+  else
+    emit_native_events()
+  end
+  return true, native_drained
+end
+
 local function schedule_command_worker_poll(delay_ms)
   local delay = tonumber(delay_ms) or state.command_worker_fallback_poll_interval_ms or BMF_COMMAND_WORKER_FALLBACK_POLL_MS
   return BMF_schedule_delayed_callback("command_worker", delay, function()
@@ -18055,6 +18090,7 @@ end
 function BMF_poll_command_requests_once()
   local poll_started_clock = os.clock()
   local processed_files = 0
+  local native_drained = 0
   local poll_ok = true
   local max_files = state.command_worker_max_files_per_poll or BMF_COMMAND_WORKER_DEFAULT_MAX_FILES_PER_POLL
   for _, file_name in ipairs(list_command_request_files()) do
@@ -18076,8 +18112,14 @@ function BMF_poll_command_requests_once()
       poll_ok = false
       state.socket.last_error = "socket command-worker watchdog failed: " .. tostring(err)
     end
+  else
+    local native_ok, native_count = BMF_drain_command_worker_native_events(64, false)
+    if not native_ok then
+      poll_ok = false
+    end
+    native_drained = native_count or 0
   end
-  if processed_files > 0 or not poll_ok then
+  if processed_files > 0 or native_drained > 0 or not poll_ok then
     BMF_telemetry_record_worker("command_polls", BMF_telemetry_duration_ms(poll_started_clock), poll_ok, "files_processed", processed_files)
   end
 end
@@ -18099,8 +18141,20 @@ function BMF_poll_command_requests_async()
     return true
   end
 
+  local poll_started_clock = os.clock()
+  local poll_ok = true
+  local native_drained = 0
+  local native_ok, native_count = BMF_drain_command_worker_native_events(64, true)
+  if not native_ok then
+    poll_ok = false
+  end
+  native_drained = native_count or 0
+
   local request_files = list_command_request_files()
   if #request_files == 0 then
+    if native_drained > 0 or not poll_ok then
+      BMF_telemetry_record_worker("command_polls", BMF_telemetry_duration_ms(poll_started_clock), poll_ok, "files_processed", 0)
+    end
     return false
   end
 
@@ -18127,6 +18181,10 @@ function BMF_poll_command_requests_async()
         break
       end
     end
+  end
+
+  if scheduled_files > 0 or native_drained > 0 or not poll_ok then
+    BMF_telemetry_record_worker("command_polls", BMF_telemetry_duration_ms(poll_started_clock), poll_ok, "files_processed", scheduled_files)
   end
 
   return false

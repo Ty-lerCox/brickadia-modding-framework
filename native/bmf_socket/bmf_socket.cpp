@@ -883,7 +883,9 @@ namespace
     std::atomic<uint64_t> g_treecut_hits{0};
     std::atomic<uint64_t> g_treecut_events{0};
     std::atomic<uint64_t> g_treecut_verified_handaxe_hits{0};
+    std::atomic<uint64_t> g_treecut_verified_pickaxe_hits{0};
     std::atomic<uint64_t> g_treecut_rejected_non_handaxe{0};
+    std::atomic<uint64_t> g_treecut_rejected_non_resource_tool{0};
     std::atomic<uint64_t> g_treecut_param_failures{0};
     std::atomic<uint64_t> g_treecut_queue_drops{0};
     std::atomic<uint64_t> g_treecut_target_resolve_attempts{0};
@@ -899,8 +901,11 @@ namespace
     std::atomic<uintptr_t> g_treecut_slot{0};
     std::atomic<uintptr_t> g_treecut_original{0};
     std::atomic<uintptr_t> g_treecut_handaxe_class{0};
+    std::atomic<uintptr_t> g_treecut_pickaxe_class{0};
     std::atomic<bool> g_treecut_handaxe_class_resolved{false};
+    std::atomic<bool> g_treecut_pickaxe_class_resolved{false};
     std::atomic<bool> g_treecut_handaxe_class_attempted{false};
+    std::atomic<bool> g_treecut_pickaxe_class_attempted{false};
     std::atomic<uintptr_t> g_treecut_last_context{0};
     std::atomic<uintptr_t> g_treecut_last_context_class{0};
     std::mutex g_treecut_mutex;
@@ -910,6 +915,8 @@ namespace
     std::string g_treecut_last_reject_reason;
     std::string g_treecut_handaxe_class_source;
     std::string g_treecut_handaxe_class_detail;
+    std::string g_treecut_pickaxe_class_source;
+    std::string g_treecut_pickaxe_class_detail;
     std::string g_treecut_last_target_name;
     std::string g_treecut_last_target_full_name;
     std::string g_treecut_last_target_class;
@@ -1764,6 +1771,26 @@ namespace
         return nullptr;
     }
 
+    enum class TreeCutResourceTool
+    {
+        None,
+        Handaxe,
+        Pickaxe,
+    };
+
+    const char* treecut_resource_tool_item_type(TreeCutResourceTool tool)
+    {
+        switch (tool)
+        {
+        case TreeCutResourceTool::Handaxe:
+            return "handaxe";
+        case TreeCutResourceTool::Pickaxe:
+            return "pickaxe";
+        default:
+            return "";
+        }
+    }
+
     bool set_treecut_handaxe_class_from_address(std::string_view source_address, std::string_view source_label)
     {
         const std::string label = source_label.empty() ? std::string("address") : std::string(source_label);
@@ -1871,7 +1898,99 @@ namespace
         return nullptr;
     }
 
-    bool is_treecut_context_handaxe(void* context)
+    void treecut_cache_pickaxe_class_unlocked(Unreal::UClass* candidate, std::string source, std::string detail)
+    {
+        g_treecut_pickaxe_class.store(reinterpret_cast<uintptr_t>(candidate));
+        g_treecut_pickaxe_class_resolved.store(candidate != nullptr);
+        g_treecut_pickaxe_class_attempted.store(true);
+        g_treecut_pickaxe_class_source = std::move(source);
+        g_treecut_pickaxe_class_detail = std::move(detail);
+        if (!candidate)
+        {
+            g_treecut_last_error = g_treecut_pickaxe_class_detail;
+        }
+    }
+
+    Unreal::UClass* resolve_treecut_pickaxe_class()
+    {
+        if (const uintptr_t cached = g_treecut_pickaxe_class.load())
+        {
+            return reinterpret_cast<Unreal::UClass*>(cached);
+        }
+
+        std::lock_guard lock(g_treecut_mutex);
+        if (const uintptr_t cached = g_treecut_pickaxe_class.load())
+        {
+            return reinterpret_cast<Unreal::UClass*>(cached);
+        }
+
+        struct CandidateName
+        {
+            const CharType* name;
+            const char* label;
+        };
+
+        struct CandidateKind
+        {
+            const CharType* kind;
+            const char* label;
+        };
+
+        const CandidateName names[] = {
+            {STR("Weapon_Pickaxe_C"), "Weapon_Pickaxe_C"},
+            {STR("Weapon_Pickaxe"), "Weapon_Pickaxe"},
+            {STR("/Game/Weapons/Melee/Pickaxe/Weapon_Pickaxe.Weapon_Pickaxe_C"), "/Game/Weapons/Melee/Pickaxe/Weapon_Pickaxe.Weapon_Pickaxe_C"},
+            {STR("BlueprintGeneratedClass /Game/Weapons/Melee/Pickaxe/Weapon_Pickaxe.Weapon_Pickaxe_C"), "BlueprintGeneratedClass /Game/Weapons/Melee/Pickaxe/Weapon_Pickaxe.Weapon_Pickaxe_C"},
+            {STR("BlueprintGeneratedClass'/Game/Weapons/Melee/Pickaxe/Weapon_Pickaxe.Weapon_Pickaxe_C'"), "BlueprintGeneratedClass'/Game/Weapons/Melee/Pickaxe/Weapon_Pickaxe.Weapon_Pickaxe_C'"},
+            {STR("/Game/Weapons/Melee/Pickaxe/Weapon_Pickaxe"), "/Game/Weapons/Melee/Pickaxe/Weapon_Pickaxe"},
+            {STR("/Game/Brickadia/Weapons/Weapon_Pickaxe.Weapon_Pickaxe_C"), "/Game/Brickadia/Weapons/Weapon_Pickaxe.Weapon_Pickaxe_C"},
+            {STR("/Game/Brickadia/Gameplay/Weapons/Weapon_Pickaxe.Weapon_Pickaxe_C"), "/Game/Brickadia/Gameplay/Weapons/Weapon_Pickaxe.Weapon_Pickaxe_C"},
+            {STR("/Game/Weapons/Weapon_Pickaxe.Weapon_Pickaxe_C"), "/Game/Weapons/Weapon_Pickaxe.Weapon_Pickaxe_C"},
+        };
+        const CandidateKind kinds[] = {
+            {STR("BlueprintGeneratedClass"), "BlueprintGeneratedClass"},
+            {STR("Class"), "Class"},
+        };
+
+        for (const CandidateName& name : names)
+        {
+            for (const CandidateKind& kind : kinds)
+            {
+                if (Unreal::UClass* candidate = find_treecut_handaxe_class_candidate(kind.kind, name.name))
+                {
+                    treecut_cache_pickaxe_class_unlocked(
+                        candidate,
+                        std::string("FindObject(") + kind.label + "," + name.label + ")",
+                        "pickaxe class resolved by native object lookup");
+                    return candidate;
+                }
+            }
+        }
+
+        treecut_cache_pickaxe_class_unlocked(
+            nullptr,
+            "native lookup",
+            "Weapon_Pickaxe class could not be resolved");
+        return nullptr;
+    }
+
+    bool treecut_context_matches_class(Unreal::UObject* object, Unreal::UClass* object_class, Unreal::UClass* expected_class)
+    {
+        if (!object || !expected_class)
+        {
+            return false;
+        }
+        try
+        {
+            return object->IsA(expected_class);
+        }
+        catch (...)
+        {
+            return object_class == expected_class;
+        }
+    }
+
+    TreeCutResourceTool classify_treecut_context_resource_tool(void* context)
     {
         Unreal::UObject* object = reinterpret_cast<Unreal::UObject*>(context);
         g_treecut_last_context.store(reinterpret_cast<uintptr_t>(context));
@@ -1882,7 +2001,7 @@ namespace
             std::lock_guard lock(g_treecut_mutex);
             g_treecut_last_item_type = "unknown";
             g_treecut_last_reject_reason = "context is not a live UObject";
-            return false;
+            return TreeCutResourceTool::None;
         }
 
         Unreal::UClass* object_class = nullptr;
@@ -1897,36 +2016,35 @@ namespace
         g_treecut_last_context_class.store(reinterpret_cast<uintptr_t>(object_class));
 
         Unreal::UClass* handaxe_class = resolve_treecut_handaxe_class();
-        if (!handaxe_class)
-        {
-            std::lock_guard lock(g_treecut_mutex);
-            g_treecut_last_item_type = "unknown";
-            g_treecut_last_reject_reason = "handaxe class unresolved";
-            return false;
-        }
-
-        bool matches = false;
-        try
-        {
-            matches = object->IsA(handaxe_class);
-        }
-        catch (...)
-        {
-            matches = object_class == handaxe_class;
-        }
+        Unreal::UClass* pickaxe_class = resolve_treecut_pickaxe_class();
+        const bool matches_handaxe = treecut_context_matches_class(object, object_class, handaxe_class);
+        const bool matches_pickaxe = treecut_context_matches_class(object, object_class, pickaxe_class);
 
         std::lock_guard lock(g_treecut_mutex);
-        if (matches)
+        if (matches_handaxe)
         {
             g_treecut_last_item_type = "handaxe";
             g_treecut_last_reject_reason.clear();
+            g_treecut_last_error.clear();
+            return TreeCutResourceTool::Handaxe;
+        }
+        if (matches_pickaxe)
+        {
+            g_treecut_last_item_type = "pickaxe";
+            g_treecut_last_reject_reason.clear();
+            g_treecut_last_error.clear();
+            return TreeCutResourceTool::Pickaxe;
+        }
+        g_treecut_last_item_type = "non-resource-tool";
+        if (!handaxe_class && !pickaxe_class)
+        {
+            g_treecut_last_reject_reason = "resource tool classes unresolved";
         }
         else
         {
-            g_treecut_last_item_type = "non-handaxe";
-            g_treecut_last_reject_reason = "weapon context did not match Weapon_Handaxe";
+            g_treecut_last_reject_reason = "weapon context did not match Weapon_Handaxe or Weapon_Pickaxe";
         }
-        return matches;
+        return TreeCutResourceTool::None;
     }
 
     bool treecut_actor_text_is_tree_like(const TreeCutTargetCandidate& candidate)
@@ -6724,7 +6842,8 @@ namespace
         uint64_t sequence,
         void* context,
         uintptr_t locals,
-        const double values[7])
+        const double values[7],
+        TreeCutResourceTool tool)
     {
         TreeCutResolvedTarget target;
         TreeCutConsoleTagInfo console_tag_info;
@@ -6736,20 +6855,24 @@ namespace
         }
         treecut_record_console_tag_info(console_tag_info);
 
+        const char* item_type = treecut_resource_tool_item_type(tool);
+        const bool is_pickaxe = tool == TreeCutResourceTool::Pickaxe;
+
         std::ostringstream out;
         out << std::setprecision(17)
             << "{"
-            << "\"type\":\"treecut_hit\","
+            << "\"type\":\"" << (is_pickaxe ? "mine_hit" : "treecut_hit") << "\","
             << "\"source\":\"BMFSocketTreeCutNative\","
-            << "\"event\":\"cityrpg.treecut.hit\","
+            << "\"event\":\"" << (is_pickaxe ? "cityrpg.mine.hit" : "cityrpg.treecut.hit") << "\","
             << "\"sequence\":" << sequence << ","
             << "\"timestamp\":\"" << json_escape(system_utc_iso()) << "\","
             << "\"function\":\"MulticastReplicateAcceleratedMeleeExplosion\","
-            << "\"itemType\":\"handaxe\","
+            << "\"itemType\":\"" << item_type << "\","
             << "\"itemVerified\":true,"
             << "\"contextAddress\":\"" << json_escape(pointer_hex(reinterpret_cast<uintptr_t>(context))) << "\","
             << "\"contextClassAddress\":\"" << json_escape(pointer_hex(g_treecut_last_context_class.load())) << "\","
             << "\"handaxeClassAddress\":\"" << json_escape(pointer_hex(g_treecut_handaxe_class.load())) << "\","
+            << "\"pickaxeClassAddress\":\"" << json_escape(pointer_hex(g_treecut_pickaxe_class.load())) << "\","
             << "\"localsAddress\":\"" << json_escape(pointer_hex(locals)) << "\","
             << "\"impact\":{\"x\":" << values[1] << ",\"y\":" << values[2] << ",\"z\":" << values[3] << "},"
             << "\"normal\":{\"x\":" << values[4] << ",\"y\":" << values[5] << ",\"z\":" << values[6] << "},"
@@ -6780,17 +6903,26 @@ namespace
 
         if (g_treecut_enabled.load() && params_ok)
         {
-            if (!is_treecut_context_handaxe(context))
+            const TreeCutResourceTool tool = classify_treecut_context_resource_tool(context);
+            if (tool == TreeCutResourceTool::None)
             {
                 g_treecut_rejected_non_handaxe.fetch_add(1);
+                g_treecut_rejected_non_resource_tool.fetch_add(1);
                 return;
             }
 
-            g_treecut_verified_handaxe_hits.fetch_add(1);
+            if (tool == TreeCutResourceTool::Pickaxe)
+            {
+                g_treecut_verified_pickaxe_hits.fetch_add(1);
+            }
+            else
+            {
+                g_treecut_verified_handaxe_hits.fetch_add(1);
+            }
             const uint64_t sequence = g_treecut_events.fetch_add(1) + 1;
             try
             {
-                enqueue_treecut_event(build_treecut_event_json(sequence, context, locals, values));
+                enqueue_treecut_event(build_treecut_event_json(sequence, context, locals, values, tool));
             }
             catch (...)
             {
@@ -6835,7 +6967,9 @@ namespace
             << "hits=" << g_treecut_hits.load() << "\n"
             << "events=" << g_treecut_events.load() << "\n"
             << "verified_handaxe_hits=" << g_treecut_verified_handaxe_hits.load() << "\n"
+            << "verified_pickaxe_hits=" << g_treecut_verified_pickaxe_hits.load() << "\n"
             << "rejected_non_handaxe=" << g_treecut_rejected_non_handaxe.load() << "\n"
+            << "rejected_non_resource_tool=" << g_treecut_rejected_non_resource_tool.load() << "\n"
             << "queued=" << g_treecut_queue.size() << "\n"
             << "queue_drops=" << g_treecut_queue_drops.load() << "\n"
             << "param_failures=" << g_treecut_param_failures.load() << "\n"
@@ -6861,6 +6995,11 @@ namespace
             << "handaxe_class_attempted=" << (g_treecut_handaxe_class_attempted.load() ? "true" : "false") << "\n"
             << "handaxe_class_source=" << json_escape(g_treecut_handaxe_class_source) << "\n"
             << "handaxe_class_detail=" << json_escape(g_treecut_handaxe_class_detail) << "\n"
+            << "pickaxe_class=" << json_escape(pointer_hex(g_treecut_pickaxe_class.load())) << "\n"
+            << "pickaxe_class_resolved=" << (g_treecut_pickaxe_class_resolved.load() ? "true" : "false") << "\n"
+            << "pickaxe_class_attempted=" << (g_treecut_pickaxe_class_attempted.load() ? "true" : "false") << "\n"
+            << "pickaxe_class_source=" << json_escape(g_treecut_pickaxe_class_source) << "\n"
+            << "pickaxe_class_detail=" << json_escape(g_treecut_pickaxe_class_detail) << "\n"
             << "last_context=" << json_escape(pointer_hex(g_treecut_last_context.load())) << "\n"
             << "last_context_class=" << json_escape(pointer_hex(g_treecut_last_context_class.load())) << "\n"
             << "last_item_type=" << json_escape(g_treecut_last_item_type) << "\n"

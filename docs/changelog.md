@@ -1,128 +1,136 @@
-# BMF Project Changelog
+# BMF Changelog
 
-This page summarizes BMF progress in plain language. It is based on the commit
-history from the initial framework setup on June 4, 2026 through the latest BMF
-work on June 13, 2026.
+Latest updates are listed first. Each update gets a version heading and a short
+set of category sections underneath it.
 
-## Where BMF Is Headed
+## BMF v0.1.0 - Foundation Update (June 13, 2026)
 
-BMF is moving toward a safer server-side Lua framework for Brickadia dedicated
-servers. The project is focused on giving plugin authors useful APIs without
-requiring every plugin to touch raw UE4SS helpers, unsafe console commands, or
-native hooks directly.
+Project Direction
+- BMF is being built as a safer server-side Lua framework for Brickadia dedicated servers.
+- The BMF-supported Omegga Windows fork is the main supported runtime for launching, bridging, validation, player sync, events, and metrics.
+- Typed Lua APIs, capability gates, and safe defaults are preferred over broad raw console execution.
+- Socket transport is the preferred path for latency-sensitive gameplay messaging, with file-backed commands and JSONL logs kept as fallbacks.
+- Native hooks, live object scans, and runtime brick mutation remain guarded surfaces that need validation before regular gameplay use.
 
-The current direction is:
+Framework
+- Added a UE4SS-loadable BMF runtime package.
+- Added plugin discovery, plugin metadata, lifecycle hooks, reload support, and plugin-owned command cleanup.
+- Added scoped plugin APIs so plugins can use BMF helpers without receiving unrestricted framework access.
+- Added plugin storage helpers for config files and plugin-owned state.
+- Added capability checks for sensitive APIs such as chat, server saves, server exec, world loading, prefab loading, vehicle spawning, and storage.
+- Added a plugin watchdog that isolates repeatedly failing plugins instead of letting one plugin keep breaking framework hooks or commands.
+- Added sandbox rules that block dangerous UE4SS and native globals from normal plugin code.
 
-- Keep the BMF-supported Omegga Windows fork as the primary server runtime,
-  bridge, validation, and metrics path.
-- Prefer typed Lua APIs, capability gates, and safe defaults over broad console
-  execution.
-- Use socket transport for latency-sensitive gameplay events while keeping
-  file-backed commands and JSONL events as durable fallback paths.
-- Treat native hooks, live object scans, and runtime brick mutation as guarded
-  surfaces that need clear validation and frame-time evidence.
-- Keep documentation readable enough that plugin authors, server operators, and
-  architects can review the system without reading every implementation file.
+Commands
+- Added the `bmf.*` command registry for server-console and bridge automation.
+- Added command output that is stable enough for scripts and validation runs to parse.
+- Added file-backed command transport under `Mods/BMF/runtime/commands`.
+- Added socket-backed command transport for faster Omegga-to-BMF calls.
+- Added access-checked command dispatch for routes that already have trustworthy actor identity.
+- Added command validation for success paths, denied paths, unknown commands, reload behavior, and plugin-owned commands.
 
-## Latest Focus
+Omegga
+- Added support for the BMF-supported Omegga Windows fork as the primary operating model.
+- Added Omegga bridge support for BMF commands, player sync, minigame event feeds, chat helper delivery, and validation.
+- Added socket relay support so Omegga plugins can receive BMF events without waiting on file polling.
+- Improved socket polling and team-assignment flows so CityRPG-style plugins can respond faster.
+- Kept file-backed command and event paths available when socket transport is unavailable.
 
-Runtime Brick Controls
-- Added guarded runtime brick state controls for visibility and collision.
-- Improved runtime brick resolution so BMF can use explicit ids, cached context,
-  and Brickadia setter paths instead of relying on blind mutation.
-- Added GUID-oriented runtime brick controls so higher-level systems can move
-  toward safer lookup flows.
+Players
+- Added normalized player records for safer player identity handling.
+- Added player listing, lookup, name resolution, summary, and whisper-summary helpers.
+- Added Omegga-fed player cache syncing through `runtime/players.json`.
+- Added Brickadia log and saved-data identity support for safer fallback player records.
+- Avoided direct live `PlayerState` identity reads where current evidence shows crash risk.
+- Added player fixture validation and headless messaging checks.
 
-Documentation And Architecture
-- Reworked the documentation into smaller pages with clearer labels, examples,
-  validation links, and reader guidance.
-- Added architecture diagrams for BMF alone, the Omegga fork, Lua plugin hooks,
-  the event bus, ConsoleTag lookup, and CityRPG tree cutting.
-- Added reference pages for dangerous surfaces, safe defaults, runtime files,
-  scripts, glossary terms, and the supported runtime contract.
+Chat
+- Added BMF chat broadcast support.
+- Added private whisper and status-message APIs.
+- Added live-player delivery through the currently validated player-controller chat path.
+- Kept two-player targeting and broader multiplayer chat validation marked as pending until the identity path is safer.
 
-## Milestones So Far
+Permissions
+- Added role-file planning for `RoleSetup2.json`.
+- Added player role assignment planning for `RoleAssignments.json`.
+- Added role and permission helpers for policy plugins.
+- Added command access policy helpers for actor-aware command routes.
+- Added validation for copied role files, duplicated permissions, denied command paths, and fail-closed policy behavior.
 
-Framework Foundation
-- Set up the UE4SS-loadable BMF runtime and plugin package.
-- Added plugin discovery, lifecycle hooks, plugin metadata, storage helpers,
-  sandboxing, watchdog isolation, and capability gates.
-- Added a server-console command registry so BMF can be driven from automation
-  and validation runs.
+Tool Policy
+- Added applicator component policy helpers for blocking unsafe components while preserving normal applicator access.
+- Added Interactable ConsoleTag prefix policy for restricting Print-to-Console usage.
+- Added brick asset placement policy for denying configured assets such as vehicle parts or other restricted bricks.
+- Added native-policy validation paths where Brickadia role files alone do not stop the live tool behavior.
+- Kept placement and paste blocking marked as experimental until a cancellable hook is proven.
 
-Player And Chat Support
-- Added normalized player records, player lookup, player summaries, and safe
-  player cache syncing.
-- Added chat broadcast, whisper, and status-message APIs around the currently
-  validated live-player delivery route.
-- Kept direct live player identity reads behind caution because some reflected
-  player-state paths are still crash-prone.
+Minigames
+- Added minigame list and lifecycle wrappers with unsafe console paths disabled by default.
+- Added BMF-owned desired minigame definitions.
+- Added minigame definition listing, lookup, delete, and reconciliation helpers.
+- Added direct minigame snapshot import into BMF-owned data.
+- Added minigame data queries for players, teams, membership, leaderboards, and player state.
+- Added minigame event subscriptions and normalized event names for Lua plugins and Omegga relays.
+- Improved team and membership tracking for CityRPG-style workflows.
+- Added synthetic minigame flow validation for create, join, team, round, leaderboard, kill, leave, and delete checkpoints.
 
-Permissions And Tool Policy
-- Added role-file planning for Brickadia role setup and role assignments.
-- Added policy helpers for applicator components, Interactable ConsoleTag
-  prefixes, brick asset placement, and command access.
-- Added native-policy validation paths where file-backed permission rules alone
-  are not enough to stop live tool behavior.
+Worlds
+- Added world SaveAs support through BMF.
+- Added additive world-load wrappers for staged Brickadia worlds.
+- Added command routes for headless world save and load validation.
+- Added validation that saved worlds can be parsed after BMF-driven load and save flows.
 
-Minigames And CityRPG Integration
-- Added minigame command wrappers, desired definition storage, data snapshots,
-  event subscriptions, and synthetic flow validation.
-- Added event feeds that let BMF normalize minigame activity for Lua plugins and
-  Omegga integrations.
-- Improved team and membership tracking so CityRPG-style plugins can consume
-  BMF events instead of polling slow file paths.
+Prefabs
+- Added prefab staging support for converting `.brz` prefabs into server-loadable `.brdb` world bundles.
+- Added Lua and command-worker wrappers for loading staged prefab worlds.
+- Kept prefab conversion outside the Lua runtime so BMF does not rewrite archive files inside UE4SS.
+- Added validation that staged prefab worlds can load, save, and preserve vehicle-like dynamic actor evidence.
 
-Omegga Bridge And Socket Transport
-- Clarified the supported Omegga fork as the main launch, bridge, player sync,
-  event relay, and validation runtime.
-- Added socket transport for low-latency command and event messaging.
-- Hardened socket polling and command handling so latency-sensitive gameplay
-  flows can avoid multi-second file-polling delays.
+Vehicles
+- Added vehicle spawn-set planning for loading several staged vehicle worlds at separated positions.
+- Added vehicle spawn-set runtime helpers.
+- Added vehicle snapshot commands for saving a running world and producing vehicle evidence.
+- Added vehicle inventory reports for saved worlds and snapshot evidence.
+- Added staged vehicle id remapping so duplicate vehicle copies can load as separate groups.
+- Kept visual correctness and drivable behavior marked for live-player validation.
 
-World, Prefab, And Vehicle Tooling
-- Added world load/save wrappers for staged Brickadia worlds.
-- Added prefab staging and vehicle spawn-set workflows that prepare `.brdb`
-  bundles outside Lua, then load them through safe runtime wrappers.
-- Added archive and vehicle snapshot tools so saved worlds can be parsed,
-  checked, and turned into readable evidence.
+Runtime Bricks
+- Added runtime brick inspection, resolution, and state APIs.
+- Added guarded visibility and collision mutation for explicit runtime brick ids.
+- Added runtime brick context caching so repeated lookups can reuse safer context.
+- Added Brickadia setter usage for runtime brick state instead of relying only on lower-level mutation.
+- Added generic runtime brick GUID controls for higher-level lookup flows.
+- Kept runtime brick mutation behind environment gates and validation requirements.
 
-Telemetry And Performance
-- Added runtime telemetry for status, commands, events, plugin timings, worker
-  throughput, socket activity, and optional native frame-time samples.
-- Added frame-time validation guidance so risky polling, native work, or bursty
-  traffic can be measured before it becomes a gameplay path.
+Tree Cutting
+- Added tree-cut event support for CityRPG-style workflows.
+- Added diagrams explaining how native tree-cut events flow into BMF and Lua.
+- Added runtime brick state patterns for hiding and restoring physical tree bricks.
+- Added ConsoleTag lookup patterns for connecting gameplay ids to runtime brick operations.
 
-## Timeline
+Telemetry
+- Added runtime health output.
+- Added command, event, plugin, worker, and socket telemetry.
+- Added optional native frame-time sampling through `BMFFrameTelemetry`.
+- Added frame-time validation guidance for polling, native mutation, live scans, and bursty event traffic.
+- Added Omegga metrics export expectations for Grafana-style monitoring.
 
-| Date | Community-facing summary |
-| --- | --- |
-| June 4, 2026 | BMF started as a UE4SS Lua framework with early plugin, player, health, and command foundations. |
-| June 5, 2026 | Permission and tool policy work began, including validation around role files and native guard paths. |
-| June 7, 2026 | Minigame APIs, BMF manager tooling, supported Omegga runtime docs, and socket transport landed. |
-| June 8, 2026 | Socket player-position work and minigame team assignment paths were hardened for faster integration traffic. |
-| June 9, 2026 | Lua examples, telemetry, frame sampling, and frame-time validation docs were added. |
-| June 11, 2026 | Tree-cut event support, runtime brick state APIs, and architecture diagrams were added for review. |
-| June 12, 2026 | Documentation was reorganized into smaller pages, and runtime brick visibility/collision work moved forward. |
-| June 13, 2026 | Runtime brick context caching, Brickadia setter usage, and GUID-oriented controls were improved. |
+Documentation
+- Added Lua examples for chat, timers, commands, storage, server settings, world loading, prefabs, vehicles, minigames, permissions, events, audit, health, and rate limits.
+- Split large API pages into smaller pages for permissions, archives, minigames, plugins, players, and server APIs.
+- Renamed proposed architecture diagrams into Architecture Patterns.
+- Added architecture diagrams for BMF alone, Omegga alone, Lua plugins, event bus messaging, BMF plus Omegga, ConsoleTag lookup, Lua hook ingress, and tree cutting.
+- Added common workflows, glossary, supported runtime, safe defaults, dangerous surfaces, runtime files, script reference, and maintainer notes.
+- Added documentation style checks and MkDocs strict build validation.
 
-## Still Experimental
-
-- Runtime brick mutation is powerful and still needs tight gates, explicit ids,
-  and performance validation.
-- Unsafe minigame console commands and raw object snapshots remain disabled by
-  default.
-- Native hooks are maintainer-owned and should stay tied to validation evidence.
-- Multiplayer chat targeting and some live-player behavior still need broader
-  live validation.
-- Vehicle and prefab gameplay behavior is proven through saved-world evidence
-  first; visual correctness and drivable behavior still need live-player checks.
-
-## Useful Links
-
-- [Supported Runtime Matrix](reference/supported-runtime.md)
-- [Architecture Patterns](architecture/architecture-patterns.md)
-- [Common Workflows](guides/common-workflows.md)
-- [Current Safe Defaults](reference/current-safe-defaults.md)
-- [Dangerous Surfaces](reference/dangerous-surfaces.md)
-- [API Overview](api/index.md)
+Bugs
+- Fixed unsafe plugin globals being reachable from normal plugin code.
+- Fixed plugin-owned commands and event handlers surviving plugin reloads.
+- Fixed plugin failures repeatedly running after watchdog isolation should stop them.
+- Fixed malformed plugin JSON storage throwing instead of returning a structured error.
+- Fixed missing capability paths so sensitive plugin APIs fail closed.
+- Fixed unsafe minigame command paths so they fail closed unless explicitly enabled.
+- Fixed command access policy paths so denied commands return handled denial output.
+- Fixed player lookup and summary behavior for empty headless servers.
+- Fixed socket command polling paths that could make gameplay integrations wait too long.
+- Fixed runtime brick lookup paths to require explicit ids or validated context before mutation.

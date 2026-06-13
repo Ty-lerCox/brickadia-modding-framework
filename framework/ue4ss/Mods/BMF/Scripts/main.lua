@@ -237,6 +237,8 @@ local state = {
       sequence = 0,
       last_result = nil,
       last_error = "",
+      guid_bindings = {},
+      guid_binding_order = {},
     },
   },
   config = {
@@ -1822,6 +1824,9 @@ API_REGISTRY = {
   { name = "BMF.bricks.inspectRuntimeState", namespace = "bricks", kind = "function", stability = "diagnostic", risk = "medium", validation = "L3 Live Server explicit brick id inspect", requiresPlayer = false, capability = "", summary = "Inspect one explicit runtime brick id for visible/collision state without scanning live UObjects." },
   { name = "BMF.bricks.resolveRuntimeState", namespace = "bricks", kind = "function", stability = "experimental", risk = "unsafe-native", validation = "Env-gated L3 Live Server bounded runtime-array scan", requiresPlayer = false, capability = "", summary = "Resolve a nearby active runtime brick id from a world position and optional saved-slot hint without scanning live UObjects." },
   { name = "BMF.bricks.setRuntimeState", namespace = "bricks", kind = "function", stability = "experimental", risk = "unsafe-native", validation = "Env-gated L3 Live Server canary only", requiresPlayer = false, capability = "bricks.runtimeState", summary = "Set one explicit runtime brick id visibility and/or collision state through BMFSocket." },
+  { name = "BMF.bricks.bindRuntimeGuid", namespace = "bricks", kind = "function", stability = "experimental", risk = "medium", validation = "L2 Headless + L3 Live Server explicit runtime ids", requiresPlayer = false, capability = "bricks.runtimeState", summary = "Bind explicit runtime brick ids to an opaque gameplay GUID without interpreting the GUID." },
+  { name = "BMF.bricks.setRuntimeStateByGuid", namespace = "bricks", kind = "function", stability = "experimental", risk = "unsafe-native", validation = "Env-gated L3 Live Server canary only", requiresPlayer = false, capability = "bricks.runtimeState", summary = "Set visibility/collision for runtime bricks previously bound to one opaque GUID." },
+  { name = "BMF.bricks.runtimeGuidStatus", namespace = "bricks", kind = "function", stability = "diagnostic", risk = "low", validation = "L2 Headless", requiresPlayer = false, capability = "", summary = "Inspect opaque GUID to runtime brick id bindings." },
   { name = "BMF.bricks.runtimeStateStatus", namespace = "bricks", kind = "function", stability = "diagnostic", risk = "low", validation = "L2 Headless safe failure; L3 Live Server result inspection", requiresPlayer = false, capability = "", summary = "Inspect the last queued runtime brick state operation result." },
   { name = "BMF.tools.treeCutTrace.enable", namespace = "tools", kind = "function", stability = "diagnostic", risk = "unsafe-native", validation = "L3 Live Player handaxe/tree trace", requiresPlayer = true, capability = "", summary = "Temporarily register bounded native hooks that summarize handaxe/tree-cut evidence." },
   { name = "BMF.tools.treeCutTrace.disable", namespace = "tools", kind = "function", stability = "diagnostic", risk = "unsafe-native", validation = "L3 Live Server cleanup", requiresPlayer = false, capability = "", summary = "Unregister active tree-cut trace hooks." },
@@ -3927,6 +3932,21 @@ local function register_builtin_commands()
   BMF.commands.register("bmf.bricks.runtime.set", "Set one explicit runtime brick id visible/collision state.", function(args)
     local options = parse_command_options(args)
     return BMF.bricks.setRuntimeState(options)
+  end)
+
+  BMF.commands.register("bmf.bricks.runtime.bind", "Bind explicit runtime brick ids to an opaque GUID.", function(args)
+    local options = parse_command_options(args)
+    return BMF.bricks.bindRuntimeGuid(options)
+  end)
+
+  BMF.commands.register("bmf.bricks.runtime.set-guid", "Set visible/collision state for runtime bricks bound to one opaque GUID.", function(args)
+    local options = parse_command_options(args)
+    return BMF.bricks.setRuntimeStateByGuid(options)
+  end)
+
+  BMF.commands.register("bmf.bricks.runtime.guid-status", "Show runtime brick GUID bindings.", function(args)
+    local options = parse_command_options(args)
+    return BMF.bricks.runtimeGuidStatus(options)
   end)
 
   BMF.commands.register("bmf.bricks.runtime.status", "Show last runtime brick-state operation.", function()
@@ -9557,10 +9577,135 @@ end
 local function brick_runtime_parse_tag_arg(options)
   options = type(options) == "table" and options or {}
   local positional = type(options._positional) == "table" and options._positional or {}
-  return trim_string(options.tag or options.treeid or options.treeId or options.consoleTag or positional[2] or "")
+  return trim_string(options.tag or options.consoleTag or options.consoletag or positional[2] or "")
 end
 
-local function brick_runtime_store_result(sequence, operation, brick_id, tag, ok, response_or_error)
+BMF_brick_runtime_parse_guid_arg = function(options)
+  options = type(options) == "table" and options or {}
+  local raw = options.guid
+  if raw == nil then raw = options.runtimeGuid end
+  if raw == nil then raw = options.runtimeguid end
+  if raw == nil then raw = options.resourceGuid end
+  if raw == nil then raw = options.resourceguid end
+  if raw == nil then raw = options.logicalId end
+  if raw == nil then raw = options.logicalid end
+  if raw == nil then raw = options.resourceId end
+  if raw == nil then raw = options.resourceid end
+  return trim_string(raw or "")
+end
+
+BMF_brick_runtime_guid_valid = function(guid)
+  if type(guid) ~= "string" then return false end
+  if guid == "" or #guid > 128 then return false end
+  return guid:match("^[A-Za-z0-9_:%-%.]+$") ~= nil
+end
+
+BMF_brick_runtime_guid_max_bindings = function()
+  return math.max(1, math.min(512, math.floor(BMF_env_number("BMF_BRICK_RUNTIME_GUID_MAX_BRICKS", 64, 1) or 64)))
+end
+
+BMF_brick_runtime_guid_cache_max_guids = function()
+  return math.max(1, math.min(4096, math.floor(BMF_env_number("BMF_BRICK_RUNTIME_GUID_CACHE_MAX_GUIDS", 1024, 1) or 1024)))
+end
+
+BMF_brick_runtime_guid_binding = function(guid, create)
+  local runtime = state.tools.brick_runtime
+  runtime.guid_bindings = runtime.guid_bindings or {}
+  runtime.guid_binding_order = runtime.guid_binding_order or {}
+  local binding = runtime.guid_bindings[guid]
+  if binding or not create then
+    return binding
+  end
+
+  local max_guids = BMF_brick_runtime_guid_cache_max_guids()
+  while #runtime.guid_binding_order >= max_guids do
+    local oldest = table.remove(runtime.guid_binding_order, 1)
+    if oldest then
+      runtime.guid_bindings[oldest] = nil
+    end
+  end
+
+  binding = {
+    guid = guid,
+    ids = {},
+    by_id = {},
+    created_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    updated_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+  }
+  runtime.guid_bindings[guid] = binding
+  runtime.guid_binding_order[#runtime.guid_binding_order + 1] = guid
+  return binding
+end
+
+BMF_brick_runtime_bind_guid = function(guid, brick_id)
+  if not BMF_brick_runtime_guid_valid(guid) then
+    return false, "BRICK_RUNTIME_GUID_INVALID"
+  end
+  brick_id = math.floor(tonumber(brick_id) or 0)
+  if brick_id <= 0 then
+    return false, "BRICK_RUNTIME_ID_REQUIRED"
+  end
+
+  local binding = BMF_brick_runtime_guid_binding(guid, true)
+  if binding.by_id[brick_id] then
+    binding.updated_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+    return true, "OK"
+  end
+
+  local max_bricks = BMF_brick_runtime_guid_max_bindings()
+  while #binding.ids >= max_bricks do
+    local removed = table.remove(binding.ids, 1)
+    if removed then
+      binding.by_id[removed] = nil
+    end
+  end
+
+  binding.ids[#binding.ids + 1] = brick_id
+  binding.by_id[brick_id] = true
+  binding.updated_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+  return true, "OK"
+end
+
+BMF_brick_runtime_parse_brick_ids = function(options)
+  options = type(options) == "table" and options or {}
+  local ids = {}
+  local seen = {}
+  local function add_id(raw)
+    local id = math.floor(tonumber(raw) or 0)
+    if id > 0 and not seen[id] then
+      ids[#ids + 1] = id
+      seen[id] = true
+    end
+  end
+
+  add_id(tree_cut_parse_brick_id(options))
+  local raw_list = options.brickids or options.brickIds or options.ids or options.runtimeids or options.runtimeIds
+  if raw_list ~= nil then
+    for entry in tostring(raw_list):gmatch("[^,%s]+") do
+      add_id(entry)
+    end
+  end
+  return ids
+end
+
+BMF_brick_runtime_format_guid_binding_lines = function(guid, binding)
+  local lines = {
+    "ok=true",
+    "code=OK",
+    "guid=" .. guid,
+    "bound_bricks=" .. tostring(binding and #binding.ids or 0),
+  }
+  if binding then
+    lines[#lines + 1] = "created_at=" .. tostring(binding.created_at or "")
+    lines[#lines + 1] = "updated_at=" .. tostring(binding.updated_at or "")
+    for index, brick_id in ipairs(binding.ids or {}) do
+      lines[#lines + 1] = "brick_id." .. tostring(index) .. "=" .. tostring(brick_id)
+    end
+  end
+  return lines
+end
+
+local function brick_runtime_store_result(sequence, operation, brick_id, tag, guid, ok, response_or_error)
   local runtime = state.tools.brick_runtime
   local text = tostring(response_or_error or "")
   local lines, fields = tree_cut_native_status_lines(text)
@@ -9569,11 +9714,16 @@ local function brick_runtime_store_result(sequence, operation, brick_id, tag, ok
   if tostring(operation or "") == "resolve" then
     stored_brick_id = tonumber(fields.best_brick_id or fields.brick_id) or stored_brick_id
   end
+  guid = tostring(guid or fields.guid or "")
+  if native_ok and guid ~= "" and stored_brick_id > 0 then
+    BMF_brick_runtime_bind_guid(guid, stored_brick_id)
+  end
   runtime.last_result = {
     sequence = sequence,
     operation = tostring(operation or ""),
     brickId = stored_brick_id,
     tag = tostring(tag or ""),
+    guid = guid,
     ok = native_ok,
     code = tostring(fields.code or (ok and "" or "LUA_ERROR")),
     fields = fields,
@@ -9660,18 +9810,33 @@ function BMF.bricks.resolveRuntimeState(options)
   options = type(options) == "table" and options or {}
   local runtime = state.tools.brick_runtime
   local tag = brick_runtime_parse_tag_arg(options)
+  local guid = BMF_brick_runtime_parse_guid_arg(options)
   local positional = type(options._positional) == "table" and options._positional or {}
   local x = tonumber(options.x or options.worldx or positional[1])
   local y = tonumber(options.y or options.worldy or positional[2])
   local z = tonumber(options.z or options.worldz or positional[3])
 
+  if guid ~= "" and not BMF_brick_runtime_guid_valid(guid) then
+    return result(false, "BRICK_RUNTIME_GUID_INVALID", "guid must be an opaque identifier without spaces", {
+      tag = tag,
+      guid = guid,
+      lines = {
+        "ok=false",
+        "code=BRICK_RUNTIME_GUID_INVALID",
+        "tag=" .. tag,
+        "guid=" .. guid,
+      },
+    })
+  end
   if not (x and y and z) then
     return result(false, "BRICK_RUNTIME_RESOLVE_POSITION_REQUIRED", "x, y, and z are required for runtime brick resolve", {
       tag = tag,
+      guid = guid,
       lines = {
         "ok=false",
         "code=BRICK_RUNTIME_RESOLVE_POSITION_REQUIRED",
         "tag=" .. tag,
+        "guid=" .. guid,
       },
     })
   end
@@ -9679,10 +9844,12 @@ function BMF.bricks.resolveRuntimeState(options)
     runtime.last_error = "BMFSocket brick runtime resolve helper is unavailable"
     return result(false, "BRICK_RUNTIME_RESOLVE_UNAVAILABLE", runtime.last_error, {
       tag = tag,
+      guid = guid,
       lines = {
         "ok=false",
         "code=BRICK_RUNTIME_RESOLVE_UNAVAILABLE",
         "tag=" .. tag,
+        "guid=" .. guid,
       },
     })
   end
@@ -9690,10 +9857,12 @@ function BMF.bricks.resolveRuntimeState(options)
     runtime.last_error = "runtime brick resolve is disabled"
     return result(false, "BRICK_RUNTIME_RESOLVE_DISABLED", runtime.last_error, {
       tag = tag,
+      guid = guid,
       lines = {
         "ok=false",
         "code=BRICK_RUNTIME_RESOLVE_DISABLED",
         "tag=" .. tag,
+        "guid=" .. guid,
         "detail=runtime brick resolve is disabled",
       },
     })
@@ -9715,13 +9884,14 @@ function BMF.bricks.resolveRuntimeState(options)
   local sequence = brick_runtime_next_sequence()
   run_on_game_thread(function()
     local ok, response = pcall(BMFSocketBrickPhysicalResolveNear, x, y, z, radius, max_scan, hint, hint_window, hint_only)
-    brick_runtime_store_result(sequence, "resolve", 0, tag, ok, ok and response or tostring(response))
+    brick_runtime_store_result(sequence, "resolve", 0, tag, guid, ok, ok and response or tostring(response))
   end)
 
   return result(true, "OK", "Runtime brick-state resolve queued on the game thread", {
     queued = true,
     sequence = sequence,
     tag = tag,
+    guid = guid,
     lines = {
       "ok=true",
       "code=OK",
@@ -9729,6 +9899,7 @@ function BMF.bricks.resolveRuntimeState(options)
       "operation=resolve",
       "sequence=" .. tostring(sequence),
       "tag=" .. tag,
+      "guid=" .. guid,
       "x=" .. tostring(x),
       "y=" .. tostring(y),
       "z=" .. tostring(z),
@@ -9746,6 +9917,18 @@ function BMF.bricks.inspectRuntimeState(options)
   local runtime = state.tools.brick_runtime
   local brick_id = tree_cut_parse_brick_id(options)
   local tag = brick_runtime_parse_tag_arg(options)
+  local guid = BMF_brick_runtime_parse_guid_arg(options)
+  if guid ~= "" and not BMF_brick_runtime_guid_valid(guid) then
+    return result(false, "BRICK_RUNTIME_GUID_INVALID", "guid must be an opaque identifier without spaces", {
+      lines = {
+        "ok=false",
+        "code=BRICK_RUNTIME_GUID_INVALID",
+        "brick_id=" .. tostring(brick_id),
+        "tag=" .. tag,
+        "guid=" .. guid,
+      },
+    })
+  end
   if brick_id <= 0 then
     return result(false, "BRICK_RUNTIME_ID_REQUIRED", "brickid is required for runtime brick-state inspect", {
       lines = {
@@ -9753,6 +9936,7 @@ function BMF.bricks.inspectRuntimeState(options)
         "code=BRICK_RUNTIME_ID_REQUIRED",
         "brick_id=" .. tostring(brick_id),
         "tag=" .. tag,
+        "guid=" .. guid,
       },
     })
   end
@@ -9765,6 +9949,7 @@ function BMF.bricks.inspectRuntimeState(options)
         "code=BRICK_RUNTIME_UNAVAILABLE",
         "brick_id=" .. tostring(brick_id),
         "tag=" .. tag,
+        "guid=" .. guid,
       },
     })
   end
@@ -9772,7 +9957,7 @@ function BMF.bricks.inspectRuntimeState(options)
   local sequence = brick_runtime_next_sequence()
   run_on_game_thread(function()
     local ok, response = pcall(BMFSocketBrickPhysicalInspect, brick_id)
-    brick_runtime_store_result(sequence, "inspect", brick_id, tag, ok, ok and response or tostring(response))
+    brick_runtime_store_result(sequence, "inspect", brick_id, tag, guid, ok, ok and response or tostring(response))
   end)
 
   return result(true, "OK", "Runtime brick-state inspect queued on the game thread", {
@@ -9787,6 +9972,7 @@ function BMF.bricks.inspectRuntimeState(options)
       "sequence=" .. tostring(sequence),
       "brick_id=" .. tostring(brick_id),
       "tag=" .. tag,
+      "guid=" .. guid,
     },
   })
 end
@@ -9796,6 +9982,18 @@ function BMF.bricks.setRuntimeState(options)
   local runtime = state.tools.brick_runtime
   local brick_id = tree_cut_parse_brick_id(options)
   local tag = brick_runtime_parse_tag_arg(options)
+  local guid = BMF_brick_runtime_parse_guid_arg(options)
+  if guid ~= "" and not BMF_brick_runtime_guid_valid(guid) then
+    return result(false, "BRICK_RUNTIME_GUID_INVALID", "guid must be an opaque identifier without spaces", {
+      lines = {
+        "ok=false",
+        "code=BRICK_RUNTIME_GUID_INVALID",
+        "brick_id=" .. tostring(brick_id),
+        "tag=" .. tag,
+        "guid=" .. guid,
+      },
+    })
+  end
   if brick_id <= 0 then
     local code = tag ~= "" and "BRICK_RUNTIME_TAG_ID_REQUIRED" or "BRICK_RUNTIME_ID_REQUIRED"
     local detail = tag ~= ""
@@ -9807,6 +10005,7 @@ function BMF.bricks.setRuntimeState(options)
         "code=" .. code,
         "brick_id=" .. tostring(brick_id),
         "tag=" .. tag,
+        "guid=" .. guid,
       },
     })
   end
@@ -9822,6 +10021,7 @@ function BMF.bricks.setRuntimeState(options)
         "code=BRICK_RUNTIME_CONFIRM_REQUIRED",
         "brick_id=" .. tostring(brick_id),
         "tag=" .. tag,
+        "guid=" .. guid,
         "required_confirm=" .. required_confirm,
       },
     })
@@ -9835,6 +10035,7 @@ function BMF.bricks.setRuntimeState(options)
         "code=BRICK_RUNTIME_UNAVAILABLE",
         "brick_id=" .. tostring(brick_id),
         "tag=" .. tag,
+        "guid=" .. guid,
       },
     })
   end
@@ -9850,6 +10051,7 @@ function BMF.bricks.setRuntimeState(options)
         "code=BRICK_RUNTIME_CONTEXT_CONFIRM_REQUIRED",
         "brick_id=" .. tostring(brick_id),
         "tag=" .. tag,
+        "guid=" .. guid,
         "required_context_confirm=brick-runtime-context",
       },
     })
@@ -9862,6 +10064,7 @@ function BMF.bricks.setRuntimeState(options)
         "code=BRICK_RUNTIME_STATE_NOOP",
         "brick_id=" .. tostring(brick_id),
         "tag=" .. tag,
+        "guid=" .. guid,
         "visible_arg=" .. tostring(visible),
         "collision_channels=" .. tostring(collision),
       },
@@ -9871,8 +10074,11 @@ function BMF.bricks.setRuntimeState(options)
   local sequence = brick_runtime_next_sequence()
   run_on_game_thread(function()
     local ok, response = pcall(BMFSocketBrickPhysicalSet, brick_id, visible, collision, context)
-    brick_runtime_store_result(sequence, "set", brick_id, tag, ok, ok and response or tostring(response))
+    brick_runtime_store_result(sequence, "set", brick_id, tag, guid, ok, ok and response or tostring(response))
   end)
+  if guid ~= "" then
+    BMF_brick_runtime_bind_guid(guid, brick_id)
+  end
 
   return result(true, "OK", "Runtime brick-state set queued on the game thread", {
     queued = true,
@@ -9881,6 +10087,7 @@ function BMF.bricks.setRuntimeState(options)
     visible = visible,
     collision = collision,
     context = context,
+    guid = guid,
     lines = {
       "ok=true",
       "code=OK",
@@ -9889,6 +10096,263 @@ function BMF.bricks.setRuntimeState(options)
       "sequence=" .. tostring(sequence),
       "brick_id=" .. tostring(brick_id),
       "tag=" .. tag,
+      "guid=" .. guid,
+      "visible_arg=" .. tostring(visible),
+      "collision_channels=" .. tostring(collision),
+      "grid_context_override=" .. tostring(context),
+    },
+  })
+end
+
+function BMF.bricks.bindRuntimeGuid(options)
+  options = type(options) == "table" and options or {}
+  local guid = BMF_brick_runtime_parse_guid_arg(options)
+  if not BMF_brick_runtime_guid_valid(guid) then
+    return result(false, "BRICK_RUNTIME_GUID_INVALID", "guid is required and must be an opaque identifier without spaces", {
+      lines = {
+        "ok=false",
+        "code=BRICK_RUNTIME_GUID_INVALID",
+        "guid=" .. guid,
+      },
+    })
+  end
+
+  local ids = BMF_brick_runtime_parse_brick_ids(options)
+  if #ids == 0 then
+    return result(false, "BRICK_RUNTIME_ID_REQUIRED", "brickid or brickids is required for runtime GUID binding", {
+      guid = guid,
+      lines = {
+        "ok=false",
+        "code=BRICK_RUNTIME_ID_REQUIRED",
+        "guid=" .. guid,
+      },
+    })
+  end
+
+  local bound = 0
+  local failed = 0
+  for _, brick_id in ipairs(ids) do
+    local ok = BMF_brick_runtime_bind_guid(guid, brick_id)
+    if ok then
+      bound = bound + 1
+    else
+      failed = failed + 1
+    end
+  end
+
+  local binding = BMF_brick_runtime_guid_binding(guid, false)
+  local lines = BMF_brick_runtime_format_guid_binding_lines(guid, binding)
+  lines[#lines + 1] = "operation=bind-guid"
+  lines[#lines + 1] = "bound_requested=" .. tostring(#ids)
+  lines[#lines + 1] = "bound_added=" .. tostring(bound)
+  lines[#lines + 1] = "bind_failed=" .. tostring(failed)
+  return result(failed == 0, failed == 0 and "OK" or "BRICK_RUNTIME_GUID_BIND_PARTIAL", "Runtime brick GUID binding updated", {
+    guid = guid,
+    bound = bound,
+    failed = failed,
+    lines = lines,
+  })
+end
+
+function BMF.bricks.runtimeGuidStatus(options)
+  options = type(options) == "table" and options or {}
+  local guid = BMF_brick_runtime_parse_guid_arg(options)
+  local runtime = state.tools.brick_runtime
+  runtime.guid_bindings = runtime.guid_bindings or {}
+  runtime.guid_binding_order = runtime.guid_binding_order or {}
+
+  if guid ~= "" then
+    if not BMF_brick_runtime_guid_valid(guid) then
+      return result(false, "BRICK_RUNTIME_GUID_INVALID", "guid must be an opaque identifier without spaces", {
+        guid = guid,
+        lines = {
+          "ok=false",
+          "code=BRICK_RUNTIME_GUID_INVALID",
+          "guid=" .. guid,
+        },
+      })
+    end
+    local binding = BMF_brick_runtime_guid_binding(guid, false)
+    if not binding then
+      return result(false, "BRICK_RUNTIME_GUID_NOT_BOUND", "No runtime bricks are bound for this GUID.", {
+        guid = guid,
+        lines = {
+          "ok=false",
+          "code=BRICK_RUNTIME_GUID_NOT_BOUND",
+          "guid=" .. guid,
+          "bound_bricks=0",
+        },
+      })
+    end
+    return result(true, "OK", "Runtime brick GUID binding collected", {
+      guid = guid,
+      lines = BMF_brick_runtime_format_guid_binding_lines(guid, binding),
+    })
+  end
+
+  local lines = {
+    "ok=true",
+    "code=OK",
+    "guid_count=" .. tostring(#runtime.guid_binding_order),
+  }
+  for index, value in ipairs(runtime.guid_binding_order) do
+    local binding = runtime.guid_bindings[value]
+    lines[#lines + 1] = "guid." .. tostring(index) .. "=" .. tostring(value)
+    lines[#lines + 1] = "guid." .. tostring(index) .. ".bound_bricks=" .. tostring(binding and #binding.ids or 0)
+  end
+  return result(true, "OK", "Runtime brick GUID bindings collected", {
+    lines = lines,
+  })
+end
+
+function BMF.bricks.setRuntimeStateByGuid(options)
+  options = type(options) == "table" and options or {}
+  local runtime = state.tools.brick_runtime
+  local guid = BMF_brick_runtime_parse_guid_arg(options)
+  if not BMF_brick_runtime_guid_valid(guid) then
+    return result(false, "BRICK_RUNTIME_GUID_INVALID", "guid is required and must be an opaque identifier without spaces", {
+      lines = {
+        "ok=false",
+        "code=BRICK_RUNTIME_GUID_INVALID",
+        "guid=" .. guid,
+      },
+    })
+  end
+
+  local confirm = tostring(options.confirm or "")
+  if confirm ~= "brick-runtime" then
+    return result(false, "BRICK_RUNTIME_CONFIRM_REQUIRED", "confirm=brick-runtime is required for runtime brick-state set", {
+      guid = guid,
+      lines = {
+        "ok=false",
+        "code=BRICK_RUNTIME_CONFIRM_REQUIRED",
+        "guid=" .. guid,
+        "required_confirm=brick-runtime",
+      },
+    })
+  end
+  if not brick_runtime_available() then
+    runtime.last_error = "BMFSocket brick runtime helpers are unavailable"
+    return result(false, "BRICK_RUNTIME_UNAVAILABLE", runtime.last_error, {
+      guid = guid,
+      lines = {
+        "ok=false",
+        "code=BRICK_RUNTIME_UNAVAILABLE",
+        "guid=" .. guid,
+      },
+    })
+  end
+
+  local binding = BMF_brick_runtime_guid_binding(guid, false)
+  if not binding or #binding.ids == 0 then
+    return result(false, "BRICK_RUNTIME_GUID_NOT_BOUND", "No runtime bricks are bound for this GUID.", {
+      guid = guid,
+      lines = {
+        "ok=false",
+        "code=BRICK_RUNTIME_GUID_NOT_BOUND",
+        "guid=" .. guid,
+        "bound_bricks=0",
+      },
+    })
+  end
+
+  local visible = brick_runtime_parse_visible_arg(options, -1)
+  local collision = brick_runtime_parse_collision_arg(options, -2)
+  local context = brick_runtime_parse_context_arg(options)
+  if context ~= "" and tostring(options.contextconfirm or options.context_confirm or "") ~= "brick-runtime-context" then
+    return result(false, "BRICK_RUNTIME_CONTEXT_CONFIRM_REQUIRED", "contextConfirm=brick-runtime-context is required for explicit diagnostic grid contexts", {
+      guid = guid,
+      lines = {
+        "ok=false",
+        "code=BRICK_RUNTIME_CONTEXT_CONFIRM_REQUIRED",
+        "guid=" .. guid,
+        "required_context_confirm=brick-runtime-context",
+      },
+    })
+  end
+  if visible == -1 and collision == -2 then
+    return result(false, "BRICK_RUNTIME_STATE_NOOP", "Provide visible or collision to change runtime brick state", {
+      guid = guid,
+      lines = {
+        "ok=false",
+        "code=BRICK_RUNTIME_STATE_NOOP",
+        "guid=" .. guid,
+        "visible_arg=" .. tostring(visible),
+        "collision_channels=" .. tostring(collision),
+      },
+    })
+  end
+
+  local ids = {}
+  for _, brick_id in ipairs(binding.ids) do
+    ids[#ids + 1] = brick_id
+  end
+  local sequence = brick_runtime_next_sequence()
+  run_on_game_thread(function()
+    local lines = {
+      "Brick runtime GUID state",
+      "source=BMF",
+      "operation=set-guid",
+      "guid=" .. guid,
+      "requested_visible_arg=" .. tostring(visible),
+      "requested_collision_channels=" .. tostring(collision),
+      "requested_grid_context_override=" .. tostring(context),
+      "bound_bricks=" .. tostring(#ids),
+    }
+    local attempted = 0
+    local succeeded = 0
+    local failed = 0
+    local pending = 0
+    for index, brick_id in ipairs(ids) do
+      attempted = attempted + 1
+      local ok, response = pcall(BMFSocketBrickPhysicalSet, brick_id, visible, collision, context)
+      local item_lines, fields = tree_cut_native_status_lines(ok and response or tostring(response))
+      local item_ok = ok == true and tostring(fields.ok or "") == "true"
+      local code = tostring(fields.code or (ok and "" or "LUA_ERROR"))
+      if item_ok then
+        succeeded = succeeded + 1
+      else
+        failed = failed + 1
+        if code == "BRICK_GRID_CONTEXT_SCAN_PENDING" then
+          pending = pending + 1
+        end
+      end
+      lines[#lines + 1] = "item." .. tostring(index) .. ".brick_id=" .. tostring(brick_id)
+      lines[#lines + 1] = "item." .. tostring(index) .. ".ok=" .. tostring(item_ok == true)
+      lines[#lines + 1] = "item." .. tostring(index) .. ".code=" .. code
+      lines[#lines + 1] = "item." .. tostring(index) .. ".visibility_set_method=" .. tostring(fields.visibility_set_method or "")
+      lines[#lines + 1] = "item." .. tostring(index) .. ".collision_set_method=" .. tostring(fields.collision_set_method or "")
+      lines[#lines + 1] = "item." .. tostring(index) .. ".after_visible=" .. tostring(fields.after_visible or "")
+      lines[#lines + 1] = "item." .. tostring(index) .. ".after_collision_channels=" .. tostring(fields.after_collision_channels or "")
+      if not item_ok and #item_lines > 0 then
+        lines[#lines + 1] = "item." .. tostring(index) .. ".detail=" .. tostring(fields.detail or code)
+      end
+    end
+    local code = failed == 0 and "OK" or pending > 0 and "BRICK_GRID_CONTEXT_SCAN_PENDING" or succeeded > 0 and "BRICK_RUNTIME_GUID_SET_PARTIAL" or "BRICK_RUNTIME_GUID_SET_FAILED"
+    lines[#lines + 1] = "ok=" .. tostring(failed == 0)
+    lines[#lines + 1] = "code=" .. code
+    lines[#lines + 1] = "attempted=" .. tostring(attempted)
+    lines[#lines + 1] = "succeeded=" .. tostring(succeeded)
+    lines[#lines + 1] = "failed=" .. tostring(failed)
+    lines[#lines + 1] = "pending=" .. tostring(pending)
+    brick_runtime_store_result(sequence, "set-guid", 0, "", guid, true, table.concat(lines, "\n"))
+  end)
+
+  return result(true, "OK", "Runtime brick-state set by GUID queued on the game thread", {
+    queued = true,
+    sequence = sequence,
+    guid = guid,
+    visible = visible,
+    collision = collision,
+    context = context,
+    lines = {
+      "ok=true",
+      "code=OK",
+      "queued=true",
+      "operation=set-guid",
+      "sequence=" .. tostring(sequence),
+      "guid=" .. guid,
+      "bound_bricks=" .. tostring(#ids),
       "visible_arg=" .. tostring(visible),
       "collision_channels=" .. tostring(collision),
       "grid_context_override=" .. tostring(context),
@@ -9911,6 +10375,7 @@ function BMF.bricks.runtimeStateStatus()
     "operation=" .. tostring(last.operation or ""),
     "brick_id=" .. tostring(last.brickId or ""),
     "tag=" .. tostring(last.tag or ""),
+    "guid=" .. tostring(last.guid or ""),
     "completed_at=" .. tostring(last.at or ""),
   }
   for _, line in ipairs(last.lines or {}) do
@@ -18512,6 +18977,25 @@ local function create_plugin_api(plugin_name, manifest)
       return run_plugin_action(function()
         return BMF.bricks.setRuntimeState(options)
       end)
+    end)
+  end
+  api.bricks.bindRuntimeGuid = function(options)
+    return require_capability(plugin_name, manifest, "bricks.runtimeState", function()
+      return run_plugin_action(function()
+        return BMF.bricks.bindRuntimeGuid(options)
+      end)
+    end)
+  end
+  api.bricks.setRuntimeStateByGuid = function(options)
+    return require_capability(plugin_name, manifest, "bricks.runtimeState", function()
+      return run_plugin_action(function()
+        return BMF.bricks.setRuntimeStateByGuid(options)
+      end)
+    end)
+  end
+  api.bricks.runtimeGuidStatus = function(options)
+    return run_plugin_action(function()
+      return BMF.bricks.runtimeGuidStatus(options)
     end)
   end
   api.bricks.resolveRuntimeState = function(options)

@@ -228,9 +228,9 @@ sequenceDiagram
     participant Server as Brickadia runtime brick
 
     World->>Indexer: Read bricks and component ConsoleTags
-    Indexer->>CityRPG: Emit treeid -> position and runtime id candidate
+    Indexer->>CityRPG: Emit resource id -> position and runtime id candidate
     CityRPG->>CityRPG: Resolve native hit to treeid:<uuid>
-    CityRPG->>BMF: bmf.bricks.runtime.set brickid=<candidate> tag=<treeid>
+    CityRPG->>BMF: bmf.bricks.runtime.set brickid=<candidate> guid=<opaque-id>
     BMF->>Native: Request inspect/set for explicit brick id
     Native->>Server: Lookup live runtime brick by id
     Server-->>Native: Return brick pointer/state
@@ -244,7 +244,7 @@ sequenceDiagram
     else id mismatch
         Native-->>BMF: ok=false code=BRICK_ID_MISMATCH
     end
-    BMF-->>CityRPG: Status includes sequence, brick_id, and tag
+    BMF-->>CityRPG: Status includes sequence, brick_id, guid, and optional tag
 ```
 
 Review questions:
@@ -345,7 +345,7 @@ sequenceDiagram
         Tree-->>Player: Award lumber, seed chance, and XP
         Tree->>Tree: Save tree state and schedule respawn
         opt physical state enabled
-            Tree->>Physical: bmf.bricks.runtime.set brickid candidate plus treeid tag
+            Tree->>Physical: bmf.bricks.runtime.set brickid candidate plus opaque guid
             Physical->>Physical: Validate runtime brick id and sparse-grid context
             alt context ready
                 Physical-->>Tree: visible=false result OK

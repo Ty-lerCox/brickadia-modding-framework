@@ -190,7 +190,8 @@ polling path. Keep it narrow:
 
 - Enable it only with `BMF_BRICK_RUNTIME_SET_ENABLED=1`.
 - Target one explicit live runtime brick id.
-- Treat `tag=<treeid:...>` as correlation metadata, not as a resolver.
+- Treat `guid=<opaque-id>` as caller-owned logical identity and `tag=<...>`
+  as optional correlation metadata, not as a resolver.
 - Reject tag-only workflows; they would require broad live UObject scans.
 - Keep `BMF_BRICK_GRID_CONTEXT_CACHE_TTL_MS` short, currently `5000`, so
   visibility/collision setters do not reuse native grid-context pointers long

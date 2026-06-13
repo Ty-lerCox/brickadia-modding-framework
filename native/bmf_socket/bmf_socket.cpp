@@ -5252,6 +5252,18 @@ namespace
         constexpr int32_t kMaxSparseCount = 500000;
         const uintptr_t scan_alignment = static_cast<uintptr_t>(
             env_u64("BMF_BRICK_CONTEXT_SCAN_ALIGNMENT", 0x10, 0x8, 0x1000));
+        const uint64_t max_duration_ms = env_u64(
+            "BMF_BRICK_CONTEXT_SCAN_MAX_MS",
+            3000,
+            0,
+            60000);
+
+        auto elapsed_ms = [&started]() -> uint64_t {
+            return static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - started)
+                    .count());
+        };
 
         if (range_end <= cursor)
         {
@@ -5261,6 +5273,12 @@ namespace
 
         while (cursor < range_end && result.regions < max_regions && result.scanned_bytes < max_scanned_bytes)
         {
+            if (max_duration_ms > 0 && elapsed_ms() >= max_duration_ms)
+            {
+                result.detail = "sparse brick-grid context scan exceeded time budget";
+                break;
+            }
+
             MEMORY_BASIC_INFORMATION mbi{};
             if (VirtualQuery(reinterpret_cast<void*>(cursor), &mbi, sizeof(mbi)) == 0)
             {
@@ -5301,6 +5319,13 @@ namespace
             {
                 result.probes++;
                 result.scanned_bytes += scan_alignment;
+                if ((result.probes & 0x3FFFULL) == 0 &&
+                    max_duration_ms > 0 &&
+                    elapsed_ms() >= max_duration_ms)
+                {
+                    result.detail = "sparse brick-grid context scan exceeded time budget";
+                    break;
+                }
 
                 int32_t group_count = -1;
                 int32_t group_active_limit = -1;
@@ -5349,10 +5374,7 @@ namespace
             }
         }
 
-        result.duration_ms = static_cast<uint64_t>(
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - started)
-                .count());
+        result.duration_ms = elapsed_ms();
         if (!result.found && result.detail.empty())
         {
             result.detail = "no plausible sparse brick-grid context found within scan bounds";
@@ -5362,7 +5384,8 @@ namespace
 
     BrickGridContextScanResult brick_grid_context_scan_memory(uint32_t brick_cell_index,
                                                               uint32_t brick_sub_index,
-                                                              uintptr_t hint_address = 0)
+                                                              uintptr_t hint_address = 0,
+                                                              bool allow_full_fallback = true)
     {
         constexpr uint64_t kFullMaxScannedBytes = 2048ULL * 1024ULL * 1024ULL;
         constexpr uint64_t kFullMaxRegions = 32768;
@@ -5403,6 +5426,15 @@ namespace
             if (near_scan.found)
             {
                 near_scan.detail = "matched sparse brick-grid context layout near owner hint";
+                return near_scan;
+            }
+            if (!allow_full_fallback ||
+                !env_flag_enabled("BMF_BRICK_CONTEXT_HINT_FULL_FALLBACK_ENABLED"))
+            {
+                if (near_scan.detail.empty())
+                {
+                    near_scan.detail = "no plausible sparse brick-grid context found near owner hint";
+                }
                 return near_scan;
             }
         }
@@ -5588,6 +5620,46 @@ namespace
                env_flag_enabled("BMF_BRICK_RUNTIME_CONTEXT_BACKGROUND_SCAN_ENABLED");
     }
 
+    bool brick_runtime_scan_before_direct_write_enabled()
+    {
+        return env_flag_enabled("BMF_BRICK_RUNTIME_SCAN_BEFORE_DIRECT_WRITE_ENABLED") ||
+               env_flag_enabled("BMF_BRICK_CONTEXT_SCAN_BEFORE_DIRECT_WRITE_ENABLED");
+    }
+
+    bool brick_grid_context_background_scan_failed_for(uint32_t brick_cell_index,
+                                                       uint32_t brick_sub_index)
+    {
+        return brick_grid_context_background_scan_enabled() &&
+               !g_brick_grid_context_background_scan_running.load() &&
+               g_brick_grid_context_background_scan_failures.load() > 0 &&
+               g_brick_grid_context_background_scan_address.load() == 0 &&
+               g_brick_grid_context_background_scan_cell_index.load() == brick_cell_index &&
+               g_brick_grid_context_background_scan_sub_index.load() == brick_sub_index;
+    }
+
+    bool brick_visibility_setter_enabled()
+    {
+        return env_flag_enabled("BMF_BRICK_VISIBILITY_SET_ENABLED") &&
+               !env_flag_enabled("BMF_BRICK_VISIBILITY_SET_DISABLED");
+    }
+
+    bool brick_visibility_direct_write_enabled()
+    {
+        return env_flag_enabled("BMF_BRICK_VISIBILITY_DIRECT_WRITE_ENABLED") &&
+               !env_flag_enabled("BMF_BRICK_VISIBILITY_DIRECT_WRITE_DISABLED");
+    }
+
+    bool brick_collision_setter_enabled()
+    {
+        return env_flag_enabled("BMF_BRICK_COLLISION_SET_ENABLED");
+    }
+
+    bool brick_collision_direct_write_enabled()
+    {
+        return env_flag_enabled("BMF_BRICK_COLLISION_DIRECT_WRITE_ENABLED") &&
+               !env_flag_enabled("BMF_BRICK_COLLISION_DIRECT_WRITE_DISABLED");
+    }
+
     bool brick_grid_context_background_scan_start(uint32_t brick_cell_index,
                                                   uint32_t brick_sub_index,
                                                   uintptr_t hint_address = 0)
@@ -5624,7 +5696,11 @@ namespace
 
         std::thread([brick_cell_index, brick_sub_index, hint_address]() {
             const BrickGridContextScanResult scan =
-                brick_grid_context_scan_memory(brick_cell_index, brick_sub_index, hint_address);
+                brick_grid_context_scan_memory(
+                    brick_cell_index,
+                    brick_sub_index,
+                    hint_address,
+                    false);
             g_brick_grid_context_background_scan_duration_ms.store(scan.duration_ms);
             g_brick_grid_context_background_scan_address.store(scan.address);
             if (scan.found)
@@ -6265,6 +6341,47 @@ namespace
             collision_source = "captured";
         }
 
+        const bool visibility_change_requested =
+            visibility_requested && target_visible != before_visible;
+        const bool collision_change_requested =
+            collision_requested && next_collision_channels != before_collision_channels;
+        const bool setter_scan_before_direct =
+            brick_runtime_scan_before_direct_write_enabled() &&
+            !grid_context_available &&
+            ((visibility_change_requested &&
+              brick_visibility_setter_enabled() &&
+              brick_visibility_direct_write_enabled()) ||
+             (collision_change_requested &&
+              brick_collision_setter_enabled() &&
+              brick_collision_direct_write_enabled())) &&
+            !brick_grid_context_background_scan_failed_for(
+                brick_cell_index,
+                brick_sub_index);
+        if (setter_scan_before_direct)
+        {
+            const bool background_context_scan_started =
+                brick_grid_context_background_scan_start(
+                    brick_cell_index,
+                    brick_sub_index,
+                    static_cast<uintptr_t>(grid_context_address));
+            const bool background_context_scan_pending =
+                background_context_scan_started ||
+                g_brick_grid_context_background_scan_running.load();
+            if (background_context_scan_pending)
+            {
+                out << "ok=false\n"
+                    << "code=BRICK_GRID_CONTEXT_SCAN_PENDING\n"
+                    << "owner_address=" << json_escape(pointer_hex(static_cast<uintptr_t>(owner_address))) << "\n"
+                    << "grid_context_address=" << json_escape(pointer_hex(static_cast<uintptr_t>(grid_context_address))) << "\n"
+                    << "grid_context_source=" << json_escape(grid_context_source) << "\n"
+                    << "background_context_scan_started=" << (background_context_scan_started ? "true" : "false") << "\n"
+                    << "direct_write_deferred=true\n";
+                append_brick_background_context_scan_status(out);
+                out << "detail=deferred direct byte-write while searching for a Brickadia setter grid context\n";
+                return out.str();
+            }
+        }
+
         const uintptr_t set_visibility_address = module_base + kBrickSetVisibilityOffset;
         const uintptr_t set_collision_address = module_base + kBrickSetCollisionChannelsOffset;
         bool visibility_attempted = false;
@@ -6278,8 +6395,8 @@ namespace
             visibility_skip_reason = "already target visible state";
         }
         else if (visibility_requested &&
-            env_flag_enabled("BMF_BRICK_VISIBILITY_SET_ENABLED") &&
-            !env_flag_enabled("BMF_BRICK_VISIBILITY_SET_DISABLED"))
+            brick_visibility_setter_enabled() &&
+            (grid_context_available || !brick_visibility_direct_write_enabled()))
         {
             if (!grid_context_available)
             {
@@ -6347,8 +6464,7 @@ namespace
             }
         }
         else if (visibility_requested &&
-            env_flag_enabled("BMF_BRICK_VISIBILITY_DIRECT_WRITE_ENABLED") &&
-            !env_flag_enabled("BMF_BRICK_VISIBILITY_DIRECT_WRITE_DISABLED"))
+            brick_visibility_direct_write_enabled())
         {
             visibility_attempted = true;
             visibility_skipped = false;
@@ -6382,7 +6498,9 @@ namespace
         {
             collision_skip_reason = "already target collision state";
         }
-        else if (collision_requested && env_flag_enabled("BMF_BRICK_COLLISION_SET_ENABLED"))
+        else if (collision_requested &&
+            brick_collision_setter_enabled() &&
+            (grid_context_available || !brick_collision_direct_write_enabled()))
         {
             collision_attempted = true;
             collision_skipped = false;
@@ -6439,8 +6557,7 @@ namespace
             }
         }
         else if (collision_requested &&
-            env_flag_enabled("BMF_BRICK_COLLISION_DIRECT_WRITE_ENABLED") &&
-            !env_flag_enabled("BMF_BRICK_COLLISION_DIRECT_WRITE_DISABLED"))
+            brick_collision_direct_write_enabled())
         {
             collision_attempted = true;
             collision_skipped = false;

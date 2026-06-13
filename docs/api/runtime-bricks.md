@@ -78,9 +78,14 @@ BMF_BRICK_RUNTIME_SET_ENABLED=1
 BMF_BRICK_RUNTIME_LOOKUP_ENABLED=1     only with a verified live runtime id
 BMF_BRICK_VISIBILITY_SET_ENABLED=1      required for visible=...
 BMF_BRICK_COLLISION_SET_ENABLED=1       required for collision=...
+BMF_BRICK_VISIBILITY_DIRECT_WRITE_ENABLED=1  optional fallback when no grid context is available
+BMF_BRICK_COLLISION_DIRECT_WRITE_ENABLED=1   optional fallback when no grid context is available
 BMF_BRICK_CONTEXT_BACKGROUND_SCAN_ENABLED=1  optional cold-start resolver
+BMF_BRICK_RUNTIME_SCAN_BEFORE_DIRECT_WRITE_ENABLED=1  optionally defer direct writes while the background resolver runs
+BMF_BRICK_CONTEXT_SCAN_MAX_MS=3000      time budget for native context scans
+BMF_BRICK_CONTEXT_HINT_FULL_FALLBACK_ENABLED=0  keep background scans near owner hints
 BMF_BRICK_GRID_CONTEXT_CACHE_TTL_MS=5000      max sparse-grid context cache age
-BMF_BRICK_OWNER_CONTEXT_SCAN_FOR_SET_ENABLED=0  keep owner scan out of gameplay setters
+BMF_BRICK_OWNER_CONTEXT_SCAN_FOR_SET_ENABLED=1  optionally try the bounded owner scan before direct fallback
 ```
 
 Set `BMF_BRICK_RUNTIME_DIAGNOSTICS_ENABLED=1` only when owner or sparse-grid
@@ -100,13 +105,22 @@ are not always safe to read.
 - Keep cached sparse-grid context short-lived. The default
   `BMF_BRICK_GRID_CONTEXT_CACHE_TTL_MS=5000` prevents long-running servers from
   reusing stale native context pointers for later visibility/collision setters.
-- Keep direct owner-context scan disabled for gameplay setters. If no fresh
-  cached context is available, let the setter return
+- Keep hint-seeded background scans bounded. For gameplay, leave
+  `BMF_BRICK_CONTEXT_HINT_FULL_FALLBACK_ENABLED=0` so a near-hint miss does not
+  fall into a process-wide scan.
+- Use direct owner-context scan for explicit runtime-id gameplay setters only
+  when the target count is bounded. If no fresh cached context is available and
+  no direct byte-write fallback is enabled, let the setter return
   `BRICK_GRID_CONTEXT_SCAN_PENDING` and retry after the background scan primes
   the cache.
 - Retry only after a completed `BRICK_GRID_CONTEXT_SCAN_PENDING` result, and
   keep retries low-frequency.
-- Keep direct byte-write gates off for gameplay. They are diagnostic only.
+- Enable direct byte-write gates only for narrow, explicit runtime-id workflows
+  that have live validation coverage. When those gates are enabled, BMF still
+  prefers Brickadia's setter if a plausible grid context is available. With
+  `BMF_BRICK_RUNTIME_SCAN_BEFORE_DIRECT_WRITE_ENABLED=1`, BMF defers the direct
+  write while the bounded background scan runs, then falls back to known runtime
+  visibility/collision bytes only after that scan fails for the same brick cell.
 
 ## Native Validation
 

@@ -195,9 +195,13 @@ polling path. Keep it narrow:
 - Keep `BMF_BRICK_GRID_CONTEXT_CACHE_TTL_MS` short, currently `5000`, so
   visibility/collision setters do not reuse native grid-context pointers long
   after they were captured.
-- Keep `BMF_BRICK_OWNER_CONTEXT_SCAN_FOR_SET_ENABLED=0` for gameplay. Owner
-  memory scans are diagnostic evidence only; the setter should wait for a
-  background scan and retry with a fresh cached context.
+- Keep native sparse-grid scans bounded with `BMF_BRICK_CONTEXT_SCAN_MAX_MS`.
+  Gameplay background scans should stay near owner hints and leave
+  `BMF_BRICK_CONTEXT_HINT_FULL_FALLBACK_ENABLED=0` so a miss returns a bounded
+  failure instead of falling into a process-wide scan.
+- Use `BMF_BRICK_OWNER_CONTEXT_SCAN_FOR_SET_ENABLED=1` only for bounded,
+  explicit runtime-id gameplay workflows. Owner memory scans must never be used
+  as broad discovery.
 - Test after restart on a known canary brick before using the path for gameplay.
 
 The setter uses Brickadia's visibility/collision setters and needs a plausible
@@ -213,7 +217,11 @@ Caller behavior matters as much as native behavior:
 - Treat `BRICK_GRID_CONTEXT_SCAN_PENDING` as a bounded retry signal.
 - Sleep between retries and cap the total result wait.
 - Avoid continuous polling.
-- Keep direct byte-write gates off for gameplay.
+- Enable direct byte-write gates only for narrow runtime-id workflows with live
+  validation, and keep them behind rollback flags. When live collision needs the
+  Brickadia setter path, enable `BMF_BRICK_RUNTIME_SCAN_BEFORE_DIRECT_WRITE_ENABLED=1`
+  so direct writes wait for one bounded background context-scan attempt before
+  falling back.
 
 Before a gameplay system such as CityRPG tree chopping promotes this path,
 capture `L6 Frame Time` evidence and keep a rollback flag available.

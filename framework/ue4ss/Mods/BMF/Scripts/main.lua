@@ -144,6 +144,7 @@ local state = {
   command_dir_ensured = false,
   command_inflight_files = {},
   socket_worker_started = false,
+  socket_worker_mode = "stopped",
   command_empty_reads = {},
   socket = {
     enabled = false,
@@ -1249,6 +1250,8 @@ write_status = function()
     "\"server_ready\":" .. tostring(state.server_ready and true or false),
     "\"command_worker_started\":" .. tostring(state.command_worker_started and true or false),
     "\"command_worker_mode\":" .. json_string(state.command_worker_mode or "unknown"),
+    "\"socket_worker_started\":" .. tostring(state.socket_worker_started and true or false),
+    "\"socket_worker_mode\":" .. json_string(state.socket_worker_mode or "unknown"),
     "\"command_worker_poll_interval_ms\":" .. tostring(state.command_worker_poll_interval_ms or 0),
     "\"command_worker_fallback_poll_interval_ms\":" .. tostring(state.command_worker_fallback_poll_interval_ms or 0),
     "\"command_worker_max_files_per_poll\":" .. tostring(state.command_worker_max_files_per_poll or 0),
@@ -1493,6 +1496,7 @@ function BMF_socket_status_snapshot()
     lastPollAt = state.socket.last_poll_at,
     lastDrainCount = state.socket.last_drain_count,
     workerStarted = state.socket_worker_started,
+    workerMode = state.socket_worker_mode,
     lastError = state.socket.last_error,
     lastStatus = state.socket.last_status,
     lastStartedAt = state.socket.last_started_at,
@@ -1718,6 +1722,10 @@ function BMF_start_game_thread_loop(prefix, interval_ms, callback)
 
   state.delayed_callbacks[key] = nil
   return false
+end
+
+function BMF_allow_delayed_worker_fallback()
+  return BMF_env_bool("BMF_ALLOW_DELAYED_WORKER_FALLBACK", true)
 end
 
 local BMF = {
@@ -3769,6 +3777,7 @@ local function register_builtin_commands()
         "last_poll_at=" .. tostring(status.lastPollAt),
         "last_drain_count=" .. tostring(status.lastDrainCount),
         "worker_started=" .. tostring(status.workerStarted),
+        "worker_mode=" .. tostring(status.workerMode),
         "last_error=" .. tostring(status.lastError),
         "native_status=" .. tostring(status.nativeStatus),
       },
@@ -9677,11 +9686,24 @@ function BMF.bricks.resolveRuntimeState(options)
       },
     })
   end
+  if not BMF_env_bool("BMF_BRICK_RUNTIME_RESOLVE_ENABLED", false) then
+    runtime.last_error = "runtime brick resolve is disabled"
+    return result(false, "BRICK_RUNTIME_RESOLVE_DISABLED", runtime.last_error, {
+      tag = tag,
+      lines = {
+        "ok=false",
+        "code=BRICK_RUNTIME_RESOLVE_DISABLED",
+        "tag=" .. tag,
+        "detail=runtime brick resolve is disabled",
+      },
+    })
+  end
 
   local radius = option_number(options, "radius", 512)
   local max_scan = option_number(options, "maxscan", option_number(options, "max", 120000))
   local hint = option_number(options, "hint", option_number(options, "hintslot", option_number(options, "slot", 0)))
   local hint_window = option_number(options, "hintwindow", option_number(options, "window", 256))
+  local hint_only = option_boolean(options, "hintonly", option_boolean(options, "hint_only", false))
   x = math.floor(x)
   y = math.floor(y)
   z = math.floor(z)
@@ -9692,7 +9714,7 @@ function BMF.bricks.resolveRuntimeState(options)
 
   local sequence = brick_runtime_next_sequence()
   run_on_game_thread(function()
-    local ok, response = pcall(BMFSocketBrickPhysicalResolveNear, x, y, z, radius, max_scan, hint, hint_window)
+    local ok, response = pcall(BMFSocketBrickPhysicalResolveNear, x, y, z, radius, max_scan, hint, hint_window, hint_only)
     brick_runtime_store_result(sequence, "resolve", 0, tag, ok, ok and response or tostring(response))
   end)
 
@@ -9714,6 +9736,7 @@ function BMF.bricks.resolveRuntimeState(options)
       "max_scan=" .. tostring(max_scan),
       "hint_slot=" .. tostring(hint),
       "hint_window=" .. tostring(hint_window),
+      "hint_only=" .. tostring(hint_only == true),
     },
   })
 end
@@ -10324,49 +10347,48 @@ function BMF.tools.treeCutNative.resolveHandaxe(options)
   })
 end
 
-function BMF.tools.treeCutNative.drain(options)
-  options = type(options) == "table" and options or {}
-  local native = state.tools.tree_cut_native
-  native.available = tree_cut_native_available()
-  if not native.available then
-    native.last_error = "BMFSocket tree-cut native helpers are unavailable"
-    return result(false, "TREE_CUT_NATIVE_UNAVAILABLE", native.last_error, {
-      drained = 0,
-      emitted = 0,
-      lines = {
-        "available=false",
-        "drained=0",
-        "emitted=0",
-      },
-    })
-  end
-
-  local limit = tonumber(options.limit or options.max or 64) or 64
+function BMF_tree_cut_native_normalize_drain_limit(value)
+  local limit = tonumber(value or 64) or 64
   if limit < 1 then
     limit = 1
   elseif limit > 256 then
     limit = 256
   end
+  return limit
+end
 
-  local ok, events_or_error = pcall(BMFSocketTreeCutDrain, limit)
-  if not ok or type(events_or_error) ~= "table" then
-    native.last_error = tostring(events_or_error or "BMFSocketTreeCutDrain failed")
-    return result(false, "TREE_CUT_NATIVE_DRAIN_FAILED", native.last_error, {
-      drained = 0,
-      emitted = 0,
-      lines = {
-        "available=true",
-        "drained=0",
-        "emitted=0",
-        "last_error=" .. native.last_error,
-      },
-    })
+function BMF_tree_cut_native_drain_raw(limit)
+  local native = state.tools.tree_cut_native
+  native.available = tree_cut_native_available()
+  if not native.available then
+    native.last_error = "BMFSocket tree-cut native helpers are unavailable"
+    return false, "TREE_CUT_NATIVE_UNAVAILABLE", native.last_error, {}
   end
 
+  local ok, events_or_error = pcall(BMFSocketTreeCutDrain, BMF_tree_cut_native_normalize_drain_limit(limit))
+  if not ok or type(events_or_error) ~= "table" then
+    native.last_error = tostring(events_or_error or "BMFSocketTreeCutDrain failed")
+    return false, "TREE_CUT_NATIVE_DRAIN_FAILED", native.last_error, {}
+  end
+
+  local raw_events = {}
+  for _, raw in ipairs(events_or_error) do
+    if trim_string(raw) ~= "" then
+      raw_events[#raw_events + 1] = raw
+    end
+  end
+
+  return true, "OK", "Tree-cut native queue drained", raw_events
+end
+
+function BMF_tree_cut_native_emit_raw(raw_events, options)
+  options = type(options) == "table" and options or {}
+  raw_events = type(raw_events) == "table" and raw_events or {}
+  local native = state.tools.tree_cut_native
   local drained = 0
   local emitted = 0
   local decode_errors = 0
-  for _, raw in ipairs(events_or_error) do
+  for _, raw in ipairs(raw_events) do
     if trim_string(raw) ~= "" then
       drained = drained + 1
       local decoded, err = json_decode(raw)
@@ -10404,6 +10426,26 @@ function BMF.tools.treeCutNative.drain(options)
       "total_emitted=" .. tostring(native.emitted_events or 0),
     },
   })
+end
+
+function BMF.tools.treeCutNative.drain(options)
+  options = type(options) == "table" and options or {}
+  local ok, code, message, raw_events = BMF_tree_cut_native_drain_raw(options.limit or options.max or 64)
+  if not ok then
+    local available = code ~= "TREE_CUT_NATIVE_UNAVAILABLE"
+    return result(false, code, message, {
+      drained = 0,
+      emitted = 0,
+      lines = {
+        "available=" .. tostring(available),
+        "drained=0",
+        "emitted=0",
+        "last_error=" .. tostring(message or ""),
+      },
+    })
+  end
+
+  return BMF_tree_cut_native_emit_raw(raw_events, options)
 end
 
 function BMF.tools.treeCutProbe.start(options)
@@ -17668,6 +17710,12 @@ local function start_command_worker()
     )
     return
   end
+  if not BMF_allow_delayed_worker_fallback() then
+    state.command_worker_started = false
+    state.command_worker_mode = "stopped"
+    log("error", "command worker unavailable: delayed fallback disabled and no loop scheduler available")
+    return
+  end
   state.command_worker_mode = "ExecuteInGameThreadWithDelay"
   log(
     "warn",
@@ -17737,6 +17785,7 @@ end
 function BMF_drain_socket_messages(max_count)
   if not state.socket.started or type(BMFSocketReceive) ~= "function" then
     state.socket_worker_started = false
+    state.socket_worker_mode = "stopped"
     return 0
   end
 
@@ -17803,6 +17852,7 @@ end
 function BMF_poll_socket_messages()
   if not state.socket.started or type(BMFSocketReceive) ~= "function" then
     state.socket_worker_started = false
+    state.socket_worker_mode = "stopped"
     return
   end
 
@@ -17811,6 +17861,7 @@ function BMF_poll_socket_messages()
   if state.socket_worker_started then
     if not BMF_schedule_socket_worker_poll(state.socket.poll_interval_ms) then
       state.socket_worker_started = false
+      state.socket_worker_mode = "stopped"
       log("error", "socket worker stopped: no game-thread scheduler available")
     end
   end
@@ -17818,18 +17869,26 @@ end
 
 function BMF_poll_socket_messages_async()
   if not state.socket_worker_started then
+    state.socket_worker_mode = "stopped"
     return true
   end
 
   if not state.socket.started or type(BMFSocketReceive) ~= "function" then
     state.socket_worker_started = false
+    state.socket_worker_mode = "stopped"
     return true
   end
 
+  local drain_started_clock = os.clock()
+  state.socket.poll_count = (tonumber(state.socket.poll_count) or 0) + 1
+  state.socket.last_poll_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+  local queued_messages = 0
+  local native_drained = 0
   local ok, messages_or_error = pcall(BMFSocketReceive, 64)
   if ok and type(messages_or_error) == "table" then
     for _, line in ipairs(messages_or_error) do
       if trim_string(line) ~= "" then
+        queued_messages = queued_messages + 1
         run_on_game_thread(function()
           local processed, err = pcall(BMF_process_socket_message, line)
           if not processed then
@@ -17838,17 +17897,34 @@ function BMF_poll_socket_messages_async()
         end)
       end
     end
+    state.socket.last_drain_count = queued_messages
   elseif not ok then
     state.socket.last_error = "BMFSocketReceive failed: " .. tostring(messages_or_error)
+    state.socket.last_drain_count = 0
+    BMF_telemetry_record_worker("socket_drains", BMF_telemetry_duration_ms(drain_started_clock), false, "messages", 0)
+  else
+    state.socket.last_drain_count = 0
   end
 
   if state.tools.tree_cut_native and state.tools.tree_cut_native.enabled == true then
-    run_on_game_thread(function()
-      pcall(BMF.tools.treeCutNative.drain, {
-        limit = 64,
-        silent = true,
-      })
-    end)
+    local native_ok, native_code, native_message, raw_events = BMF_tree_cut_native_drain_raw(64)
+    if native_ok and type(raw_events) == "table" and #raw_events > 0 then
+      native_drained = #raw_events
+      run_on_game_thread(function()
+        local emitted, err = pcall(BMF_tree_cut_native_emit_raw, raw_events, {
+          silent = true,
+        })
+        if not emitted then
+          state.tools.tree_cut_native.last_error = "native tree-cut emit failed: " .. tostring(err)
+        end
+      end)
+    elseif not native_ok then
+      state.tools.tree_cut_native.last_error = tostring(native_message or native_code or "native tree-cut drain failed")
+    end
+  end
+
+  if queued_messages > 0 or native_drained > 0 then
+    BMF_telemetry_record_worker("socket_drains", BMF_telemetry_duration_ms(drain_started_clock), true, "messages", queued_messages + native_drained)
   end
 
   return false
@@ -17885,6 +17961,7 @@ function BMF_start_socket_transport()
   state.socket.last_status = tostring(status or "")
   state.socket.last_started_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
   state.socket_worker_started = true
+  state.socket_worker_mode = "starting"
   log("info", "socket transport started host=" .. tostring(state.socket.host) .. " port=" .. tostring(state.socket.port) .. " poll_ms=" .. tostring(state.socket.poll_interval_ms))
   if BMF_env_bool("BMF_TREECUT_NATIVE_ENABLED", true) then
     local treecut_ok, treecut_result = pcall(BMF.tools.treeCutNative.start, {
@@ -17896,6 +17973,7 @@ function BMF_start_socket_transport()
     end
   end
   if BMF_start_async_loop("socket_worker", state.socket.poll_interval_ms, BMF_poll_socket_messages_async) then
+    state.socket_worker_mode = "LoopAsync"
     log("info", "socket worker polling via LoopAsync")
     return
   end
@@ -17910,11 +17988,21 @@ function BMF_start_socket_transport()
     BMF_drain_socket_messages(64)
     return false
   end) then
+    state.socket_worker_mode = "LoopInGameThread"
     log("info", "socket worker polling via LoopInGameThread")
     return
   end
+  if not BMF_allow_delayed_worker_fallback() then
+    state.socket_worker_started = false
+    state.socket_worker_mode = "stopped"
+    log("error", "socket worker unavailable: delayed fallback disabled and no loop scheduler available")
+    return
+  end
+  state.socket_worker_mode = "ExecuteInGameThreadWithDelay"
+  log("warn", "socket worker using game-thread delayed fallback interval_ms=" .. tostring(state.socket.poll_interval_ms))
   if not BMF_schedule_socket_worker_poll(state.socket.poll_interval_ms) then
     state.socket_worker_started = false
+    state.socket_worker_mode = "stopped"
     log("error", "socket worker unavailable: no game-thread scheduler available")
   end
 end

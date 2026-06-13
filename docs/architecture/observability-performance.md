@@ -96,6 +96,7 @@ BMF_ALLOW_LOOPASYNC=1                  allow LoopAsync explicitly
 BMF_ALLOW_LOOPASYNC=0                  force async loop off
 BMF_COMMAND_WORKER_ASYNC=0             disable async command worker path
 BMF_ALLOW_GAME_THREAD_LOOP=1           allow game-thread loop fallback
+BMF_ALLOW_DELAYED_WORKER_FALLBACK=0    fail closed instead of using recurring delayed callbacks
 BMF_COMMAND_WORKER_POLL_MS=<ms>        async poll interval
 BMF_COMMAND_WORKER_FALLBACK_POLL_MS=<ms>
 BMF_COMMAND_WORKER_MAX_FILES_PER_POLL=<n>

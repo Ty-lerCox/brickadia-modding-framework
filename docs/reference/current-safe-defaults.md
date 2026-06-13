@@ -36,6 +36,7 @@ Default `Mods/BMF/config.json` values:
 | `BMF_COMMAND_WORKER_MAX_FILES_PER_POLL` | `1` |
 | `BMF_COMMAND_WORKER_ASYNC` | `1` when async loop support is available |
 | `BMF_ALLOW_GAME_THREAD_LOOP` | unset or `0` unless validating fallback behavior |
+| `BMF_ALLOW_DELAYED_WORKER_FALLBACK` | unset or `1`; set `0` during scheduler validation to fail closed instead of using recurring delayed callbacks |
 
 ## Socket Transport
 

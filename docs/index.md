@@ -46,6 +46,7 @@ sections.
 - [Observability and performance](architecture/observability-performance.md)
 - [API overview](api/index.md)
 - [Current status](status.md)
+- [Project changelog](changelog.md)
 
 ## Project State
 

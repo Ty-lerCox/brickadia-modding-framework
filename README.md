@@ -19,6 +19,9 @@ Key entry points:
 - [Architecture Patterns](docs/architecture/architecture-patterns.md):
   high-level sequence diagrams for BMF, Lua plugins, the event bus, Omegga, and
   ConsoleTag lookup.
+- [Resource Lookup Tags](docs/guides/resource-lookup-tags.md): the
+  `lookup:<uuid>:<purpose>` in-game tag format and Lua visibility/collision
+  examples.
 - [API Overview](docs/api/index.md): current Lua API surfaces and their status
   labels.
 - [Lua Examples](docs/examples/index.md): copyable and runnable plugin

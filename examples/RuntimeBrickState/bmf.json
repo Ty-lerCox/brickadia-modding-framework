@@ -1,0 +1,7 @@
+{
+  "name": "RuntimeBrickState",
+  "displayName": "Runtime Brick State",
+  "version": "0.1.0",
+  "entry": "main.lua",
+  "capabilities": ["bricks.runtimeState"]
+}

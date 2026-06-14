@@ -53,8 +53,9 @@ contexts, denial mode, and feedback event paths.
 ## Runtime Brick State
 
 Runtime brick state mutation is a native control path, not a general tag
-resolver. Callers must provide an explicit live runtime brick id candidate, and
-BMF native code validates the internal runtime id before applying visibility or
+resolver. Public callers should provide `uuid=<uuid> purpose=<purpose>` or a
+canonical `lookup:<uuid>:<purpose>` tag; explicit live runtime brick ids are
+diagnostic/cache values that BMF validates before applying visibility or
 collision changes.
 
 See [Runtime Brick State](../api/runtime-bricks.md) for caller rules and

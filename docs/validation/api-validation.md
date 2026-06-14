@@ -89,8 +89,11 @@ current safety level matters.
 
 ## Runtime Brick State
 
-- Clean-restart canary hid and restored one explicit runtime brick id.
-- Tag-only mutation is rejected with `BRICK_RUNTIME_TAG_ID_REQUIRED`.
+- Clean-restart canary hid and restored one UUID/purpose lookup target, with
+  explicit runtime ids reserved for diagnostics and verified cache entries.
+- GUID/tag-only mutation is accepted through the queued GUID path; without an
+  existing binding, explicit position, or cached exact tag candidate, the final
+  status returns `BRICK_RUNTIME_GUID_LOOKUP_MISS`.
 - Native validation checks the returned brick's internal runtime id before using
   Brickadia visibility/collision setters.
 - Broader gameplay use still needs conservative gates and `L6 Frame Time`

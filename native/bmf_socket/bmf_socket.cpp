@@ -1286,7 +1286,40 @@ namespace
     bool treecut_console_tag_is_tree_id(std::string_view raw)
     {
         const std::string text = ascii_lower(trim_ascii(raw));
-        return text.rfind("treeid:", 0) == 0 || text.rfind("choptree:", 0) == 0;
+        if (text.rfind("treeid:", 0) == 0 || text.rfind("choptree:", 0) == 0 ||
+            text.rfind("mineid:", 0) == 0)
+        {
+            return true;
+        }
+
+        constexpr std::string_view lookup_prefix{"lookup:"};
+        if (text.rfind(lookup_prefix, 0) != 0)
+        {
+            return false;
+        }
+
+        const size_t guid_start = lookup_prefix.size();
+        const size_t purpose_separator = text.find(':', guid_start);
+        if (purpose_separator == std::string::npos || purpose_separator == guid_start ||
+            purpose_separator + 1 >= text.size())
+        {
+            return false;
+        }
+        if (text.find(':', purpose_separator + 1) != std::string::npos)
+        {
+            return false;
+        }
+
+        for (const char ch : text)
+        {
+            if (!(std::isalnum(static_cast<unsigned char>(ch)) || ch == ':' ||
+                  ch == '-' || ch == '_' || ch == '.'))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     std::string treecut_first_tree_id_console_tag(const std::vector<std::string>& tags)
@@ -3103,28 +3136,80 @@ namespace
     {
         const std::string wanted = ascii_lower(trim_ascii(raw_tag));
         std::ostringstream out;
-        out << "Tree-cut console tag lookup\n"
-            << "source=BMFSocketTreeCutFindTag\n"
-            << "ok=" << (!wanted.empty() ? "true" : "false") << "\n"
+        out << "Resource console tag lookup\n"
+            << "source=BMFSocketResourceFindTag\n"
             << "tag=" << json_escape(wanted) << "\n"
             << "max_results=" << max_results << "\n"
             << "max_scan=" << max_scan << "\n";
 
         if (wanted.empty())
         {
-            out << "code=TREE_CUT_FIND_TAG_REQUIRED\n"
+            out << "ok=false\n"
+                << "code=TREE_CUT_FIND_TAG_REQUIRED\n"
                 << "detail=tag is required\n";
             return out.str();
         }
 
-        out << "code=TREE_CUT_FIND_TAG_DISABLED\n"
-            << "detail=disabled because broad UObject ConsoleTag scans held the game thread and triggered Brickadia hang detection\n"
-            << "matches=0\n"
+        std::vector<TreeCutTargetCandidate> candidates;
+        {
+            std::lock_guard lock(g_treecut_mutex);
+            candidates = g_treecut_target_cache;
+        }
+
+        TreeCutTargetCandidate best{};
+        bool found = false;
+        size_t inspected = 0;
+        size_t matches = 0;
+        bool truncated = false;
+        for (const TreeCutTargetCandidate& candidate : candidates)
+        {
+            ++inspected;
+            if (!is_live_uobject(candidate.actor))
+            {
+                continue;
+            }
+            if (ascii_lower(trim_ascii(candidate.console_tag)) != wanted)
+            {
+                continue;
+            }
+
+            if (!found)
+            {
+                best = candidate;
+                found = true;
+            }
+            ++matches;
+            if (matches >= std::max<size_t>(1, max_results))
+            {
+                truncated = matches < candidates.size();
+                break;
+            }
+        }
+
+        out << "ok=" << (found ? "true" : "false") << "\n"
+            << "code=" << (found ? "OK" : "TREE_CUT_FIND_TAG_NOT_FOUND") << "\n"
+            << "matches=" << matches << "\n"
+            << "cache_candidates=" << candidates.size() << "\n"
             << "scanned=0\n"
-            << "inspected=0\n"
+            << "inspected=" << inspected << "\n"
             << "errors=0\n"
-            << "truncated=false\n"
-            << "duration_ms=0\n";
+            << "truncated=" << (truncated ? "true" : "false") << "\n"
+            << "duration_ms=0\n"
+            << "detail=searched existing tree-cut target cache only; no UObject scan was run\n";
+        if (found)
+        {
+            out << std::setprecision(17)
+                << "best_x=" << static_cast<double>(best.location.X()) << "\n"
+                << "best_y=" << static_cast<double>(best.location.Y()) << "\n"
+                << "best_z=" << static_cast<double>(best.location.Z()) << "\n"
+                << "best_tag=" << json_escape(best.console_tag) << "\n"
+                << "best_source=" << json_escape(best.console_tag_source) << "\n"
+                << "best_target_name=" << json_escape(best.name) << "\n"
+                << "best_target_full_name=" << json_escape(best.full_name) << "\n"
+                << "best_target_class=" << json_escape(best.class_name) << "\n"
+                << "best_target_address=" << json_escape(best.address) << "\n"
+                << "best_location_method=" << json_escape(best.location_method) << "\n";
+        }
         return out.str();
     }
 
@@ -3213,6 +3298,7 @@ namespace
     std::atomic<uint64_t> g_brick_context_capture_hits{0};
     std::atomic<uint64_t> g_brick_context_capture_rejects{0};
     std::atomic<bool> g_brick_grid_context_background_scan_running{false};
+    std::atomic<uint64_t> g_brick_grid_context_background_scan_started_at_ms{0};
     std::atomic<uint64_t> g_brick_grid_context_background_scan_requests{0};
     std::atomic<uint64_t> g_brick_grid_context_background_scan_completions{0};
     std::atomic<uint64_t> g_brick_grid_context_background_scan_failures{0};
@@ -4080,6 +4166,37 @@ namespace
         return true;
     }
 
+    bool brick_runtime_candidate_better(const BrickRuntimeSlotCandidate& candidate,
+                                        const BrickRuntimeSlotCandidate& current,
+                                        bool has_current,
+                                        bool prefer_visible,
+                                        bool prefer_collidable)
+    {
+        if (!has_current)
+        {
+            return true;
+        }
+        if (prefer_visible)
+        {
+            const bool candidate_visible = candidate.visible != 0;
+            const bool current_visible = current.visible != 0;
+            if (candidate_visible != current_visible)
+            {
+                return candidate_visible;
+            }
+        }
+        if (prefer_collidable)
+        {
+            const bool candidate_collidable = candidate.collision_channels != 0;
+            const bool current_collidable = current.collision_channels != 0;
+            if (candidate_collidable != current_collidable)
+            {
+                return candidate_collidable;
+            }
+        }
+        return candidate.distance_sq < current.distance_sq;
+    }
+
     uint32_t brick_runtime_slot_from_address(uintptr_t module_base, uintptr_t brick_address)
     {
         uint64_t array_base_raw = 0;
@@ -4261,7 +4378,9 @@ namespace
                                                               int64_t target_x,
                                                               int64_t target_y,
                                                               int64_t target_z,
-                                                              uint64_t radius_sq)
+                                                              uint64_t radius_sq,
+                                                              bool prefer_visible,
+                                                              bool prefer_collidable)
     {
         BrickRuntimeHintLookupResult result{};
         result.attempted = hint_id > 0;
@@ -4370,8 +4489,12 @@ namespace
                 result.detail = detail;
                 continue;
             }
-            if (!result.nearest_validated ||
-                candidate.distance_sq < result.nearest.distance_sq)
+            if (brick_runtime_candidate_better(
+                    candidate,
+                    result.nearest,
+                    result.nearest_validated,
+                    prefer_visible,
+                    prefer_collidable))
             {
                 result.nearest_validated = true;
                 result.nearest = candidate;
@@ -4384,7 +4507,12 @@ namespace
             }
 
             result.candidates++;
-            if (!result.found || candidate.distance_sq < result.best.distance_sq)
+            if (brick_runtime_candidate_better(
+                    candidate,
+                    result.best,
+                    result.found,
+                    prefer_visible,
+                    prefer_collidable))
             {
                 result.found = true;
                 result.best = candidate;
@@ -4553,6 +4681,8 @@ namespace
                                   int64_t target_y,
                                   int64_t target_z,
                                   uint64_t radius_sq,
+                                  bool prefer_visible,
+                                  bool prefer_collidable,
                                   BrickRuntimeResolveResult& result)
     {
         if (start_slot >= snapshot.accessible_slots)
@@ -4641,7 +4771,12 @@ namespace
                         continue;
                     }
                     result.candidates++;
-                    if (!result.found || candidate.distance_sq < result.best.distance_sq)
+                    if (brick_runtime_candidate_better(
+                            candidate,
+                            result.best,
+                            result.found,
+                            prefer_visible,
+                            prefer_collidable))
                     {
                         result.found = true;
                         result.best = candidate;
@@ -4657,10 +4792,12 @@ namespace
                                                uint32_t start_slot,
                                                uint32_t end_slot,
                                                int64_t target_x,
-                                               int64_t target_y,
-                                               int64_t target_z,
-                                               uint64_t radius_sq,
-                                               BrickRuntimeResolveResult& result)
+                                                 int64_t target_y,
+                                                 int64_t target_z,
+                                                 uint64_t radius_sq,
+                                                 bool prefer_visible,
+                                                 bool prefer_collidable,
+                                                 BrickRuntimeResolveResult& result)
     {
         result.direct_array_scan_attempted = true;
         result.direct_array_scan_enabled = brick_runtime_resolve_direct_array_enabled();
@@ -4781,7 +4918,12 @@ namespace
                         continue;
                     }
                     result.direct_array_candidates++;
-                    if (!result.found || candidate.distance_sq < result.best.distance_sq)
+                    if (brick_runtime_candidate_better(
+                            candidate,
+                            result.best,
+                            result.found,
+                            prefer_visible,
+                            prefer_collidable))
                     {
                         result.found = true;
                         result.best = candidate;
@@ -4801,7 +4943,9 @@ namespace
                                                  uint32_t max_scan,
                                                  uint32_t hint_slot,
                                                  uint32_t hint_window,
-                                                 bool hint_only)
+                                                 bool hint_only,
+                                                 bool prefer_visible,
+                                                 bool prefer_collidable)
     {
         if (radius == 0)
         {
@@ -4826,7 +4970,9 @@ namespace
             << "max_scan=" << max_scan << "\n"
             << "hint_slot=" << hint_slot << "\n"
             << "hint_window=" << hint_window << "\n"
-            << "hint_only=" << (hint_only ? "true" : "false") << "\n";
+            << "hint_only=" << (hint_only ? "true" : "false") << "\n"
+            << "prefer_visible=" << (prefer_visible ? "true" : "false") << "\n"
+            << "prefer_collidable=" << (prefer_collidable ? "true" : "false") << "\n";
 
         if (target_x < INT32_MIN || target_x > INT32_MAX ||
             target_y < INT32_MIN || target_y > INT32_MAX ||
@@ -4883,7 +5029,9 @@ namespace
                 target_x,
                 target_y,
                 target_z,
-                radius_sq);
+                radius_sq,
+                prefer_visible,
+                prefer_collidable);
             resolve.hint_lookup_attempted = hint_lookup.attempted;
             resolve.hint_lookup_enabled = hint_lookup.enabled;
             resolve.hint_lookup_found = hint_lookup.found;
@@ -4921,6 +5069,8 @@ namespace
                 target_y,
                 target_z,
                 radius_sq,
+                prefer_visible,
+                prefer_collidable,
                 resolve);
         }
 
@@ -4937,6 +5087,8 @@ namespace
                 target_y,
                 target_z,
                 radius_sq,
+                prefer_visible,
+                prefer_collidable,
                 resolve);
         }
 
@@ -4952,6 +5104,8 @@ namespace
                 target_y,
                 target_z,
                 radius_sq,
+                prefer_visible,
+                prefer_collidable,
                 resolve);
             const uint32_t direct_full_end = std::min<uint32_t>(max_scan, snapshot.requested_slots);
             brick_runtime_scan_direct_array_slots(
@@ -4962,6 +5116,8 @@ namespace
                 target_y,
                 target_z,
                 radius_sq,
+                prefer_visible,
+                prefer_collidable,
                 resolve);
             resolve.truncated = full_end < snapshot.accessible_slots ||
                                 direct_full_end < snapshot.requested_slots;
@@ -5437,7 +5593,7 @@ namespace
             {
                 result.probes++;
                 result.scanned_bytes += scan_alignment;
-                if ((result.probes & 0x3FFFULL) == 0 &&
+                if ((result.probes & 0xFFULL) == 0 &&
                     max_duration_ms > 0 &&
                     elapsed_ms() >= max_duration_ms)
                 {
@@ -5805,6 +5961,7 @@ namespace
         g_brick_grid_context_background_scan_sub_index.store(brick_sub_index);
         g_brick_grid_context_background_scan_address.store(0);
         g_brick_grid_context_background_scan_hint.store(hint_address);
+        g_brick_grid_context_background_scan_started_at_ms.store(monotonic_ms());
         g_brick_grid_context_background_scan_duration_ms.store(0);
         {
             std::lock_guard lock(g_brick_physical_mutex);
@@ -5812,30 +5969,53 @@ namespace
                 "background sparse-grid context scan is running";
         }
 
-        std::thread([brick_cell_index, brick_sub_index, hint_address]() {
-            const BrickGridContextScanResult scan =
-                brick_grid_context_scan_memory(
-                    brick_cell_index,
-                    brick_sub_index,
-                    hint_address,
-                    false);
-            g_brick_grid_context_background_scan_duration_ms.store(scan.duration_ms);
-            g_brick_grid_context_background_scan_address.store(scan.address);
-            if (scan.found)
+        const bool allow_full_fallback =
+            env_flag_enabled("BMF_BRICK_CONTEXT_HINT_FULL_FALLBACK_ENABLED");
+        std::thread([brick_cell_index, brick_sub_index, hint_address, allow_full_fallback]() {
+            try
             {
-                brick_grid_context_cache_store(scan.address, "background-scan");
-                g_brick_grid_context_background_scan_completions.fetch_add(1);
+                const BrickGridContextScanResult scan =
+                    brick_grid_context_scan_memory(
+                        brick_cell_index,
+                        brick_sub_index,
+                        hint_address,
+                        allow_full_fallback);
+                g_brick_grid_context_background_scan_duration_ms.store(scan.duration_ms);
+                g_brick_grid_context_background_scan_address.store(scan.address);
+                if (scan.found)
                 {
-                    std::lock_guard lock(g_brick_physical_mutex);
-                    g_brick_grid_context_background_scan_detail = scan.detail;
+                    brick_grid_context_cache_store(scan.address, "background-scan");
+                    g_brick_grid_context_background_scan_completions.fetch_add(1);
+                    {
+                        std::lock_guard lock(g_brick_physical_mutex);
+                        g_brick_grid_context_background_scan_detail = scan.detail;
+                    }
+                }
+                else
+                {
+                    g_brick_grid_context_background_scan_failures.fetch_add(1);
+                    {
+                        std::lock_guard lock(g_brick_physical_mutex);
+                        g_brick_grid_context_background_scan_detail = scan.detail;
+                    }
                 }
             }
-            else
+            catch (const std::exception& ex)
             {
                 g_brick_grid_context_background_scan_failures.fetch_add(1);
                 {
                     std::lock_guard lock(g_brick_physical_mutex);
-                    g_brick_grid_context_background_scan_detail = scan.detail;
+                    g_brick_grid_context_background_scan_detail =
+                        std::string("background sparse-grid context scan failed: ") + ex.what();
+                }
+            }
+            catch (...)
+            {
+                g_brick_grid_context_background_scan_failures.fetch_add(1);
+                {
+                    std::lock_guard lock(g_brick_physical_mutex);
+                    g_brick_grid_context_background_scan_detail =
+                        "background sparse-grid context scan failed with an unknown exception";
                 }
             }
             g_brick_grid_context_background_scan_running.store(false);
@@ -6080,8 +6260,16 @@ namespace
             std::lock_guard lock(g_brick_physical_mutex);
             detail = g_brick_grid_context_background_scan_detail;
         }
+        const uint64_t started_at_ms =
+            g_brick_grid_context_background_scan_started_at_ms.load();
+        const bool running =
+            g_brick_grid_context_background_scan_running.load();
+        const uint64_t elapsed_ms =
+            running && started_at_ms != 0
+                ? (monotonic_ms() >= started_at_ms ? monotonic_ms() - started_at_ms : 0)
+                : g_brick_grid_context_background_scan_duration_ms.load();
         out << "background_context_scan_enabled=" << (brick_grid_context_background_scan_enabled() ? "true" : "false") << "\n"
-            << "background_context_scan_running=" << (g_brick_grid_context_background_scan_running.load() ? "true" : "false") << "\n"
+            << "background_context_scan_running=" << (running ? "true" : "false") << "\n"
             << "background_context_scan_requests=" << g_brick_grid_context_background_scan_requests.load() << "\n"
             << "background_context_scan_completions=" << g_brick_grid_context_background_scan_completions.load() << "\n"
             << "background_context_scan_failures=" << g_brick_grid_context_background_scan_failures.load() << "\n"
@@ -6089,6 +6277,8 @@ namespace
             << "background_context_scan_hint=" << json_escape(pointer_hex(g_brick_grid_context_background_scan_hint.load())) << "\n"
             << "background_context_scan_cell_index=" << g_brick_grid_context_background_scan_cell_index.load() << "\n"
             << "background_context_scan_sub_index=" << g_brick_grid_context_background_scan_sub_index.load() << "\n"
+            << "background_context_scan_started_at_ms=" << started_at_ms << "\n"
+            << "background_context_scan_elapsed_ms=" << elapsed_ms << "\n"
             << "background_context_scan_duration_ms=" << g_brick_grid_context_background_scan_duration_ms.load() << "\n"
             << "background_context_scan_detail=" << json_escape(detail) << "\n";
     }
@@ -6518,14 +6708,20 @@ namespace
         {
             if (!grid_context_available)
             {
+                const bool background_context_scan_known_failed =
+                    brick_grid_context_background_scan_failed_for(
+                        brick_cell_index,
+                        brick_sub_index);
                 const bool background_context_scan_started =
+                    !background_context_scan_known_failed &&
                     brick_grid_context_background_scan_start(
                         brick_cell_index,
                         brick_sub_index,
                         static_cast<uintptr_t>(grid_context_address));
                 const bool background_context_scan_pending =
-                    background_context_scan_started ||
-                    g_brick_grid_context_background_scan_running.load();
+                    !background_context_scan_known_failed &&
+                    (background_context_scan_started ||
+                     g_brick_grid_context_background_scan_running.load());
                 out << "ok=false\n"
                     << "code=" << (background_context_scan_pending
                            ? "BRICK_GRID_CONTEXT_SCAN_PENDING"
@@ -6533,6 +6729,7 @@ namespace
                     << "owner_address=" << json_escape(pointer_hex(static_cast<uintptr_t>(owner_address))) << "\n"
                     << "grid_context_address=" << json_escape(pointer_hex(static_cast<uintptr_t>(grid_context_address))) << "\n"
                     << "grid_context_source=" << json_escape(grid_context_source) << "\n"
+                    << "background_context_scan_known_failed=" << (background_context_scan_known_failed ? "true" : "false") << "\n"
                     << "background_context_scan_started=" << (background_context_scan_started ? "true" : "false") << "\n"
                     << "low_setter_hook_enabled=" << (brick_runtime_low_setter_context_hook_enabled() ? "true" : "false") << "\n"
                     << "visibility_low_setter_hook_installed=" << (g_brick_visibility_low_setter_hook.installed.load() ? "true" : "false") << "\n"
@@ -6626,14 +6823,20 @@ namespace
             collision_method = "brickadia-setter";
             if (!grid_context_available)
             {
+                const bool background_context_scan_known_failed =
+                    brick_grid_context_background_scan_failed_for(
+                        brick_cell_index,
+                        brick_sub_index);
                 const bool background_context_scan_started =
+                    !background_context_scan_known_failed &&
                     brick_grid_context_background_scan_start(
                         brick_cell_index,
                         brick_sub_index,
                         static_cast<uintptr_t>(grid_context_address));
                 const bool background_context_scan_pending =
-                    background_context_scan_started ||
-                    g_brick_grid_context_background_scan_running.load();
+                    !background_context_scan_known_failed &&
+                    (background_context_scan_started ||
+                     g_brick_grid_context_background_scan_running.load());
                 out << "ok=false\n"
                     << "code=" << (background_context_scan_pending
                            ? "BRICK_GRID_CONTEXT_SCAN_PENDING"
@@ -6641,6 +6844,7 @@ namespace
                     << "owner_address=" << json_escape(pointer_hex(static_cast<uintptr_t>(owner_address))) << "\n"
                     << "grid_context_address=" << json_escape(pointer_hex(static_cast<uintptr_t>(grid_context_address))) << "\n"
                     << "grid_context_source=" << json_escape(grid_context_source) << "\n"
+                    << "background_context_scan_known_failed=" << (background_context_scan_known_failed ? "true" : "false") << "\n"
                     << "background_context_scan_started=" << (background_context_scan_started ? "true" : "false") << "\n"
                     << "low_setter_hook_enabled=" << (brick_runtime_low_setter_context_hook_enabled() ? "true" : "false") << "\n"
                     << "visibility_low_setter_hook_installed=" << (g_brick_visibility_low_setter_hook.installed.load() ? "true" : "false") << "\n"
@@ -6862,7 +7066,7 @@ namespace
         out << std::setprecision(17)
             << "{"
             << "\"type\":\"" << (is_pickaxe ? "mine_hit" : "treecut_hit") << "\","
-            << "\"source\":\"BMFSocketTreeCutNative\","
+            << "\"source\":\"BMFSocketResourceNative\","
             << "\"event\":\"" << (is_pickaxe ? "cityrpg.mine.hit" : "cityrpg.treecut.hit") << "\","
             << "\"sequence\":" << sequence << ","
             << "\"timestamp\":\"" << json_escape(system_utc_iso()) << "\","
@@ -6926,7 +7130,7 @@ namespace
             }
             catch (...)
             {
-                treecut_set_error("treecut event serialization failed");
+                treecut_set_error("resource event serialization failed");
             }
         }
     }
@@ -6956,8 +7160,8 @@ namespace
     {
         std::lock_guard lock(g_treecut_mutex);
         std::ostringstream out;
-        out << "Tree-cut native status\n"
-            << "source=BMFSocketTreeCutNative\n"
+        out << "Resource native status\n"
+            << "source=BMFSocketResourceNative\n"
             << "enabled=" << (g_treecut_enabled.load() ? "true" : "false") << "\n"
             << "installed=" << (g_treecut_installed.load() ? "true" : "false") << "\n"
             << "function=" << json_escape(pointer_hex(g_treecut_function.load())) << "\n"
@@ -8035,6 +8239,8 @@ namespace
         uint32_t hint_slot = 0;
         uint32_t hint_window = kBrickRuntimeResolveDefaultHintWindow;
         bool hint_only = false;
+        bool prefer_visible = false;
+        bool prefer_collidable = false;
 
         if (lua_isnumber(state, 1))
         {
@@ -8085,6 +8291,22 @@ namespace
             hint_only = lua_tointeger(state, 8) != 0;
         }
         hint_only = hint_only && hint_slot > 0 && hint_window > 0;
+        if (lua_isboolean(state, 9))
+        {
+            prefer_visible = lua_toboolean(state, 9) != 0;
+        }
+        else if (lua_isnumber(state, 9))
+        {
+            prefer_visible = lua_tointeger(state, 9) != 0;
+        }
+        if (lua_isboolean(state, 10))
+        {
+            prefer_collidable = lua_toboolean(state, 10) != 0;
+        }
+        else if (lua_isnumber(state, 10))
+        {
+            prefer_collidable = lua_tointeger(state, 10) != 0;
+        }
 
         lua.set_string(brick_physical_resolve_near_text(
             x,
@@ -8094,7 +8316,9 @@ namespace
             max_scan,
             hint_slot,
             hint_window,
-            hint_only));
+            hint_only,
+            prefer_visible,
+            prefer_collidable));
         return 1;
     }
 
@@ -8342,6 +8566,10 @@ namespace
             lua.register_function("BMFSocketTreeCutStop", lua_socket_treecut_stop);
             lua.register_function("BMFSocketTreeCutStatus", lua_socket_treecut_status);
             lua.register_function("BMFSocketTreeCutFindTag", lua_socket_treecut_find_tag);
+            lua.register_function("BMFSocketResourceNativeStart", lua_socket_treecut_start);
+            lua.register_function("BMFSocketResourceNativeStop", lua_socket_treecut_stop);
+            lua.register_function("BMFSocketResourceNativeStatus", lua_socket_treecut_status);
+            lua.register_function("BMFSocketResourceNativeFindTag", lua_socket_treecut_find_tag);
             lua.register_function("BMFSocketBrickPhysicalInspect", lua_socket_brick_physical_inspect);
             lua.register_function("BMFSocketBrickPhysicalResolveNear", lua_socket_brick_physical_resolve_near);
             lua.register_function("BMFSocketBrickPhysicalSet", lua_socket_brick_physical_set);
@@ -8349,6 +8577,9 @@ namespace
             lua.register_function("BMFSocketTreeCutResolveHandaxe", lua_socket_treecut_resolve_handaxe);
             lua.register_function("BMFSocketTreeCutSetHandaxeClass", lua_socket_treecut_set_handaxe_class);
             lua.register_function("BMFSocketTreeCutDrain", lua_socket_treecut_drain);
+            lua.register_function("BMFSocketResourceNativeRefreshTargets", lua_socket_treecut_refresh_targets);
+            lua.register_function("BMFSocketResourceNativeResolveTools", lua_socket_treecut_resolve_handaxe);
+            lua.register_function("BMFSocketResourceNativeDrain", lua_socket_treecut_drain);
             lua.register_function("BMFSocketTreeCutProbeStart", lua_socket_treecut_probe_start);
             lua.register_function("BMFSocketTreeCutProbeStop", lua_socket_treecut_probe_stop);
             lua.register_function("BMFSocketTreeCutProbeStatus", lua_socket_treecut_probe_status);

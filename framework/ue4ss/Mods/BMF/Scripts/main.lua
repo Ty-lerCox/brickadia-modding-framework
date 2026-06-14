@@ -1823,9 +1823,9 @@ API_REGISTRY = {
   { name = "BMF.tools.uobject.describe", namespace = "tools", kind = "function", stability = "diagnostic", risk = "low", validation = "L3 Live Server address-only native diagnostic", requiresPlayer = false, capability = "", summary = "Describe one explicit live UObject pointer without global scans; used to decode native trace context pointers." },
   { name = "BMF.bricks.inspectRuntimeState", namespace = "bricks", kind = "function", stability = "diagnostic", risk = "medium", validation = "L3 Live Server explicit brick id inspect", requiresPlayer = false, capability = "", summary = "Inspect one explicit runtime brick id for visible/collision state without scanning live UObjects." },
   { name = "BMF.bricks.resolveRuntimeState", namespace = "bricks", kind = "function", stability = "experimental", risk = "unsafe-native", validation = "Env-gated L3 Live Server bounded runtime-array scan", requiresPlayer = false, capability = "", summary = "Resolve a nearby active runtime brick id from a world position and optional saved-slot hint without scanning live UObjects." },
-  { name = "BMF.bricks.setRuntimeState", namespace = "bricks", kind = "function", stability = "experimental", risk = "unsafe-native", validation = "Env-gated L3 Live Server canary only", requiresPlayer = false, capability = "bricks.runtimeState", summary = "Set one explicit runtime brick id visibility and/or collision state through BMFSocket." },
-  { name = "BMF.bricks.bindRuntimeGuid", namespace = "bricks", kind = "function", stability = "experimental", risk = "medium", validation = "L2 Headless + L3 Live Server explicit runtime ids", requiresPlayer = false, capability = "bricks.runtimeState", summary = "Bind explicit runtime brick ids to an opaque gameplay GUID without interpreting the GUID." },
-  { name = "BMF.bricks.setRuntimeStateByGuid", namespace = "bricks", kind = "function", stability = "experimental", risk = "unsafe-native", validation = "Env-gated L3 Live Server canary only", requiresPlayer = false, capability = "bricks.runtimeState", summary = "Set visibility/collision for runtime bricks previously bound to one opaque GUID." },
+  { name = "BMF.bricks.setRuntimeState", namespace = "bricks", kind = "function", stability = "experimental", risk = "unsafe-native", validation = "Env-gated L3 Live Server canary only", requiresPlayer = false, capability = "bricks.runtimeState", summary = "Set runtime brick visibility/collision by explicit runtime id or by UUID-first lookup metadata." },
+  { name = "BMF.bricks.bindRuntimeGuid", namespace = "bricks", kind = "function", stability = "experimental", risk = "medium", validation = "L2 Headless + L3 Live Server explicit runtime ids", requiresPlayer = false, capability = "bricks.runtimeState", summary = "Bind explicit runtime brick ids or a bounded lookup result to an opaque gameplay GUID." },
+  { name = "BMF.bricks.setRuntimeStateByGuid", namespace = "bricks", kind = "function", stability = "experimental", risk = "unsafe-native", validation = "Env-gated L3 Live Server canary only", requiresPlayer = false, capability = "bricks.runtimeState", summary = "Set visibility/collision for runtime bricks bound to, or resolved for, one opaque GUID." },
   { name = "BMF.bricks.runtimeGuidStatus", namespace = "bricks", kind = "function", stability = "diagnostic", risk = "low", validation = "L2 Headless", requiresPlayer = false, capability = "", summary = "Inspect opaque GUID to runtime brick id bindings." },
   { name = "BMF.bricks.runtimeStateStatus", namespace = "bricks", kind = "function", stability = "diagnostic", risk = "low", validation = "L2 Headless safe failure; L3 Live Server result inspection", requiresPlayer = false, capability = "", summary = "Inspect the last queued runtime brick state operation result." },
   { name = "BMF.tools.treeCutTrace.enable", namespace = "tools", kind = "function", stability = "diagnostic", risk = "unsafe-native", validation = "L3 Live Player handaxe/tree trace", requiresPlayer = true, capability = "", summary = "Temporarily register bounded native hooks that summarize handaxe/tree-cut evidence." },
@@ -1833,9 +1833,16 @@ API_REGISTRY = {
   { name = "BMF.tools.treeCutTrace.status", namespace = "tools", kind = "function", stability = "diagnostic", risk = "low", validation = "L2 Headless command; L3 Live Player for event counts", requiresPlayer = false, capability = "", summary = "Inspect tree-cut trace hook state and counters." },
   { name = "BMF.tools.treeCutTrace.recent", namespace = "tools", kind = "function", stability = "diagnostic", risk = "low", validation = "L3 Live Player trace review", requiresPlayer = false, capability = "", summary = "List recent tree-cut trace records." },
   { name = "BMF.tools.treeCutTrace.clear", namespace = "tools", kind = "function", stability = "diagnostic", risk = "low", validation = "L2 Headless reset", requiresPlayer = false, capability = "", summary = "Clear tree-cut trace counters and recent events." },
-  { name = "BMF.tools.treeCutNative.start", namespace = "tools", kind = "function", stability = "experimental", risk = "unsafe-native", validation = "L3 Live Player handaxe/tree hit event", requiresPlayer = true, capability = "", summary = "Install and enable the native melee-hit queue used for CityRPG tree-cut events." },
-  { name = "BMF.tools.treeCutNative.stop", namespace = "tools", kind = "function", stability = "experimental", risk = "unsafe-native", validation = "L3 Live Server cleanup", requiresPlayer = false, capability = "", summary = "Disable native tree-cut event capture without unloading the native detour." },
-  { name = "BMF.tools.treeCutNative.status", namespace = "tools", kind = "function", stability = "experimental", risk = "low", validation = "L2 Headless safe failure; L3 Live Player event counts", requiresPlayer = false, capability = "", summary = "Inspect native tree-cut hook install state, counters, and queue depth." },
+  { name = "BMF.tools.resourceNative.start", namespace = "tools", kind = "function", stability = "experimental", risk = "unsafe-native", validation = "L3 Live Player handaxe/pickaxe resource hit event", requiresPlayer = true, capability = "", summary = "Install and enable the native melee-hit queue used for CityRPG resource events." },
+  { name = "BMF.tools.resourceNative.stop", namespace = "tools", kind = "function", stability = "experimental", risk = "unsafe-native", validation = "L3 Live Server cleanup", requiresPlayer = false, capability = "", summary = "Disable native resource event capture without unloading the native detour." },
+  { name = "BMF.tools.resourceNative.status", namespace = "tools", kind = "function", stability = "experimental", risk = "low", validation = "L2 Headless safe failure; L3 Live Player event counts", requiresPlayer = false, capability = "", summary = "Inspect native resource hook install state, counters, and queue depth." },
+  { name = "BMF.tools.resourceNative.resolveTools", namespace = "tools", kind = "function", stability = "experimental", risk = "medium", validation = "L3 Live Server game-thread asset resolve", requiresPlayer = false, capability = "", summary = "Load and resolve resource tool generated classes for strict native item checks." },
+  { name = "BMF.tools.resourceNative.refreshTargets", namespace = "tools", kind = "function", stability = "diagnostic", risk = "unsafe-native", validation = "Disabled by default; manual native diagnostics only", requiresPlayer = false, capability = "", summary = "Opt-in unsafe native resource target cache refresh for diagnostics; CityRPG should prefer bounded runtime anchors." },
+  { name = "BMF.tools.resourceNative.findTag", namespace = "tools", kind = "function", stability = "diagnostic", risk = "unsafe-native", validation = "L3 Live Server bounded exact ConsoleTag lookup", requiresPlayer = false, capability = "", summary = "Find cached native target candidates that directly carry a specific resource lookup ConsoleTag." },
+  { name = "BMF.tools.resourceNative.drain", namespace = "tools", kind = "function", stability = "experimental", risk = "medium", validation = "L3 Live Player socket relay", requiresPlayer = false, capability = "", summary = "Drain queued native resource hit events and emit them into the BMF event bus." },
+  { name = "BMF.tools.treeCutNative.start", namespace = "tools", kind = "function", stability = "compatibility", risk = "unsafe-native", validation = "L3 Live Player handaxe/tree hit event", requiresPlayer = true, capability = "", summary = "Compatibility alias for BMF.tools.resourceNative.start." },
+  { name = "BMF.tools.treeCutNative.stop", namespace = "tools", kind = "function", stability = "compatibility", risk = "unsafe-native", validation = "L3 Live Server cleanup", requiresPlayer = false, capability = "", summary = "Compatibility alias for BMF.tools.resourceNative.stop." },
+  { name = "BMF.tools.treeCutNative.status", namespace = "tools", kind = "function", stability = "compatibility", risk = "low", validation = "L2 Headless safe failure; L3 Live Player event counts", requiresPlayer = false, capability = "", summary = "Compatibility alias for BMF.tools.resourceNative.status." },
   { name = "BMF.tools.treeCutNative.resolveHandaxe", namespace = "tools", kind = "function", stability = "experimental", risk = "medium", validation = "L3 Live Server game-thread asset resolve", requiresPlayer = false, capability = "", summary = "Load and resolve the handaxe generated class for strict native tree-cut item checks." },
   { name = "BMF.tools.treeCutNative.refreshTargets", namespace = "tools", kind = "function", stability = "diagnostic", risk = "unsafe-native", validation = "Disabled by default; manual native diagnostics only", requiresPlayer = false, capability = "", summary = "Opt-in unsafe native tree actor cache refresh for diagnostics; CityRPG should prefer bounded runtime anchors." },
   { name = "BMF.tools.treeCutNative.findTag", namespace = "tools", kind = "function", stability = "diagnostic", risk = "unsafe-native", validation = "L3 Live Server bounded exact ConsoleTag lookup", requiresPlayer = false, capability = "", summary = "Find live UObject candidates that directly carry a specific treeid ConsoleTag for physical-state research." },
@@ -3879,22 +3886,69 @@ local function register_builtin_commands()
     return BMF.tools.treeCutTrace.clear()
   end)
 
-  BMF.commands.register("bmf.tools.treecut.native.start", "Start native CityRPG tree-cut hit event capture.", function(args)
+  BMF.commands.register("bmf.tools.resource.native.start", "Start native CityRPG resource hit event capture.", function(args)
     local options = parse_command_options(args)
-    return BMF.tools.treeCutNative.start({
+    return BMF.tools.resourceNative.start({
       reason = options.reason or "command",
     })
   end)
 
-  BMF.commands.register("bmf.tools.treecut.native.stop", "Stop native CityRPG tree-cut hit event capture.", function(args)
+  BMF.commands.register("bmf.tools.resource.native.stop", "Stop native CityRPG resource hit event capture.", function(args)
     local options = parse_command_options(args)
-    return BMF.tools.treeCutNative.stop({
+    return BMF.tools.resourceNative.stop({
       reason = options.reason or "command",
     })
   end)
 
-  BMF.commands.register("bmf.tools.treecut.native.status", "Show native CityRPG tree-cut hit event capture status.", function()
-    return BMF.tools.treeCutNative.status()
+  BMF.commands.register("bmf.tools.resource.native.status", "Show native CityRPG resource hit event capture status.", function()
+    return BMF.tools.resourceNative.status()
+  end)
+
+  BMF.commands.register("bmf.tools.resource.native.resolve-tools", "Resolve native resource tool classes used by resource hit capture.", function(args)
+    local options = parse_command_options(args)
+    return BMF.tools.resourceNative.resolveTools({
+      reason = options.reason or "command",
+      loadAsset = option_boolean(options, "loadasset", false),
+    })
+  end)
+
+  BMF.commands.register("bmf.tools.resource.native.refresh-targets", "Refresh cached native resource targets used by hit target resolution.", function()
+    return BMF.tools.resourceNative.refreshTargets()
+  end)
+
+  BMF.commands.register("bmf.tools.resource.native.find-tag", "Find cached native resource candidates for one lookup ConsoleTag.", function(args)
+    local options = parse_command_options(args)
+    local positional = type(options._positional) == "table" and options._positional or {}
+    return BMF.tools.resourceNative.findTag({
+      tag = options.tag or options.lookup or options.resourceid or options.resourceId or options.treeid or options.treeId or options.mineid or options.mineId or positional[1] or "",
+      limit = option_number(options, "limit", option_number(options, "maxresults", 8)),
+      maxScan = option_number(options, "maxscan", option_number(options, "max", 250000)),
+    })
+  end)
+
+  BMF.commands.register("bmf.tools.resource.native.drain", "Drain native CityRPG resource hit events into the BMF event bus.", function(args)
+    local options = parse_command_options(args)
+    return BMF.tools.resourceNative.drain({
+      limit = option_number(options, "limit", 64),
+    })
+  end)
+
+  BMF.commands.register("bmf.tools.treecut.native.start", "Compatibility alias for bmf.tools.resource.native.start.", function(args)
+    local options = parse_command_options(args)
+    return BMF.tools.resourceNative.start({
+      reason = options.reason or "command",
+    })
+  end)
+
+  BMF.commands.register("bmf.tools.treecut.native.stop", "Compatibility alias for bmf.tools.resource.native.stop.", function(args)
+    local options = parse_command_options(args)
+    return BMF.tools.resourceNative.stop({
+      reason = options.reason or "command",
+    })
+  end)
+
+  BMF.commands.register("bmf.tools.treecut.native.status", "Compatibility alias for bmf.tools.resource.native.status.", function()
+    return BMF.tools.resourceNative.status()
   end)
 
   BMF.commands.register("bmf.tools.treecut.native.resolve-handaxe", "Resolve the native handaxe class used by tree-cut hit capture.", function(args)
@@ -3905,15 +3959,15 @@ local function register_builtin_commands()
     })
   end)
 
-  BMF.commands.register("bmf.tools.treecut.native.refresh-targets", "Refresh cached native tree actors used by tree-cut hit target resolution.", function()
-    return BMF.tools.treeCutNative.refreshTargets()
+  BMF.commands.register("bmf.tools.treecut.native.refresh-targets", "Compatibility alias for bmf.tools.resource.native.refresh-targets.", function()
+    return BMF.tools.resourceNative.refreshTargets()
   end)
 
-  BMF.commands.register("bmf.tools.treecut.native.find-tag", "Find live UObject candidates for one treeid ConsoleTag.", function(args)
+  BMF.commands.register("bmf.tools.treecut.native.find-tag", "Compatibility alias for bmf.tools.resource.native.find-tag.", function(args)
     local options = parse_command_options(args)
     local positional = type(options._positional) == "table" and options._positional or {}
-    return BMF.tools.treeCutNative.findTag({
-      tag = options.tag or options.treeid or options.treeId or positional[1] or "",
+    return BMF.tools.resourceNative.findTag({
+      tag = options.tag or options.lookup or options.resourceid or options.resourceId or options.treeid or options.treeId or options.mineid or options.mineId or positional[1] or "",
       limit = option_number(options, "limit", option_number(options, "maxresults", 8)),
       maxScan = option_number(options, "maxscan", option_number(options, "max", 250000)),
     })
@@ -3929,17 +3983,17 @@ local function register_builtin_commands()
     return BMF.bricks.resolveRuntimeState(options)
   end)
 
-  BMF.commands.register("bmf.bricks.runtime.set", "Set one explicit runtime brick id visible/collision state.", function(args)
+  BMF.commands.register("bmf.bricks.runtime.set", "Set runtime brick visible/collision state by brick id, GUID, UUID+purpose, or tag.", function(args)
     local options = parse_command_options(args)
     return BMF.bricks.setRuntimeState(options)
   end)
 
-  BMF.commands.register("bmf.bricks.runtime.bind", "Bind explicit runtime brick ids to an opaque GUID.", function(args)
+  BMF.commands.register("bmf.bricks.runtime.bind", "Bind explicit runtime brick ids or a bounded lookup result to an opaque GUID.", function(args)
     local options = parse_command_options(args)
     return BMF.bricks.bindRuntimeGuid(options)
   end)
 
-  BMF.commands.register("bmf.bricks.runtime.set-guid", "Set visible/collision state for runtime bricks bound to one opaque GUID.", function(args)
+  BMF.commands.register("bmf.bricks.runtime.set-guid", "Set visible/collision state for runtime bricks bound to or resolved for one opaque GUID.", function(args)
     local options = parse_command_options(args)
     return BMF.bricks.setRuntimeStateByGuid(options)
   end)
@@ -3967,9 +4021,9 @@ local function register_builtin_commands()
     return BMF.tools.treeCutNative.physicalStatus()
   end)
 
-  BMF.commands.register("bmf.tools.treecut.native.drain", "Drain native CityRPG tree-cut hit events into the BMF event bus.", function(args)
+  BMF.commands.register("bmf.tools.treecut.native.drain", "Compatibility alias for bmf.tools.resource.native.drain.", function(args)
     local options = parse_command_options(args)
-    return BMF.tools.treeCutNative.drain({
+    return BMF.tools.resourceNative.drain({
       limit = option_number(options, "limit", 64),
     })
   end)
@@ -7548,6 +7602,7 @@ BMF.tools.uobject = {}
 BMF.tools.applicator = {}
 BMF.tools.treeCutTrace = {}
 BMF.tools.treeCutNative = {}
+BMF.tools.resourceNative = {}
 BMF.tools.treeCutProbe = {}
 
 do
@@ -9435,23 +9490,23 @@ function BMF.tools.treeCutTrace.clear()
 end
 
 local function tree_cut_native_available()
-  return type(BMFSocketTreeCutStart) == "function"
-    and type(BMFSocketTreeCutStop) == "function"
-    and type(BMFSocketTreeCutStatus) == "function"
-    and type(BMFSocketTreeCutDrain) == "function"
+  return type(BMFSocketResourceNativeStart or BMFSocketTreeCutStart) == "function"
+    and type(BMFSocketResourceNativeStop or BMFSocketTreeCutStop) == "function"
+    and type(BMFSocketResourceNativeStatus or BMFSocketTreeCutStatus) == "function"
+    and type(BMFSocketResourceNativeDrain or BMFSocketTreeCutDrain) == "function"
 end
 
 local function tree_cut_handaxe_resolver_available()
-  return type(BMFSocketTreeCutResolveHandaxe) == "function"
+  return type(BMFSocketResourceNativeResolveTools or BMFSocketTreeCutResolveHandaxe) == "function"
     and type(BMFSocketTreeCutSetHandaxeClass) == "function"
 end
 
 local function tree_cut_target_resolver_available()
-  return type(BMFSocketTreeCutRefreshTargets) == "function"
+  return type(BMFSocketResourceNativeRefreshTargets or BMFSocketTreeCutRefreshTargets) == "function"
 end
 
 local function tree_cut_tag_lookup_available()
-  return type(BMFSocketTreeCutFindTag) == "function"
+  return type(BMFSocketResourceNativeFindTag or BMFSocketTreeCutFindTag) == "function"
 end
 
 local function tree_cut_physical_available()
@@ -9580,9 +9635,59 @@ local function brick_runtime_parse_tag_arg(options)
   return trim_string(options.tag or options.consoleTag or options.consoletag or positional[2] or "")
 end
 
+local function brick_runtime_parse_lookup_purpose_arg(options)
+  options = type(options) == "table" and options or {}
+  return trim_string(
+    options.purpose or
+    options.lookupPurpose or
+    options.lookuppurpose or
+    options.lookup_purpose or
+    options.resourcePurpose or
+    options.resourcepurpose or
+    options.role or
+    options.kind or
+    ""
+  )
+end
+
+local function brick_runtime_lookup_segment_valid(value, allow_colon)
+  if type(value) ~= "string" then return false end
+  if value == "" or #value > 128 then return false end
+  if allow_colon then
+    return value:match("^[A-Za-z0-9_:%-%.]+$") ~= nil
+  end
+  return value:match("^[A-Za-z0-9_%-%.]+$") ~= nil
+end
+
+local function brick_runtime_lookup_tag_valid(tag)
+  if type(tag) ~= "string" then return false end
+  return tag:match("^lookup:[A-Za-z0-9_%-]+:[A-Za-z0-9_%-%.]+$") ~= nil
+end
+
+local function brick_runtime_normalize_lookup_tag(tag)
+  tag = trim_string(tag or "")
+  if tag == "" then return "" end
+  if brick_runtime_lookup_tag_valid(tag) then
+    return tag:lower()
+  end
+  return tag
+end
+
+local function brick_runtime_format_lookup_tag(id, purpose)
+  id = trim_string(id or "")
+  purpose = trim_string(purpose or "")
+  if not brick_runtime_lookup_segment_valid(id, false) then return "" end
+  if not brick_runtime_lookup_segment_valid(purpose, false) then return "" end
+  return "lookup:" .. id:lower() .. ":" .. purpose:lower()
+end
+
 BMF_brick_runtime_parse_guid_arg = function(options)
   options = type(options) == "table" and options or {}
   local raw = options.guid
+  if raw == nil then raw = options.uuid end
+  if raw == nil then raw = options.UUID end
+  if raw == nil then raw = options.lookupId end
+  if raw == nil then raw = options.lookupid end
   if raw == nil then raw = options.runtimeGuid end
   if raw == nil then raw = options.runtimeguid end
   if raw == nil then raw = options.resourceGuid end
@@ -9592,6 +9697,32 @@ BMF_brick_runtime_parse_guid_arg = function(options)
   if raw == nil then raw = options.resourceId end
   if raw == nil then raw = options.resourceid end
   return trim_string(raw or "")
+end
+
+local function brick_runtime_canonical_guid_arg(options)
+  local guid = BMF_brick_runtime_parse_guid_arg(options)
+  local tag = brick_runtime_normalize_lookup_tag(brick_runtime_parse_tag_arg(options))
+  if guid == "" and tag ~= "" then
+    return tag
+  end
+  local purpose = brick_runtime_parse_lookup_purpose_arg(options)
+  if purpose ~= "" then
+    local lookup = brick_runtime_format_lookup_tag(guid, purpose)
+    if lookup ~= "" then
+      return lookup
+    end
+  end
+  return brick_runtime_normalize_lookup_tag(guid)
+end
+
+local function brick_runtime_canonical_tag_arg(options, guid)
+  local tag = brick_runtime_normalize_lookup_tag(brick_runtime_parse_tag_arg(options))
+  if tag ~= "" then return tag end
+  if brick_runtime_lookup_tag_valid(guid or "") then
+    return tostring(guid):lower()
+  end
+  local purpose = brick_runtime_parse_lookup_purpose_arg(options)
+  return brick_runtime_format_lookup_tag(guid, purpose)
 end
 
 BMF_brick_runtime_guid_valid = function(guid)
@@ -9806,11 +9937,135 @@ local function brick_runtime_parse_context_arg(options)
   return text
 end
 
+local function brick_runtime_parse_resolve_position_arg(options, allow_positional)
+  options = type(options) == "table" and options or {}
+  local positional = allow_positional and type(options._positional) == "table" and options._positional or {}
+  local x = tonumber(options.x or options.worldx or options.worldX or positional[1])
+  local y = tonumber(options.y or options.worldy or options.worldY or positional[2])
+  local z = tonumber(options.z or options.worldz or options.worldZ or positional[3])
+  if not (x and y and z) then
+    return nil, nil, nil
+  end
+  return math.floor(x), math.floor(y), math.floor(z)
+end
+
+local function brick_runtime_lookup_tag_position_on_game_thread(tag, options)
+  tag = brick_runtime_normalize_lookup_tag(tag)
+  local lines = {
+    "lookup_tag=" .. tostring(tag or ""),
+  }
+  if tag == "" then
+    lines[#lines + 1] = "lookup_tag_code=BRICK_RUNTIME_TAG_REQUIRED"
+    return nil, nil, nil, lines
+  end
+  if not tree_cut_tag_lookup_available() then
+    lines[#lines + 1] = "lookup_tag_code=TREE_CUT_TAG_LOOKUP_UNAVAILABLE"
+    return nil, nil, nil, lines
+  end
+
+  local max_scan = option_number(options, "tagmaxscan", option_number(options, "tagMaxScan", 0))
+  max_scan = math.max(0, math.floor(tonumber(max_scan) or 0))
+  local ok, response = pcall(BMFSocketResourceNativeFindTag or BMFSocketTreeCutFindTag, tag, 1, max_scan)
+  local _, fields = tree_cut_native_status_lines(ok and response or tostring(response))
+  lines[#lines + 1] = "lookup_tag_ok=" .. tostring(ok == true and tostring(fields.ok or "") == "true")
+  lines[#lines + 1] = "lookup_tag_code=" .. tostring(fields.code or (ok and "" or "LUA_ERROR"))
+  lines[#lines + 1] = "lookup_tag_matches=" .. tostring(fields.matches or "")
+  if not ok or tostring(fields.ok or "") ~= "true" or tostring(fields.code or "") ~= "OK" then
+    return nil, nil, nil, lines
+  end
+
+  local x = tonumber(fields.best_x or fields.x)
+  local y = tonumber(fields.best_y or fields.y)
+  local z = tonumber(fields.best_z or fields.z)
+  if not (x and y and z) then
+    lines[#lines + 1] = "lookup_tag_position=false"
+    return nil, nil, nil, lines
+  end
+  lines[#lines + 1] = "lookup_tag_position=true"
+  lines[#lines + 1] = "lookup_tag_source=" .. tostring(fields.best_source or fields.console_tag_source or "")
+  lines[#lines + 1] = "lookup_tag_target=" .. tostring(fields.best_target_name or fields.best_name or "")
+  return math.floor(x), math.floor(y), math.floor(z), lines
+end
+
+local function brick_runtime_resolve_id_on_game_thread(options, guid, tag)
+  options = type(options) == "table" and options or {}
+  local lines = {
+    "source=BMF",
+    "operation=resolve-guid",
+    "guid=" .. tostring(guid or ""),
+    "tag=" .. tostring(tag or ""),
+  }
+
+  local x, y, z = brick_runtime_parse_resolve_position_arg(options, false)
+  if not x then
+    local tag_x, tag_y, tag_z, tag_lines = brick_runtime_lookup_tag_position_on_game_thread(tag, options)
+    for _, line in ipairs(tag_lines or {}) do
+      lines[#lines + 1] = tostring(line)
+    end
+    x, y, z = tag_x, tag_y, tag_z
+  end
+
+  if not (x and y and z) then
+    lines[#lines + 1] = "ok=false"
+    lines[#lines + 1] = "code=BRICK_RUNTIME_GUID_LOOKUP_MISS"
+    lines[#lines + 1] = "detail=no bound runtime ids and no cached tag/position candidate was available"
+    return nil, lines
+  end
+  if type(BMFSocketBrickPhysicalResolveNear) ~= "function" then
+    lines[#lines + 1] = "ok=false"
+    lines[#lines + 1] = "code=BRICK_RUNTIME_RESOLVE_UNAVAILABLE"
+    lines[#lines + 1] = "detail=BMFSocket brick runtime resolve helper is unavailable"
+    return nil, lines
+  end
+  if not BMF_env_bool("BMF_BRICK_RUNTIME_RESOLVE_ENABLED", false) then
+    lines[#lines + 1] = "ok=false"
+    lines[#lines + 1] = "code=BRICK_RUNTIME_RESOLVE_DISABLED"
+    lines[#lines + 1] = "detail=runtime brick resolve is disabled"
+    return nil, lines
+  end
+
+  local radius = option_number(options, "radius", 512)
+  local max_scan = option_number(options, "maxscan", option_number(options, "max", 120000))
+  local hint = option_number(options, "hint", option_number(options, "hintslot", option_number(options, "slot", 0)))
+  local hint_window = option_number(options, "hintwindow", option_number(options, "window", 256))
+  local hint_only = option_boolean(options, "hintonly", option_boolean(options, "hint_only", false))
+  local prefer_visible = option_boolean(options, "prefervisible", option_boolean(options, "prefer_visible", false))
+  local prefer_collidable = option_boolean(options, "prefercollidable", option_boolean(options, "prefer_collidable", false))
+  radius = math.max(1, math.floor(tonumber(radius) or 512))
+  max_scan = math.max(1, math.floor(tonumber(max_scan) or 120000))
+  hint = math.max(0, math.floor(tonumber(hint) or 0))
+  hint_window = math.max(0, math.floor(tonumber(hint_window) or 256))
+
+  local ok, response = pcall(BMFSocketBrickPhysicalResolveNear, x, y, z, radius, max_scan, hint, hint_window, hint_only, prefer_visible, prefer_collidable)
+  local _, fields = tree_cut_native_status_lines(ok and response or tostring(response))
+  local resolved = tonumber(fields.best_brick_id or fields.brick_id) or 0
+  local native_ok = ok == true and tostring(fields.ok or "") == "true" and resolved > 0
+  lines[#lines + 1] = "resolve_ok=" .. tostring(native_ok)
+  lines[#lines + 1] = "resolve_code=" .. tostring(fields.code or (ok and "" or "LUA_ERROR"))
+  lines[#lines + 1] = "x=" .. tostring(x)
+  lines[#lines + 1] = "y=" .. tostring(y)
+  lines[#lines + 1] = "z=" .. tostring(z)
+  lines[#lines + 1] = "radius=" .. tostring(radius)
+  lines[#lines + 1] = "max_scan=" .. tostring(max_scan)
+  lines[#lines + 1] = "best_brick_id=" .. tostring(resolved > 0 and resolved or "")
+  if not native_ok then
+    lines[#lines + 1] = "ok=false"
+    lines[#lines + 1] = "code=" .. tostring(fields.code or (ok and "BRICK_RUNTIME_RESOLVE_FAILED" or "LUA_ERROR"))
+    return nil, lines
+  end
+
+  lines[#lines + 1] = "ok=true"
+  lines[#lines + 1] = "code=OK"
+  lines[#lines + 1] = "brick_id=" .. tostring(resolved)
+  BMF_brick_runtime_bind_guid(guid, resolved)
+  return resolved, lines
+end
+
 function BMF.bricks.resolveRuntimeState(options)
   options = type(options) == "table" and options or {}
   local runtime = state.tools.brick_runtime
-  local tag = brick_runtime_parse_tag_arg(options)
-  local guid = BMF_brick_runtime_parse_guid_arg(options)
+  local guid = brick_runtime_canonical_guid_arg(options)
+  local tag = brick_runtime_canonical_tag_arg(options, guid)
   local positional = type(options._positional) == "table" and options._positional or {}
   local x = tonumber(options.x or options.worldx or positional[1])
   local y = tonumber(options.y or options.worldy or positional[2])
@@ -9873,6 +10128,8 @@ function BMF.bricks.resolveRuntimeState(options)
   local hint = option_number(options, "hint", option_number(options, "hintslot", option_number(options, "slot", 0)))
   local hint_window = option_number(options, "hintwindow", option_number(options, "window", 256))
   local hint_only = option_boolean(options, "hintonly", option_boolean(options, "hint_only", false))
+  local prefer_visible = option_boolean(options, "prefervisible", option_boolean(options, "prefer_visible", false))
+  local prefer_collidable = option_boolean(options, "prefercollidable", option_boolean(options, "prefer_collidable", false))
   x = math.floor(x)
   y = math.floor(y)
   z = math.floor(z)
@@ -9883,7 +10140,7 @@ function BMF.bricks.resolveRuntimeState(options)
 
   local sequence = brick_runtime_next_sequence()
   run_on_game_thread(function()
-    local ok, response = pcall(BMFSocketBrickPhysicalResolveNear, x, y, z, radius, max_scan, hint, hint_window, hint_only)
+    local ok, response = pcall(BMFSocketBrickPhysicalResolveNear, x, y, z, radius, max_scan, hint, hint_window, hint_only, prefer_visible, prefer_collidable)
     brick_runtime_store_result(sequence, "resolve", 0, tag, guid, ok, ok and response or tostring(response))
   end)
 
@@ -9908,6 +10165,8 @@ function BMF.bricks.resolveRuntimeState(options)
       "hint_slot=" .. tostring(hint),
       "hint_window=" .. tostring(hint_window),
       "hint_only=" .. tostring(hint_only == true),
+      "prefer_visible=" .. tostring(prefer_visible == true),
+      "prefer_collidable=" .. tostring(prefer_collidable == true),
     },
   })
 end
@@ -9916,8 +10175,8 @@ function BMF.bricks.inspectRuntimeState(options)
   options = type(options) == "table" and options or {}
   local runtime = state.tools.brick_runtime
   local brick_id = tree_cut_parse_brick_id(options)
-  local tag = brick_runtime_parse_tag_arg(options)
-  local guid = BMF_brick_runtime_parse_guid_arg(options)
+  local guid = brick_runtime_canonical_guid_arg(options)
+  local tag = brick_runtime_canonical_tag_arg(options, guid)
   if guid ~= "" and not BMF_brick_runtime_guid_valid(guid) then
     return result(false, "BRICK_RUNTIME_GUID_INVALID", "guid must be an opaque identifier without spaces", {
       lines = {
@@ -9981,8 +10240,8 @@ function BMF.bricks.setRuntimeState(options)
   options = type(options) == "table" and options or {}
   local runtime = state.tools.brick_runtime
   local brick_id = tree_cut_parse_brick_id(options)
-  local tag = brick_runtime_parse_tag_arg(options)
-  local guid = BMF_brick_runtime_parse_guid_arg(options)
+  local guid = brick_runtime_canonical_guid_arg(options)
+  local tag = brick_runtime_canonical_tag_arg(options, guid)
   if guid ~= "" and not BMF_brick_runtime_guid_valid(guid) then
     return result(false, "BRICK_RUNTIME_GUID_INVALID", "guid must be an opaque identifier without spaces", {
       lines = {
@@ -9995,14 +10254,16 @@ function BMF.bricks.setRuntimeState(options)
     })
   end
   if brick_id <= 0 then
-    local code = tag ~= "" and "BRICK_RUNTIME_TAG_ID_REQUIRED" or "BRICK_RUNTIME_ID_REQUIRED"
-    local detail = tag ~= ""
-      and "tag was provided, but this runtime setter still requires a verified brickid candidate"
-      or "brickid is required for runtime brick-state set"
-    return result(false, code, detail, {
+    if guid ~= "" or tag ~= "" then
+      local forwarded = copy_table(options)
+      if guid ~= "" then forwarded.guid = guid end
+      if tag ~= "" then forwarded.tag = tag end
+      return BMF.bricks.setRuntimeStateByGuid(forwarded)
+    end
+    return result(false, "BRICK_RUNTIME_ID_OR_GUID_REQUIRED", "brickid, guid, uuid+purpose, or tag is required for runtime brick-state set", {
       lines = {
         "ok=false",
-        "code=" .. code,
+        "code=BRICK_RUNTIME_ID_OR_GUID_REQUIRED",
         "brick_id=" .. tostring(brick_id),
         "tag=" .. tag,
         "guid=" .. guid,
@@ -10106,25 +10367,65 @@ end
 
 function BMF.bricks.bindRuntimeGuid(options)
   options = type(options) == "table" and options or {}
-  local guid = BMF_brick_runtime_parse_guid_arg(options)
+  local runtime = state.tools.brick_runtime
+  local guid = brick_runtime_canonical_guid_arg(options)
+  local tag = brick_runtime_canonical_tag_arg(options, guid)
   if not BMF_brick_runtime_guid_valid(guid) then
     return result(false, "BRICK_RUNTIME_GUID_INVALID", "guid is required and must be an opaque identifier without spaces", {
       lines = {
         "ok=false",
         "code=BRICK_RUNTIME_GUID_INVALID",
         "guid=" .. guid,
+        "tag=" .. tag,
       },
     })
   end
 
   local ids = BMF_brick_runtime_parse_brick_ids(options)
   if #ids == 0 then
-    return result(false, "BRICK_RUNTIME_ID_REQUIRED", "brickid or brickids is required for runtime GUID binding", {
+    if not brick_runtime_available() then
+      runtime.last_error = "BMFSocket brick runtime helpers are unavailable"
+      return result(false, "BRICK_RUNTIME_UNAVAILABLE", runtime.last_error, {
+        guid = guid,
+        lines = {
+          "ok=false",
+          "code=BRICK_RUNTIME_UNAVAILABLE",
+          "guid=" .. guid,
+          "tag=" .. tag,
+        },
+      })
+    end
+
+    local sequence = brick_runtime_next_sequence()
+    run_on_game_thread(function()
+      local resolved, lines = brick_runtime_resolve_id_on_game_thread(options, guid, tag)
+      if resolved and resolved > 0 then
+        lines[#lines + 1] = "operation=bind-guid"
+        lines[#lines + 1] = "bound_requested=1"
+        lines[#lines + 1] = "bound_added=1"
+        lines[#lines + 1] = "bind_failed=0"
+      else
+        lines[#lines + 1] = "operation=bind-guid"
+        lines[#lines + 1] = "bound_requested=1"
+        lines[#lines + 1] = "bound_added=0"
+        lines[#lines + 1] = "bind_failed=1"
+      end
+      brick_runtime_store_result(sequence, "bind-guid", resolved or 0, tag, guid, true, table.concat(lines, "\n"))
+    end)
+
+    return result(true, "OK", "Runtime brick GUID lookup/bind queued on the game thread", {
+      queued = true,
+      sequence = sequence,
       guid = guid,
+      tag = tag,
       lines = {
-        "ok=false",
-        "code=BRICK_RUNTIME_ID_REQUIRED",
+        "ok=true",
+        "code=OK",
+        "queued=true",
+        "operation=bind-guid",
+        "sequence=" .. tostring(sequence),
         "guid=" .. guid,
+        "tag=" .. tag,
       },
     })
   end
@@ -10156,7 +10457,7 @@ end
 
 function BMF.bricks.runtimeGuidStatus(options)
   options = type(options) == "table" and options or {}
-  local guid = BMF_brick_runtime_parse_guid_arg(options)
+  local guid = brick_runtime_canonical_guid_arg(options)
   local runtime = state.tools.brick_runtime
   runtime.guid_bindings = runtime.guid_bindings or {}
   runtime.guid_binding_order = runtime.guid_binding_order or {}
@@ -10208,7 +10509,7 @@ end
 function BMF.bricks.setRuntimeStateByGuid(options)
   options = type(options) == "table" and options or {}
   local runtime = state.tools.brick_runtime
-  local guid = BMF_brick_runtime_parse_guid_arg(options)
+  local guid = brick_runtime_canonical_guid_arg(options)
   if not BMF_brick_runtime_guid_valid(guid) then
     return result(false, "BRICK_RUNTIME_GUID_INVALID", "guid is required and must be an opaque identifier without spaces", {
       lines = {
@@ -10243,19 +10544,6 @@ function BMF.bricks.setRuntimeStateByGuid(options)
     })
   end
 
-  local binding = BMF_brick_runtime_guid_binding(guid, false)
-  if not binding or #binding.ids == 0 then
-    return result(false, "BRICK_RUNTIME_GUID_NOT_BOUND", "No runtime bricks are bound for this GUID.", {
-      guid = guid,
-      lines = {
-        "ok=false",
-        "code=BRICK_RUNTIME_GUID_NOT_BOUND",
-        "guid=" .. guid,
-        "bound_bricks=0",
-      },
-    })
-  end
-
   local visible = brick_runtime_parse_visible_arg(options, -1)
   local collision = brick_runtime_parse_collision_arg(options, -2)
   local context = brick_runtime_parse_context_arg(options)
@@ -10283,6 +10571,80 @@ function BMF.bricks.setRuntimeStateByGuid(options)
     })
   end
 
+  local tag = brick_runtime_canonical_tag_arg(options, guid)
+  local binding = BMF_brick_runtime_guid_binding(guid, false)
+  if not binding or #binding.ids == 0 then
+    local sequence = brick_runtime_next_sequence()
+    run_on_game_thread(function()
+      local resolved, resolve_lines = brick_runtime_resolve_id_on_game_thread(options, guid, tag)
+      if not resolved or resolved <= 0 then
+        brick_runtime_store_result(sequence, "set-guid", 0, tag, guid, true, table.concat(resolve_lines, "\n"))
+        return
+      end
+
+      local lines = {
+        "Brick runtime GUID state",
+        "source=BMF",
+        "operation=set-guid",
+        "guid=" .. guid,
+        "tag=" .. tag,
+        "requested_visible_arg=" .. tostring(visible),
+        "requested_collision_channels=" .. tostring(collision),
+        "requested_grid_context_override=" .. tostring(context),
+        "bound_bricks=1",
+      }
+      for index, line in ipairs(resolve_lines or {}) do
+        lines[#lines + 1] = "lookup." .. tostring(index) .. "=" .. tostring(line)
+      end
+
+      local ok, response = pcall(BMFSocketBrickPhysicalSet, resolved, visible, collision, context)
+      local item_lines, fields = tree_cut_native_status_lines(ok and response or tostring(response))
+      local item_ok = ok == true and tostring(fields.ok or "") == "true"
+      local code = tostring(fields.code or (ok and "" or "LUA_ERROR"))
+      lines[#lines + 1] = "item.1.brick_id=" .. tostring(resolved)
+      lines[#lines + 1] = "item.1.ok=" .. tostring(item_ok == true)
+      lines[#lines + 1] = "item.1.code=" .. code
+      lines[#lines + 1] = "item.1.visibility_set_method=" .. tostring(fields.visibility_set_method or "")
+      lines[#lines + 1] = "item.1.collision_set_method=" .. tostring(fields.collision_set_method or "")
+      lines[#lines + 1] = "item.1.after_visible=" .. tostring(fields.after_visible or "")
+      lines[#lines + 1] = "item.1.after_collision_channels=" .. tostring(fields.after_collision_channels or "")
+      if not item_ok and #item_lines > 0 then
+        lines[#lines + 1] = "item.1.detail=" .. tostring(fields.detail or code)
+      end
+      lines[#lines + 1] = "ok=" .. tostring(item_ok == true)
+      lines[#lines + 1] = "code=" .. (item_ok and "OK" or code ~= "" and code or "BRICK_RUNTIME_GUID_SET_FAILED")
+      lines[#lines + 1] = "attempted=1"
+      lines[#lines + 1] = "succeeded=" .. tostring(item_ok and 1 or 0)
+      lines[#lines + 1] = "failed=" .. tostring(item_ok and 0 or 1)
+      lines[#lines + 1] = "pending=" .. tostring(code == "BRICK_GRID_CONTEXT_SCAN_PENDING" and 1 or 0)
+      brick_runtime_store_result(sequence, "set-guid", resolved, tag, guid, true, table.concat(lines, "\n"))
+    end)
+
+    return result(true, "OK", "Runtime brick-state GUID lookup/set queued on the game thread", {
+      queued = true,
+      sequence = sequence,
+      guid = guid,
+      tag = tag,
+      visible = visible,
+      collision = collision,
+      context = context,
+      lines = {
+        "ok=true",
+        "code=OK",
+        "queued=true",
+        "operation=set-guid",
+        "sequence=" .. tostring(sequence),
+        "guid=" .. guid,
+        "tag=" .. tag,
+        "bound_bricks=0",
+        "lookup_queued=true",
+        "visible_arg=" .. tostring(visible),
+        "collision_channels=" .. tostring(collision),
+        "grid_context_override=" .. tostring(context),
+      },
+    })
+  end
+
   local ids = {}
   for _, brick_id in ipairs(binding.ids) do
     ids[#ids + 1] = brick_id
@@ -10294,6 +10656,7 @@ function BMF.bricks.setRuntimeStateByGuid(options)
       "source=BMF",
       "operation=set-guid",
       "guid=" .. guid,
+      "tag=" .. tag,
       "requested_visible_arg=" .. tostring(visible),
       "requested_collision_channels=" .. tostring(collision),
       "requested_grid_context_override=" .. tostring(context),
@@ -10335,7 +10698,7 @@ function BMF.bricks.setRuntimeStateByGuid(options)
     lines[#lines + 1] = "succeeded=" .. tostring(succeeded)
     lines[#lines + 1] = "failed=" .. tostring(failed)
     lines[#lines + 1] = "pending=" .. tostring(pending)
-    brick_runtime_store_result(sequence, "set-guid", 0, "", guid, true, table.concat(lines, "\n"))
+    brick_runtime_store_result(sequence, "set-guid", 0, tag, guid, true, table.concat(lines, "\n"))
   end)
 
   return result(true, "OK", "Runtime brick-state set by GUID queued on the game thread", {
@@ -10352,6 +10715,7 @@ function BMF.bricks.setRuntimeStateByGuid(options)
       "operation=set-guid",
       "sequence=" .. tostring(sequence),
       "guid=" .. guid,
+      "tag=" .. tag,
       "bound_bricks=" .. tostring(#ids),
       "visible_arg=" .. tostring(visible),
       "collision_channels=" .. tostring(collision),
@@ -10393,7 +10757,7 @@ function BMF.tools.treeCutNative.start(options)
   local native = state.tools.tree_cut_native
   native.available = tree_cut_native_available()
   if not native.available then
-    native.last_error = "BMFSocket tree-cut native helpers are unavailable"
+    native.last_error = "BMFSocket resource native helpers are unavailable"
     return result(false, "TREE_CUT_NATIVE_UNAVAILABLE", native.last_error, {
       lines = {
         "available=false",
@@ -10404,9 +10768,9 @@ function BMF.tools.treeCutNative.start(options)
     })
   end
 
-  local ok, started_or_error, status = pcall(BMFSocketTreeCutStart)
+  local ok, started_or_error, status = pcall(BMFSocketResourceNativeStart or BMFSocketTreeCutStart)
   if not ok or started_or_error == false then
-    native.last_error = tostring(status or started_or_error or "BMFSocketTreeCutStart failed")
+    native.last_error = tostring(status or started_or_error or "BMFSocketResourceNativeStart failed")
     return result(false, "TREE_CUT_NATIVE_START_FAILED", native.last_error, {
       lines = {
         "available=true",
@@ -10419,30 +10783,30 @@ function BMF.tools.treeCutNative.start(options)
 
   native.last_started_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
   local lines, fields = tree_cut_native_update_status(status or "")
-  local auto_refresh = options.refreshTargets ~= false and BMF_env_bool("BMF_TREECUT_TARGET_AUTO_REFRESH", false)
+  local auto_refresh = options.refreshTargets ~= false and BMF_env_bool("BMF_RESOURCE_TARGET_AUTO_REFRESH", BMF_env_bool("BMF_TREECUT_TARGET_AUTO_REFRESH", false))
   if auto_refresh and tree_cut_target_resolver_available() then
-    local delay_ms = BMF_env_number("BMF_TREECUT_TARGET_REFRESH_DELAY_MS", 3000, 0)
+    local delay_ms = BMF_env_number("BMF_RESOURCE_TARGET_REFRESH_DELAY_MS", BMF_env_number("BMF_TREECUT_TARGET_REFRESH_DELAY_MS", 3000, 0), 0)
     local scheduled = BMF_schedule_delayed_callback("tree_cut_target_refresh", delay_ms, function()
       run_on_game_thread(function()
-        local refresh_ok, refresh_result = pcall(BMF.tools.treeCutNative.refreshTargets, {
+        local refresh_ok, refresh_result = pcall(BMF.tools.resourceNative.refreshTargets, {
           reason = tostring(options.reason or "start") .. "-auto",
         })
         if not refresh_ok or not refresh_result or refresh_result.ok ~= true then
           local detail = refresh_ok and tostring(refresh_result and refresh_result.message or "unknown") or tostring(refresh_result)
-          log("warn", "tree-cut target auto-refresh failed: " .. detail)
+          log("warn", "resource target auto-refresh failed: " .. detail)
         else
-          log("info", "tree-cut target cache auto-refreshed")
+          log("info", "resource target cache auto-refreshed")
         end
       end)
       return true
     end)
     if not scheduled then
-      log("warn", "tree-cut target auto-refresh was not scheduled")
+      log("warn", "resource target auto-refresh was not scheduled")
     end
   end
-  log("info", "tree-cut native capture started reason=" .. tostring(options.reason or "manual"))
+  log("info", "resource native capture started reason=" .. tostring(options.reason or "manual"))
   write_status()
-  return result(true, "OK", "Tree-cut native capture started", {
+  return result(true, "OK", "Resource native capture started", {
     fields = fields,
     lines = lines,
   })
@@ -10454,7 +10818,7 @@ function BMF.tools.treeCutNative.stop(options)
   if not tree_cut_native_available() then
     native.available = false
     native.enabled = false
-    native.last_error = "BMFSocket tree-cut native helpers are unavailable"
+    native.last_error = "BMFSocket resource native helpers are unavailable"
     return result(false, "TREE_CUT_NATIVE_UNAVAILABLE", native.last_error, {
       lines = {
         "available=false",
@@ -10464,9 +10828,9 @@ function BMF.tools.treeCutNative.stop(options)
     })
   end
 
-  local ok, stopped_or_error, status = pcall(BMFSocketTreeCutStop)
+  local ok, stopped_or_error, status = pcall(BMFSocketResourceNativeStop or BMFSocketTreeCutStop)
   if not ok or stopped_or_error == false then
-    native.last_error = tostring(status or stopped_or_error or "BMFSocketTreeCutStop failed")
+    native.last_error = tostring(status or stopped_or_error or "BMFSocketResourceNativeStop failed")
     return result(false, "TREE_CUT_NATIVE_STOP_FAILED", native.last_error, {
       lines = {
         "available=true",
@@ -10476,9 +10840,9 @@ function BMF.tools.treeCutNative.stop(options)
   end
 
   local lines, fields = tree_cut_native_update_status(status or "")
-  log("info", "tree-cut native capture stopped reason=" .. tostring(options.reason or "manual"))
+  log("info", "resource native capture stopped reason=" .. tostring(options.reason or "manual"))
   write_status()
-  return result(true, "OK", "Tree-cut native capture stopped", {
+  return result(true, "OK", "Resource native capture stopped", {
     fields = fields,
     lines = lines,
   })
@@ -10488,7 +10852,7 @@ function BMF.tools.treeCutNative.status()
   local native = state.tools.tree_cut_native
   native.available = tree_cut_native_available()
   if not native.available then
-    return result(false, "TREE_CUT_NATIVE_UNAVAILABLE", "BMFSocket tree-cut native helpers are unavailable", {
+    return result(false, "TREE_CUT_NATIVE_UNAVAILABLE", "BMFSocket resource native helpers are unavailable", {
       lines = {
         "available=false",
         "enabled=false",
@@ -10497,9 +10861,9 @@ function BMF.tools.treeCutNative.status()
     })
   end
 
-  local ok, status_or_error = pcall(BMFSocketTreeCutStatus)
+  local ok, status_or_error = pcall(BMFSocketResourceNativeStatus or BMFSocketTreeCutStatus)
   if not ok then
-    native.last_error = tostring(status_or_error or "BMFSocketTreeCutStatus failed")
+    native.last_error = tostring(status_or_error or "BMFSocketResourceNativeStatus failed")
     return result(false, "TREE_CUT_NATIVE_STATUS_FAILED", native.last_error, {
       lines = {
         "available=true",
@@ -10509,7 +10873,7 @@ function BMF.tools.treeCutNative.status()
   end
 
   local lines, fields = tree_cut_native_update_status(status_or_error or "")
-  return result(true, "OK", "Tree-cut native status collected", {
+  return result(true, "OK", "Resource native status collected", {
     fields = fields,
     lines = lines,
   })
@@ -10520,7 +10884,7 @@ function BMF.tools.treeCutNative.refreshTargets(options)
   local native = state.tools.tree_cut_native
   native.available = tree_cut_native_available()
   if not native.available or not tree_cut_target_resolver_available() then
-    native.last_error = "BMFSocket tree-cut target resolver helpers are unavailable"
+    native.last_error = "BMFSocket resource target resolver helpers are unavailable"
     return result(false, "TREE_CUT_TARGET_RESOLVER_UNAVAILABLE", native.last_error, {
       lines = {
         "available=" .. tostring(native.available == true),
@@ -10530,12 +10894,12 @@ function BMF.tools.treeCutNative.refreshTargets(options)
     })
   end
 
-  local ok, refreshed_or_error, status = pcall(BMFSocketTreeCutRefreshTargets)
+  local ok, refreshed_or_error, status = pcall(BMFSocketResourceNativeRefreshTargets or BMFSocketTreeCutRefreshTargets)
   if not ok or refreshed_or_error == false then
     local lines, fields = tree_cut_native_update_status(status or "")
-    native.last_error = fields.last_error or tostring(status or refreshed_or_error or "BMFSocketTreeCutRefreshTargets failed")
+    native.last_error = fields.last_error or tostring(status or refreshed_or_error or "BMFSocketResourceNativeRefreshTargets failed")
     if native.last_error == "" then
-      native.last_error = "BMFSocketTreeCutRefreshTargets failed"
+      native.last_error = "BMFSocket resource target refresh failed"
     end
     return result(false, "TREE_CUT_TARGET_REFRESH_FAILED", native.last_error, {
       fields = fields,
@@ -10550,7 +10914,7 @@ function BMF.tools.treeCutNative.refreshTargets(options)
   native.last_target_refresh_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
   local lines, fields = tree_cut_native_update_status(status or "")
   write_status()
-  return result(true, "OK", "Tree-cut target cache refreshed", {
+  return result(true, "OK", "Resource target cache refreshed", {
     fields = fields,
     lines = lines,
   })
@@ -10559,9 +10923,9 @@ end
 function BMF.tools.treeCutNative.findTag(options)
   options = type(options) == "table" and options or {}
   local positional = type(options._positional) == "table" and options._positional or {}
-  local tag = trim_string(options.tag or options.treeId or options.treeid or positional[1] or "")
+  local tag = trim_string(options.tag or options.lookup or options.resourceId or options.resourceid or options.treeId or options.treeid or options.mineId or options.mineid or positional[1] or "")
   if tag == "" then
-    return result(false, "TREE_CUT_FIND_TAG_REQUIRED", "treeid ConsoleTag is required", {
+    return result(false, "TREE_CUT_FIND_TAG_REQUIRED", "lookup ConsoleTag is required", {
       lines = {
         "available=" .. tostring(tree_cut_tag_lookup_available()),
         "code=TREE_CUT_FIND_TAG_REQUIRED",
@@ -10573,7 +10937,7 @@ function BMF.tools.treeCutNative.findTag(options)
   local native = state.tools.tree_cut_native
   native.available = tree_cut_native_available()
   if not tree_cut_tag_lookup_available() then
-    native.last_error = "BMFSocket tree-cut tag lookup helper is unavailable"
+    native.last_error = "BMFSocket resource tag lookup helper is unavailable"
     return result(false, "TREE_CUT_TAG_LOOKUP_UNAVAILABLE", native.last_error, {
       tag = tag,
       lines = {
@@ -10596,9 +10960,9 @@ function BMF.tools.treeCutNative.findTag(options)
     max_scan = 250000
   end
 
-  local ok, response = pcall(BMFSocketTreeCutFindTag, tag, limit, max_scan)
+  local ok, response = pcall(BMFSocketResourceNativeFindTag or BMFSocketTreeCutFindTag, tag, limit, max_scan)
   if not ok then
-    native.last_error = tostring(response or "BMFSocketTreeCutFindTag failed")
+    native.last_error = tostring(response or "BMFSocketResourceNativeFindTag failed")
     return result(false, "TREE_CUT_TAG_LOOKUP_FAILED", native.last_error, {
       tag = tag,
       lines = {
@@ -10612,7 +10976,7 @@ function BMF.tools.treeCutNative.findTag(options)
 
   local lines, fields = tree_cut_native_status_lines(response or "")
   local matches = tonumber(fields.matches or 0) or 0
-  return result(true, "OK", "Tree-cut ConsoleTag lookup completed", {
+  return result(true, "OK", "Resource ConsoleTag lookup completed", {
     tag = tag,
     matches = matches,
     fields = fields,
@@ -10640,7 +11004,7 @@ function BMF.tools.treeCutNative.resolveHandaxe(options)
   local native = state.tools.tree_cut_native
   native.available = tree_cut_native_available()
   if not native.available or not tree_cut_handaxe_resolver_available() then
-    native.last_error = "BMFSocket tree-cut handaxe resolver helpers are unavailable"
+    native.last_error = "BMFSocket resource tool resolver helpers are unavailable"
     return result(false, "TREE_CUT_HANDAXE_RESOLVER_UNAVAILABLE", native.last_error, {
       lines = {
         "available=" .. tostring(native.available == true),
@@ -10702,7 +11066,7 @@ function BMF.tools.treeCutNative.resolveHandaxe(options)
               native.last_error = ""
               native.last_handaxe_resolved_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
               write_status()
-              return result(true, "OK", "Tree-cut handaxe class resolved", {
+              return result(true, "OK", "Resource tool class resolved", {
                 fields = fields,
                 loaded = loaded,
                 loadErrors = load_errors,
@@ -10751,7 +11115,7 @@ function BMF.tools.treeCutNative.resolveHandaxe(options)
                   native.last_error = ""
                   native.last_handaxe_resolved_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
                   write_status()
-                  return result(true, "OK", "Tree-cut handaxe class resolved", {
+                  return result(true, "OK", "Resource tool class resolved", {
                     fields = fields,
                     loaded = loaded,
                     loadErrors = load_errors,
@@ -10776,9 +11140,9 @@ function BMF.tools.treeCutNative.resolveHandaxe(options)
     detail_lines[#detail_lines + 1] = "find_objects_error=FindObjects or EObjectFlags unavailable"
   end
 
-  local resolve_ok, resolved_or_error, status = pcall(BMFSocketTreeCutResolveHandaxe)
+  local resolve_ok, resolved_or_error, status = pcall(BMFSocketResourceNativeResolveTools or BMFSocketTreeCutResolveHandaxe)
   if not resolve_ok then
-    native.last_error = tostring(resolved_or_error or "BMFSocketTreeCutResolveHandaxe failed")
+    native.last_error = tostring(resolved_or_error or "BMFSocketResourceNativeResolveTools failed")
     detail_lines[#detail_lines + 1] = "native_resolve_error=" .. native.last_error
     return result(false, "TREE_CUT_HANDAXE_RESOLVE_FAILED", native.last_error, {
       loaded = loaded,
@@ -10800,7 +11164,7 @@ function BMF.tools.treeCutNative.resolveHandaxe(options)
   end
   write_status()
 
-  return result(resolved_or_error == true, resolved_or_error == true and "OK" or "TREE_CUT_HANDAXE_UNRESOLVED", "Tree-cut handaxe class resolve attempted", {
+  return result(resolved_or_error == true, resolved_or_error == true and "OK" or "TREE_CUT_HANDAXE_UNRESOLVED", "Resource tool class resolve attempted", {
     fields = fields,
     loaded = loaded,
     loadErrors = load_errors,
@@ -10826,13 +11190,13 @@ function BMF_tree_cut_native_drain_raw(limit)
   local native = state.tools.tree_cut_native
   native.available = tree_cut_native_available()
   if not native.available then
-    native.last_error = "BMFSocket tree-cut native helpers are unavailable"
+    native.last_error = "BMFSocket resource native helpers are unavailable"
     return false, "TREE_CUT_NATIVE_UNAVAILABLE", native.last_error, {}
   end
 
-  local ok, events_or_error = pcall(BMFSocketTreeCutDrain, BMF_tree_cut_native_normalize_drain_limit(limit))
+  local ok, events_or_error = pcall(BMFSocketResourceNativeDrain or BMFSocketTreeCutDrain, BMF_tree_cut_native_normalize_drain_limit(limit))
   if not ok or type(events_or_error) ~= "table" then
-    native.last_error = tostring(events_or_error or "BMFSocketTreeCutDrain failed")
+    native.last_error = tostring(events_or_error or "BMFSocketResourceNativeDrain failed")
     return false, "TREE_CUT_NATIVE_DRAIN_FAILED", native.last_error, {}
   end
 
@@ -10843,7 +11207,7 @@ function BMF_tree_cut_native_drain_raw(limit)
     end
   end
 
-  return true, "OK", "Tree-cut native queue drained", raw_events
+  return true, "OK", "Resource native queue drained", raw_events
 end
 
 function BMF_tree_cut_native_emit_raw(raw_events, options)
@@ -10860,14 +11224,14 @@ function BMF_tree_cut_native_emit_raw(raw_events, options)
       if type(decoded) == "table" then
         decoded._bmf = decoded._bmf or {}
         decoded._bmf.emittedAt = os.date("!%Y-%m-%dT%H:%M:%SZ")
-        decoded._bmf.source = "BMFSocketTreeCutNative"
+        decoded._bmf.source = "BMFSocketResourceNative"
         local event_name = tostring(decoded.event or "cityrpg.treecut.hit")
         BMF.events.emit(event_name, decoded)
         emitted = emitted + 1
         native.last_event = copy_table(decoded)
       else
         decode_errors = decode_errors + 1
-        native.last_error = tostring(err or "native tree-cut event decode failed")
+        native.last_error = tostring(err or "native resource event decode failed")
       end
     end
   end
@@ -10876,9 +11240,9 @@ function BMF_tree_cut_native_emit_raw(raw_events, options)
   native.emitted_events = (tonumber(native.emitted_events) or 0) + emitted
   native.decode_errors = (tonumber(native.decode_errors) or 0) + decode_errors
   if drained > 0 and options.silent ~= true then
-    log("info", "tree-cut native drained events=" .. tostring(drained) .. " emitted=" .. tostring(emitted))
+    log("info", "resource native drained events=" .. tostring(drained) .. " emitted=" .. tostring(emitted))
   end
-  return result(decode_errors == 0, decode_errors == 0 and "OK" or "TREE_CUT_NATIVE_DECODE_ERRORS", "Tree-cut native queue drained", {
+  return result(decode_errors == 0, decode_errors == 0 and "OK" or "TREE_CUT_NATIVE_DECODE_ERRORS", "Resource native queue drained", {
     drained = drained,
     emitted = emitted,
     decodeErrors = decode_errors,
@@ -10911,6 +11275,46 @@ function BMF.tools.treeCutNative.drain(options)
   end
 
   return BMF_tree_cut_native_emit_raw(raw_events, options)
+end
+
+BMF.tools.resourceNative.start = function(options)
+  return BMF.tools.treeCutNative.start(options)
+end
+
+BMF.tools.resourceNative.stop = function(options)
+  return BMF.tools.treeCutNative.stop(options)
+end
+
+BMF.tools.resourceNative.status = function(options)
+  return BMF.tools.treeCutNative.status(options)
+end
+
+BMF.tools.resourceNative.refreshTargets = function(options)
+  return BMF.tools.treeCutNative.refreshTargets(options)
+end
+
+BMF.tools.resourceNative.findTag = function(options)
+  return BMF.tools.treeCutNative.findTag(options)
+end
+
+BMF.tools.resourceNative.inspectPhysical = function(options)
+  return BMF.tools.treeCutNative.inspectPhysical(options)
+end
+
+BMF.tools.resourceNative.setPhysical = function(options)
+  return BMF.tools.treeCutNative.setPhysical(options)
+end
+
+BMF.tools.resourceNative.physicalStatus = function(options)
+  return BMF.tools.treeCutNative.physicalStatus(options)
+end
+
+BMF.tools.resourceNative.resolveTools = function(options)
+  return BMF.tools.treeCutNative.resolveHandaxe(options)
+end
+
+BMF.tools.resourceNative.drain = function(options)
+  return BMF.tools.treeCutNative.drain(options)
 end
 
 function BMF.tools.treeCutProbe.start(options)
@@ -18486,13 +18890,13 @@ function BMF_start_socket_transport()
   state.socket_worker_started = true
   state.socket_worker_mode = "starting"
   log("info", "socket transport started host=" .. tostring(state.socket.host) .. " port=" .. tostring(state.socket.port) .. " poll_ms=" .. tostring(state.socket.poll_interval_ms))
-  if BMF_env_bool("BMF_TREECUT_NATIVE_ENABLED", true) then
-    local treecut_ok, treecut_result = pcall(BMF.tools.treeCutNative.start, {
+  if BMF_env_bool("BMF_RESOURCE_NATIVE_ENABLED", BMF_env_bool("BMF_TREECUT_NATIVE_ENABLED", true)) then
+    local resource_ok, resource_result = pcall(BMF.tools.resourceNative.start, {
       reason = "socket-start",
     })
-    if not treecut_ok or not treecut_result or treecut_result.ok ~= true then
-      local detail = treecut_ok and tostring(treecut_result and treecut_result.message or "unknown") or tostring(treecut_result)
-      log("warn", "tree-cut native capture did not start: " .. detail)
+    if not resource_ok or not resource_result or resource_result.ok ~= true then
+      local detail = resource_ok and tostring(resource_result and resource_result.message or "unknown") or tostring(resource_result)
+      log("warn", "resource native capture did not start: " .. detail)
     end
   end
   if BMF_start_async_loop("socket_worker", state.socket.poll_interval_ms, BMF_poll_socket_messages_async) then
@@ -18927,6 +19331,10 @@ local function create_plugin_api(plugin_name, manifest)
   api.tools.treeCutNative = {}
   for key, value in pairs(BMF.tools.treeCutNative) do
     api.tools.treeCutNative[key] = value
+  end
+  api.tools.resourceNative = {}
+  for key, value in pairs(BMF.tools.resourceNative) do
+    api.tools.resourceNative[key] = value
   end
   api.tools.treeCutTrace = {}
   for key, value in pairs(BMF.tools.treeCutTrace) do

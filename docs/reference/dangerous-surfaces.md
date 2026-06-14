@@ -17,7 +17,7 @@ new native hooks, raw console wrappers, and broad object scans listed here.
 | [Server shutdown](../api/server/shutdown.md) | Disabled by capability and config opt-in | Can stop validation servers when a future executor works. | Let Omegga or a service manager own process lifecycle. |
 | [Plugin unsafe globals](../api/plugins/sandbox.md) | Disabled by `allowPluginUnsafeGlobals=false` and missing `unsafe.globals` | Lets plugins call raw UE4SS/native helpers. | Use scoped BMF facades and capability gates. |
 | [Unsafe minigame commands](../api/minigames/unsafe-commands.md) | Disabled by unsafe opt-ins | Touches legacy Brickadia minigame console/object surfaces. | Use minigame events and data snapshots. |
-| [Runtime brick state](../api/runtime-bricks.md) | Disabled by environment gates | Mutates live brick visibility/collision by runtime id. | Use explicit ids, validation canaries, and `L6 Frame Time` evidence. |
+| [Runtime brick state](../api/runtime-bricks.md) | Disabled by environment gates | Mutates live brick visibility/collision by runtime id. | Prefer UUID/purpose lookup tags, bounded canaries, and `L6 Frame Time` evidence. |
 | [Applicator native policy](../api/permissions/applicator-policy.md) | Experimental native path | Blocks native component placement. | Keep role-file planning and policy evaluation as the first layer. |
 | [Interactable tag guard](../api/permissions/interactable-tags.md) | Experimental native path | Blocks save-time Interactable ConsoleTag changes. | Keep allowed prefixes narrow and role-aware. |
 | [Brick asset placement policy](../api/permissions/brick-assets.md) | Policy-ready, hook incomplete | Future placement/paste hook can block live building. | Use policy-only evaluation until a cancellable hook is proven. |

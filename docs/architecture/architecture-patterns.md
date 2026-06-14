@@ -214,9 +214,9 @@ Review questions:
 ## 7. Brick Lookup With ConsoleTag
 
 `ConsoleTag` should be treated as a stable logical identity, not as a magic live
-pointer. Current safe patterns use the tag to find or confirm a candidate
-runtime brick id, then let BMF native code validate that candidate before
-mutation.
+pointer. Current safe patterns expose `lookup:<uuid>:<purpose>` to scripters,
+then let BMF use existing bindings, explicit positions, or the native target
+cache to find and validate the live runtime brick before mutation.
 
 ```mermaid
 sequenceDiagram
@@ -228,11 +228,11 @@ sequenceDiagram
     participant Server as Brickadia runtime brick
 
     World->>Indexer: Read bricks and component ConsoleTags
-    Indexer->>CityRPG: Emit resource id -> position and runtime id candidate
-    CityRPG->>CityRPG: Resolve native hit to treeid:<uuid>
-    CityRPG->>BMF: bmf.bricks.runtime.set brickid=<candidate> guid=<opaque-id>
-    BMF->>Native: Request inspect/set for explicit brick id
-    Native->>Server: Lookup live runtime brick by id
+    Indexer->>CityRPG: Emit lookup tag -> position and optional runtime hint
+    CityRPG->>CityRPG: Resolve native hit to lookup:<uuid>:<purpose>
+    CityRPG->>BMF: bmf.bricks.runtime.set-guid tag=lookup:<uuid>:<purpose>
+    BMF->>Native: Resolve cached tag/position to runtime brick
+    Native->>Server: Lookup live runtime brick by bounded candidate
     Server-->>Native: Return brick pointer/state
     Native->>Native: Verify internal runtime id matches candidate
     alt id matches and context is available
@@ -251,7 +251,8 @@ Review questions:
 
 - What produces the trusted tag index for a given server?
 - When should saved `brickIndex` be rejected as a runtime id candidate?
-- Is a future tag-only resolver worth the game-thread scan risk?
+- How fresh does the bounded native target cache need to be for UUID-first
+  resource lookup without adding game-thread scan risk?
 
 ## 8. Hooked Brickadia Events Into Lua
 
@@ -316,22 +317,22 @@ sequenceDiagram
     participant Tree as CityRPG TreeService
     participant Physical as BMF runtime brick state
 
-    BMF->>Native: Start treecut native capture
+    BMF->>Native: Start resource native capture
     Native->>Server: Install detour on melee impact function
-    Player->>Server: Swing handaxe at tree
+    Player->>Server: Swing handaxe or pickaxe at resource
     Server->>Native: Call detoured melee impact
     Native->>Server: Call original Brickadia function
     Native->>Native: Read impact, normal, context, ConsoleTag candidates
-    Native->>Native: Verify weapon context is handaxe
-    Native->>Queue: Enqueue cityrpg.treecut.hit JSON payload
+    Native->>Native: Verify weapon context is handaxe or pickaxe
+    Native->>Queue: Enqueue cityrpg.treecut.hit or cityrpg.mine.hit JSON payload
 
-    BMF->>Queue: Drain with BMFSocketTreeCutDrain
+    BMF->>Queue: Drain with BMFSocketResourceNativeDrain
     Queue-->>BMF: Return queued native payloads
-    BMF->>BMF: Decode payload and mark source BMFSocketTreeCutNative
-    BMF->>Bus: Emit cityrpg.treecut.hit
+    BMF->>BMF: Decode payload and mark source BMFSocketResourceNative
+    BMF->>Bus: Emit cityrpg.treecut.hit or cityrpg.mine.hit
     Bus->>Bus: Append runtime/events.jsonl and optional socket envelope
     Bus-->>Relay: Deliver event by socket or JSONL fallback
-    Relay->>Tree: Emit local treecut event
+    Relay->>CityRPG: Emit local treecut or minehit event
 
     Tree->>Tree: Verify itemType=handaxe and itemVerified=true
     Tree->>Tree: Resolve player from payload
@@ -345,8 +346,8 @@ sequenceDiagram
         Tree-->>Player: Award lumber, seed chance, and XP
         Tree->>Tree: Save tree state and schedule respawn
         opt physical state enabled
-            Tree->>Physical: bmf.bricks.runtime.set brickid candidate plus opaque guid
-            Physical->>Physical: Validate runtime brick id and sparse-grid context
+            Tree->>Physical: bmf.bricks.runtime.set-guid tag=lookup:<uuid>:treecut
+            Physical->>Physical: Resolve lookup binding and validate sparse-grid context
             alt context ready
                 Physical-->>Tree: visible=false result OK
             else background context scan pending

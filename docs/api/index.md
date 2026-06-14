@@ -40,7 +40,7 @@ Compact labels use the terms defined in the [Glossary](../reference/glossary.md)
 | API registry | `stable`, `L2` | [API Registry](apis.md) | [InspectApiLabels](../examples/inspect-api-labels.md) | Runtime API listing and labels. |
 | Chat | `experimental`, `live-player`, `L3` | [Chat](chat.md) | [HelloBroadcast](../examples/hello-broadcast.md) | Broadcast and private-message surfaces. |
 | Commands | `experimental`, `L2`, `L5` | [Commands](commands.md) | [Plugin Command](../examples/plugin-command.md) | Server-console command registry. |
-| Runtime brick state | `experimental`, `unsafe-native`, `L6 required` | [Runtime Brick State](runtime-bricks.md) | CityRPG tree lifecycle | Runtime brick inspect/set controls. |
+| Runtime brick state | `experimental`, `unsafe-native`, `L6 required` | [Runtime Brick State](runtime-bricks.md) | [RuntimeBrickState](../examples/runtime-brick-state.md) | Runtime brick inspect/set controls. |
 | Plugins | `stable`, `L2`, `L5` | [Plugins](plugins.md) | [Plugin Storage](../examples/plugin-storage.md) | Plugin metadata, lifecycle, sandbox, and capability gates. |
 | Players | `experimental`, `live-player`, `L2/L3` | [Players](players.md) | [PlayerSummary](../examples/player-summary.md) | Player normalization and planned live-player data APIs. |
 | Permissions | `file-backed`, `experimental hooks`, `L2/L5` | [Permissions](permissions.md) | [AssignRole](../examples/assign-role.md) | Role files, tool guards, and command access. |

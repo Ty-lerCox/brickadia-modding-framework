@@ -58,11 +58,14 @@ bursty command/event traffic.
 ## Inspect Tree Cutting
 
 1. Start with diagram 9 in [Architecture Patterns](../architecture/architecture-patterns.md#9-cityrpg-native-tree-cutting).
-2. Use [Runtime Brick State](../api/runtime-bricks.md) for physical
+2. Use [Resource Lookup Tags](resource-lookup-tags.md) for the
+   `lookup:<uuid>:treecut` and `lookup:<uuid>:mine` in-game tag format.
+3. Use [Runtime Brick State](../api/runtime-bricks.md) for physical
    hide/restore rules.
-3. Use [Native Hook Notes](../maintainers/native-hooks.md) for hook ownership and
+4. Use [Native Hook Notes](../maintainers/native-hooks.md) for hook ownership and
    restart-sensitive maintenance.
-4. Keep CityRPG-specific policy in the CityRPG tree service, not BMF core.
+5. Keep CityRPG-specific policy in the CityRPG tree and stone services, not BMF
+   core.
 
 ## Work With Role And Tool Policy
 

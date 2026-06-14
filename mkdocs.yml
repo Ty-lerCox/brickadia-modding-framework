@@ -57,6 +57,7 @@ nav:
       - ListMinigames: examples/list-minigames.md
       - AssignRole: examples/assign-role.md
       - Placement Guards: examples/placement-guards.md
+      - RuntimeBrickState: examples/runtime-brick-state.md
       - InspectApiLabels: examples/inspect-api-labels.md
       - PlayerSummary: examples/player-summary.md
       - HealthCheck: examples/health-check.md
@@ -64,6 +65,7 @@ nav:
       - RateLimitedCommand: examples/rate-limited-command.md
   - Guides:
       - Common Workflows: guides/common-workflows.md
+      - Resource Lookup Tags: guides/resource-lookup-tags.md
   - Reference:
       - Glossary: reference/glossary.md
       - Supported Runtime Matrix: reference/supported-runtime.md

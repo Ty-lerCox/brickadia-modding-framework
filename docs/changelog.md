@@ -100,11 +100,14 @@ Runtime Bricks
 - Added runtime brick context caching so repeated lookups can reuse safer context.
 - Added Brickadia setter usage for runtime brick state instead of relying only on lower-level mutation.
 - Added generic runtime brick GUID controls for higher-level lookup flows.
+- Added UUID-first runtime brick lookup with canonical `lookup:<uuid>:<purpose>` tags and cache-only native tag lookup fallback.
+- Added a runnable Lua example for changing runtime brick visibility and collision directly or through a bound GUID.
 - Kept runtime brick mutation behind environment gates and validation requirements.
 
 Tree Cutting
 - Added tree-cut event support for CityRPG-style workflows.
-- Added diagrams explaining how native tree-cut events flow into BMF and Lua.
+- Added resource-native command/API aliases for shared handaxe and pickaxe hit capture; old treecut command names remain compatibility aliases.
+- Added diagrams explaining how native resource events flow into BMF and Lua.
 - Added runtime brick state patterns for hiding and restoring physical tree bricks.
 - Added ConsoleTag lookup patterns for connecting gameplay ids to runtime brick operations.
 

@@ -34,6 +34,7 @@ surface has a documented example.
 | Minigames | [ListMinigames](list-minigames.md) | `Runnable folder` | None |
 | Permissions | [AssignRole](assign-role.md) | `Runnable folder` | None |
 | Placement policy | [Placement Guards](placement-guards.md) | `Policy workflow`, `Experimental/native` | Varies by guard |
+| Runtime bricks | [RuntimeBrickState](runtime-brick-state.md) | `Runnable folder`, `Experimental/native` | `bricks.runtimeState`; uses `lookup:<uuid>:<purpose>` tags |
 | API labels | [InspectApiLabels](inspect-api-labels.md) | `Validation pattern` | None |
 | Players | [PlayerSummary](player-summary.md) | `Copy-paste` | None |
 | Health and compatibility | [HealthCheck](health-check.md) | `Copy-paste` | None |

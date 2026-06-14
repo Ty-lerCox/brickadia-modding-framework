@@ -189,10 +189,13 @@ Runtime brick state mutation is an experimental native control path, not a
 polling path. Keep it narrow:
 
 - Enable it only with `BMF_BRICK_RUNTIME_SET_ENABLED=1`.
-- Target one explicit live runtime brick id.
-- Treat `guid=<opaque-id>` as caller-owned logical identity and `tag=<...>`
-  as optional correlation metadata, not as a resolver.
-- Reject tag-only workflows; they would require broad live UObject scans.
+- Prefer `uuid=<uuid> purpose=<purpose>` or `tag=lookup:<uuid>:<purpose>` for
+  public gameplay APIs.
+- Treat explicit live runtime brick ids as diagnostic/runtime-cache values,
+  not as a scripter-facing contract.
+- Allow GUID/tag-only runtime-brick workflows only when they use existing
+  bindings, explicit positions, or cached exact target-cache lookups. Do not
+  add broad live UObject scans to satisfy convenience lookups.
 - Keep `BMF_BRICK_GRID_CONTEXT_CACHE_TTL_MS` short, currently `5000`, so
   visibility/collision setters do not reuse native grid-context pointers long
   after they were captured.

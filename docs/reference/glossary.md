@@ -21,7 +21,8 @@ link here instead of redefining it.
 
 | Term | Meaning |
 | --- | --- |
-| ConsoleTag | Brickadia component tag used by gameplay plugins as a stable logical identity, for example `treeid:<uuid>` or another opaque resource key. It is not a live pointer. |
+| ConsoleTag | Brickadia component tag used by gameplay plugins as a stable logical identity, for example `lookup:<uuid>:treecut` or another opaque resource key. It is not a live pointer. |
+| Lookup tag | Canonical BMF `ConsoleTag` format `lookup:<uuid>:<purpose>`. BMF treats the purpose as opaque and uses the tag to resolve/cache live runtime brick ids internally. |
 | Runtime brick id | Live in-process brick identifier candidate. It must be verified against the active server process before native mutation. |
 | Native hook | C++ detour or native function wrapper used when Lua hooks are unsafe or not cancellable. |
 | Hook ingress | The path that captures Brickadia runtime data and hands a normalized event to BMF Lua. |

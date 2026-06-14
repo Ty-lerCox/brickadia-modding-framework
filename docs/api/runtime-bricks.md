@@ -1,12 +1,14 @@
 # Runtime Brick State API
 
-Runtime brick state commands are experimental native controls for explicit live
-runtime brick ids. Callers can also bind those runtime ids to an opaque GUID and
-then change visibility/collision for every currently bound brick under that
-GUID. BMF does not interpret that GUID; gameplay layers decide whether it means
-a resource node, a prop, a puzzle part, or anything else.
+Runtime brick state commands are experimental native controls for live brick
+visibility/collision. Scripter-facing integrations should pass a UUID plus a
+purpose, or a canonical lookup tag such as `lookup:<uuid>:mine`, and let BMF
+bind a bounded lookup result to that opaque GUID. BMF does not assign gameplay
+meaning to the purpose segment; gameplay layers decide whether it represents a
+resource node, prop, puzzle part, or anything else.
 
 For high-level `ConsoleTag` lookup flow, see
+[Resource Lookup Tags](../guides/resource-lookup-tags.md) and
 [Brick Lookup With ConsoleTag](../architecture/architecture-patterns.md#7-brick-lookup-with-consoletag).
 **Labels:** `experimental`, `unsafe-native`, `L2 Headless`, `L6 required`
 
@@ -18,39 +20,87 @@ experimental feature-gated path, not a general admin tool.
 
 ## When To Use
 
-Use this API only when the caller already has plausible live runtime brick id
-candidates and needs to inspect or mutate visibility/collision under explicit
-feature gates.
+Use this API when the caller has a resource UUID/purpose, a previously bound
+GUID, an explicit nearby resolve position, or a `ConsoleTag` that is already
+present in BMF's bounded native target cache. Explicit live runtime brick ids
+are supported for diagnostics and internal cache handoff, but they should not
+be the public contract exposed to gameplay scripters.
 
-BMF never performs broad world discovery from a GUID. The caller is responsible
-for resolving saved data, `ConsoleTag`s, or domain-specific records into live
-runtime brick ids, then binding those ids with `guid=<opaque-id>`.
+BMF never performs broad world discovery from a GUID. UUID-first calls use the
+canonical tag `lookup:<uuid>:<purpose>` and only consult existing bindings,
+explicit positions, or the cached native target list before running the bounded
+runtime-id resolver.
+
+## In-Game ConsoleTag Contract
+
+Author gameplay targets in Brickadia with an Interactable component and set
+**Advanced -> Print To Console** to the canonical lookup tag:
+
+```text
+lookup:<uuid>:<purpose>
+```
+
+CityRPG currently uses:
+
+```text
+lookup:222fd538-01c1-457c-9f67-aaab9fe6bbfd:treecut
+lookup:222fd538-01c1-457c-9f67-aaab9fe6bbfd:mine
+```
+
+Use one UUID for one logical target. A custom multi-brick tree or rock can put
+the same lookup tag on every participating brick so the gameplay layer treats
+all hits as the same resource node. BMF treats `purpose` as an opaque string;
+CityRPG owns meanings such as `treecut` and `mine`.
 
 ## Lua API
+
+Runnable example:
+[RuntimeBrickState](../examples/runtime-brick-state.md)
 
 The public Lua surface is:
 
 ```lua
-local inspected = BMF.bricks.inspectRuntimeState({
-  brickid = 56357,
-  guid = "resource:example",
+local hiddenByUuid = BMF.bricks.setRuntimeStateByGuid({
+  uuid = "222fd538-01c1-457c-9f67-aaab9fe6bbfd",
+  purpose = "mine",
+  visible = false,
+  collision = 0,
+  confirm = "brick-runtime",
 })
 
-local hidden = BMF.bricks.setRuntimeState({
-  brickid = 56357,
-  guid = "resource:example",
+local restoredByTag = BMF.bricks.setRuntimeStateByGuid({
+  tag = "lookup:222fd538-01c1-457c-9f67-aaab9fe6bbfd:mine",
+  visible = true,
+  collision = "restore",
+  confirm = "brick-runtime",
+})
+
+local visibilityOnly = BMF.bricks.setRuntimeStateByGuid({
+  tag = "lookup:222fd538-01c1-457c-9f67-aaab9fe6bbfd:treecut",
   visible = false,
   collision = "unchanged",
   confirm = "brick-runtime",
 })
 
-local bound = BMF.bricks.bindRuntimeGuid({
-  guid = "resource:example",
-  brickids = "56357,56358",
+local collisionOnly = BMF.bricks.setRuntimeStateByGuid({
+  uuid = "222fd538-01c1-457c-9f67-aaab9fe6bbfd",
+  purpose = "treecut",
+  visible = "unchanged",
+  collision = 0,
+  confirm = "brick-runtime",
 })
 
-local hiddenGroup = BMF.bricks.setRuntimeStateByGuid({
-  guid = "resource:example",
+local boundByUuid = BMF.bricks.bindRuntimeGuid({
+  uuid = "222fd538-01c1-457c-9f67-aaab9fe6bbfd",
+  purpose = "mine",
+  x = 12345,
+  y = 67890,
+  z = 512,
+})
+
+local diagnosticExplicitId = BMF.bricks.setRuntimeState({
+  brickid = 56357,
+  guid = "lookup:222fd538-01c1-457c-9f67-aaab9fe6bbfd:mine",
   visible = false,
   collision = 0,
   confirm = "brick-runtime",
@@ -65,6 +115,39 @@ capability-gated as `bricks.runtimeState`. Mutation calls are also
 ## Server-Console Commands
 
 ```text
+Omegga.Bridge.BMF bmf.bricks.runtime.set-guid uuid=<uuid> purpose=<purpose> confirm=brick-runtime [visible=true|false|restore|unchanged] [collision=<0-255>|restore|unchanged]
+Omegga.Bridge.BMF bmf.bricks.runtime.set-guid tag=lookup:<uuid>:<purpose> confirm=brick-runtime [visible=true|false|restore|unchanged] [collision=<0-255>|restore|unchanged]
+```
+
+Queues visibility/collision mutation for every runtime brick currently bound to
+the lookup GUID. If no binding exists, BMF attempts one bounded lookup/resolve
+and then sets the resolved runtime brick.
+
+Common examples:
+
+```text
+Omegga.Bridge.BMF bmf.bricks.runtime.set-guid tag=lookup:222fd538-01c1-457c-9f67-aaab9fe6bbfd:treecut visible=false collision=0 confirm=brick-runtime
+Omegga.Bridge.BMF bmf.bricks.runtime.set-guid tag=lookup:222fd538-01c1-457c-9f67-aaab9fe6bbfd:treecut visible=true collision=restore confirm=brick-runtime
+Omegga.Bridge.BMF bmf.bricks.runtime.set-guid uuid=222fd538-01c1-457c-9f67-aaab9fe6bbfd purpose=mine visible=false collision=unchanged confirm=brick-runtime
+Omegga.Bridge.BMF bmf.bricks.runtime.set-guid uuid=222fd538-01c1-457c-9f67-aaab9fe6bbfd purpose=mine visible=unchanged collision=0 confirm=brick-runtime
+```
+
+```text
+Omegga.Bridge.BMF bmf.bricks.runtime.bind uuid=<uuid> purpose=<purpose> [x=<x> y=<y> z=<z>]
+Omegga.Bridge.BMF bmf.bricks.runtime.bind tag=lookup:<uuid>:<purpose> [x=<x> y=<y> z=<z>]
+```
+
+Binds one bounded lookup result to an opaque GUID. This is an in-memory runtime
+cache, not persistent world state.
+
+```text
+Omegga.Bridge.BMF bmf.bricks.runtime.set [uuid=<uuid> purpose=<purpose>|tag=lookup:<uuid>:<purpose>|guid=<opaque-id>] confirm=brick-runtime [visible=true|false|restore|unchanged] [collision=<0-255>|restore|unchanged]
+```
+
+Queues a visibility/collision mutation through the UUID/GUID path. BMF attempts
+existing bindings, explicit `x/y/z`, or a cached exact `ConsoleTag` lookup.
+
+```text
 Omegga.Bridge.BMF bmf.bricks.runtime.resolve guid=<opaque-id> x=<x> y=<y> z=<z> radius=<n> maxscan=<n> [hint=<slot>] [hintwindow=<n>] [hintonly=true]
 ```
 
@@ -74,34 +157,14 @@ GUID.
 
 ```text
 Omegga.Bridge.BMF bmf.bricks.runtime.inspect brickid=<id> [guid=<opaque-id>] [tag=<opaque-tag>]
-```
-
-Queues a game-thread inspection and reports visible/collision bytes plus native
-runtime state. Runtime lookup is disabled unless
-`BMF_BRICK_RUNTIME_LOOKUP_ENABLED=1` is set.
-
-```text
-Omegga.Bridge.BMF bmf.bricks.runtime.set brickid=<id> [guid=<opaque-id>] [tag=<opaque-tag>] confirm=brick-runtime [visible=true|false|restore|unchanged] [collision=<0-255>|restore|unchanged]
-```
-
-Queues a visibility/collision mutation for the explicit candidate id. When
-`guid` is supplied, BMF also binds that runtime id to the GUID for later grouped
-mutation.
-
-```text
+Omegga.Bridge.BMF bmf.bricks.runtime.set brickid=<id> [guid=<opaque-id>] confirm=brick-runtime [visible=true|false|restore|unchanged] [collision=<0-255>|restore|unchanged]
 Omegga.Bridge.BMF bmf.bricks.runtime.bind guid=<opaque-id> brickid=<id>
 Omegga.Bridge.BMF bmf.bricks.runtime.bind guid=<opaque-id> brickids=<id,id,...>
 ```
 
-Binds one or more explicit live runtime brick ids to an opaque GUID. This is a
-bounded in-memory cache, not persistent world state.
-
-```text
-Omegga.Bridge.BMF bmf.bricks.runtime.set-guid guid=<opaque-id> confirm=brick-runtime [visible=true|false|restore|unchanged] [collision=<0-255>|restore|unchanged]
-```
-
-Queues visibility/collision mutation for every runtime brick currently bound to
-the GUID.
+These explicit `brickid` forms are for internal runtime caches and diagnostics.
+Do not expose them as a gameplay scripting contract; runtime ids are process
+local and can change after reloads.
 
 ```text
 Omegga.Bridge.BMF bmf.bricks.runtime.guid-status [guid=<opaque-id>]
@@ -135,6 +198,8 @@ BMF_BRICK_GRID_CONTEXT_CACHE_TTL_MS=5000      max sparse-grid context cache age
 BMF_BRICK_OWNER_CONTEXT_SCAN_FOR_SET_ENABLED=1  optionally try the bounded owner scan before direct fallback
 BMF_BRICK_RUNTIME_GUID_MAX_BRICKS=64          max runtime ids bound to one GUID
 BMF_BRICK_RUNTIME_GUID_CACHE_MAX_GUIDS=1024   max GUID bindings retained in memory
+BMF_RESOURCE_TARGET_AUTO_REFRESH=1            optional startup target-cache refresh; lookup reads the cache only
+BMF_TREECUT_TARGET_AUTO_REFRESH=1             compatibility alias for the same cache refresh path
 ```
 
 Set `BMF_BRICK_RUNTIME_DIAGNOSTICS_ENABLED=1` only when owner or sparse-grid
@@ -143,14 +208,15 @@ are not always safe to read.
 
 ## Caller Rules
 
-- Always resolve and bind live runtime `brickid` candidates before mutating by
-  GUID.
-- Treat `guid=<opaque-id>` as a generic gameplay identifier. BMF does not parse
-  prefixes such as `treeid:` or `mineid:`.
-- Treat `tag=<opaque-tag>` as optional correlation metadata only.
-- Do not send tag-only mutations; they return `BRICK_RUNTIME_TAG_ID_REQUIRED`.
-- Do not send GUID-only mutations until at least one runtime brick id has been
-  bound; they return `BRICK_RUNTIME_GUID_NOT_BOUND`.
+- Prefer `uuid=<uuid> purpose=<purpose>` or `tag=lookup:<uuid>:<purpose>` for
+  scripter-facing resource APIs. BMF canonicalizes `uuid + purpose` into the
+  lookup tag and uses that as the opaque GUID.
+- Treat `guid=<opaque-id>` as a generic gameplay identifier. BMF does not attach
+  CityRPG meaning to purposes such as `treecut` or `mine`.
+- GUID/tag-only mutations are allowed, but they only use existing bindings,
+  explicit `x/y/z`, or the native target cache. They do not scan the world.
+- When no binding, position, or cached exact tag is available, the queued result
+  returns `BRICK_RUNTIME_GUID_LOOKUP_MISS`.
 - Do not assume saved BRS `brickIndex` or `brickId` values are live runtime ids
   unless a runtime probe has confirmed them in the active server process.
 - Keep `BMF_BRICK_RUNTIME_LOOKUP_ENABLED=0` for saved indices.

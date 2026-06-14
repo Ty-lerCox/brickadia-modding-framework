@@ -84,11 +84,12 @@ repeated command-file requests.
 | Permissions | `bmf.tools.applicator.refresh` | Refreshes denied Applicator component type cache. | [Applicator policy](permissions/applicator-policy.md) |
 | Permissions | `bmf.brickassetguard.status` | Prints brick asset guard policy status. | [Brick assets](permissions/brick-assets.md) |
 | Permissions | `bmf.brickassetguard.check asset=<asset> roles=<role>` | Evaluates one brick asset against configured policy. | [Brick assets](permissions/brick-assets.md) |
-| Runtime bricks | `bmf.bricks.runtime.inspect ...` | Inspects one explicit live runtime brick id. | [Runtime Brick State](runtime-bricks.md) |
-| Runtime bricks | `bmf.bricks.runtime.resolve ...` | Resolves a nearby live runtime brick id under explicit gates. | [Runtime Brick State](runtime-bricks.md) |
-| Runtime bricks | `bmf.bricks.runtime.set ...` | Mutates visibility/collision for one explicit live runtime brick id. | [Runtime Brick State](runtime-bricks.md) |
-| Runtime bricks | `bmf.bricks.runtime.bind ...` | Binds explicit runtime brick ids to one opaque GUID. | [Runtime Brick State](runtime-bricks.md) |
-| Runtime bricks | `bmf.bricks.runtime.set-guid ...` | Mutates visibility/collision for bricks previously bound to one opaque GUID. | [Runtime Brick State](runtime-bricks.md) |
+| Runtime bricks | `bmf.bricks.runtime.set-guid uuid=<uuid> purpose=<purpose> ...` | Mutates visibility/collision through a UUID/purpose lookup tag. | [Runtime Brick State](runtime-bricks.md) |
+| Runtime bricks | `bmf.bricks.runtime.bind uuid=<uuid> purpose=<purpose> ...` | Binds one bounded lookup result to one opaque GUID. | [Runtime Brick State](runtime-bricks.md) |
+| Runtime bricks | `bmf.bricks.runtime.set ...` | Mutates visibility/collision by UUID+purpose, lookup tag, GUID, or diagnostic explicit id. | [Runtime Brick State](runtime-bricks.md) |
+| Runtime bricks | `bmf.bricks.runtime.inspect ...` | Diagnostic inspection for one verified live runtime brick id. | [Runtime Brick State](runtime-bricks.md) |
+| Runtime bricks | `bmf.bricks.runtime.resolve ...` | Diagnostic runtime-id resolve near one world position under explicit gates. | [Runtime Brick State](runtime-bricks.md) |
+| Runtime bricks | `bmf.tools.resource.native.*` | Starts, drains, and inspects native CityRPG resource hit capture. | [Runtime Brick State](runtime-bricks.md) |
 | Runtime bricks | `bmf.bricks.runtime.guid-status ...` | Prints opaque GUID binding state. | [Runtime Brick State](runtime-bricks.md) |
 | Runtime bricks | `bmf.bricks.runtime.status` | Prints the last queued runtime brick result. | [Runtime Brick State](runtime-bricks.md) |
 | Minigames | `bmf.minigames.*` | Desired definitions, events, data cache, and guarded unsafe wrappers. | [Minigames](minigames.md) |

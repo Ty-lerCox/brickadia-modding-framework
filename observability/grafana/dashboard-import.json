@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "api": {
+    "kind": "grafana-dashboard-import",
+    "dashboardModel": "observability/grafana/bmf-dashboard.json",
+    "defaultEndpoint": "POST /api/dashboards/db",
+    "overwrite": true
+  },
+  "requestTemplate": {
+    "dashboard": "{{dashboardJson}}",
+    "folderUid": "{{folderUid}}",
+    "overwrite": true,
+    "message": "Import BMF standard dashboard {{dashboardVersion}}"
+  },
+  "requiredInputs": [
+    "grafanaBaseUrl",
+    "grafanaApiToken",
+    "folderUid",
+    "prometheusDatasourceUid",
+    "environment",
+    "instance",
+    "server_profile",
+    "brickadia_build"
+  ],
+  "outputFields": [
+    "dashboardUid",
+    "dashboardUrl",
+    "dashboardVersion"
+  ],
+  "secretFields": [
+    "grafanaApiToken"
+  ]
+}

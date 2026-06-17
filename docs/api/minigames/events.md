@@ -125,7 +125,7 @@ versus JSONL fallback behavior.
 The packaged Omegga producer lives at:
 
 ```text
-integrations/omegga/bmf-minigame-events/
+packages/omegga-plugins/bmf-minigame-events/
 ```
 
 Its safe default is log-events-only. Snapshot, team, and leaderboard polling are

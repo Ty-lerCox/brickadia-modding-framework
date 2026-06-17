@@ -1,0 +1,60 @@
+@use '../../css/theme';
+@use '../../css/mixins';
+
+.players-container {
+  display: flex;
+  align-items: stretch;
+}
+
+.players-view {
+  .widgets-container {
+    z-index: 200;
+  }
+}
+
+.player-table-container,
+.player-inspector-container {
+  @include mixins.column-container;
+}
+
+.player-table-container {
+  margin-right: 16px;
+
+  .input {
+    max-width: 300px;
+    margin-right: 8px;
+    flex: 1;
+    width: 100%;
+  }
+}
+
+.players-list {
+  @include mixins.column-container;
+  flex: 1;
+  background-color: theme.$br-element-popout-bg;
+
+  .pagination-footer {
+    @include mixins.row;
+    align-items: center;
+
+    .current-page {
+      display: flex;
+      flex-direction: column;
+      text-align: center;
+      font-size: 16px;
+      flex: 1;
+      font-weight: bold;
+      color: white;
+    }
+  }
+}
+
+.player-inspector {
+  @include mixins.column;
+  background-color: theme.$br-element-popout-bg;
+  flex: 1;
+  position: relative;
+  border-bottom-left-radius: theme.$br-radius-md;
+  border-bottom-right-radius: theme.$br-radius-md;
+  overflow: hidden;
+}

@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "version": "0.1.0-dev",
+  "owner": "BMF",
+  "alloy": {
+    "template": "observability/alloy/bmf.alloy.template",
+    "scrapeTargets": [
+      "omegga-metrics",
+      "alloy-self"
+    ],
+    "remoteWriteSecretRefs": [
+      "BMF_GRAFANA_REMOTE_WRITE_URL",
+      "BMF_GRAFANA_REMOTE_WRITE_USERNAME",
+      "BMF_GRAFANA_REMOTE_WRITE_TOKEN"
+    ]
+  },
+  "grafana": {
+    "dashboard": "observability/grafana/bmf-dashboard.json",
+    "import": "observability/grafana/dashboard-import.json",
+    "dashboardUid": "bmf-standard",
+    "dashboardVersion": "0.1.0-dev"
+  },
+  "labels": [
+    "environment",
+    "instance",
+    "server_profile",
+    "brickadia_build"
+  ],
+  "metrics": [
+    "up",
+    "bmf_runtime_status_up",
+    "bmf_frame_time_seconds_bucket",
+    "bmf_frame_time_slow_total",
+    "bmf_command_total",
+    "bmf_socket_connected",
+    "bmf_event_total"
+  ]
+}

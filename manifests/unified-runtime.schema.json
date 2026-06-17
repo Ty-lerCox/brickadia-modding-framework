@@ -1,0 +1,354 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ty-lercox.github.io/brickadia-modding-framework/schemas/unified-runtime.schema.json",
+  "title": "BMF Unified Runtime Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "generatedFor",
+    "status",
+    "goal",
+    "supportedPlatforms",
+    "desktop",
+    "orchestration",
+    "components",
+    "healthChecks",
+    "telemetry",
+    "eventTraffic",
+    "release",
+    "roadmapDocs"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "generatedFor": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "planned",
+        "in-progress",
+        "supported"
+      ]
+    },
+    "goal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "document",
+        "summary"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "document": {
+          "type": "string",
+          "minLength": 1
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "supportedPlatforms": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "desktop": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "appId",
+        "shell",
+        "renderer",
+        "componentSystem",
+        "designSystem",
+        "installer"
+      ],
+      "properties": {
+        "appId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "shell": {
+          "type": "string",
+          "minLength": 1
+        },
+        "renderer": {
+          "type": "string",
+          "minLength": 1
+        },
+        "componentSystem": {
+          "type": "string",
+          "minLength": 1
+        },
+        "designSystem": {
+          "type": "string",
+          "minLength": 1
+        },
+        "installer": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "orchestration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "corePackage",
+        "defaultMode",
+        "operationIds",
+        "guardrails"
+      ],
+      "properties": {
+        "corePackage": {
+          "type": "string",
+          "minLength": 1
+        },
+        "defaultMode": {
+          "type": "string",
+          "minLength": 1
+        },
+        "operationIds": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "guardrails": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "components": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/component"
+      }
+    },
+    "healthChecks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/check"
+      }
+    },
+    "telemetry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dataPath",
+        "dashboardOwner",
+        "desktopBoundary",
+        "checks"
+      ],
+      "properties": {
+        "dataPath": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "dashboardOwner": {
+          "type": "string",
+          "minLength": 1
+        },
+        "desktopBoundary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "checks": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "eventTraffic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "preferredTransport",
+        "fallbackTransports",
+        "inspectorSources",
+        "guardrails"
+      ],
+      "properties": {
+        "preferredTransport": {
+          "type": "string",
+          "minLength": 1
+        },
+        "fallbackTransports": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "inspectorSources": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "guardrails": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "primaryArtifact",
+        "catalogArtifact",
+        "requiredArtifacts",
+        "manifest"
+      ],
+      "properties": {
+        "primaryArtifact": {
+          "type": "string",
+          "minLength": 1
+        },
+        "catalogArtifact": {
+          "type": "string",
+          "minLength": 1
+        },
+        "requiredArtifacts": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "manifest": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "roadmapDocs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  },
+  "$defs": {
+    "component": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "kind",
+        "owner",
+        "required",
+        "status",
+        "source"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "owner": {
+          "type": "string",
+          "minLength": 1
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "status": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "component",
+        "healthyWhen",
+        "severity"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "component": {
+          "type": "string",
+          "minLength": 1
+        },
+        "healthyWhen": {
+          "type": "string",
+          "minLength": 1
+        },
+        "severity": {
+          "type": "string",
+          "enum": [
+            "required",
+            "degraded-ok",
+            "optional"
+          ]
+        }
+      }
+    }
+  }
+}

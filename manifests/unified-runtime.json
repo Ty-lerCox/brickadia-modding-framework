@@ -1,0 +1,306 @@
+{
+  "schemaVersion": 1,
+  "generatedFor": "BMF 0.1.0-dev",
+  "status": "planned",
+  "goal": {
+    "id": "bmf-unified-runtime",
+    "document": "docs/roadmap/goal.md",
+    "summary": "Deliver a Windows MSI-installed BMF Desktop application that can deploy, run, diagnose, observe, update, and repair the BMF-compatible Brickadia/Omegga/UE4SS runtime stack from one self-sustaining BMF repository."
+  },
+  "supportedPlatforms": [
+    "windows-dedicated-server"
+  ],
+  "desktop": {
+    "appId": "bmf-desktop",
+    "shell": "Electron",
+    "renderer": "Angular",
+    "componentSystem": "Angular Material 3",
+    "designSystem": "Material You-style Material 3 tokens",
+    "installer": "MSI"
+  },
+  "orchestration": {
+    "corePackage": "packages/orchestrator-core",
+    "defaultMode": "dry-run",
+    "operationIds": [
+      "install-stack",
+      "repair-stack",
+      "update-stack",
+      "start-stack",
+      "stop-stack",
+      "restart-stack",
+      "snapshot-stack",
+      "configure-telemetry",
+      "inspect-event-traffic"
+    ],
+    "guardrails": [
+      "dry-run-by-default",
+      "explicit-user-action-required",
+      "structured-logs-only",
+      "redact-secrets-before-display-or-export",
+      "target-path-scope-validation",
+      "backup-before-overwrite",
+      "journal-every-applied-step",
+      "rollback-instructions-generated",
+      "rollback-journal-executable",
+      "bounded-log-snapshot",
+      "local-profile-registry",
+      "explicit-start-confirmation-required",
+      "configured-start-script-only",
+      "append-only-launch-log",
+      "journal-every-service-action",
+      "do-not-send-bmf-commands",
+      "do-not-add-ui-driven-server-probes"
+    ]
+  },
+  "components": [
+    {
+      "id": "bmf-desktop",
+      "name": "BMF Desktop",
+      "kind": "desktop-operations-app",
+      "owner": "apps/bmf-desktop",
+      "required": true,
+      "status": "existing-scaffold",
+      "source": "apps/bmf-desktop"
+    },
+    {
+      "id": "orchestrator-core",
+      "name": "BMF Orchestration Core",
+      "kind": "shared-install-health-launch-update-api",
+      "owner": "packages/orchestrator-core",
+      "required": true,
+      "status": "existing-scaffold",
+      "source": "packages/orchestrator-core"
+    },
+    {
+      "id": "bmfctl",
+      "name": "bmfctl",
+      "kind": "cli",
+      "owner": "apps/bmfctl",
+      "required": true,
+      "status": "existing-experimental",
+      "source": "cli/bin/bmfctl.js"
+    },
+    {
+      "id": "bmf-runtime",
+      "name": "BMF UE4SS Lua Runtime",
+      "kind": "ue4ss-lua-runtime",
+      "owner": "packages/bmf-runtime",
+      "required": true,
+      "status": "existing-package-boundary",
+      "source": "packages/bmf-runtime"
+    },
+    {
+      "id": "bmf-native-socket",
+      "name": "BMFSocket",
+      "kind": "native-socket-transport",
+      "owner": "packages/bmf-native-socket",
+      "required": true,
+      "status": "existing-package-boundary",
+      "source": "packages/bmf-native-socket"
+    },
+    {
+      "id": "bmf-frame-telemetry",
+      "name": "BMFFrameTelemetry",
+      "kind": "native-frame-telemetry",
+      "owner": "packages/bmf-frame-telemetry",
+      "required": false,
+      "status": "existing-package-boundary",
+      "source": "packages/bmf-frame-telemetry"
+    },
+    {
+      "id": "omegga-runtime",
+      "name": "BMF-compatible Omegga runtime",
+      "kind": "server-supervisor-and-ue4ss-bridge",
+      "owner": "packages/omegga-runtime",
+      "required": true,
+      "status": "synced-source",
+      "source": "packages/omegga-runtime"
+    },
+    {
+      "id": "omegga-plugin-bmf-bridge",
+      "name": "Generic BMF Bridge Omegga Plugin",
+      "kind": "omegga-plugin-command-event-bridge",
+      "owner": "packages/omegga-plugins/bmf-bridge",
+      "required": true,
+      "status": "existing-scaffold",
+      "source": "packages/omegga-plugins/bmf-bridge"
+    },
+    {
+      "id": "omegga-plugin-bmf-player-sync",
+      "name": "BMF Player Sync Omegga Adapter",
+      "kind": "omegga-plugin-player-sync",
+      "owner": "packages/omegga-plugins/bmf-player-sync",
+      "required": true,
+      "status": "existing-package",
+      "source": "packages/omegga-plugins/bmf-player-sync"
+    },
+    {
+      "id": "omegga-plugin-bmf-minigame-events",
+      "name": "BMF Minigame Events Omegga Adapter",
+      "kind": "omegga-plugin-minigame-events",
+      "owner": "packages/omegga-plugins/bmf-minigame-events",
+      "required": true,
+      "status": "existing-package",
+      "source": "packages/omegga-plugins/bmf-minigame-events"
+    },
+    {
+      "id": "ue4ss-compatibility",
+      "name": "UE4SS Compatibility Bundles",
+      "kind": "brickadia-ue4ss-compatibility-assets",
+      "owner": "compat/ue4ss",
+      "required": true,
+      "status": "existing-package-boundary",
+      "source": "compat/ue4ss"
+    },
+    {
+      "id": "grafana-alloy",
+      "name": "Grafana Alloy",
+      "kind": "metrics-collector",
+      "owner": "observability/alloy",
+      "required": false,
+      "status": "existing-scaffold",
+      "source": "observability/alloy/bmf.alloy.template"
+    },
+    {
+      "id": "grafana-dashboard",
+      "name": "Standard BMF Grafana Dashboard",
+      "kind": "grafana-dashboard",
+      "owner": "observability/grafana",
+      "required": false,
+      "status": "existing-scaffold",
+      "source": "observability/grafana/bmf-dashboard.json"
+    }
+  ],
+  "healthChecks": [
+    {
+      "id": "brickadia-files",
+      "component": "omegga-runtime",
+      "healthyWhen": "Brickadia dedicated server binary exists and matches the selected supported build.",
+      "severity": "required"
+    },
+    {
+      "id": "omegga-running",
+      "component": "omegga-runtime",
+      "healthyWhen": "The selected BMF-compatible Omegga runtime is installed, starts successfully, and owns the expected profile.",
+      "severity": "required"
+    },
+    {
+      "id": "ue4ss-enabled",
+      "component": "ue4ss-compatibility",
+      "healthyWhen": "UE4SS files, compatibility bundle, mod enablement files, and OmeggaBridge are staged for the active server.",
+      "severity": "required"
+    },
+    {
+      "id": "bmf-status-fresh",
+      "component": "bmf-runtime",
+      "healthyWhen": "BMF is loaded and writes a fresh Mods/BMF/runtime/status.json.",
+      "severity": "required"
+    },
+    {
+      "id": "bmf-socket-connected",
+      "component": "bmf-native-socket",
+      "healthyWhen": "BMFSocket is enabled and connected when socket transport is required by the profile.",
+      "severity": "degraded-ok"
+    },
+    {
+      "id": "frame-telemetry-fresh",
+      "component": "bmf-frame-telemetry",
+      "healthyWhen": "BMFFrameTelemetry writes fresh runtime/frame-telemetry.json when the profile enables native frame telemetry.",
+      "severity": "optional"
+    },
+    {
+      "id": "metrics-endpoint",
+      "component": "omegga-runtime",
+      "healthyWhen": "Omegga /metrics responds locally and includes fresh BMF runtime metrics.",
+      "severity": "degraded-ok"
+    },
+    {
+      "id": "alloy-ready",
+      "component": "grafana-alloy",
+      "healthyWhen": "Grafana Alloy readiness endpoint is healthy and the remote-write queue has no authentication or send errors.",
+      "severity": "optional"
+    },
+    {
+      "id": "dashboard-imported",
+      "component": "grafana-dashboard",
+      "healthyWhen": "The standard BMF dashboard exists in Grafana and the profile stores its dashboard URL.",
+      "severity": "optional"
+    }
+  ],
+  "telemetry": {
+    "dataPath": [
+      "Mods/BMF/runtime/status.json",
+      "Mods/BMF/runtime/telemetry.json",
+      "Mods/BMF/runtime/frame-telemetry.json",
+      "Omegga http://127.0.0.1:<port>/metrics",
+      "Grafana Alloy remote_write",
+      "Grafana Cloud dashboard"
+    ],
+    "dashboardOwner": "Grafana",
+    "desktopBoundary": "BMF Desktop shows setup and health status, then opens Grafana for real telemetry dashboards.",
+    "checks": [
+      "omegga-metrics-reachable",
+      "bmf-runtime-status-up",
+      "alloy-ready",
+      "remote-write-healthy",
+      "dashboard-url-present"
+    ]
+  },
+  "eventTraffic": {
+    "preferredTransport": "BMFSocket loopback broker",
+    "fallbackTransports": [
+      "runtime/events.jsonl",
+      "runtime/commands request-response files"
+    ],
+    "inspectorSources": [
+      "socket-event-stream",
+      "events-jsonl",
+      "command-request-response-records",
+      "omegga-bridge-plugin-diagnostics",
+      "bmf-audit-and-telemetry-summaries"
+    ],
+    "guardrails": [
+      "observe-existing-traffic-only",
+      "do-not-add-ui-driven-server-probes",
+      "redact-secrets-before-display-or-export",
+      "bound-retained-record-count",
+      "coalesce-repetitive-status-records",
+      "apply-backpressure-when-paused"
+    ]
+  },
+  "release": {
+    "primaryArtifact": "BMF-Desktop-<version>-x64.msi",
+    "catalogArtifact": "release-catalog.json",
+    "requiredArtifacts": [
+      "BMF-Desktop-<version>-x64.msi",
+      "BMF-Desktop-<version>-x64.msi.sha256",
+      "release-manifest.json",
+      "release-catalog.json",
+      "RELEASE_NOTES.md"
+    ],
+    "manifest": [
+      "bmfDesktopVersion",
+      "bmfRuntimeVersion",
+      "omeggaRuntimeVersionOrCommit",
+      "supportedBrickadiaBuild",
+      "ue4ssBundleId",
+      "nativeHelperHashes",
+      "alloyTemplateVersion",
+      "dashboardVersion",
+      "installerSha256",
+      "releaseCatalog",
+      "releaseChannel"
+    ]
+  },
+  "roadmapDocs": [
+    "docs/roadmap/index.md",
+    "docs/roadmap/goal.md",
+    "docs/roadmap/monorepo-consolidation.md",
+    "docs/roadmap/phase-plan.md",
+    "docs/roadmap/bmf-desktop-control-panel.md",
+    "docs/roadmap/service-health-model.md",
+    "docs/roadmap/grafana-onboarding.md",
+    "docs/roadmap/event-traffic-inspector.md",
+    "docs/roadmap/release-artifacts.md"
+  ]
+}

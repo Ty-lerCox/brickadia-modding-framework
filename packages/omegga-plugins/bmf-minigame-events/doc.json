@@ -1,0 +1,128 @@
+{
+  "name": "BMF Minigame Events",
+  "description": "Feeds Omegga-observed Brickadia minigame lifecycle and leaderboard changes into BMF events.",
+  "author": "BMF",
+  "config": {
+    "commandDir": {
+      "description": "Path to Mods/BMF/runtime/commands. If blank, OMEGGA_BMF_COMMAND_DIR, OMEGGA_BMF_RUNTIME_DIR, or the standard Omegga-managed BMF runtime path is used.",
+      "default": "",
+      "type": "string"
+    },
+    "eventTransport": {
+      "description": "How log-derived minigame events are delivered. event-log writes BMF-compatible runtime/events.jsonl records from Omegga and avoids BMF game-thread command dispatch. command uses bmf.minigames.events.emit so BMF Lua event handlers run.",
+      "default": "event-log",
+      "type": "string"
+    },
+    "eventLogPath": {
+      "description": "Path to Mods/BMF/runtime/events.jsonl for event-log transport. If blank, OMEGGA_BMF_EVENTS_PATH or the runtime directory beside commandDir is used.",
+      "default": "",
+      "type": "string"
+    },
+    "enabled": {
+      "description": "Enable the adapter.",
+      "default": true,
+      "type": "boolean"
+    },
+    "emitJoinEvents": {
+      "description": "Emit joinminigame and leaveminigame events from Brickadia checkpoint logs.",
+      "default": true,
+      "type": "boolean"
+    },
+    "allowUnsafeConsoleSnapshots": {
+      "description": "Opt in to Brickadia GetAll-based minigame/leaderboard snapshots. Disabled by default because this path can crash the current UE4SS dedicated-server runtime.",
+      "default": false,
+      "type": "boolean"
+    },
+    "seedCacheFromBmfData": {
+      "description": "Seed the adapter's join/leave caches from BMF.minigames.data.snapshot at startup and during safe manual syncs.",
+      "default": true,
+      "type": "boolean"
+    },
+    "seedCacheTimeoutMs": {
+      "description": "Timeout while waiting for BMF.minigames.data.snapshot command-worker responses used for cache seeding.",
+      "default": 5000,
+      "type": "number"
+    },
+    "emitRoundEvents": {
+      "description": "Emit roundchange and roundend events from BP_Ruleset_C snapshots when allowUnsafeConsoleSnapshots is enabled.",
+      "default": false,
+      "type": "boolean"
+    },
+    "emitSnapshotEvents": {
+      "description": "Emit BMF-native snapshot events when the observed minigame/member/team snapshot changes and allowUnsafeConsoleSnapshots is enabled.",
+      "default": false,
+      "type": "boolean"
+    },
+    "applySnapshotImports": {
+      "description": "Import observed minigame/member/team snapshots into BMF.minigames data with bmf.minigames.data.apply-snapshot when allowUnsafeConsoleSnapshots is enabled.",
+      "default": true,
+      "type": "boolean"
+    },
+    "emitCreateEvents": {
+      "description": "Emit BMF-native created events when a new BP_Ruleset_C appears after the initial snapshot and allowUnsafeConsoleSnapshots is enabled.",
+      "default": false,
+      "type": "boolean"
+    },
+    "emitDeleteEvents": {
+      "description": "Emit BMF-native deleted events when an observed BP_Ruleset_C disappears and allowUnsafeConsoleSnapshots is enabled.",
+      "default": false,
+      "type": "boolean"
+    },
+    "emitTeamEvents": {
+      "description": "Emit BMF-native teamchange events from BP_Team_C MemberStates snapshots when allowUnsafeConsoleSnapshots is enabled.",
+      "default": false,
+      "type": "boolean"
+    },
+    "emitLeaderboardEvents": {
+      "description": "Emit leaderboardchange, score, kill, and death events from BP_PlayerState_C LeaderboardData snapshots when allowUnsafeConsoleSnapshots is enabled.",
+      "default": false,
+      "type": "boolean"
+    },
+    "startupDelayMs": {
+      "description": "Delay after the Omegga server-start event before the first minigame and leaderboard snapshots.",
+      "default": 15000,
+      "type": "number"
+    },
+    "minigameCheckIntervalMs": {
+      "description": "Interval for minigame round snapshots when unsafe console snapshots are enabled. Set to 0 to disable round polling.",
+      "default": 0,
+      "type": "number"
+    },
+    "leaderboardCheckIntervalMs": {
+      "description": "Interval for leaderboard snapshots when unsafe console snapshots are enabled. Set to 0 to disable leaderboard polling.",
+      "default": 0,
+      "type": "number"
+    },
+    "minigameCheckTimeoutMs": {
+      "description": "Timeout used while waiting for GetAll BP_Ruleset_C command output.",
+      "default": 5000,
+      "type": "number"
+    },
+    "leaderboardCheckTimeoutMs": {
+      "description": "Timeout used while waiting for GetAll BP_PlayerState_C LeaderboardData command output.",
+      "default": 5000,
+      "type": "number"
+    },
+    "afterMatchDelayMs": {
+      "description": "Delay after the last matching console line before a snapshot resolves.",
+      "default": 100,
+      "type": "number"
+    },
+    "joinRetryCount": {
+      "description": "Retry count for resolving the Omegga player/minigame cache after a join log.",
+      "default": 20,
+      "type": "number"
+    },
+    "joinRetryDelayMs": {
+      "description": "Delay between join cache resolution retries.",
+      "default": 100,
+      "type": "number"
+    },
+    "duplicateJoinWindowMs": {
+      "description": "Window for ignoring duplicate Brickadia checkpoint log lines.",
+      "default": 250,
+      "type": "number"
+    }
+  },
+  "commands": []
+}

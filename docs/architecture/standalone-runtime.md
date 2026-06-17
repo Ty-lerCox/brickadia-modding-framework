@@ -51,8 +51,9 @@ work.
 
 - Do not start standalone replacement work by deleting current Omegga
   integration files.
-- Treat `integrations/omegga/` as supported adapter code until equivalent BMF
-  replacements exist and are validated.
+- Treat `packages/omegga-plugins/` as the canonical supported adapter source.
+  Legacy `integrations/omegga/` copies are compatibility inputs only until the
+  old layout is removed.
 - Prefer provider-neutral helper names in new Lua, scripts, and docs.
 - Keep existing Omegga-backed canaries as active proof until replacement BMF
   canaries exist.

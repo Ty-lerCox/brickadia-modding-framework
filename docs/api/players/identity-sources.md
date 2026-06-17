@@ -63,9 +63,10 @@ Omegga.Bridge.BMF bmf.players.sync players=[["OriginalBuilder","Build Lead","111
 ```
 
 The supported Omegga feeder lives at
-`integrations/omegga/bmf-player-sync/`. Configure its `commandDir` to the active
-`Mods/BMF/runtime/commands` directory, or set `OMEGGA_BMF_COMMAND_DIR`. It queues
-syncs on Omegga player-list changes and also runs a periodic fallback sync.
+`packages/omegga-plugins/bmf-player-sync/`. Configure its `commandDir` to the
+active `Mods/BMF/runtime/commands` directory, or set `OMEGGA_BMF_COMMAND_DIR`.
+It queues syncs on Omegga player-list changes and also runs a periodic fallback
+sync.
 
 On the current Windows UE4SS runtime, Omegga's live player list can stay empty
 when its PlayerState/PlayerController matcher cannot complete. The adapter then

@@ -1,0 +1,65 @@
+{
+  "compilerOptions": {
+    "allowJs": false,
+    "baseUrl": ".",
+    "rootDir": ".",
+    "paths": {
+      "@omegga/*": [
+        "./omegga/*"
+      ],
+      "@cli/*": [
+        "./cli/*"
+      ],
+      "@util/*": [
+        "./util/*"
+      ],
+      "@util": [
+        "./util/index.ts"
+      ],
+      "@webserver/*": [
+        "./webserver/*"
+      ],
+      "@brickadia/*": [
+        "./brickadia/*"
+      ],
+      "@config/*": [
+        "./config/*"
+      ],
+      "@config": [
+        "./config/index.ts"
+      ],
+      "@/*": [
+        "./*"
+      ],
+    },
+    "plugins": [
+      {
+        "transform": "typescript-transform-paths"
+      },
+      {
+        "transform": "typescript-transform-paths",
+        "afterDeclarations": true
+      }
+    ],
+    "skipLibCheck": true,
+    "module": "nodenext",
+    "moduleResolution": "NodeNext",
+    // "noImplicitAny": true,
+    "esModuleInterop": true,
+    // "strict": true,
+    "resolveJsonModule": true,
+    "outDir": "../dist",
+    "sourceMap": true,
+    "declaration": true,
+    "target": "es2018",
+    "typeRoots": [
+      "./index.d.ts",
+      "../node_modules/@types",
+      "node_modules/@types",
+    ],
+    // "watch": true
+  },
+  "exclude": [
+    "./webserver/frontend",
+  ]
+}

@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "id": "bmf-native-socket",
+  "componentId": "bmf-native-socket",
+  "name": "BMFSocket",
+  "status": "current-layout-package-boundary",
+  "owner": "packages/bmf-native-socket",
+  "sourceRoots": [
+    "native/bmf_socket",
+    "framework/ue4ss/Mods/BMFSocket"
+  ],
+  "installRoots": [
+    "Mods/BMFSocket"
+  ],
+  "entrypoints": [
+    "framework/ue4ss/Mods/BMFSocket/dlls/main.dll"
+  ],
+  "buildScript": "scripts/build-bmf-socket-native-mod.ps1",
+  "requiredFiles": [
+    "native/bmf_socket/CMakeLists.txt",
+    "native/bmf_socket/bmf_socket.cpp",
+    "framework/ue4ss/Mods/BMFSocket/README.md",
+    "framework/ue4ss/Mods/BMFSocket/dlls/.gitkeep"
+  ],
+  "runtimeOutputs": [
+    "Mods/BMF/runtime/socket.json",
+    "Mods/BMF/runtime/events.jsonl",
+    "Mods/BMF/runtime/commands"
+  ],
+  "guardrails": [
+    "optional-native-transport",
+    "file-bridge-fallback-required",
+    "bounded-traffic-buffering",
+    "validate-before-release"
+  ]
+}

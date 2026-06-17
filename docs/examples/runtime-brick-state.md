@@ -44,14 +44,14 @@ local hidden = BMF.bricks.setRuntimeStateByGuid({
 })
 ```
 
-Restore a resource brick from UUID and purpose:
+Restore a resource brick from UUID and purpose without touching collision:
 
 ```lua
 local restored = BMF.bricks.setRuntimeStateByGuid({
   uuid = "222fd538-01c1-457c-9f67-aaab9fe6bbfd",
   purpose = "mine",
   visible = true,
-  collision = "restore",
+  collision = "unchanged",
   confirm = "brick-runtime",
 })
 ```
@@ -137,3 +137,9 @@ retrying or issuing the next mutation.
     uses existing bindings, explicit positions, or the native target cache; it
     does not scan the world. Keep calls low-frequency and collect frame-time
     evidence before using it in gameplay loops.
+
+!!! warning
+    `collision=restore` is disabled unless
+    `BMF_BRICK_RUNTIME_COLLISION_RESTORE_ENABLED=1` is set. Prefer
+    `collision=unchanged` when restoring visibility, or use an explicit numeric
+    collision value only after live validation for the current server build.

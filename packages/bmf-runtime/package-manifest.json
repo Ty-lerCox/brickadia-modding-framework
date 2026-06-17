@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "id": "bmf-runtime",
+  "componentId": "bmf-runtime",
+  "name": "BMF UE4SS Lua Runtime",
+  "status": "current-layout-package-boundary",
+  "owner": "packages/bmf-runtime",
+  "sourceRoots": [
+    "framework/ue4ss/Mods/BMF"
+  ],
+  "installRoots": [
+    "Mods/BMF"
+  ],
+  "entrypoints": [
+    "framework/ue4ss/Mods/BMF/Scripts/main.lua"
+  ],
+  "requiredFiles": [
+    "framework/ue4ss/Mods/BMF/bmf.json",
+    "framework/ue4ss/Mods/BMF/config.json",
+    "framework/ue4ss/Mods/BMF/enabled.txt",
+    "framework/ue4ss/Mods/BMF/Scripts/main.lua"
+  ],
+  "runtimeOutputs": [
+    "Mods/BMF/runtime/status.json",
+    "Mods/BMF/runtime/events.jsonl",
+    "Mods/BMF/runtime/audit.jsonl"
+  ],
+  "guardrails": [
+    "keep-current-install-path",
+    "validate-before-release",
+    "stage-through-orchestrator-core",
+    "do-not-hide-runtime-source-roots"
+  ]
+}

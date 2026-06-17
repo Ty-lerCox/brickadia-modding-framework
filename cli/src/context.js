@@ -1,6 +1,10 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const {
+  getStoredProfile,
+  loadProfileRegistry,
+} = require('../../packages/orchestrator-core/src/profiles');
 const { exists, isDirectory, readJson } = require('./file');
 
 const RUNTIME_ALIASES = [
@@ -125,10 +129,41 @@ function resolveStartScript(omeggaDir, options = {}) {
   return firstExisting(candidates) || candidates[0];
 }
 
+function profileStoreOptions(bmfRoot, options = {}) {
+  return {
+    root: bmfRoot,
+    profileStorePath: options.profileStorePath || options.profileStore || options.storePath,
+  };
+}
+
+function resolveStoredProfile(bmfRoot, options = {}) {
+  const shouldLoadProfile = options.profile
+    || options.profileId
+    || options.profileStore
+    || options.profileStorePath
+    || options.storePath;
+  if (!shouldLoadProfile) return null;
+
+  const storeOptions = profileStoreOptions(bmfRoot, options);
+  const registry = loadProfileRegistry(storeOptions);
+  const profileId = options.profileId || options.profile || registry.selectedProfileId;
+  if (!profileId) return null;
+  return getStoredProfile(profileId, storeOptions);
+}
+
 function runtimeModsDirs(gameWin64Dir, options = {}) {
   if (options.modsDir) return [path.resolve(options.modsDir)];
   if (!gameWin64Dir) return [];
   return RUNTIME_ALIASES.map(alias => path.join(gameWin64Dir, 'ue4ss', alias));
+}
+
+function profileRuntimeModsDirs(profilePaths = {}) {
+  if (!profilePaths.bmfRuntimeDir) return [];
+
+  const runtimeDir = path.resolve(profilePaths.bmfRuntimeDir);
+  const bmfModDir = path.dirname(runtimeDir);
+  if (path.basename(bmfModDir).toLowerCase() !== 'bmf') return [];
+  return [path.dirname(bmfModDir)];
 }
 
 function bridgeRuntimeDirs(omeggaDir) {
@@ -169,17 +204,34 @@ function readOmeggaPackage(omeggaDir) {
 
 function resolveContext(options = {}) {
   const bmfRoot = path.resolve(options.bmfRoot || options.root || process.env.BMF_ROOT || findBmfRoot());
-  const omeggaDir = resolveOmeggaDir(bmfRoot, options);
+  const storedProfile = resolveStoredProfile(bmfRoot, options);
+  const profilePaths = storedProfile?.paths || {};
+  const omeggaDir = options.omegga
+    ? resolveOmeggaDir(bmfRoot, options)
+    : profilePaths.omeggaRuntime
+      ? path.resolve(profilePaths.omeggaRuntime)
+      : resolveOmeggaDir(bmfRoot, options);
   const compatibilityRoot = resolveCompatibilityRoot(bmfRoot, options);
-  const gameWin64Dir = resolveGameWin64Dir(options);
+  const gameWin64Dir = options.gameWin64
+    ? resolveGameWin64Dir(options)
+    : profilePaths.brickadiaWin64
+      ? path.resolve(profilePaths.brickadiaWin64)
+      : resolveGameWin64Dir(options);
   const savedDir = resolveSavedDir(omeggaDir, options);
-  const startScript = resolveStartScript(omeggaDir, options);
+  const startScript = options.startScript
+    ? resolveStartScript(omeggaDir, options)
+    : profilePaths.omeggaStartScript
+      ? path.resolve(profilePaths.omeggaStartScript)
+      : resolveStartScript(omeggaDir, options);
   const bmfSourceDir = path.join(bmfRoot, 'framework', 'ue4ss', 'Mods', 'BMF');
   const omeggaTemplateUe4ssDir = path.join(omeggaDir, 'templates', 'windows-ue4ss', 'ue4ss');
   const omeggaTemplateModsDir = path.join(omeggaTemplateUe4ssDir, 'Mods');
   const omeggaTemplateBmfDir = path.join(omeggaTemplateModsDir, 'BMF');
   const omeggaTemplateBridgeDir = path.join(omeggaTemplateModsDir, 'OmeggaBridge');
-  const liveModsDirs = runtimeModsDirs(gameWin64Dir, options);
+  const liveModsDirs = [
+    ...profileRuntimeModsDirs(profilePaths),
+    ...runtimeModsDirs(gameWin64Dir, options),
+  ].filter((dir, index, dirs) => dirs.indexOf(dir) === index);
 
   return {
     cwd: process.cwd(),

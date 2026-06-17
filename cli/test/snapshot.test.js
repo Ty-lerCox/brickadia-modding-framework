@@ -17,3 +17,20 @@ test('snapshot writes doctor output and copied diagnostics', () => {
   assert.ok(snapshot.copiedFiles.length > 0);
   assert.ok(snapshot.copiedLogs.length > 0);
 });
+
+test('snapshot uses BMF_SNAPSHOT_ROOT when --out is not provided', () => {
+  const env = makeEnvironment();
+  const previous = process.env.BMF_SNAPSHOT_ROOT;
+  const snapshotRoot = path.join(env.root, 'appdata', 'snapshots');
+  process.env.BMF_SNAPSHOT_ROOT = snapshotRoot;
+  try {
+    const snapshot = createSnapshot(env.options);
+
+    assert.equal(path.dirname(snapshot.root), snapshotRoot);
+    assert.ok(fs.existsSync(path.join(snapshot.root, 'snapshot.json')));
+    assert.ok(fs.existsSync(path.join(snapshot.root, 'doctor.json')));
+  } finally {
+    if (previous === undefined) delete process.env.BMF_SNAPSHOT_ROOT;
+    else process.env.BMF_SNAPSHOT_ROOT = previous;
+  }
+});

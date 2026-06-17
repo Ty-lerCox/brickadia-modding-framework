@@ -29,8 +29,8 @@
     "requiresBmfCompatibleOmegga": true,
     "dependenciesManifest": "manifests/dependencies.json",
     "supportedAdapters": [
-      "integrations/omegga/bmf-player-sync",
-      "integrations/omegga/bmf-minigame-events"
+      "packages/omegga-plugins/bmf-player-sync",
+      "packages/omegga-plugins/bmf-minigame-events"
     ],
     "notes": "BMF currently targets a BMF-compatible Omegga runtime for Windows launch, UE4SS setup, command transport, player sync, minigame event feeding, helper globals, logs, and validation. Upstream Omegga alone may not satisfy these requirements until the BMF compatibility work is included."
   },

@@ -1,0 +1,968 @@
+<mat-toolbar class="toolbar">
+  <span class="brand">BMF Desktop</span>
+  <span class="spacer"></span>
+  <button mat-icon-button matTooltip="Refresh plan" aria-label="Refresh plan" (click)="refreshPlan()">
+    <mat-icon>refresh</mat-icon>
+  </button>
+  <button mat-icon-button matTooltip="Open Grafana" aria-label="Open Grafana" [disabled]="!dashboardCanOpen()" (click)="openDashboard()">
+    <mat-icon>open_in_new</mat-icon>
+  </button>
+</mat-toolbar>
+
+<main class="shell">
+  <section class="status-band">
+    <div>
+      <div class="eyebrow">Profile</div>
+      <h1>{{ profileName() }}</h1>
+    </div>
+    <div class="status-metrics">
+      <div class="metric">
+        <span>Health</span>
+        <strong>{{ healthStatus() }}</strong>
+      </div>
+      <div class="metric">
+        <span>Operations</span>
+        <strong>{{ bootstrapPlan()?.operations?.length ?? 0 }}</strong>
+      </div>
+      <div class="metric">
+        <span>Traffic</span>
+        <strong>{{ eventRecords().length }}</strong>
+      </div>
+    </div>
+    <button mat-flat-button color="primary" (click)="refreshPlan()">
+      <mat-icon>playlist_add_check</mat-icon>
+      Build Plan
+    </button>
+  </section>
+
+  <mat-tab-group animationDuration="160ms" class="tabs">
+    <mat-tab label="Profiles">
+      <section class="panel-grid">
+        <div class="panel">
+          <h2>Server Profile</h2>
+          <div class="form-grid">
+            <mat-form-field appearance="outline">
+              <mat-label>Name</mat-label>
+              <input matInput [ngModel]="profileName()" (ngModelChange)="profileName.set($event); markProfileDirty()">
+            </mat-form-field>
+            <mat-form-field appearance="outline">
+              <mat-label>Brickadia port</mat-label>
+              <input matInput inputmode="numeric" [ngModel]="brickadiaPort()" (ngModelChange)="brickadiaPort.set($event); markProfileDirty()">
+            </mat-form-field>
+            <mat-form-field appearance="outline">
+              <mat-label>Omegga web port</mat-label>
+              <input matInput inputmode="numeric" [ngModel]="omeggaWebPort()" (ngModelChange)="omeggaWebPort.set($event); markProfileDirty()">
+            </mat-form-field>
+            <mat-form-field appearance="outline">
+              <mat-label>BMF socket port</mat-label>
+              <input matInput inputmode="numeric" [ngModel]="bmfSocketPort()" (ngModelChange)="bmfSocketPort.set($event); markProfileDirty()">
+            </mat-form-field>
+            <mat-form-field appearance="outline">
+              <mat-label>Alloy ready port</mat-label>
+              <input matInput inputmode="numeric" [ngModel]="alloyReadyPort()" (ngModelChange)="alloyReadyPort.set($event); markProfileDirty()">
+            </mat-form-field>
+            <mat-form-field appearance="outline">
+              <mat-label>Brickadia Win64 path</mat-label>
+              <input matInput [ngModel]="brickadiaWin64Path()" (ngModelChange)="brickadiaWin64Path.set($event); markProfileDirty()">
+              <button mat-icon-button matSuffix type="button" matTooltip="Browse Brickadia Win64 path" aria-label="Browse Brickadia Win64 path" (click)="chooseProfilePath('brickadiaWin64')">
+                <mat-icon>folder_open</mat-icon>
+              </button>
+            </mat-form-field>
+            <mat-form-field appearance="outline">
+              <mat-label>Omegga runtime path</mat-label>
+              <input matInput [ngModel]="omeggaRuntimePath()" (ngModelChange)="omeggaRuntimePath.set($event); markProfileDirty()">
+              <button mat-icon-button matSuffix type="button" matTooltip="Browse Omegga runtime path" aria-label="Browse Omegga runtime path" (click)="chooseProfilePath('omeggaRuntime')">
+                <mat-icon>folder_open</mat-icon>
+              </button>
+            </mat-form-field>
+            <mat-form-field appearance="outline">
+              <mat-label>Omegga start script</mat-label>
+              <input matInput [ngModel]="omeggaStartScriptPath()" (ngModelChange)="omeggaStartScriptPath.set($event); markProfileDirty()">
+              <button mat-icon-button matSuffix type="button" matTooltip="Browse Omegga start script" aria-label="Browse Omegga start script" (click)="chooseProfilePath('omeggaStartScript')">
+                <mat-icon>description</mat-icon>
+              </button>
+            </mat-form-field>
+            <mat-form-field appearance="outline">
+              <mat-label>BMF root path</mat-label>
+              <input matInput [ngModel]="bmfRootPath()" (ngModelChange)="bmfRootPath.set($event); markProfileDirty()">
+              <button mat-icon-button matSuffix type="button" matTooltip="Browse BMF root path" aria-label="Browse BMF root path" (click)="chooseProfilePath('bmfRoot')">
+                <mat-icon>folder_open</mat-icon>
+              </button>
+            </mat-form-field>
+            <mat-form-field appearance="outline">
+              <mat-label>BMF runtime dir</mat-label>
+              <input matInput [ngModel]="bmfRuntimeDirPath()" (ngModelChange)="bmfRuntimeDirPath.set($event); markProfileDirty()">
+              <button mat-icon-button matSuffix type="button" matTooltip="Browse BMF runtime dir" aria-label="Browse BMF runtime dir" (click)="chooseProfilePath('bmfRuntimeDir')">
+                <mat-icon>folder_open</mat-icon>
+              </button>
+            </mat-form-field>
+            <mat-form-field appearance="outline">
+              <mat-label>Alloy executable</mat-label>
+              <input matInput [ngModel]="grafanaAlloyExecutablePath()" (ngModelChange)="grafanaAlloyExecutablePath.set($event); markProfileDirty()">
+              <button mat-icon-button matSuffix type="button" matTooltip="Browse Alloy executable" aria-label="Browse Alloy executable" (click)="chooseProfilePath('grafanaAlloyExecutable')">
+                <mat-icon>memory</mat-icon>
+              </button>
+            </mat-form-field>
+            <mat-form-field appearance="outline">
+              <mat-label>Alloy config path</mat-label>
+              <input matInput [ngModel]="grafanaAlloyConfigPath()" (ngModelChange)="grafanaAlloyConfigPath.set($event); markProfileDirty()">
+              <button mat-icon-button matSuffix type="button" matTooltip="Choose Alloy config path" aria-label="Choose Alloy config path" (click)="chooseProfilePath('grafanaAlloyConfig')">
+                <mat-icon>save_as</mat-icon>
+              </button>
+            </mat-form-field>
+            <mat-form-field appearance="outline">
+              <mat-label>Telemetry environment</mat-label>
+              <input matInput [ngModel]="telemetryEnvironment()" (ngModelChange)="telemetryEnvironment.set($event); markProfileDirty()">
+            </mat-form-field>
+            <mat-form-field appearance="outline">
+              <mat-label>Telemetry instance</mat-label>
+              <input matInput [ngModel]="telemetryInstance()" (ngModelChange)="telemetryInstance.set($event); markProfileDirty()">
+            </mat-form-field>
+            <mat-form-field appearance="outline">
+              <mat-label>Dashboard URL</mat-label>
+              <input matInput [ngModel]="dashboardUrl()" (ngModelChange)="dashboardUrl.set($event); markProfileDirty()">
+            </mat-form-field>
+            <mat-slide-toggle [ngModel]="telemetryEnabled()" (ngModelChange)="telemetryEnabled.set($event); markProfileDirty()">
+              Grafana telemetry
+            </mat-slide-toggle>
+            <mat-slide-toggle [ngModel]="frameTelemetryEnabled()" (ngModelChange)="frameTelemetryEnabled.set($event); markProfileDirty()">
+              Frame telemetry
+            </mat-slide-toggle>
+          </div>
+          <div class="profile-actions">
+            <button mat-flat-button color="primary" (click)="saveCurrentProfile()">
+              <mat-icon>save</mat-icon>
+              Save Profile
+            </button>
+            <button mat-button (click)="refreshProfiles()">
+              <mat-icon>sync</mat-icon>
+              Refresh Profiles
+            </button>
+          </div>
+          <div class="artifact-grid profile-summary">
+            <span>Stored</span><strong>{{ profileStoreSummary().total }}</strong>
+            <span>Selected</span><strong>{{ profileStoreSummary().selectedProfileId || 'none' }}</strong>
+            <span>Launcher</span><strong>Local Windows process</strong>
+            <span>Configured paths</span><strong>{{ configuredPathCount() }}</strong>
+            <span>Draft state</span><strong>{{ profileFormDirty() ? 'unsaved' : 'saved' }}</strong>
+          </div>
+        </div>
+        <div class="panel">
+          <h2>Stored Profiles</h2>
+          <mat-list>
+            @for (profile of storedProfiles(); track profile.id) {
+              <mat-list-item (click)="selectStoredProfile(profile)">
+                <mat-icon matListItemIcon>{{ profile.id === profileStoreSummary().selectedProfileId ? 'radio_button_checked' : 'radio_button_unchecked' }}</mat-icon>
+                <span matListItemTitle>{{ profile.name }}</span>
+                <span matListItemLine>{{ profile.id }} / Local Windows process</span>
+              </mat-list-item>
+            }
+          </mat-list>
+          <mat-divider></mat-divider>
+          <h2 class="paths-heading">Paths</h2>
+          <mat-list>
+            <mat-list-item>
+              <mat-icon matListItemIcon>folder</mat-icon>
+              <span matListItemTitle>Brickadia Win64</span>
+              <span matListItemLine>{{ profileDraft().paths.brickadiaWin64 || 'Not selected' }}</span>
+            </mat-list-item>
+            <mat-list-item>
+              <mat-icon matListItemIcon>terminal</mat-icon>
+              <span matListItemTitle>Omegga runtime</span>
+              <span matListItemLine>{{ profileDraft().paths.omeggaRuntime || 'Bundled runtime pending' }}</span>
+            </mat-list-item>
+            <mat-list-item>
+              <mat-icon matListItemIcon>play_circle</mat-icon>
+              <span matListItemTitle>Omegga start script</span>
+              <span matListItemLine>{{ profileDraft().paths.omeggaStartScript || 'Not configured' }}</span>
+            </mat-list-item>
+            <mat-list-item>
+              <mat-icon matListItemIcon>deployed_code</mat-icon>
+              <span matListItemTitle>Launcher</span>
+              <span matListItemLine>Local Windows process</span>
+            </mat-list-item>
+            <mat-list-item>
+              <mat-icon matListItemIcon>settings</mat-icon>
+              <span matListItemTitle>BMF runtime dir</span>
+              <span matListItemLine>{{ profileDraft().paths.bmfRuntimeDir || 'Auto-detected when possible' }}</span>
+            </mat-list-item>
+            <mat-list-item>
+              <mat-icon matListItemIcon>dashboard</mat-icon>
+              <span matListItemTitle>Grafana dashboard</span>
+              <span matListItemLine>{{ dashboardOpenUrl() || 'Not verified' }}</span>
+            </mat-list-item>
+          </mat-list>
+        </div>
+      </section>
+    </mat-tab>
+
+    <mat-tab label="Components">
+      <section class="panel-grid">
+        <div class="panel">
+          <h2>Setup Readiness</h2>
+          <div class="artifact-name">{{ bootstrapPlan()?.prerequisites?.status || 'not checked' }}</div>
+          <div class="summary-grid">
+            <span>Blocking</span><strong>{{ prerequisiteSummary().blocked }}</strong>
+            <span>Healthy</span><strong>{{ prerequisiteSummary().healthy }}</strong>
+            <span>Required</span><strong>{{ prerequisiteSummary().required }}</strong>
+            <span>Total</span><strong>{{ prerequisiteSummary().total }}</strong>
+          </div>
+          <mat-divider></mat-divider>
+          <mat-list>
+            @for (check of prerequisiteChecks(); track check.id) {
+              <mat-list-item>
+                <mat-icon matListItemIcon>{{ check.status === 'healthy' ? 'task_alt' : check.status === 'degraded' ? 'warning' : check.status === 'unhealthy' ? 'error' : 'help' }}</mat-icon>
+                <span matListItemTitle>{{ check.title }}</span>
+                <span matListItemLine>{{ check.summary }}</span>
+                <span matListItemMeta>{{ check.required ? 'required' : 'optional' }}</span>
+              </mat-list-item>
+            }
+          </mat-list>
+        </div>
+        <div class="panel operations-panel">
+          <h2>Operation Plan</h2>
+          <mat-chip-set aria-label="Operation plan">
+            @for (operation of bootstrapPlan()?.operations ?? []; track operation.operationId) {
+              <mat-chip (click)="selectOperation(operation)">{{ operation.operationId }}</mat-chip>
+            }
+          </mat-chip-set>
+          <mat-divider></mat-divider>
+          <mat-list>
+            @for (action of planActions(); track action.id) {
+              <mat-list-item>
+                <mat-icon matListItemIcon>{{ action.mode === 'would-run' ? 'pending_actions' : 'task_alt' }}</mat-icon>
+                <span matListItemTitle>{{ action.title }}</span>
+                <span matListItemLine>{{ action.component }} / {{ action.kind }}</span>
+              </mat-list-item>
+            }
+          </mat-list>
+        </div>
+        <div class="panel">
+          <div class="traffic-header">
+            <h2>Execution Contract</h2>
+            <div class="service-controls">
+              <button mat-icon-button matTooltip="Preview selected transaction" aria-label="Preview selected transaction" (click)="refreshOperationTransaction(selectedOperation()?.operationId || operationTransaction()?.operationId || 'install-stack')">
+                <mat-icon>fact_check</mat-icon>
+              </button>
+              <button mat-icon-button color="primary" matTooltip="Apply selected transaction" aria-label="Apply selected transaction" [disabled]="!transactionCanApply()" (click)="applySelectedTransaction()">
+                <mat-icon>file_download_done</mat-icon>
+              </button>
+              <button mat-icon-button matTooltip="Preview rollback" aria-label="Preview rollback" [disabled]="!rollbackCanPreview()" (click)="refreshRollbackTransaction()">
+                <mat-icon>undo</mat-icon>
+              </button>
+              <button mat-icon-button color="warn" matTooltip="Apply rollback" aria-label="Apply rollback" [disabled]="!rollbackCanApply()" (click)="applyRollbackTransaction()">
+                <mat-icon>settings_backup_restore</mat-icon>
+              </button>
+            </div>
+          </div>
+          <div class="artifact-name">{{ operationTransaction()?.transactionId || 'transaction pending' }}</div>
+          <mat-progress-bar mode="determinate" [value]="transactionSummary().total ? (transactionSummary().ready / transactionSummary().total) * 100 : 0"></mat-progress-bar>
+          <div class="artifact-grid">
+            <span>Status</span><strong>{{ operationTransaction()?.status || 'planned' }}</strong>
+            <span>Ready steps</span><strong>{{ transactionSummary().ready }}</strong>
+            <span>Blocked steps</span><strong>{{ transactionSummary().blocked }}</strong>
+            <span>Backups</span><strong>{{ transactionSummary().backupsRequired }}</strong>
+            <span>Applied</span><strong>{{ transactionAppliedSummary().applied }}/{{ transactionAppliedSummary().total }}</strong>
+            <span>Errors</span><strong>{{ operationTransaction()?.errors?.length ?? 0 }}</strong>
+            <span>Rollback</span><strong>{{ operationTransaction()?.rollback?.length ?? 0 }}</strong>
+            <span>Unsupported</span><strong>{{ transactionSummary().unsupported }}</strong>
+            <span>Journal</span><strong>{{ operationTransaction()?.journalPath || 'pending' }}</strong>
+            <span>Finished</span><strong>{{ operationTransaction()?.finishedAt || 'pending' }}</strong>
+          </div>
+          @if ((operationTransaction()?.applied?.length ?? 0) > 0) {
+            <mat-list class="transaction-steps">
+              @for (step of operationTransaction()?.applied ?? []; track step.id) {
+                <mat-list-item>
+                  <mat-icon matListItemIcon>{{ step.result === 'applied' ? 'task_alt' : step.result === 'failed' ? 'error' : 'skip_next' }}</mat-icon>
+                  <span matListItemTitle>{{ step.title }}</span>
+                  <span matListItemLine>{{ step.result }} / {{ step.targetPath || step.reason || step.error || 'no target' }}</span>
+                </mat-list-item>
+              }
+            </mat-list>
+          }
+          @if ((operationTransaction()?.errors?.length ?? 0) > 0) {
+            <mat-list class="transaction-steps">
+              @for (error of operationTransaction()?.errors ?? []; track error.stepId) {
+                <mat-list-item>
+                  <mat-icon matListItemIcon>error</mat-icon>
+                  <span matListItemTitle>{{ error.stepId }}</span>
+                  <span matListItemLine>{{ error.message }}</span>
+                </mat-list-item>
+              }
+            </mat-list>
+          }
+          @if (operationRollback()) {
+            <mat-divider></mat-divider>
+            <h2 class="rollback-heading">Rollback Contract</h2>
+            <div class="artifact-grid">
+              <span>Status</span><strong>{{ operationRollback()?.status || 'pending' }}</strong>
+              <span>Ready steps</span><strong>{{ rollbackSummary().ready }}</strong>
+              <span>Blocked steps</span><strong>{{ rollbackSummary().blocked }}</strong>
+              <span>Restores</span><strong>{{ rollbackSummary().restores }}</strong>
+              <span>Removals</span><strong>{{ rollbackSummary().removals }}</strong>
+              <span>Backups</span><strong>{{ rollbackSummary().backupsRequired }}</strong>
+              <span>Source journal</span><strong>{{ operationRollback()?.sourceJournalPath || 'pending' }}</strong>
+              <span>Rollback journal</span><strong>{{ operationRollback()?.journalPath || 'pending' }}</strong>
+              <span>Finished</span><strong>{{ operationRollback()?.finishedAt || 'pending' }}</strong>
+            </div>
+            <mat-list class="transaction-steps">
+              @for (step of operationRollback()?.applied || operationRollback()?.steps || []; track step.id) {
+                <mat-list-item>
+                  <mat-icon matListItemIcon>{{ step.status === 'blocked' || step.result === 'failed' ? 'error' : step.action === 'remove-created-path' ? 'delete' : 'restore' }}</mat-icon>
+                  <span matListItemTitle>{{ step.action }} / {{ step.sourceStepId || step.id }}</span>
+                  <span matListItemLine>{{ step.result || step.status }} / {{ step.targetPath || step.blockedReason || 'no target' }}</span>
+                </mat-list-item>
+              }
+            </mat-list>
+            @if ((operationRollback()?.errors?.length ?? 0) > 0) {
+              <mat-list class="transaction-steps">
+                @for (error of operationRollback()?.errors ?? []; track error.stepId) {
+                  <mat-list-item>
+                    <mat-icon matListItemIcon>error</mat-icon>
+                    <span matListItemTitle>{{ error.stepId }}</span>
+                    <span matListItemLine>{{ error.message }}</span>
+                  </mat-list-item>
+                }
+              </mat-list>
+            }
+          }
+        </div>
+        <div class="panel update-panel">
+          <div class="traffic-header">
+            <h2>Desktop Updates</h2>
+            <div class="service-controls">
+              <button mat-icon-button matTooltip="Check desktop updates" aria-label="Check desktop updates" (click)="refreshUpdateCheck()">
+                <mat-icon>sync</mat-icon>
+              </button>
+              <button mat-icon-button matTooltip="Plan desktop update download" aria-label="Plan desktop update download" (click)="refreshUpdatePlan()">
+                <mat-icon>fact_check</mat-icon>
+              </button>
+              <button mat-icon-button matTooltip="Download desktop update" aria-label="Download desktop update" (click)="downloadDesktopUpdate()">
+                <mat-icon>download</mat-icon>
+              </button>
+              <button mat-icon-button matTooltip="Preview installer handoff" aria-label="Preview installer handoff" (click)="refreshUpdateInstallPlan()">
+                <mat-icon>rule</mat-icon>
+              </button>
+              <button mat-icon-button matTooltip="Launch verified installer" aria-label="Launch verified installer" (click)="launchUpdateInstaller()">
+                <mat-icon>install_desktop</mat-icon>
+              </button>
+            </div>
+          </div>
+          <div class="artifact-grid update-grid">
+            <span>Status</span><strong>{{ updateStatus() }}</strong>
+            <span>Plan</span><strong>{{ updatePlanStatus() }}</strong>
+            <span>Download</span><strong>{{ updateDownloadStatus() }}</strong>
+            <span>Install</span><strong>{{ updateInstallStatus() }}</strong>
+            <span>Current</span><strong>{{ updateCheck()?.currentVersion || 'pending' }}</strong>
+            <span>Latest</span><strong>{{ updateCheck()?.latest?.version || 'pending' }}</strong>
+            <span>Channel</span><strong>{{ updateCheck()?.releaseChannel || 'dev' }}</strong>
+            <span>Artifact</span><strong>{{ updateCheck()?.latest?.artifact?.fileName || 'pending' }}</strong>
+            <span>Download URL</span><strong>{{ updatePlan()?.artifact?.url || updateCheck()?.latest?.artifact?.url || 'pending' }}</strong>
+            <span>Output</span><strong>{{ updateDownload()?.verification?.path || updatePlan()?.artifact?.outputPath || 'pending' }}</strong>
+            <span>SHA256</span><strong>{{ updateCheck()?.latest?.artifact?.sha256 || 'pending' }}</strong>
+            <span>Verification</span><strong>{{ updateDownload()?.verification?.status || updateArtifactStatus() }}</strong>
+            <span>Installer</span><strong>{{ updateInstallPlan()?.installer?.verification?.status || 'pending' }}</strong>
+            <span>Command</span><strong>{{ updateInstallPlan()?.command?.display || 'pending' }}</strong>
+            <span>Launch</span><strong>{{ updateInstallHandoff()?.launch?.status || 'pending' }}</strong>
+            <span>Catalog</span><strong>{{ updateCheck()?.catalogPath || 'pending' }}</strong>
+          </div>
+          @if ((updatePlan()?.steps?.length ?? 0) > 0) {
+            <mat-list>
+              @for (step of updatePlan()?.steps ?? []; track step.id) {
+                <mat-list-item>
+                  <mat-icon matListItemIcon>{{ step.status === 'ready' ? 'task_alt' : 'block' }}</mat-icon>
+                  <span matListItemTitle>{{ step.title }}</span>
+                  <span matListItemLine>{{ step.summary }}</span>
+                </mat-list-item>
+              }
+            </mat-list>
+          }
+          @if ((updatePlan()?.blockers?.length ?? 0) > 0) {
+            <mat-list>
+              @for (blocker of updatePlan()?.blockers ?? []; track blocker.id) {
+                <mat-list-item>
+                  <mat-icon matListItemIcon>block</mat-icon>
+                  <span matListItemTitle>{{ blocker.id }}</span>
+                  <span matListItemLine>{{ blocker.summary }}</span>
+                </mat-list-item>
+              }
+            </mat-list>
+          }
+          @if ((updateInstallPlan()?.blockers?.length ?? 0) > 0) {
+            <mat-list>
+              @for (blocker of updateInstallPlan()?.blockers ?? []; track blocker.id) {
+                <mat-list-item>
+                  <mat-icon matListItemIcon>block</mat-icon>
+                  <span matListItemTitle>{{ blocker.id }}</span>
+                  <span matListItemLine>{{ blocker.summary }}</span>
+                </mat-list-item>
+              }
+            </mat-list>
+          }
+          @if ((updateCheck()?.validation?.errors?.length ?? 0) > 0) {
+            <mat-list>
+              @for (error of updateCheck()?.validation?.errors ?? []; track error) {
+                <mat-list-item>
+                  <mat-icon matListItemIcon>error</mat-icon>
+                  <span matListItemTitle>Catalog error</span>
+                  <span matListItemLine>{{ error }}</span>
+                </mat-list-item>
+              }
+            </mat-list>
+          }
+        </div>
+      </section>
+    </mat-tab>
+
+    <mat-tab label="Services">
+      <section class="services-layout">
+        <div class="panel readiness-panel">
+          <div>
+            <h2>Start Readiness</h2>
+            <p>{{ startReadiness().summary }}</p>
+          </div>
+          <mat-chip-set aria-label="Start readiness">
+            <mat-chip>{{ startReadiness().status }}</mat-chip>
+          </mat-chip-set>
+        </div>
+        <div class="panel service-contract-panel">
+          <div class="traffic-header">
+            <h2>Launch Contract</h2>
+            <div class="service-controls">
+              <span class="service-control-label">Stack</span>
+              <button mat-icon-button matTooltip="Preview start" aria-label="Preview start" (click)="refreshServiceAction('start-stack')">
+                <mat-icon>play_arrow</mat-icon>
+              </button>
+              <button mat-icon-button color="primary" matTooltip="Start configured service" aria-label="Start configured service" [disabled]="!serviceCanStart()" (click)="startStackService()">
+                <mat-icon>rocket_launch</mat-icon>
+              </button>
+              <button mat-icon-button matTooltip="Preview stop" aria-label="Preview stop" (click)="refreshServiceAction('stop-stack')">
+                <mat-icon>stop</mat-icon>
+              </button>
+              <button mat-icon-button color="warn" matTooltip="Stop configured service" aria-label="Stop configured service" [disabled]="!serviceCanStop()" (click)="stopStackService()">
+                <mat-icon>stop_circle</mat-icon>
+              </button>
+              <button mat-icon-button matTooltip="Preview restart" aria-label="Preview restart" (click)="refreshServiceAction('restart-stack')">
+                <mat-icon>restart_alt</mat-icon>
+              </button>
+              <button mat-icon-button color="primary" matTooltip="Restart configured service" aria-label="Restart configured service" [disabled]="!serviceCanRestart()" (click)="restartStackService()">
+                <mat-icon>published_with_changes</mat-icon>
+              </button>
+              <span class="service-control-label">Alloy</span>
+              <button mat-icon-button matTooltip="Preview Alloy start" aria-label="Preview Alloy start" (click)="refreshServiceAction('start-alloy')">
+                <mat-icon>play_arrow</mat-icon>
+              </button>
+              <button mat-icon-button color="primary" matTooltip="Start Alloy" aria-label="Start Alloy" [disabled]="!alloyCanStart()" (click)="startAlloyService()">
+                <mat-icon>rocket_launch</mat-icon>
+              </button>
+              <button mat-icon-button matTooltip="Preview Alloy stop" aria-label="Preview Alloy stop" (click)="refreshServiceAction('stop-alloy')">
+                <mat-icon>stop</mat-icon>
+              </button>
+              <button mat-icon-button color="warn" matTooltip="Stop Alloy" aria-label="Stop Alloy" [disabled]="!alloyCanStop()" (click)="stopAlloyService()">
+                <mat-icon>stop_circle</mat-icon>
+              </button>
+              <button mat-icon-button matTooltip="Preview Alloy restart" aria-label="Preview Alloy restart" (click)="refreshServiceAction('restart-alloy')">
+                <mat-icon>restart_alt</mat-icon>
+              </button>
+              <button mat-icon-button color="primary" matTooltip="Restart Alloy" aria-label="Restart Alloy" [disabled]="!alloyCanRestart()" (click)="restartAlloyService()">
+                <mat-icon>published_with_changes</mat-icon>
+              </button>
+            </div>
+          </div>
+          <div class="artifact-grid service-contract-grid">
+            <span>Status</span><strong>{{ serviceAction()?.status || 'pending' }}</strong>
+            <span>Action</span><strong>{{ serviceAction()?.actionId || 'start-stack' }}</strong>
+            <span>Command</span><strong>{{ serviceAction()?.command?.display || 'not configured' }}</strong>
+            <span>Log</span><strong>{{ serviceAction()?.paths?.logPath || 'pending' }}</strong>
+            <span>Journal</span><strong>{{ serviceAction()?.paths?.journalPath || 'pending' }}</strong>
+            <span>PID file</span><strong>{{ serviceAction()?.paths?.pidPath || 'pending' }}</strong>
+            <span>PID</span><strong>{{ serviceAction()?.process?.pid || 'pending' }}</strong>
+            <span>Owned PID</span><strong>{{ serviceAction()?.ownedProcess?.pid || 'pending' }}</strong>
+            <span>Started</span><strong>{{ serviceAction()?.startedAt || 'pending' }}</strong>
+            <span>Stopped</span><strong>{{ serviceAction()?.stoppedAt || 'pending' }}</strong>
+            <span>Restarted</span><strong>{{ serviceAction()?.restartedAt || 'pending' }}</strong>
+            <span>Stop result</span><strong>{{ serviceAction()?.stop?.status || 'pending' }}</strong>
+            <span>Journal written</span><strong>{{ serviceAction()?.journal?.written === true ? 'yes' : serviceAction()?.journal?.written === false ? 'no' : 'pending' }}</strong>
+          </div>
+          @if ((serviceAction()?.blockers?.length ?? 0) > 0) {
+            <mat-list>
+              @for (blocker of serviceAction()?.blockers ?? []; track blocker.id) {
+                <mat-list-item>
+                  <mat-icon matListItemIcon>block</mat-icon>
+                  <span matListItemTitle>{{ blocker.id }}</span>
+                  <span matListItemLine>{{ blocker.summary }}</span>
+                </mat-list-item>
+              }
+            </mat-list>
+          }
+          @if ((serviceAction()?.errors?.length ?? 0) > 0) {
+            <mat-list>
+              @for (error of serviceAction()?.errors ?? []; track error.message) {
+                <mat-list-item>
+                  <mat-icon matListItemIcon>error</mat-icon>
+                  <span matListItemTitle>Service error</span>
+                  <span matListItemLine>{{ error.message }}</span>
+                </mat-list-item>
+              }
+            </mat-list>
+          }
+        </div>
+        <div class="panel port-panel">
+          <h2>Configured Ports</h2>
+          <mat-list>
+            @for (port of portDiagnostics(); track port.id) {
+              <mat-list-item>
+                <mat-icon matListItemIcon>{{ port.status === 'available' ? 'check_circle' : port.status === 'in-use' ? 'error' : 'help' }}</mat-icon>
+                <span matListItemTitle>{{ port.label }} / {{ port.protocol.toUpperCase() }} {{ port.port || 'none' }}</span>
+                <span matListItemLine>{{ port.summary }}</span>
+              </mat-list-item>
+            }
+          </mat-list>
+        </div>
+        <div class="health-grid">
+          @for (check of healthChecks(); track check.id) {
+            <mat-card class="health-card" [class]="check.status">
+              <mat-card-header>
+                <mat-icon mat-card-avatar>{{ check.status === 'healthy' ? 'check_circle' : 'error' }}</mat-icon>
+                <mat-card-title>{{ check.component }}</mat-card-title>
+                <mat-card-subtitle>{{ check.id }}</mat-card-subtitle>
+              </mat-card-header>
+              <mat-card-content>{{ check.summary }}</mat-card-content>
+              @if (check.evidence?.length) {
+                <mat-card-content class="evidence-line">{{ check.evidence[0] }}</mat-card-content>
+              }
+              <mat-card-actions>
+                <button mat-button>
+                  <mat-icon>article</mat-icon>
+                  Logs
+                </button>
+                <button mat-button>
+                  <mat-icon>build</mat-icon>
+                  {{ check.nextAction || 'Inspect' }}
+                </button>
+              </mat-card-actions>
+            </mat-card>
+          }
+        </div>
+      </section>
+    </mat-tab>
+
+    <mat-tab label="Telemetry">
+      <section class="panel-grid">
+        <div class="panel">
+          <h2>Grafana Cloud</h2>
+          <div class="artifact-grid telemetry-summary">
+            <span>Status</span><strong>{{ telemetryStatus() }}</strong>
+            <span>Dashboard</span><strong>{{ telemetryPlan()?.dashboard?.dashboardUid || 'pending' }}</strong>
+            <span>Version</span><strong>{{ telemetryPlan()?.dashboard?.dashboardVersion || 'pending' }}</strong>
+            <span>Import</span><strong>{{ dashboardImportStatus() }}</strong>
+          </div>
+          <div class="form-grid">
+            <mat-form-field appearance="outline">
+              <mat-label>Remote write URL</mat-label>
+              <input matInput placeholder="https://prometheus-prod...">
+            </mat-form-field>
+            <mat-form-field appearance="outline">
+              <mat-label>Instance label</mat-label>
+              <input matInput value="local">
+            </mat-form-field>
+          </div>
+          <div class="profile-actions telemetry-actions">
+            <button mat-flat-button color="primary" (click)="refreshDashboardImportPlan()">
+              <mat-icon>cloud_upload</mat-icon>
+              Prepare Import
+            </button>
+            <button mat-button (click)="writeDashboardImportPayload()">
+              <mat-icon>save_as</mat-icon>
+              Write Payload
+            </button>
+            <button mat-button color="primary" (click)="uploadDashboardImport()">
+              <mat-icon>cloud_done</mat-icon>
+              Upload Dashboard
+            </button>
+          </div>
+        </div>
+        <div class="panel dashboard-import-panel">
+          <div class="traffic-header">
+            <h2>Dashboard Import</h2>
+            <button mat-icon-button matTooltip="Open Grafana dashboard" aria-label="Open Grafana dashboard" [disabled]="!dashboardCanOpen()" (click)="openDashboard()">
+              <mat-icon>open_in_new</mat-icon>
+            </button>
+          </div>
+          <div class="artifact-grid dashboard-import-grid">
+            <span>Status</span><strong>{{ dashboardImportStatus() }}</strong>
+            <span>Endpoint</span><strong>{{ dashboardImportPlan()?.request?.url || dashboardImportPlan()?.request?.apiPath || 'pending' }}</strong>
+            <span>Payload</span><strong>{{ dashboardImportPlan()?.request?.outputPath || 'pending' }}</strong>
+            <span>Write</span><strong>{{ dashboardImportWriteStatus() }}</strong>
+            <span>Upload</span><strong>{{ dashboardImportUploadStatus() }}</strong>
+            <span>Token env</span><strong>{{ dashboardImportPlan()?.request?.tokenEnvRef || 'BMF_GRAFANA_API_TOKEN' }}</strong>
+            <span>Token</span><strong>{{ dashboardImportSecretStatus() }}</strong>
+            <span>SHA256</span><strong>{{ dashboardImportPlan()?.payloadSummary?.sha256 || 'pending' }}</strong>
+            <span>Bytes</span><strong>{{ dashboardImportWrite()?.bytes || dashboardImportPlan()?.payloadSummary?.bytes || 'pending' }}</strong>
+            <span>HTTP</span><strong>{{ dashboardImportUpload()?.response?.status || 'pending' }}</strong>
+            <span>Dashboard URL</span><strong>{{ dashboardOpenUrl() || 'pending' }}</strong>
+          </div>
+          @if ((dashboardImportUpload()?.errors?.length ?? 0) > 0) {
+            <mat-list>
+              @for (error of dashboardImportUpload()?.errors ?? []; track error) {
+                <mat-list-item>
+                  <mat-icon matListItemIcon>error</mat-icon>
+                  <span matListItemTitle>Upload error</span>
+                  <span matListItemLine>{{ error }}</span>
+                </mat-list-item>
+              }
+            </mat-list>
+          }
+          <pre class="command-output">{{ dashboardImportPlan()?.request?.commands?.powershell || 'Dashboard import command pending' }}</pre>
+        </div>
+        <div class="panel">
+          <div class="traffic-header">
+            <h2>Alloy</h2>
+            <button mat-icon-button matTooltip="Write Alloy config" aria-label="Write Alloy config" (click)="writeTelemetryAlloyConfig()">
+              <mat-icon>save_as</mat-icon>
+            </button>
+          </div>
+          <div class="artifact-grid telemetry-summary">
+            <span>Write</span><strong>{{ telemetryAlloyWriteStatus() }}</strong>
+            <span>Output</span><strong>{{ telemetryAlloyWrite()?.outputPath || telemetryPlan()?.alloy?.outputPath || 'pending' }}</strong>
+            <span>Bytes</span><strong>{{ telemetryAlloyWrite()?.bytes || 'pending' }}</strong>
+            <span>SHA256</span><strong>{{ telemetryAlloyWrite()?.sha256 || telemetryPlan()?.alloy?.configSha256 || 'pending' }}</strong>
+          </div>
+          <mat-list>
+            <mat-list-item>
+              <mat-icon matListItemIcon>dns</mat-icon>
+              <span matListItemTitle>Ready endpoint</span>
+              <span matListItemLine>{{ telemetryPlan()?.alloy?.readyUrl || 'http://127.0.0.1:12345/-/ready' }}</span>
+            </mat-list-item>
+            <mat-list-item>
+              <mat-icon matListItemIcon>analytics</mat-icon>
+              <span matListItemTitle>Metrics target</span>
+              <span matListItemLine>{{ telemetryPlan()?.alloy?.metricsUrl || 'http://127.0.0.1:8080/metrics' }}</span>
+            </mat-list-item>
+            <mat-list-item>
+              <mat-icon matListItemIcon>description</mat-icon>
+              <span matListItemTitle>Config output</span>
+              <span matListItemLine>{{ telemetryPlan()?.alloy?.outputPath || 'Profile path not configured' }}</span>
+            </mat-list-item>
+          </mat-list>
+        </div>
+        <div class="panel">
+          <h2>Labels</h2>
+          <mat-chip-set aria-label="Telemetry labels">
+            @for (label of telemetryLabels(); track label[0]) {
+              <mat-chip>{{ label[0] }}={{ label[1] }}</mat-chip>
+            }
+          </mat-chip-set>
+        </div>
+        <div class="panel">
+          <h2>Secret Refs</h2>
+          <mat-list>
+            @for (secret of telemetryPlan()?.alloy?.secretStatus ?? []; track secret.ref) {
+              <mat-list-item>
+                <mat-icon matListItemIcon>{{ secret.configured ? 'lock' : 'lock_open' }}</mat-icon>
+                <span matListItemTitle>{{ secret.ref }}</span>
+                <span matListItemLine>{{ secret.configured ? 'Configured in environment' : 'Missing from environment' }}</span>
+              </mat-list-item>
+            }
+          </mat-list>
+        </div>
+      </section>
+    </mat-tab>
+
+    <mat-tab label="Traffic">
+      <section class="traffic-layout">
+        <div class="panel traffic-main-panel">
+          <div class="traffic-header">
+            <h2>Event Traffic</h2>
+            <div class="traffic-controls">
+              <mat-slide-toggle [ngModel]="trafficLiveEnabled()" (ngModelChange)="toggleTrafficLive($event)">
+                Live
+              </mat-slide-toggle>
+              <button mat-icon-button matTooltip="Refresh traffic" aria-label="Refresh traffic" (click)="refreshTraffic()">
+                <mat-icon>sync</mat-icon>
+              </button>
+              <button mat-icon-button [matTooltip]="trafficPaused() ? 'Resume' : 'Pause'" [attr.aria-label]="trafficPaused() ? 'Resume traffic' : 'Pause traffic'" (click)="toggleTrafficPause()">
+                <mat-icon>{{ trafficPaused() ? 'play_arrow' : 'pause' }}</mat-icon>
+              </button>
+              <button mat-icon-button matTooltip="Copy redacted trace" aria-label="Copy redacted trace" (click)="copyTrafficTrace()">
+                <mat-icon>content_copy</mat-icon>
+              </button>
+              <button mat-icon-button matTooltip="Export redacted trace" aria-label="Export redacted trace" (click)="exportTrafficTrace()">
+                <mat-icon>ios_share</mat-icon>
+              </button>
+              <button mat-icon-button matTooltip="Clear" aria-label="Clear traffic" (click)="clearTraffic()">
+                <mat-icon>delete_sweep</mat-icon>
+              </button>
+            </div>
+          </div>
+          <div class="traffic-filters">
+            <mat-form-field appearance="outline">
+              <mat-label>Event, command, payload</mat-label>
+              <input matInput [ngModel]="trafficFilterText()" (ngModelChange)="setTrafficFilterText($event)">
+            </mat-form-field>
+            <mat-form-field appearance="outline">
+              <mat-label>Transport</mat-label>
+              <mat-select [ngModel]="trafficTransportFilter()" (ngModelChange)="setTrafficTransportFilter($event)">
+                <mat-option value="all">All transports</mat-option>
+                @for (transport of trafficTransports(); track transport) {
+                  <mat-option [value]="transport">{{ transport }}</mat-option>
+                }
+              </mat-select>
+            </mat-form-field>
+            <mat-form-field appearance="outline">
+              <mat-label>Status</mat-label>
+              <mat-select [ngModel]="trafficStatusFilter()" (ngModelChange)="setTrafficStatusFilter($event)">
+                <mat-option value="all">All statuses</mat-option>
+                @for (status of trafficStatuses(); track status) {
+                  <mat-option [value]="status">{{ status }}</mat-option>
+                }
+              </mat-select>
+            </mat-form-field>
+            <mat-form-field appearance="outline">
+              <mat-label>Source</mat-label>
+              <mat-select [ngModel]="trafficSourceFilter()" (ngModelChange)="setTrafficSourceFilter($event)">
+                <mat-option value="all">All sources</mat-option>
+                @for (source of trafficSourceNames(); track source) {
+                  <mat-option [value]="source">{{ source }}</mat-option>
+                }
+              </mat-select>
+            </mat-form-field>
+            <mat-form-field appearance="outline">
+              <mat-label>Plugin or consumer</mat-label>
+              <input matInput [ngModel]="trafficPluginFilter()" (ngModelChange)="setTrafficPluginFilter($event)">
+            </mat-form-field>
+          </div>
+          <div class="traffic-summary">
+            <div class="metric">
+              <span>Retained</span>
+              <strong>{{ trafficSummary().retained }}</strong>
+            </div>
+            <div class="metric">
+              <span>Filtered</span>
+              <strong>{{ filteredEventRecords().length }}</strong>
+            </div>
+            <div class="metric">
+              <span>Dropped</span>
+              <strong>{{ trafficSummary().dropped }}</strong>
+            </div>
+            <div class="metric">
+              <span>Socket</span>
+              <strong>{{ trafficSocketState() }}</strong>
+            </div>
+            <div class="metric">
+              <span>Live</span>
+              <strong>{{ trafficLiveStatus() }}</strong>
+            </div>
+            <div class="metric">
+              <span>Last</span>
+              <strong>{{ trafficLastRefresh() || 'pending' }}</strong>
+            </div>
+            <div class="metric">
+              <span>Redactions</span>
+              <strong>{{ trafficSummary().redactions }}</strong>
+            </div>
+            <div class="metric">
+              <span>Export</span>
+              <strong>{{ trafficExportStatus() }}</strong>
+            </div>
+          </div>
+          <div class="table-frame">
+            <table mat-table [dataSource]="paginatedEventRecords()" class="traffic-table">
+              <ng-container matColumnDef="timestamp">
+                <th mat-header-cell *matHeaderCellDef>Time</th>
+                <td mat-cell *matCellDef="let row">{{ row.timestamp }}</td>
+              </ng-container>
+              <ng-container matColumnDef="type">
+                <th mat-header-cell *matHeaderCellDef>Type</th>
+                <td mat-cell *matCellDef="let row">{{ row.type }}</td>
+              </ng-container>
+              <ng-container matColumnDef="event">
+                <th mat-header-cell *matHeaderCellDef>Event</th>
+                <td mat-cell *matCellDef="let row">{{ row.event || row.command || '-' }}</td>
+              </ng-container>
+              <ng-container matColumnDef="transport">
+                <th mat-header-cell *matHeaderCellDef>Transport</th>
+                <td mat-cell *matCellDef="let row">{{ row.transport }}</td>
+              </ng-container>
+              <ng-container matColumnDef="status">
+                <th mat-header-cell *matHeaderCellDef>Status</th>
+                <td mat-cell *matCellDef="let row">{{ row.status }}</td>
+              </ng-container>
+              <ng-container matColumnDef="source">
+                <th mat-header-cell *matHeaderCellDef>Source</th>
+                <td mat-cell *matCellDef="let row">{{ row.source }}</td>
+              </ng-container>
+              <ng-container matColumnDef="consumer">
+                <th mat-header-cell *matHeaderCellDef>Consumer</th>
+                <td mat-cell *matCellDef="let row">{{ row.consumer || '-' }}</td>
+              </ng-container>
+              <tr mat-header-row *matHeaderRowDef="displayedEventColumns"></tr>
+              <tr mat-row *matRowDef="let row; columns: displayedEventColumns;" (click)="selectTrafficRecord(row)" [class.selected-row]="selectedTrafficRecord()?.rowId === row.rowId" [attr.aria-selected]="selectedTrafficRecord()?.rowId === row.rowId"></tr>
+            </table>
+          </div>
+          <div class="pagination-bar" aria-label="Traffic pagination">
+            <span>{{ trafficPageSummary() }}</span>
+            <button mat-icon-button matTooltip="Newer traffic" aria-label="Newer traffic" [disabled]="trafficPageIndex() === 0" (click)="setTrafficPage(-1)">
+              <mat-icon>chevron_left</mat-icon>
+            </button>
+            <strong>{{ trafficPageIndex() + 1 }} / {{ trafficPageCount() }}</strong>
+            <button mat-icon-button matTooltip="Older traffic" aria-label="Older traffic" [disabled]="trafficPageIndex() + 1 >= trafficPageCount()" (click)="setTrafficPage(1)">
+              <mat-icon>chevron_right</mat-icon>
+            </button>
+          </div>
+        </div>
+        <div class="panel traffic-detail-panel">
+          <div class="traffic-header">
+            <h2>Payload</h2>
+            <button mat-icon-button matTooltip="Copy selected payload" aria-label="Copy selected payload" (click)="copySelectedTrafficPayload()">
+              <mat-icon>content_copy</mat-icon>
+            </button>
+          </div>
+          <div class="artifact-grid">
+            <span>Type</span><strong>{{ selectedTrafficRecord()?.type || 'none' }}</strong>
+            <span>Event</span><strong>{{ selectedTrafficRecord()?.event || selectedTrafficRecord()?.command || 'none' }}</strong>
+            <span>Source</span><strong>{{ selectedTrafficRecord()?.source || 'none' }}</strong>
+            <span>Transport</span><strong>{{ selectedTrafficRecord()?.transport || 'none' }}</strong>
+            <span>Status</span><strong>{{ selectedTrafficRecord()?.status || 'none' }}</strong>
+            <span>Consumer</span><strong>{{ selectedTrafficRecord()?.consumer || 'none' }}</strong>
+            <span>Duration</span><strong>{{ selectedTrafficRecord()?.durationMs ?? 'n/a' }}</strong>
+            <span>Redactions</span><strong>{{ selectedTrafficRecord()?.redactions ?? 0 }}</strong>
+            <span>Export path</span><strong>{{ trafficTraceExport()?.outputPath || 'not exported' }}</strong>
+          </div>
+          <pre class="payload-output">{{ selectedTrafficPayload() }}</pre>
+        </div>
+        <div class="panel traffic-source-panel">
+          <h2>Sources</h2>
+          <mat-list>
+            @for (source of trafficSources(); track source.id) {
+              <mat-list-item>
+                <mat-icon matListItemIcon>{{ source.exists ? 'sensors' : 'sensors_off' }}</mat-icon>
+                <span matListItemTitle>{{ source.id }} / {{ source.records }} record(s)</span>
+                <span matListItemLine>{{ source.path || 'Not configured' }}</span>
+              </mat-list-item>
+            }
+          </mat-list>
+        </div>
+      </section>
+    </mat-tab>
+
+    <mat-tab label="Snapshots">
+      <section class="panel-grid">
+        <div class="panel">
+          <div class="traffic-header">
+            <h2>Troubleshooting Snapshot</h2>
+            <div class="service-controls">
+              <button mat-icon-button matTooltip="Preview troubleshooting snapshot" aria-label="Preview troubleshooting snapshot" (click)="refreshTroubleshootingSnapshot()">
+                <mat-icon>fact_check</mat-icon>
+              </button>
+              <button mat-icon-button color="primary" matTooltip="Write troubleshooting snapshot" aria-label="Write troubleshooting snapshot" (click)="writeTroubleshootingSnapshot()">
+                <mat-icon>archive</mat-icon>
+              </button>
+            </div>
+          </div>
+          <div class="artifact-grid">
+            <span>Status</span><strong>{{ snapshotStatus() }}</strong>
+            <span>Health</span><strong>{{ snapshotSummary().healthStatus }}</strong>
+            <span>Health checks</span><strong>{{ snapshotSummary().healthChecks }}</strong>
+            <span>Log records</span><strong>{{ snapshotSummary().logRecords }}</strong>
+            <span>Traffic records</span><strong>{{ snapshotSummary().trafficRecords }}</strong>
+            <span>Files</span><strong>{{ snapshotSummary().copiedFiles }}</strong>
+            <span>Log tails</span><strong>{{ snapshotSummary().copiedLogs }}</strong>
+            <span>Doctor</span><strong>{{ snapshotSummary().doctorStatus || 'not included' }}</strong>
+            <span>Root</span><strong>{{ troubleshootingSnapshot()?.root || 'pending' }}</strong>
+            <span>Snapshot file</span><strong>{{ troubleshootingSnapshot()?.files?.snapshot || 'pending' }}</strong>
+            <span>Health file</span><strong>{{ troubleshootingSnapshot()?.files?.health || 'pending' }}</strong>
+            <span>Logs file</span><strong>{{ troubleshootingSnapshot()?.files?.logs || 'pending' }}</strong>
+            <span>Traffic file</span><strong>{{ troubleshootingSnapshot()?.files?.traffic || 'pending' }}</strong>
+            <span>Readme</span><strong>{{ troubleshootingSnapshot()?.files?.readme || 'pending' }}</strong>
+          </div>
+        </div>
+        <div class="panel">
+          <h2>Copied Files</h2>
+          <mat-list>
+            @for (file of snapshotCopiedFiles(); track file.snapshotPath) {
+              <mat-list-item>
+                <mat-icon matListItemIcon>description</mat-icon>
+                <span matListItemTitle>{{ file.snapshotPath }}</span>
+                <span matListItemLine>{{ file.source }}</span>
+              </mat-list-item>
+            }
+          </mat-list>
+          <mat-divider></mat-divider>
+          <h2 class="paths-heading">Log Tails</h2>
+          <mat-list>
+            @for (file of snapshotCopiedLogs(); track file.snapshotPath) {
+              <mat-list-item>
+                <mat-icon matListItemIcon>article</mat-icon>
+                <span matListItemTitle>{{ file.snapshotPath }}</span>
+                <span matListItemLine>{{ file.source }}</span>
+              </mat-list-item>
+            }
+          </mat-list>
+        </div>
+      </section>
+    </mat-tab>
+
+    <mat-tab label="Logs">
+      <section class="logs-layout">
+        <div class="panel">
+          <div class="traffic-header">
+            <h2>Log Snapshot</h2>
+            <button mat-icon-button matTooltip="Refresh logs" aria-label="Refresh logs" (click)="refreshLogs()">
+              <mat-icon>sync</mat-icon>
+            </button>
+          </div>
+          <div class="traffic-summary">
+            <div class="metric">
+              <span>Retained</span>
+              <strong>{{ logSummary().retained }}</strong>
+            </div>
+            <div class="metric">
+              <span>Sources</span>
+              <strong>{{ logSummary().existingSources }}/{{ logSummary().sources }}</strong>
+            </div>
+            <div class="metric">
+              <span>Errors</span>
+              <strong>{{ logSummary().parseErrors }}</strong>
+            </div>
+            <div class="metric">
+              <span>Redactions</span>
+              <strong>{{ logSummary().redactions }}</strong>
+            </div>
+          </div>
+          <div class="pagination-bar" aria-label="Log pagination">
+            <span>{{ runtimeLogPageSummary() }}</span>
+            <button mat-icon-button matTooltip="Newer logs" aria-label="Newer logs" [disabled]="runtimeLogPageIndex() === 0" (click)="setRuntimeLogPage(-1)">
+              <mat-icon>chevron_left</mat-icon>
+            </button>
+            <strong>{{ runtimeLogPageIndex() + 1 }} / {{ runtimeLogPageCount() }}</strong>
+            <button mat-icon-button matTooltip="Older logs" aria-label="Older logs" [disabled]="runtimeLogPageIndex() + 1 >= runtimeLogPageCount()" (click)="setRuntimeLogPage(1)">
+              <mat-icon>chevron_right</mat-icon>
+            </button>
+          </div>
+          <pre class="log-output">@for (line of paginatedRuntimeLogLines(); track line) {
+{{ line }}
+}</pre>
+        </div>
+        <div class="panel">
+          <h2>Sources</h2>
+          <mat-list class="log-sources">
+            @for (source of logSnapshotSources(); track source.id) {
+              <mat-list-item>
+                <mat-icon matListItemIcon>{{ source.exists ? 'article' : 'description' }}</mat-icon>
+                <span matListItemTitle>{{ source.component }} / {{ source.id }}</span>
+                <span matListItemLine>{{ source.path || 'Not configured' }}</span>
+              </mat-list-item>
+            }
+          </mat-list>
+        </div>
+        <div class="panel action-log-panel">
+          <h2>Action Log</h2>
+          <pre class="log-output action-log-output">@for (line of logLines(); track line) {
+{{ line }}
+}</pre>
+        </div>
+      </section>
+    </mat-tab>
+  </mat-tab-group>
+</main>

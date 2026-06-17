@@ -1,0 +1,65 @@
+appId: dev.bmf.desktop
+productName: BMF Desktop
+artifactName: BMF-Desktop-${version}-${arch}.${ext}
+directories:
+  output: dist/release
+  buildResources: build
+files:
+  - electron/**/*
+  - dist/bmf-desktop/**/*
+  - package.json
+  - node_modules/@bmf/orchestrator-core/**/*
+extraResources:
+  - from: ../../manifests
+    to: bmf/manifests
+    filter:
+      - "**/*"
+  - from: ../../framework/ue4ss/Mods
+    to: bmf/framework/ue4ss/Mods
+    filter:
+      - BMF/**/*
+      - BMFSocket/**/*
+      - BMFFrameTelemetry/**/*
+  - from: ../../packages
+    to: bmf/packages
+    filter:
+      - orchestrator-core/**/*
+      - bmf-runtime/**/*
+      - bmf-native-socket/**/*
+      - bmf-frame-telemetry/**/*
+      - omegga-runtime/**/*
+      - omegga-plugins/**/*
+  - from: ../../cli
+    to: bmf/cli
+    filter:
+      - bin/**/*
+      - src/**/*
+      - package.json
+      - README.md
+  - from: packaged-assets
+    to: bmf/apps/bmf-desktop
+    filter:
+      - package.json
+  - from: packaged-assets/bin
+    to: bmf/bin
+    filter:
+      - "**/*"
+  - from: ../../compat
+    to: bmf/compat
+    filter:
+      - "**/*"
+  - from: ../../observability
+    to: bmf/observability
+    filter:
+      - "**/*"
+asar: true
+win:
+  icon: build/icon.ico
+  target:
+    - target: msi
+      arch:
+        - x64
+msi:
+  oneClick: false
+  perMachine: true
+  shortcutName: BMF Desktop

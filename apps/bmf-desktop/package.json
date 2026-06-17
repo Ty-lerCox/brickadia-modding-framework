@@ -1,0 +1,43 @@
+{
+  "name": "@bmf/desktop",
+  "version": "0.1.0-dev",
+  "private": true,
+  "description": "BMF Desktop operations console for managing local Brickadia/Omegga/BMF server profiles.",
+  "author": "BMF",
+  "main": "electron/main.cjs",
+  "engines": {
+    "node": "^22.22.3 || ^24.15.0 || >=26.0.0"
+  },
+  "scripts": {
+    "start": "ng serve --host 127.0.0.1 --port 4200",
+    "build:renderer": "ng build --configuration production",
+    "build": "npm run build:renderer",
+    "electron:dev": "set BMF_DESKTOP_DEV_SERVER_URL=http://127.0.0.1:4200&& electron .",
+    "dist:msi": "npm run build && electron-builder --win msi --x64",
+    "release:local": "powershell -NoProfile -ExecutionPolicy Bypass -File ..\\..\\scripts\\build-bmf-desktop-release.ps1 -BuildMsi -Force",
+    "validate": "powershell -NoProfile -ExecutionPolicy Bypass -File ..\\..\\scripts\\validate-bmf-desktop.ps1"
+  },
+  "dependencies": {
+    "@angular/animations": "22.0.1",
+    "@angular/cdk": "22.0.1",
+    "@angular/common": "22.0.1",
+    "@angular/compiler": "22.0.1",
+    "@angular/core": "22.0.1",
+    "@angular/forms": "22.0.1",
+    "@angular/material": "22.0.1",
+    "@angular/platform-browser": "22.0.1",
+    "@angular/router": "22.0.1",
+    "@bmf/orchestrator-core": "file:../../packages/orchestrator-core",
+    "rxjs": "7.8.2",
+    "tslib": "2.8.1",
+    "zone.js": "0.16.2"
+  },
+  "devDependencies": {
+    "@angular-devkit/build-angular": "22.0.1",
+    "@angular/cli": "22.0.1",
+    "@angular/compiler-cli": "22.0.1",
+    "electron": "42.4.1",
+    "electron-builder": "26.15.3",
+    "typescript": "6.0.3"
+  }
+}

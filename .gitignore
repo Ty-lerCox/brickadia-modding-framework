@@ -13,7 +13,13 @@ build/
 *.zip
 *.7z
 
+# BMF Desktop source build resources
+!apps/bmf-desktop/build/
+!apps/bmf-desktop/build/icon.ico
+
 # Local dependency caches
+node_modules/
+.angular/
 .venv/
 venv/
 __pycache__/

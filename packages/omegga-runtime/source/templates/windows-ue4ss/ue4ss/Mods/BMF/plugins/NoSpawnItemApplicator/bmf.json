@@ -1,0 +1,6 @@
+{
+  "name": "NoSpawnItemApplicator",
+  "version": "0.1.0",
+  "description": "Policy-ready guard that denies SpawnItem applicator components while keeping applicator permissions allowed.",
+  "capabilities": ["tools.applicator", "chat.whisper", "chat.broadcast", "plugins.storage"]
+}

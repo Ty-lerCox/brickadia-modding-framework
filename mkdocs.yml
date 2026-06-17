@@ -41,6 +41,16 @@ nav:
   - Home: index.md
   - Status: status.md
   - Changelog: changelog.md
+  - Roadmap:
+      - Overview: roadmap/index.md
+      - BMF Unified Runtime Goal: roadmap/goal.md
+      - Monorepo Consolidation: roadmap/monorepo-consolidation.md
+      - Phase Plan: roadmap/phase-plan.md
+      - BMF Desktop Control Panel: roadmap/bmf-desktop-control-panel.md
+      - Service Health Model: roadmap/service-health-model.md
+      - Grafana Onboarding: roadmap/grafana-onboarding.md
+      - Event Traffic Inspector: roadmap/event-traffic-inspector.md
+      - Release Artifacts: roadmap/release-artifacts.md
   - Getting Started:
       - First Plugin: getting-started/first-plugin.md
       - Windows Install: install/windows.md

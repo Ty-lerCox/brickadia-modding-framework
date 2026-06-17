@@ -1,142 +1,43 @@
 const path = require('node:path');
-const fs = require('node:fs');
+const { writeTroubleshootingSnapshot } = require('../../packages/orchestrator-core/src');
 const { publicContext, resolveContext } = require('./context');
-const {
-  ensureDir,
-  exists,
-  isDirectory,
-  listFilesRecursive,
-  readText,
-  safeRelative,
-  tailFile,
-  timestamp,
-  writeJson,
-  writeText,
-} = require('./file');
+const { safeRelative, timestamp, writeJson, writeText } = require('./file');
 const { runDoctor } = require('./doctor');
-
-function safeSnapshotName(label) {
-  return String(label || 'file').replace(/^[A-Za-z]:/, '').replace(/[\\/:"*?<>|]+/g, '__');
-}
-
-function writeFileCopy(snapshotRoot, sourcePath, contents, record) {
-  if (!exists(sourcePath)) return;
-  const relative = path.join('files', safeSnapshotName(sourcePath));
-  const destination = path.join(snapshotRoot, relative);
-  ensureDir(path.dirname(destination));
-  writeText(destination, contents ?? readText(sourcePath));
-  record.push({
-    source: sourcePath,
-    snapshotPath: relative.replace(/\\/g, '/'),
-  });
-}
-
-function collectKnownFiles(ctx, snapshotRoot) {
-  const copied = [];
-  const files = [
-    path.join(ctx.bmfRoot, 'manifests', 'bmf-package.json'),
-    path.join(ctx.bmfRoot, 'manifests', 'dependencies.json'),
-    path.join(ctx.bmfRoot, 'manifests', 'compatibility.json'),
-    path.join(ctx.bmfSourceDir, 'bmf.json'),
-    path.join(ctx.bmfSourceDir, 'config.json'),
-    path.join(ctx.omeggaDir, 'package.json'),
-    path.join(ctx.omeggaTemplateModsDir, 'mods.txt'),
-    path.join(ctx.omeggaTemplateModsDir, 'mods.json'),
-    path.join(ctx.omeggaTemplateBmfDir, 'bmf.json'),
-    path.join(ctx.omeggaTemplateBmfDir, 'config.json'),
-  ];
-
-  for (const modsDir of ctx.liveModsDirs) {
-    files.push(path.join(modsDir, 'mods.txt'));
-    files.push(path.join(modsDir, 'mods.json'));
-    files.push(path.join(modsDir, 'BMF', 'bmf.json'));
-    files.push(path.join(modsDir, 'BMF', 'config.json'));
-  }
-
-  if (isDirectory(ctx.compatibilityRoot)) {
-    files.push(
-      ...listFilesRecursive(ctx.compatibilityRoot, filepath => {
-        return ['manifest.json', 'validation-report.json', 'validation-report.md'].includes(
-          path.basename(filepath),
-        );
-      }),
-    );
-  }
-
-  for (const file of Array.from(new Set(files))) {
-    writeFileCopy(snapshotRoot, file, null, copied);
-  }
-
-  return copied;
-}
-
-function collectLogs(ctx, snapshotRoot) {
-  const copied = [];
-  const logCandidates = [];
-  if (isDirectory(ctx.omeggaDir)) {
-    for (const entry of fs.readdirSync(ctx.omeggaDir, { withFileTypes: true })) {
-      const basename = entry.name.toLowerCase();
-      if (entry.isFile() && basename.endsWith('.log')) {
-        logCandidates.push(path.join(ctx.omeggaDir, entry.name));
-      }
-    }
-  }
-  if (ctx.gameWin64Dir) {
-    logCandidates.push(
-      ...listFilesRecursive(path.join(ctx.gameWin64Dir, 'ue4ss'), filepath => {
-        return path.basename(filepath).toLowerCase().endsWith('.log');
-      }),
-    );
-  }
-  if (ctx.savedDir) {
-    const brickadiaLog = path.join(ctx.savedDir, 'Logs', 'Brickadia.log');
-    if (exists(brickadiaLog)) logCandidates.push(brickadiaLog);
-  }
-  for (const dir of ctx.bridgeRuntimeDirs) {
-    logCandidates.push(
-      ...listFilesRecursive(dir, filepath => path.basename(filepath).toLowerCase().endsWith('.log')),
-    );
-  }
-
-  for (const file of Array.from(new Set(logCandidates)).slice(-25)) {
-    const relative = path.join('logs', `${safeSnapshotName(file)}.tail.log`);
-    const destination = path.join(snapshotRoot, relative);
-    ensureDir(path.dirname(destination));
-    writeText(destination, tailFile(file, 300));
-    copied.push({
-      source: file,
-      snapshotPath: relative.replace(/\\/g, '/'),
-      mode: 'tail',
-      lines: 300,
-    });
-  }
-
-  return copied;
-}
+const { profileFromContext } = require('./orchestrator');
 
 function createSnapshot(options = {}) {
   const ctx = resolveContext(options);
+  const profile = profileFromContext(ctx, options);
+  const snapshotRoot = options.snapshotRoot || process.env.BMF_SNAPSHOT_ROOT;
   const outRoot = options.out
     ? path.resolve(options.out)
-    : path.join(ctx.bmfRoot, 'artifacts', 'bmfctl', 'snapshots', timestamp());
-  ensureDir(outRoot);
-
+    : path.join(snapshotRoot ? path.resolve(snapshotRoot) : path.join(ctx.bmfRoot, 'artifacts', 'bmfctl', 'snapshots'), timestamp());
   const doctor = runDoctor(options);
-  const copiedFiles = collectKnownFiles(ctx, outRoot);
-  const copiedLogs = collectLogs(ctx, outRoot);
+
+  const coreSnapshot = writeTroubleshootingSnapshot({ profile }, {
+    root: ctx.bmfRoot,
+    out: outRoot,
+    confirm: 'snapshot',
+    doctorReport: doctor,
+    maxLogLines: options.maxLogLines || options.maxLines || options.limit,
+    maxLogBytes: options.maxLogBytes || options.maxBytes,
+    maxFiles: options.maxFiles,
+    maxTrafficRecords: options.maxTrafficRecords || options.maxRecords || options.limit,
+    maxCommandFiles: options.maxCommandFiles,
+    anonymizePlayers: Boolean(options.anonymizePlayers),
+    redactPrivateIps: Boolean(options.redactPrivateIps),
+  });
+
   const snapshot = {
+    ...coreSnapshot,
     tool: 'bmfctl',
     command: 'snapshot',
-    createdAt: new Date().toISOString(),
-    root: outRoot,
     context: publicContext(ctx),
     doctor: {
       status: doctor.status,
       summary: doctor.summary,
       findings: doctor.findings,
     },
-    copiedFiles,
-    copiedLogs,
   };
 
   writeJson(path.join(outRoot, 'snapshot.json'), snapshot);
@@ -148,8 +49,10 @@ function createSnapshot(options = {}) {
       '',
       `Created: ${snapshot.createdAt}`,
       `Doctor status: ${doctor.status}`,
+      `Health status: ${snapshot.summary.healthStatus}`,
       '',
-      'Files are intentionally copied as diagnostics. Logs are tailed, not copied in full.',
+      'Files are bounded and redacted before export. Logs are tailed, not copied in full.',
+      'No BMF commands or game-server probes were sent to create this snapshot.',
       `Relative root: ${safeRelative(ctx.bmfRoot, outRoot)}`,
       '',
     ].join('\n'),

@@ -1,4 +1,5 @@
 const path = require('node:path');
+const os = require('node:os');
 const { resolveContext } = require('./context');
 const {
   backupDirectory,
@@ -109,9 +110,9 @@ function targetModsDirs(ctx, options = {}) {
   return ctx.liveModsDirs;
 }
 
-function writeRepairLog(ctx, repairId, result, backupRoot, dryRun) {
+function writeRepairLog(ctx, repairId, result, backupRoot, dryRun, options = {}) {
   if (dryRun) return null;
-  const logDir = path.join(ctx.bmfRoot, 'artifacts', 'bmfctl', 'repairs');
+  const logDir = path.join(repairArtifactRoot(ctx, options), 'repairs');
   ensureDir(logDir);
   const logPath = path.join(logDir, `${timestamp()}-${repairId.replace(/[^\w.-]/g, '_')}.json`);
   writeJson(logPath, {
@@ -135,7 +136,9 @@ function repair(repairId, options = {}) {
   }
 
   const dryRun = Boolean(options.dryRun);
-  const backupRoot = path.join(ctx.bmfRoot, 'artifacts', 'bmfctl', 'backups', timestamp());
+  const backupRoot = options.backupRoot
+    ? path.resolve(options.backupRoot)
+    : path.join(repairArtifactRoot(ctx, options), 'backups', timestamp());
   const result = {
     repairId,
     title: definition.title,
@@ -171,7 +174,7 @@ function repair(repairId, options = {}) {
 
     result.targets.push(ctx.startScript);
     if (!dryRun && after !== before) writeText(ctx.startScript, after);
-    result.logPath = writeRepairLog(ctx, repairId, result, backupRoot, dryRun);
+    result.logPath = writeRepairLog(ctx, repairId, result, backupRoot, dryRun, options);
     return result;
   }
 
@@ -210,7 +213,7 @@ function repair(repairId, options = {}) {
     }
   }
 
-  result.logPath = writeRepairLog(ctx, repairId, result, backupRoot, dryRun);
+  result.logPath = writeRepairLog(ctx, repairId, result, backupRoot, dryRun, options);
   return result;
 }
 
@@ -242,3 +245,24 @@ module.exports = {
   repairAll,
   repairIdsFromDoctor,
 };
+
+function repairArtifactRoot(ctx, options = {}) {
+  if (options.repairRoot) return path.resolve(options.repairRoot);
+  if (options.artifactsRoot) return path.resolve(options.artifactsRoot);
+  if (options.journalRoot) return path.join(path.resolve(options.journalRoot), 'bmfctl');
+  if (isInstalledBundleRoot(ctx.bmfRoot)) {
+    return path.join(desktopUserDataRoot(), 'bmfctl');
+  }
+  return path.join(ctx.bmfRoot, 'artifacts', 'bmfctl');
+}
+
+function isInstalledBundleRoot(root) {
+  const normalized = path.resolve(root || '').replace(/\//g, '\\').toLowerCase();
+  return normalized.includes('\\resources\\bmf') || normalized.includes('\\program files\\bmf desktop\\');
+}
+
+function desktopUserDataRoot() {
+  if (process.env.BMF_DESKTOP_USER_DATA) return path.resolve(process.env.BMF_DESKTOP_USER_DATA);
+  if (process.env.APPDATA) return path.join(process.env.APPDATA, 'BMF Desktop');
+  return path.join(os.homedir(), '.bmf-desktop');
+}

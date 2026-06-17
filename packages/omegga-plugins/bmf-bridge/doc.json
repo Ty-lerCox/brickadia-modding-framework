@@ -1,0 +1,100 @@
+{
+  "name": "BMF Bridge",
+  "description": "Generic socket and file-backed BMF command/event bridge for Omegga plugins and BMF Desktop event inspection.",
+  "author": "BMF",
+  "config": {
+    "enabled": {
+      "description": "Enable the bridge plugin.",
+      "default": true,
+      "type": "boolean"
+    },
+    "runtimeDir": {
+      "description": "Path to Mods/BMF/runtime. If blank, OMEGGA_BMF_RUNTIME_DIR, commandDir, or the standard Omegga-managed BMF runtime path is used.",
+      "default": "",
+      "type": "string"
+    },
+    "commandDir": {
+      "description": "Path to Mods/BMF/runtime/commands. If blank, OMEGGA_BMF_COMMAND_DIR or runtimeDir/commands is used.",
+      "default": "",
+      "type": "string"
+    },
+    "eventLogPath": {
+      "description": "Path to Mods/BMF/runtime/events.jsonl. If blank, OMEGGA_BMF_EVENTS_PATH or runtimeDir/events.jsonl is used.",
+      "default": "",
+      "type": "string"
+    },
+    "socketPath": {
+      "description": "Path to Mods/BMF/runtime/socket.json. If blank, runtimeDir/socket.json is used.",
+      "default": "",
+      "type": "string"
+    },
+    "preferredTransport": {
+      "description": "Preferred command/event transport. Use socket to prefer the BMF loopback broker and fall back to files when unavailable.",
+      "default": "socket",
+      "type": "string"
+    },
+    "socketRole": {
+      "description": "Client role sent to the BMF socket broker.",
+      "default": "plugin",
+      "type": "string"
+    },
+    "socketSource": {
+      "description": "Source name sent in socket hello, command, and diagnostics envelopes.",
+      "default": "omegga.bmf-bridge",
+      "type": "string"
+    },
+    "tailEvents": {
+      "description": "Tail runtime/events.jsonl as a fallback event source.",
+      "default": true,
+      "type": "boolean"
+    },
+    "tailEventsWhenSocketConnected": {
+      "description": "Continue tailing events.jsonl while the socket is connected. Disabled by default to avoid duplicate records.",
+      "default": false,
+      "type": "boolean"
+    },
+    "readExistingEventLog": {
+      "description": "Read existing events.jsonl records on startup. Disabled by default so live views begin at current EOF.",
+      "default": false,
+      "type": "boolean"
+    },
+    "eventPollIntervalMs": {
+      "description": "events.jsonl polling interval. Values below 250ms are clamped.",
+      "default": 1000,
+      "type": "number"
+    },
+    "maxReadBytesPerPoll": {
+      "description": "Maximum events.jsonl bytes parsed per poll before dropping ahead to the most recent slice.",
+      "default": 65536,
+      "type": "number"
+    },
+    "maxRecords": {
+      "description": "Maximum normalized records retained in memory for Omegga plugin consumers and BMF Desktop inspection.",
+      "default": 500,
+      "type": "number"
+    },
+    "commandTimeoutMs": {
+      "description": "Timeout for BMF command responses over socket or file fallback.",
+      "default": 5000,
+      "type": "number"
+    },
+    "socketReconnectMs": {
+      "description": "Delay before reconnecting to the BMF socket broker after a disconnect. Set to 0 to disable reconnects.",
+      "default": 2500,
+      "type": "number"
+    },
+    "statusWriteIntervalMs": {
+      "description": "Interval for writing bmf-bridge-status.json. Set to 0 to write only on status changes.",
+      "default": 5000,
+      "type": "number"
+    },
+    "redactPrivateIpsOnExport": {
+      "description": "Also redact private IPv4 addresses in exported or requested sanitized records.",
+      "default": false,
+      "type": "boolean"
+    }
+  },
+  "commands": [
+    "bmfbridge"
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "name": "@bmf/orchestrator-core",
+  "version": "0.1.0-dev",
+  "private": true,
+  "description": "Shared BMF install, profile, health, manifest, and orchestration primitives.",
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "license": "UNLICENSED"
+}

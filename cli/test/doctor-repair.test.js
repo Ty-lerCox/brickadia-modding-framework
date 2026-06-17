@@ -38,6 +38,28 @@ test('repair all applies doctor-selected repairs', () => {
   assert.equal(result.after.status, 'ok');
 });
 
+test('repair writes artifacts to user data for installed Desktop bundles', () => {
+  const env = makeEnvironment();
+  const installedRoot = path.join(env.root, 'Program Files', 'BMF Desktop', 'resources', 'bmf');
+  fs.cpSync(env.bmfRoot, installedRoot, { recursive: true });
+  const previousAppData = process.env.APPDATA;
+  process.env.APPDATA = path.join(env.root, 'AppData', 'Roaming');
+
+  try {
+    const result = repair('bmf.copy', {
+      ...env.options,
+      bmfRoot: installedRoot,
+    });
+    const expectedRoot = path.join(process.env.APPDATA, 'BMF Desktop', 'bmfctl');
+    assert.ok(result.backupRoot.startsWith(path.join(expectedRoot, 'backups')));
+    assert.ok(result.logPath.startsWith(path.join(expectedRoot, 'repairs')));
+    assert.equal(fs.existsSync(path.join(installedRoot, 'artifacts')), false);
+  } finally {
+    if (previousAppData === undefined) delete process.env.APPDATA;
+    else process.env.APPDATA = previousAppData;
+  }
+});
+
 test('doctor detects nested Omegga bridge session status files', () => {
   const env = makeEnvironment();
   const sessionDir = path.join(env.omeggaDir, 'data', 'ue4ss-bridge', 'session-1');

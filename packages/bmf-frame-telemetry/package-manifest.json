@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "id": "bmf-frame-telemetry",
+  "componentId": "bmf-frame-telemetry",
+  "name": "BMFFrameTelemetry",
+  "status": "current-layout-package-boundary",
+  "owner": "packages/bmf-frame-telemetry",
+  "sourceRoots": [
+    "native/bmf_frame_telemetry",
+    "framework/ue4ss/Mods/BMFFrameTelemetry"
+  ],
+  "installRoots": [
+    "Mods/BMFFrameTelemetry"
+  ],
+  "entrypoints": [
+    "framework/ue4ss/Mods/BMFFrameTelemetry/dlls/main.dll"
+  ],
+  "buildScript": "scripts/build-bmf-frame-telemetry-native-mod.ps1",
+  "requiredFiles": [
+    "native/bmf_frame_telemetry/CMakeLists.txt",
+    "native/bmf_frame_telemetry/bmf_frame_telemetry.cpp",
+    "framework/ue4ss/Mods/BMFFrameTelemetry/README.md",
+    "framework/ue4ss/Mods/BMFFrameTelemetry/dlls/.gitkeep"
+  ],
+  "runtimeOutputs": [
+    "Mods/BMF/runtime/frame-telemetry.json"
+  ],
+  "guardrails": [
+    "optional-native-telemetry",
+    "low-rate-json-output",
+    "grafana-remains-dashboard-owner",
+    "validate-before-release"
+  ]
+}

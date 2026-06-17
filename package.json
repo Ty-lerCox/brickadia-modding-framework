@@ -1,0 +1,34 @@
+{
+  "name": "@bmf/workspace",
+  "version": "0.1.0-dev",
+  "private": true,
+  "description": "Unified Brickadia Modding Framework monorepo workspace.",
+  "engines": {
+    "node": "^22.22.3 || ^24.15.0 || >=26.0.0",
+    "npm": ">=10.0.0"
+  },
+  "workspaces": [
+    "apps/bmf-desktop",
+    "cli",
+    "packages/orchestrator-core"
+  ],
+  "scripts": {
+    "setup": "npm run install:desktop && npm run install:omegga",
+    "install:desktop": "npm --prefix apps/bmf-desktop ci",
+    "install:omegga": "npm --prefix packages/omegga-runtime/source ci",
+    "build:desktop": "npm --prefix apps/bmf-desktop run build",
+    "release:desktop": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-bmf-desktop-release.ps1 -BuildMsi -Force",
+    "test": "npm run test:core && npm run test:cli",
+    "test:core": "npm --prefix packages/orchestrator-core test",
+    "test:cli": "npm --prefix cli test",
+    "doctor": "node cli/bin/bmfctl.js doctor",
+    "validate": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/validate-package.ps1",
+    "validate:workspace": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/validate-workspace.ps1",
+    "validate:ci": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/validate-ci-workflows.ps1",
+    "validate:desktop": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/validate-bmf-desktop.ps1",
+    "validate:orchestrator": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/validate-orchestrator-core.ps1",
+    "validate:runtime-packages": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/validate-bmf-runtime-packages.ps1",
+    "validate:release": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/validate-release-package.ps1"
+  },
+  "license": "UNLICENSED"
+}

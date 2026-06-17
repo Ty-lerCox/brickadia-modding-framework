@@ -3321,8 +3321,7 @@ namespace
 
     bool brick_runtime_lookup_enabled()
     {
-        return env_flag_enabled("BMF_BRICK_RUNTIME_LOOKUP_ENABLED") ||
-               env_flag_enabled("BMF_BRICK_RUNTIME_UNSAFE_LOOKUP_ENABLED");
+        return env_flag_enabled("BMF_BRICK_RUNTIME_UNSAFE_LOOKUP_ENABLED");
     }
 
     bool brick_runtime_resolve_enabled()
@@ -3333,14 +3332,34 @@ namespace
 
     bool brick_runtime_resolve_hint_lookup_enabled()
     {
-        return env_flag_enabled("BMF_BRICK_RUNTIME_RESOLVE_HINT_LOOKUP_ENABLED") ||
-               env_flag_enabled("BMF_TREE_PHYSICAL_RESOLVE_HINT_LOOKUP_ENABLED");
+        return (env_flag_enabled("BMF_BRICK_RUNTIME_RESOLVE_HINT_LOOKUP_ENABLED") ||
+                env_flag_enabled("BMF_TREE_PHYSICAL_RESOLVE_HINT_LOOKUP_ENABLED")) &&
+               brick_runtime_lookup_enabled();
+    }
+
+    bool brick_runtime_resolve_direct_array_requested()
+    {
+        return env_flag_enabled("BMF_BRICK_RUNTIME_RESOLVE_DIRECT_ARRAY_ENABLED") ||
+               env_flag_enabled("BMF_TREE_PHYSICAL_RESOLVE_DIRECT_ARRAY_ENABLED");
+    }
+
+    bool brick_runtime_resolve_unsafe_native_enabled()
+    {
+        return env_flag_enabled("BMF_BRICK_RUNTIME_RESOLVE_UNSAFE_NATIVE_ENABLED") ||
+               env_flag_enabled("BMF_TREE_PHYSICAL_RESOLVE_UNSAFE_NATIVE_ENABLED");
     }
 
     bool brick_runtime_resolve_direct_array_enabled()
     {
-        return env_flag_enabled("BMF_BRICK_RUNTIME_RESOLVE_DIRECT_ARRAY_ENABLED") ||
-               env_flag_enabled("BMF_TREE_PHYSICAL_RESOLVE_DIRECT_ARRAY_ENABLED");
+        return brick_runtime_resolve_direct_array_requested() &&
+               brick_runtime_resolve_unsafe_native_enabled();
+    }
+
+    bool brick_runtime_resolve_lookup_fallback_enabled()
+    {
+        return (env_flag_enabled("BMF_BRICK_RUNTIME_RESOLVE_LOOKUP_FALLBACK_ENABLED") ||
+                env_flag_enabled("BMF_TREE_PHYSICAL_RESOLVE_LOOKUP_FALLBACK_ENABLED")) &&
+               env_flag_enabled("BMF_BRICK_RUNTIME_RESOLVE_UNSAFE_LOOKUP_SCAN_ENABLED");
     }
 
     uint64_t brick_runtime_resolve_direct_array_max_ms()
@@ -3352,6 +3371,15 @@ namespace
             5000);
     }
 
+    uint64_t brick_runtime_resolve_scan_max_ms()
+    {
+        return env_u64(
+            "BMF_BRICK_RUNTIME_RESOLVE_SCAN_MAX_MS",
+            75,
+            1,
+            5000);
+    }
+
     uint32_t brick_runtime_resolve_hint_lookup_max_ids()
     {
         return static_cast<uint32_t>(env_u64(
@@ -3359,6 +3387,20 @@ namespace
             kBrickRuntimeResolveHintLookupDefaultMaxIds,
             1,
             kBrickRuntimeResolveHintLookupMaxIdsLimit));
+    }
+
+    uint32_t brick_runtime_resolve_lookup_fallback_max_scan(uint32_t fallback)
+    {
+        const uint64_t configured = env_u64(
+            "BMF_BRICK_RUNTIME_RESOLVE_LOOKUP_MAX_SCAN",
+            fallback,
+            0,
+            kBrickRuntimeResolveMaxScanLimit);
+        if (configured == 0)
+        {
+            return fallback;
+        }
+        return static_cast<uint32_t>(configured);
     }
 
     uintptr_t brickadia_module_base()
@@ -4532,6 +4574,161 @@ namespace
         return result;
     }
 
+    struct BrickRuntimeLookupScanResult
+    {
+        bool attempted{false};
+        bool enabled{false};
+        bool found{false};
+        bool timed_out{false};
+        uint64_t scanned_ids{0};
+        uint64_t lookup_hits{0};
+        uint64_t candidates{0};
+        uint32_t start_id{1};
+        uint32_t end_id{0};
+        uint64_t time_budget_ms{0};
+        BrickRuntimeSlotCandidate best{};
+        BrickRuntimeSlotCandidate nearest{};
+        bool nearest_validated{false};
+        std::string code{"BRICK_RUNTIME_LOOKUP_SCAN_DISABLED"};
+        std::string detail;
+    };
+
+    BrickRuntimeLookupScanResult brick_runtime_lookup_scan_ids(uint32_t max_scan,
+                                                              int64_t target_x,
+                                                              int64_t target_y,
+                                                              int64_t target_z,
+                                                              uint64_t radius_sq,
+                                                              bool prefer_visible,
+                                                              bool prefer_collidable)
+    {
+        BrickRuntimeLookupScanResult result{};
+        result.enabled = brick_runtime_resolve_lookup_fallback_enabled();
+        result.attempted = result.enabled;
+        if (!result.enabled)
+        {
+            result.detail = "lookup scan is disabled; set BMF_BRICK_RUNTIME_RESOLVE_UNSAFE_LOOKUP_SCAN_ENABLED=1 only for isolated validation";
+            return result;
+        }
+
+        const uint32_t end_id = brick_runtime_resolve_lookup_fallback_max_scan(max_scan);
+        if (end_id == 0)
+        {
+            result.code = "BRICK_RUNTIME_LOOKUP_SCAN_EMPTY";
+            result.detail = "runtime lookup scan limit is zero";
+            return result;
+        }
+        result.end_id = end_id;
+        result.time_budget_ms = brick_runtime_resolve_scan_max_ms();
+
+        const uintptr_t module_base = brickadia_module_base();
+        if (module_base == 0)
+        {
+            result.code = "BRICK_MODULE_UNAVAILABLE";
+            result.detail = "GetModuleHandleW(nullptr) returned no module base";
+            return result;
+        }
+
+        const auto started = std::chrono::steady_clock::now();
+        auto timed_out = [&]() -> bool {
+            const uint64_t elapsed_ms = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - started)
+                    .count());
+            return elapsed_ms >= result.time_budget_ms;
+        };
+
+        for (uint32_t id = result.start_id; id <= end_id; ++id)
+        {
+            if ((result.scanned_ids & 0x03FF) == 0 && timed_out())
+            {
+                result.timed_out = true;
+                result.code = "BRICK_RUNTIME_LOOKUP_SCAN_TIMED_OUT";
+                result.detail = "bounded runtime id lookup scan reached the configured time budget";
+                return result;
+            }
+
+            result.scanned_ids++;
+            uintptr_t registry_address = 0;
+            uintptr_t brick_address = 0;
+            std::string code;
+            std::string detail;
+            if (!brick_runtime_lookup_address(
+                    module_base,
+                    id,
+                    registry_address,
+                    brick_address,
+                    code,
+                    detail))
+            {
+                if (code != "BRICK_NOT_FOUND")
+                {
+                    result.code = code;
+                    result.detail = detail;
+                }
+                continue;
+            }
+
+            result.lookup_hits++;
+            BrickRuntimeSlotCandidate candidate{};
+            if (!brick_runtime_validate_lookup_candidate(
+                    module_base,
+                    brick_address,
+                    id,
+                    target_x,
+                    target_y,
+                    target_z,
+                    candidate,
+                    code,
+                    detail))
+            {
+                result.code = code;
+                result.detail = detail;
+                continue;
+            }
+
+            if (brick_runtime_candidate_better(
+                    candidate,
+                    result.nearest,
+                    result.nearest_validated,
+                    prefer_visible,
+                    prefer_collidable))
+            {
+                result.nearest_validated = true;
+                result.nearest = candidate;
+            }
+            if (candidate.distance_sq > radius_sq)
+            {
+                result.code = "BRICK_RUNTIME_LOOKUP_SCAN_OUT_OF_RADIUS";
+                result.detail = "runtime id lookup scan found live bricks, but none within the requested radius";
+                continue;
+            }
+
+            result.candidates++;
+            if (brick_runtime_candidate_better(
+                    candidate,
+                    result.best,
+                    result.found,
+                    prefer_visible,
+                    prefer_collidable))
+            {
+                result.found = true;
+                result.best = candidate;
+            }
+        }
+
+        if (result.found)
+        {
+            result.code = "OK";
+            result.detail = "matched active runtime brick through bounded runtime id lookup scan";
+        }
+        else if (result.detail.empty())
+        {
+            result.code = "BRICK_RUNTIME_LOOKUP_SCAN_NOT_FOUND";
+            result.detail = "no runtime brick id matched the requested position within radius";
+        }
+        return result;
+    }
+
     void brick_runtime_cache_verified_candidate(const BrickRuntimeSlotCandidate& candidate)
     {
         BrickRuntimeVerifiedCandidate verified{};
@@ -4562,7 +4759,7 @@ namespace
             {
                 out_code = "BRICK_RUNTIME_LOOKUP_DISABLED";
                 out_detail =
-                    "BMF_BRICK_RUNTIME_LOOKUP_ENABLED=1 is required unless the brick id was verified by bmf.bricks.runtime.resolve in this server process";
+                    "BMF_BRICK_RUNTIME_UNSAFE_LOOKUP_ENABLED=1 is required unless the brick id was verified by bmf.bricks.runtime.resolve in this server process";
                 return false;
             }
             verified = found->second;
@@ -4664,6 +4861,20 @@ namespace
         BrickRuntimeSlotCandidate hint_lookup_nearest{};
         std::string hint_lookup_code;
         std::string hint_lookup_detail;
+        bool lookup_scan_attempted{false};
+        bool lookup_scan_enabled{false};
+        bool lookup_scan_found{false};
+        bool lookup_scan_timed_out{false};
+        uint64_t lookup_scan_scanned_ids{0};
+        uint64_t lookup_scan_hits{0};
+        uint64_t lookup_scan_candidates{0};
+        uint32_t lookup_scan_start_id{0};
+        uint32_t lookup_scan_end_id{0};
+        uint64_t lookup_scan_time_budget_ms{0};
+        bool lookup_scan_nearest_validated{false};
+        BrickRuntimeSlotCandidate lookup_scan_nearest{};
+        std::string lookup_scan_code;
+        std::string lookup_scan_detail;
         bool direct_array_scan_attempted{false};
         bool direct_array_scan_enabled{false};
         bool direct_array_scan_found{false};
@@ -4672,6 +4883,8 @@ namespace
         uint64_t direct_array_candidates{0};
         uint64_t direct_array_time_budget_ms{0};
         bool direct_array_timed_out{false};
+        uint64_t scan_time_budget_ms{0};
+        bool scan_timed_out{false};
     };
 
     void brick_runtime_scan_slots(const BrickRuntimeArraySnapshot& snapshot,
@@ -4685,6 +4898,10 @@ namespace
                                   bool prefer_collidable,
                                   BrickRuntimeResolveResult& result)
     {
+        if (result.scan_timed_out)
+        {
+            return;
+        }
         if (start_slot >= snapshot.accessible_slots)
         {
             return;
@@ -4706,9 +4923,29 @@ namespace
 
         const uintptr_t scan_start = snapshot.array_base + static_cast<uintptr_t>(start_offset);
         const uintptr_t scan_end = snapshot.array_base + static_cast<uintptr_t>(end_offset);
+        if (result.scan_time_budget_ms == 0)
+        {
+            result.scan_time_budget_ms = brick_runtime_resolve_scan_max_ms();
+        }
+        const auto started = std::chrono::steady_clock::now();
+        uint64_t local_scanned_slots = 0;
+        auto timed_out = [&]() -> bool {
+            const uint64_t elapsed_ms = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - started)
+                    .count());
+            return elapsed_ms >= result.scan_time_budget_ms;
+        };
         uintptr_t cursor = scan_start;
         while (cursor < scan_end)
         {
+            if (timed_out())
+            {
+                result.scan_timed_out = true;
+                result.truncated = true;
+                return;
+            }
+
             MEMORY_BASIC_INFORMATION mbi{};
             if (VirtualQuery(reinterpret_cast<void*>(cursor), &mbi, sizeof(mbi)) == 0)
             {
@@ -4753,6 +4990,14 @@ namespace
 
                 for (uint32_t slot = first; slot < last; ++slot)
                 {
+                    if ((local_scanned_slots & 0x0FFF) == 0 && timed_out())
+                    {
+                        result.scan_timed_out = true;
+                        result.truncated = true;
+                        return;
+                    }
+
+                    local_scanned_slots++;
                     result.scanned_slots++;
                     BrickRuntimeSlotCandidate candidate{};
                     if (!brick_runtime_read_slot_candidate(
@@ -4992,34 +5237,11 @@ namespace
             return out.str();
         }
 
-        const uint32_t requested_slots =
-            hint_slot > 0
-                ? (hint_only
-                       ? (hint_slot > UINT32_MAX - hint_window - 1 ? UINT32_MAX : hint_slot + hint_window + 1)
-                       : std::max<uint32_t>(
-                             max_scan,
-                             hint_slot > UINT32_MAX - hint_window - 1 ? UINT32_MAX : hint_slot + hint_window + 1))
-                : max_scan;
-        BrickRuntimeArraySnapshot snapshot{};
-        if (!brick_runtime_array_snapshot(requested_slots, snapshot))
-        {
-            out << "ok=false\n"
-                << "code=" << snapshot.code << "\n"
-                << "module_base=" << json_escape(pointer_hex(snapshot.module_base)) << "\n"
-                << "array_base_address=" << json_escape(pointer_hex(snapshot.array_base)) << "\n"
-                << "active_flags_address=" << json_escape(pointer_hex(snapshot.active_flags_base)) << "\n"
-                << "array_region_state=" << hex_u64(snapshot.array_region_state) << "\n"
-                << "active_flags_region_state=" << hex_u64(snapshot.active_flags_region_state) << "\n"
-                << "array_region_protect=" << hex_u64(snapshot.array_region_protect) << "\n"
-                << "active_flags_region_protect=" << hex_u64(snapshot.active_flags_region_protect) << "\n"
-                << "array_region_size=" << snapshot.array_region_size << "\n"
-                << "active_flags_region_size=" << snapshot.active_flags_region_size << "\n"
-                << "detail=" << json_escape(snapshot.detail) << "\n";
-            return out.str();
-        }
-
         BrickRuntimeResolveResult resolve{};
         const uint64_t radius_sq = static_cast<uint64_t>(radius) * static_cast<uint64_t>(radius);
+        BrickRuntimeArraySnapshot snapshot{};
+        snapshot.module_base = brickadia_module_base();
+
         BrickRuntimeHintLookupResult hint_lookup{};
         if (hint_slot > 0)
         {
@@ -5055,6 +5277,266 @@ namespace
                 brick_runtime_cache_verified_candidate(resolve.best);
             }
         }
+
+        BrickRuntimeLookupScanResult lookup_scan{};
+        if (!resolve.found && brick_runtime_resolve_lookup_fallback_enabled())
+        {
+            lookup_scan = brick_runtime_lookup_scan_ids(
+                max_scan,
+                target_x,
+                target_y,
+                target_z,
+                radius_sq,
+                prefer_visible,
+                prefer_collidable);
+            resolve.lookup_scan_attempted = lookup_scan.attempted;
+            resolve.lookup_scan_enabled = lookup_scan.enabled;
+            resolve.lookup_scan_found = lookup_scan.found;
+            resolve.lookup_scan_timed_out = lookup_scan.timed_out;
+            resolve.lookup_scan_scanned_ids = lookup_scan.scanned_ids;
+            resolve.lookup_scan_hits = lookup_scan.lookup_hits;
+            resolve.lookup_scan_candidates = lookup_scan.candidates;
+            resolve.lookup_scan_start_id = lookup_scan.start_id;
+            resolve.lookup_scan_end_id = lookup_scan.end_id;
+            resolve.lookup_scan_time_budget_ms = lookup_scan.time_budget_ms;
+            resolve.lookup_scan_nearest_validated = lookup_scan.nearest_validated;
+            resolve.lookup_scan_nearest = lookup_scan.nearest;
+            resolve.lookup_scan_code = lookup_scan.code;
+            resolve.lookup_scan_detail = lookup_scan.detail;
+            if (lookup_scan.found)
+            {
+                resolve.found = true;
+                resolve.best = lookup_scan.best;
+                resolve.code = "OK";
+                resolve.detail = lookup_scan.detail;
+                brick_runtime_cache_verified_candidate(resolve.best);
+            }
+        }
+
+        const bool allow_hint_direct_array_scan =
+            !resolve.found &&
+            !brick_runtime_resolve_unsafe_native_enabled() &&
+            brick_runtime_resolve_direct_array_enabled() &&
+            hint_slot > 0 &&
+            hint_window > 0 &&
+            hint_only;
+
+        if (resolve.found && !brick_runtime_resolve_unsafe_native_enabled())
+        {
+            const uint64_t duration_ms = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - started)
+                    .count());
+            out << "ok=true\n"
+                << "code=OK\n"
+                << "module_base=" << json_escape(pointer_hex(snapshot.module_base)) << "\n"
+                << "array_base_address=\n"
+                << "active_flags_address=\n"
+                << "array_region_state=0\n"
+                << "active_flags_region_state=0\n"
+                << "array_region_protect=0\n"
+                << "active_flags_region_protect=0\n"
+                << "array_region_size=0\n"
+                << "active_flags_region_size=0\n"
+                << "requested_slots=0\n"
+                << "array_region_slots=0\n"
+                << "active_flags_region_slots=0\n"
+                << "accessible_slots=0\n"
+                << "sparse=false\n"
+                << "scanned_slots=0\n"
+                << "active_slots=0\n"
+                << "candidates=" << resolve.candidates << "\n"
+                << "hint_lookup_attempted=" << (resolve.hint_lookup_attempted ? "true" : "false") << "\n"
+                << "hint_lookup_enabled=" << (resolve.hint_lookup_enabled ? "true" : "false") << "\n"
+                << "hint_lookup_found=" << (resolve.hint_lookup_found ? "true" : "false") << "\n"
+                << "hint_lookup_truncated=" << (resolve.hint_lookup_truncated ? "true" : "false") << "\n"
+                << "hint_lookup_start_id=" << resolve.hint_lookup_start_id << "\n"
+                << "hint_lookup_end_id=" << resolve.hint_lookup_end_id << "\n"
+                << "hint_lookup_scanned_ids=" << resolve.hint_lookup_scanned_ids << "\n"
+                << "hint_lookup_hits=" << resolve.hint_lookup_hits << "\n"
+                << "hint_lookup_candidates=" << resolve.hint_lookup_candidates << "\n"
+                << "hint_lookup_registry_address=" << json_escape(pointer_hex(resolve.hint_lookup_registry_address)) << "\n"
+                << "hint_lookup_nearest_validated=" << (resolve.hint_lookup_nearest_validated ? "true" : "false") << "\n"
+                << "hint_lookup_code=" << json_escape(resolve.hint_lookup_code) << "\n"
+                << "hint_lookup_detail=" << json_escape(resolve.hint_lookup_detail) << "\n"
+                << "lookup_scan_attempted=" << (resolve.lookup_scan_attempted ? "true" : "false") << "\n"
+                << "lookup_scan_enabled=" << (resolve.lookup_scan_enabled ? "true" : "false") << "\n"
+                << "lookup_scan_found=" << (resolve.lookup_scan_found ? "true" : "false") << "\n"
+                << "lookup_scan_timed_out=" << (resolve.lookup_scan_timed_out ? "true" : "false") << "\n"
+                << "lookup_scan_start_id=" << resolve.lookup_scan_start_id << "\n"
+                << "lookup_scan_end_id=" << resolve.lookup_scan_end_id << "\n"
+                << "lookup_scan_scanned_ids=" << resolve.lookup_scan_scanned_ids << "\n"
+                << "lookup_scan_hits=" << resolve.lookup_scan_hits << "\n"
+                << "lookup_scan_candidates=" << resolve.lookup_scan_candidates << "\n"
+                << "lookup_scan_time_budget_ms=" << resolve.lookup_scan_time_budget_ms << "\n"
+                << "lookup_scan_nearest_validated=" << (resolve.lookup_scan_nearest_validated ? "true" : "false") << "\n"
+                << "lookup_scan_code=" << json_escape(resolve.lookup_scan_code) << "\n"
+                << "lookup_scan_detail=" << json_escape(resolve.lookup_scan_detail) << "\n"
+                << "direct_array_scan_attempted=false\n"
+                << "direct_array_scan_enabled=false\n"
+                << "direct_array_scan_found=false\n"
+                << "direct_array_scanned_slots=0\n"
+                << "direct_array_valid_slots=0\n"
+                << "direct_array_candidates=0\n"
+                << "direct_array_time_budget_ms=0\n"
+                << "direct_array_timed_out=false\n"
+                << "scan_time_budget_ms=0\n"
+                << "scan_timed_out=false\n"
+                << "used_hint=" << (resolve.used_hint ? "true" : "false") << "\n"
+                << "full_scan=false\n"
+                << "truncated=false\n"
+                << "duration_ms=" << duration_ms << "\n"
+                << "detail=" << json_escape(resolve.detail) << "\n";
+            if (resolve.lookup_scan_nearest_validated)
+            {
+                out << "lookup_scan_nearest_brick_id=" << resolve.lookup_scan_nearest.brick_id << "\n"
+                    << "lookup_scan_nearest_slot=" << resolve.lookup_scan_nearest.slot << "\n"
+                    << "lookup_scan_nearest_cell_index=" << resolve.lookup_scan_nearest.cell_index << "\n"
+                    << "lookup_scan_nearest_sub_index=" << resolve.lookup_scan_nearest.sub_index << "\n"
+                    << "lookup_scan_nearest_x=" << resolve.lookup_scan_nearest.x << "\n"
+                    << "lookup_scan_nearest_y=" << resolve.lookup_scan_nearest.y << "\n"
+                    << "lookup_scan_nearest_z=" << resolve.lookup_scan_nearest.z << "\n"
+                    << "lookup_scan_nearest_address=" << json_escape(pointer_hex(resolve.lookup_scan_nearest.address)) << "\n"
+                    << "lookup_scan_nearest_distance_sq=" << resolve.lookup_scan_nearest.distance_sq << "\n"
+                    << "lookup_scan_nearest_visible=" << static_cast<unsigned int>(resolve.lookup_scan_nearest.visible) << "\n"
+                    << "lookup_scan_nearest_collision_channels=" << static_cast<unsigned int>(resolve.lookup_scan_nearest.collision_channels) << "\n";
+            }
+            out << "brick_id=" << resolve.best.brick_id << "\n"
+                << "best_brick_id=" << resolve.best.brick_id << "\n"
+                << "best_slot=" << resolve.best.slot << "\n"
+                << "best_cell_index=" << resolve.best.cell_index << "\n"
+                << "best_sub_index=" << resolve.best.sub_index << "\n"
+                << "best_x=" << resolve.best.x << "\n"
+                << "best_y=" << resolve.best.y << "\n"
+                << "best_z=" << resolve.best.z << "\n"
+                << "best_address=" << json_escape(pointer_hex(resolve.best.address)) << "\n"
+                << "best_distance_sq=" << resolve.best.distance_sq << "\n"
+                << "best_visible=" << static_cast<unsigned int>(resolve.best.visible) << "\n"
+                << "best_collision_channels=" << static_cast<unsigned int>(resolve.best.collision_channels) << "\n"
+                << "verified_cached=true\n";
+            return out.str();
+        }
+
+        if (!resolve.found &&
+            !brick_runtime_resolve_unsafe_native_enabled() &&
+            !allow_hint_direct_array_scan)
+        {
+            const uint64_t duration_ms = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - started)
+                    .count());
+            const std::string code = !resolve.lookup_scan_code.empty()
+                                         ? resolve.lookup_scan_code
+                                         : (!resolve.hint_lookup_code.empty()
+                                                ? resolve.hint_lookup_code
+                                                : "BRICK_RUNTIME_RESOLVE_UNSAFE_DISABLED");
+            const std::string detail = !resolve.lookup_scan_detail.empty()
+                                           ? resolve.lookup_scan_detail
+                                           : (!resolve.hint_lookup_detail.empty()
+                                                  ? resolve.hint_lookup_detail
+                                                  : "native runtime brick array scan is disabled; enable BMF_BRICK_RUNTIME_RESOLVE_UNSAFE_NATIVE_ENABLED=1 only for isolated validation");
+            out << "ok=false\n"
+                << "code=" << json_escape(code) << "\n"
+                << "module_base=" << json_escape(pointer_hex(snapshot.module_base)) << "\n"
+                << "array_base_address=\n"
+                << "active_flags_address=\n"
+                << "array_region_state=0\n"
+                << "active_flags_region_state=0\n"
+                << "array_region_protect=0\n"
+                << "active_flags_region_protect=0\n"
+                << "array_region_size=0\n"
+                << "active_flags_region_size=0\n"
+                << "requested_slots=0\n"
+                << "array_region_slots=0\n"
+                << "active_flags_region_slots=0\n"
+                << "accessible_slots=0\n"
+                << "sparse=false\n"
+                << "scanned_slots=0\n"
+                << "active_slots=0\n"
+                << "candidates=0\n"
+                << "hint_lookup_attempted=" << (resolve.hint_lookup_attempted ? "true" : "false") << "\n"
+                << "hint_lookup_enabled=" << (resolve.hint_lookup_enabled ? "true" : "false") << "\n"
+                << "hint_lookup_found=" << (resolve.hint_lookup_found ? "true" : "false") << "\n"
+                << "hint_lookup_truncated=" << (resolve.hint_lookup_truncated ? "true" : "false") << "\n"
+                << "hint_lookup_start_id=" << resolve.hint_lookup_start_id << "\n"
+                << "hint_lookup_end_id=" << resolve.hint_lookup_end_id << "\n"
+                << "hint_lookup_scanned_ids=" << resolve.hint_lookup_scanned_ids << "\n"
+                << "hint_lookup_hits=" << resolve.hint_lookup_hits << "\n"
+                << "hint_lookup_candidates=" << resolve.hint_lookup_candidates << "\n"
+                << "hint_lookup_registry_address=" << json_escape(pointer_hex(resolve.hint_lookup_registry_address)) << "\n"
+                << "hint_lookup_nearest_validated=" << (resolve.hint_lookup_nearest_validated ? "true" : "false") << "\n"
+                << "hint_lookup_code=" << json_escape(resolve.hint_lookup_code) << "\n"
+                << "hint_lookup_detail=" << json_escape(resolve.hint_lookup_detail) << "\n"
+                << "lookup_scan_attempted=" << (resolve.lookup_scan_attempted ? "true" : "false") << "\n"
+                << "lookup_scan_enabled=" << (resolve.lookup_scan_enabled ? "true" : "false") << "\n"
+                << "lookup_scan_found=" << (resolve.lookup_scan_found ? "true" : "false") << "\n"
+                << "lookup_scan_timed_out=" << (resolve.lookup_scan_timed_out ? "true" : "false") << "\n"
+                << "lookup_scan_start_id=" << resolve.lookup_scan_start_id << "\n"
+                << "lookup_scan_end_id=" << resolve.lookup_scan_end_id << "\n"
+                << "lookup_scan_scanned_ids=" << resolve.lookup_scan_scanned_ids << "\n"
+                << "lookup_scan_hits=" << resolve.lookup_scan_hits << "\n"
+                << "lookup_scan_candidates=" << resolve.lookup_scan_candidates << "\n"
+                << "lookup_scan_time_budget_ms=" << resolve.lookup_scan_time_budget_ms << "\n"
+                << "lookup_scan_nearest_validated=" << (resolve.lookup_scan_nearest_validated ? "true" : "false") << "\n"
+                << "lookup_scan_code=" << json_escape(resolve.lookup_scan_code) << "\n"
+                << "lookup_scan_detail=" << json_escape(resolve.lookup_scan_detail) << "\n"
+                << "direct_array_scan_attempted=false\n"
+                << "direct_array_scan_enabled=false\n"
+                << "direct_array_scan_found=false\n"
+                << "direct_array_scanned_slots=0\n"
+                << "direct_array_valid_slots=0\n"
+                << "direct_array_candidates=0\n"
+                << "direct_array_time_budget_ms=0\n"
+                << "direct_array_timed_out=false\n"
+                << "scan_time_budget_ms=0\n"
+                << "scan_timed_out=false\n"
+                << "used_hint=" << (resolve.used_hint ? "true" : "false") << "\n"
+                << "full_scan=false\n"
+                << "truncated=" << ((resolve.lookup_scan_timed_out || resolve.hint_lookup_truncated) ? "true" : "false") << "\n"
+                << "duration_ms=" << duration_ms << "\n"
+                << "detail=" << json_escape(detail) << "\n";
+            if (resolve.lookup_scan_nearest_validated)
+            {
+                out << "lookup_scan_nearest_brick_id=" << resolve.lookup_scan_nearest.brick_id << "\n"
+                    << "lookup_scan_nearest_slot=" << resolve.lookup_scan_nearest.slot << "\n"
+                    << "lookup_scan_nearest_cell_index=" << resolve.lookup_scan_nearest.cell_index << "\n"
+                    << "lookup_scan_nearest_sub_index=" << resolve.lookup_scan_nearest.sub_index << "\n"
+                    << "lookup_scan_nearest_x=" << resolve.lookup_scan_nearest.x << "\n"
+                    << "lookup_scan_nearest_y=" << resolve.lookup_scan_nearest.y << "\n"
+                    << "lookup_scan_nearest_z=" << resolve.lookup_scan_nearest.z << "\n"
+                    << "lookup_scan_nearest_address=" << json_escape(pointer_hex(resolve.lookup_scan_nearest.address)) << "\n"
+                    << "lookup_scan_nearest_distance_sq=" << resolve.lookup_scan_nearest.distance_sq << "\n"
+                    << "lookup_scan_nearest_visible=" << static_cast<unsigned int>(resolve.lookup_scan_nearest.visible) << "\n"
+                    << "lookup_scan_nearest_collision_channels=" << static_cast<unsigned int>(resolve.lookup_scan_nearest.collision_channels) << "\n";
+            }
+            return out.str();
+        }
+
+        const uint32_t requested_slots =
+            hint_slot > 0
+                ? (hint_only
+                       ? (hint_slot > UINT32_MAX - hint_window - 1 ? UINT32_MAX : hint_slot + hint_window + 1)
+                       : std::max<uint32_t>(
+                             max_scan,
+                             hint_slot > UINT32_MAX - hint_window - 1 ? UINT32_MAX : hint_slot + hint_window + 1))
+                : max_scan;
+        if (!brick_runtime_array_snapshot(requested_slots, snapshot))
+        {
+            out << "ok=false\n"
+                << "code=" << snapshot.code << "\n"
+                << "module_base=" << json_escape(pointer_hex(snapshot.module_base)) << "\n"
+                << "array_base_address=" << json_escape(pointer_hex(snapshot.array_base)) << "\n"
+                << "active_flags_address=" << json_escape(pointer_hex(snapshot.active_flags_base)) << "\n"
+                << "array_region_state=" << hex_u64(snapshot.array_region_state) << "\n"
+                << "active_flags_region_state=" << hex_u64(snapshot.active_flags_region_state) << "\n"
+                << "array_region_protect=" << hex_u64(snapshot.array_region_protect) << "\n"
+                << "active_flags_region_protect=" << hex_u64(snapshot.active_flags_region_protect) << "\n"
+                << "array_region_size=" << snapshot.array_region_size << "\n"
+                << "active_flags_region_size=" << snapshot.active_flags_region_size << "\n"
+                << "detail=" << json_escape(snapshot.detail) << "\n";
+            return out.str();
+        }
+
         if (hint_slot > 0 && hint_window > 0)
         {
             resolve.used_hint = true;
@@ -5172,6 +5654,19 @@ namespace
             << "hint_lookup_nearest_validated=" << (resolve.hint_lookup_nearest_validated ? "true" : "false") << "\n"
             << "hint_lookup_code=" << json_escape(resolve.hint_lookup_code) << "\n"
             << "hint_lookup_detail=" << json_escape(resolve.hint_lookup_detail) << "\n"
+            << "lookup_scan_attempted=" << (resolve.lookup_scan_attempted ? "true" : "false") << "\n"
+            << "lookup_scan_enabled=" << (resolve.lookup_scan_enabled ? "true" : "false") << "\n"
+            << "lookup_scan_found=" << (resolve.lookup_scan_found ? "true" : "false") << "\n"
+            << "lookup_scan_timed_out=" << (resolve.lookup_scan_timed_out ? "true" : "false") << "\n"
+            << "lookup_scan_start_id=" << resolve.lookup_scan_start_id << "\n"
+            << "lookup_scan_end_id=" << resolve.lookup_scan_end_id << "\n"
+            << "lookup_scan_scanned_ids=" << resolve.lookup_scan_scanned_ids << "\n"
+            << "lookup_scan_hits=" << resolve.lookup_scan_hits << "\n"
+            << "lookup_scan_candidates=" << resolve.lookup_scan_candidates << "\n"
+            << "lookup_scan_time_budget_ms=" << resolve.lookup_scan_time_budget_ms << "\n"
+            << "lookup_scan_nearest_validated=" << (resolve.lookup_scan_nearest_validated ? "true" : "false") << "\n"
+            << "lookup_scan_code=" << json_escape(resolve.lookup_scan_code) << "\n"
+            << "lookup_scan_detail=" << json_escape(resolve.lookup_scan_detail) << "\n"
             << "direct_array_scan_attempted=" << (resolve.direct_array_scan_attempted ? "true" : "false") << "\n"
             << "direct_array_scan_enabled=" << (resolve.direct_array_scan_enabled ? "true" : "false") << "\n"
             << "direct_array_scan_found=" << (resolve.direct_array_scan_found ? "true" : "false") << "\n"
@@ -5180,6 +5675,8 @@ namespace
             << "direct_array_candidates=" << resolve.direct_array_candidates << "\n"
             << "direct_array_time_budget_ms=" << resolve.direct_array_time_budget_ms << "\n"
             << "direct_array_timed_out=" << (resolve.direct_array_timed_out ? "true" : "false") << "\n"
+            << "scan_time_budget_ms=" << resolve.scan_time_budget_ms << "\n"
+            << "scan_timed_out=" << (resolve.scan_timed_out ? "true" : "false") << "\n"
             << "used_hint=" << (resolve.used_hint ? "true" : "false") << "\n"
             << "full_scan=" << (resolve.full_scan ? "true" : "false") << "\n"
             << "truncated=" << (resolve.truncated ? "true" : "false") << "\n"
@@ -5198,6 +5695,20 @@ namespace
                 << "hint_lookup_nearest_distance_sq=" << resolve.hint_lookup_nearest.distance_sq << "\n"
                 << "hint_lookup_nearest_visible=" << static_cast<unsigned int>(resolve.hint_lookup_nearest.visible) << "\n"
                 << "hint_lookup_nearest_collision_channels=" << static_cast<unsigned int>(resolve.hint_lookup_nearest.collision_channels) << "\n";
+        }
+        if (resolve.lookup_scan_nearest_validated)
+        {
+            out << "lookup_scan_nearest_brick_id=" << resolve.lookup_scan_nearest.brick_id << "\n"
+                << "lookup_scan_nearest_slot=" << resolve.lookup_scan_nearest.slot << "\n"
+                << "lookup_scan_nearest_cell_index=" << resolve.lookup_scan_nearest.cell_index << "\n"
+                << "lookup_scan_nearest_sub_index=" << resolve.lookup_scan_nearest.sub_index << "\n"
+                << "lookup_scan_nearest_x=" << resolve.lookup_scan_nearest.x << "\n"
+                << "lookup_scan_nearest_y=" << resolve.lookup_scan_nearest.y << "\n"
+                << "lookup_scan_nearest_z=" << resolve.lookup_scan_nearest.z << "\n"
+                << "lookup_scan_nearest_address=" << json_escape(pointer_hex(resolve.lookup_scan_nearest.address)) << "\n"
+                << "lookup_scan_nearest_distance_sq=" << resolve.lookup_scan_nearest.distance_sq << "\n"
+                << "lookup_scan_nearest_visible=" << static_cast<unsigned int>(resolve.lookup_scan_nearest.visible) << "\n"
+                << "lookup_scan_nearest_collision_channels=" << static_cast<unsigned int>(resolve.lookup_scan_nearest.collision_channels) << "\n";
         }
         if (resolve.found)
         {
@@ -5249,7 +5760,7 @@ namespace
             }
             out_code = "BRICK_RUNTIME_LOOKUP_DISABLED";
             out_detail =
-                "set BMF_BRICK_RUNTIME_LOOKUP_ENABLED=1 only when brickid is a verified live runtime id; "
+                "set BMF_BRICK_RUNTIME_UNSAFE_LOOKUP_ENABLED=1 only when brickid is a verified live runtime id; "
                 "saved BRS brickIndex values are not safe runtime ids; "
                 "or resolve the id first with bmf.bricks.runtime.resolve";
             return false;

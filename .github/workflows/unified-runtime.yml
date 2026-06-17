@@ -1,0 +1,194 @@
+name: Unified runtime CI
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/unified-runtime.yml
+      - README.md
+      - package.json
+      - apps/bmf-desktop/**
+      - cli/**
+      - compat/**
+      - docs/**
+      - framework/ue4ss/Mods/**
+      - manifests/**
+      - native/**
+      - observability/**
+      - packages/**
+      - requirements-docs.txt
+      - scripts/**
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/unified-runtime.yml
+      - README.md
+      - package.json
+      - apps/bmf-desktop/**
+      - cli/**
+      - compat/**
+      - docs/**
+      - framework/ue4ss/Mods/**
+      - manifests/**
+      - native/**
+      - observability/**
+      - packages/**
+      - requirements-docs.txt
+      - scripts/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CI: "true"
+  NODE_VERSION: "24.15.0"
+
+jobs:
+  workspace:
+    name: Workspace validation and Node tests
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Validate root workspace contract
+        run: npm run validate:workspace
+
+      - name: Validate unified package surface
+        run: npm run validate
+
+      - name: Run orchestration and CLI tests
+        run: npm run test
+
+  desktop:
+    name: BMF Desktop renderer and release metadata
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install Desktop dependencies
+        run: npm run install:desktop
+
+      - name: Build Desktop renderer
+        run: npm run build:desktop
+
+      - name: Validate Desktop static contract
+        run: npm run validate:desktop
+
+      - name: Validate Desktop release metadata
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/validate-bmf-desktop-release.ps1
+
+  omegga-runtime:
+    name: BMF-supported Omegga runtime
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Validate Omegga runtime package boundary
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/validate-omegga-runtime-package.ps1
+
+      - name: Install Omegga runtime dependencies
+        run: npm --prefix packages/omegga-runtime/source ci
+
+      - name: Run Omegga runtime tests
+        run: npm --prefix packages/omegga-runtime/source test
+
+  native-helpers:
+    name: Native helper validation
+    runs-on: windows-latest
+    env:
+      BMF_UE4SS_SOURCE_DIR: ${{ vars.BMF_UE4SS_SOURCE_DIR }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Validate native package boundaries
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/validate-bmf-runtime-packages.ps1
+
+      - name: Build native helper DLLs when UE4SS source is configured
+        shell: powershell
+        run: |
+          $ue4ssSourceDir = $env:BMF_UE4SS_SOURCE_DIR
+          if ([string]::IsNullOrWhiteSpace($ue4ssSourceDir) -or !(Test-Path -LiteralPath $ue4ssSourceDir)) {
+            Write-Host 'Skipping native helper build. Set repository variable BMF_UE4SS_SOURCE_DIR to a UE4SS source checkout to enable it.'
+            exit 0
+          }
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-bmf-socket-native-mod.ps1 -Ue4ssSourceDir $ue4ssSourceDir
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-bmf-frame-telemetry-native-mod.ps1 -Ue4ssSourceDir $ue4ssSourceDir
+
+  packaging:
+    name: Release package validation
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Validate release package zip
+        run: npm run validate:release
+
+  docs:
+    name: Documentation build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install documentation dependencies
+        run: pip install -r requirements-docs.txt
+
+      - name: Build documentation
+        run: python -m mkdocs build --strict
+
+  desktop-msi:
+    name: BMF Desktop MSI artifact
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install Desktop dependencies
+        run: npm run install:desktop
+
+      - name: Build MSI release artifacts
+        run: npm run release:desktop
+
+      - name: Upload MSI release bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: bmf-desktop-msi-release
+          path: artifacts/local/bmf-desktop-release/**
+          if-no-files-found: error

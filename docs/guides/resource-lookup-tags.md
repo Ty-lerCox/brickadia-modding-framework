@@ -43,13 +43,13 @@ local hidden = BMF.bricks.setRuntimeStateByGuid({
 })
 ```
 
-Restore visibility and the captured collision mask:
+Restore visibility without touching collision:
 
 ```lua
 local restored = BMF.bricks.setRuntimeStateByGuid({
   tag = "lookup:222fd538-01c1-457c-9f67-aaab9fe6bbfd:mine",
   visible = true,
-  collision = "restore",
+  collision = "unchanged",
   confirm = "brick-runtime",
 })
 ```
@@ -81,7 +81,7 @@ The equivalent bridge command shape is:
 
 ```text
 Omegga.Bridge.BMF bmf.bricks.runtime.set-guid tag=lookup:<uuid>:<purpose> visible=false collision=0 confirm=brick-runtime
-Omegga.Bridge.BMF bmf.bricks.runtime.set-guid uuid=<uuid> purpose=<purpose> visible=true collision=restore confirm=brick-runtime
+Omegga.Bridge.BMF bmf.bricks.runtime.set-guid uuid=<uuid> purpose=<purpose> visible=true collision=unchanged confirm=brick-runtime
 ```
 
 ## Lookup Rules
@@ -91,10 +91,17 @@ Omegga.Bridge.BMF bmf.bricks.runtime.set-guid uuid=<uuid> purpose=<purpose> visi
   the same internal GUID.
 - GUID/tag-only mutation uses existing bindings, explicit `x/y/z`, or cached
   exact `ConsoleTag` hits. It does not perform broad world scans.
+- Cold native runtime-id resolve is validation-only. It fails fast unless both
+  `BMF_BRICK_RUNTIME_RESOLVE_ENABLED=1` and
+  `BMF_BRICK_RUNTIME_RESOLVE_UNSAFE_NATIVE_ENABLED=1` are set.
 - Use `BMF.bricks.runtimeStateStatus()` or `bmf.bricks.runtime.status` to wait
   for the queued mutation result before retrying.
 - Keep runtime mutation behind the gates documented in
   [Runtime Brick State](../api/runtime-bricks.md).
+- `collision=restore` is disabled by default because captured collision restore
+  crosses the highest-risk native setter path. Use `collision=unchanged` on
+  visibility restore unless the server has explicitly enabled and validated
+  `BMF_BRICK_RUNTIME_COLLISION_RESTORE_ENABLED=1`.
 
 ## CityRPG Compatibility
 

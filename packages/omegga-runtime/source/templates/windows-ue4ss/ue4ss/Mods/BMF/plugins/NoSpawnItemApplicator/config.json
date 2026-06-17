@@ -1,0 +1,8 @@
+{
+  "policy": {
+    "allowedRoles": ["Owner", "Admin"],
+    "allowedPlayers": ["ff0f7114-85b9-46af-8ff1-85673e6ae0d6"],
+    "allowedContexts": [],
+    "allowSinglePlayerContextLearning": true
+  }
+}

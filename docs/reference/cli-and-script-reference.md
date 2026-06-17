@@ -13,9 +13,46 @@ Run commands from the repository root unless a script says otherwise.
 
 ## Manager CLI
 
+From a source checkout, run `node .\cli\bin\bmfctl.js ...`.
+
+From an installed BMF Desktop MSI, run the bundled shim at
+`%ProgramFiles%\BMF Desktop\resources\bmf\bin\bmfctl.cmd ...`. The shim runs
+through the installed Electron executable in Node mode, sets `BMF_ROOT` to the
+bundled `resources\bmf` asset tree, and defaults profile state, transactions,
+service logs, updates, and snapshots to `%APPDATA%\BMF Desktop`.
+
 | Task | Command |
 | --- | --- |
 | Run the local doctor | `node .\cli\bin\bmfctl.js doctor` |
+| Show shared CLI/Desktop service health | `node .\cli\bin\bmfctl.js health` |
+| Show start-readiness port conflicts | `node .\cli\bin\bmfctl.js health --port-diagnostics` |
+| Add bounded loopback checks to health | `node .\cli\bin\bmfctl.js health --network-checks` |
+| Save the current server profile inputs | `node .\cli\bin\bmfctl.js profiles save --profile local --profile-name "Local Server"` |
+| List stored server profiles | `node .\cli\bin\bmfctl.js profiles list` |
+| Select a stored server profile | `node .\cli\bin\bmfctl.js profiles select local` |
+| Preview bootstrap operations | `node .\cli\bin\bmfctl.js plan bootstrap --telemetry` |
+| Preview install transaction | `node .\cli\bin\bmfctl.js transaction install-stack --json` |
+| Apply install transaction | `node .\cli\bin\bmfctl.js transaction install-stack --apply --confirm apply` |
+| Preview repair transaction | `node .\cli\bin\bmfctl.js transaction repair-stack --json` |
+| Apply repair transaction | `node .\cli\bin\bmfctl.js transaction repair-stack --apply --confirm apply` |
+| Preview transaction rollback | `node .\cli\bin\bmfctl.js rollback .\artifacts\local\transactions\<journal>.json --json` |
+| Apply transaction rollback | `node .\cli\bin\bmfctl.js rollback .\artifacts\local\transactions\<journal>.json --apply --confirm rollback` |
+| Preview service launch contract | `node .\cli\bin\bmfctl.js services start-stack --start-script C:\path\to\Start-BrickadiaOmegga.ps1` |
+| Start configured Omegga stack | `node .\cli\bin\bmfctl.js services start-stack --start-script C:\path\to\Start-BrickadiaOmegga.ps1 --apply --confirm start` |
+| Preview Grafana Alloy launch | `node .\cli\bin\bmfctl.js services start-alloy --alloy-executable "C:\Program Files\GrafanaLabs\Alloy\alloy.exe" --alloy-config .\artifacts\local\bmf.alloy` |
+| Stop BMF-owned Grafana Alloy | `node .\cli\bin\bmfctl.js services stop-alloy --apply --confirm stop` |
+| Check desktop release catalog | `node .\cli\bin\bmfctl.js update check --release-catalog .\artifacts\local\bmf-desktop-release\release-catalog.json` |
+| Plan desktop update download | `node .\cli\bin\bmfctl.js update plan --release-catalog .\artifacts\local\bmf-desktop-release\release-catalog.json` |
+| Download desktop update MSI | `node .\cli\bin\bmfctl.js update download --release-catalog .\artifacts\local\bmf-desktop-release\release-catalog.json --confirm download` |
+| Preview desktop update installer handoff | `node .\cli\bin\bmfctl.js update install --release-catalog .\artifacts\local\bmf-desktop-release\release-catalog.json` |
+| Launch verified desktop update installer | `node .\cli\bin\bmfctl.js update install --release-catalog .\artifacts\local\bmf-desktop-release\release-catalog.json --apply --confirm install` |
+| Preview Grafana/Alloy onboarding | `node .\cli\bin\bmfctl.js telemetry plan --json` |
+| Render Alloy config | `node .\cli\bin\bmfctl.js telemetry alloy --out .\artifacts\local\bmf.alloy --dry-run` |
+| Prepare Grafana dashboard import payload | `node .\cli\bin\bmfctl.js telemetry dashboard --grafana-base-url https://grafana.example --out .\artifacts\local\dashboard-import.json --dry-run` |
+| Upload Grafana dashboard | `node .\cli\bin\bmfctl.js telemetry dashboard --grafana-base-url https://grafana.example --apply --confirm import` |
+| Inspect redacted BMF/Omegga event traffic | `node .\cli\bin\bmfctl.js traffic --json` |
+| Inspect redacted runtime and operation logs | `node .\cli\bin\bmfctl.js logs --json` |
+| Run installed shim version check | `"%ProgramFiles%\BMF Desktop\resources\bmf\bin\bmfctl.cmd" version` |
 | Validate the CLI package | `.\scripts\validate-bmfctl.ps1` |
 
 ## Package And Docs
@@ -25,6 +62,9 @@ Run commands from the repository root unless a script says otherwise.
 | Validate package markers | `.\scripts\validate-package.ps1` |
 | Build a release zip | `.\scripts\build-release-package.ps1 -OutDir .\artifacts\local\release -Force` |
 | Validate a release zip | `.\scripts\validate-release-package.ps1` |
+| Build BMF Desktop MSI | `npm --prefix .\apps\bmf-desktop run dist:msi` |
+| Build BMF Desktop MSI release | `.\scripts\build-bmf-desktop-release.ps1 -BuildMsi -DownloadBaseUrl https://downloads.example/bmf -Force` |
+| Validate BMF Desktop release metadata | `.\scripts\validate-bmf-desktop-release.ps1` |
 | Validate Windows installer behavior | `.\scripts\validate-windows-installer.ps1` |
 | Validate documentation style | `python scripts\validate-docs-style.py` |
 | Build docs strictly | `python -m mkdocs build --strict` |

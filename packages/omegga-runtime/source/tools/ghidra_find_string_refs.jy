@@ -1,0 +1,84 @@
+def describe_location(addr):
+    func = getFunctionContaining(addr)
+    if func is not None:
+        return "func={} entry={}".format(func.getName(), func.getEntryPoint())
+
+    instruction = getInstructionContaining(addr)
+    if instruction is not None:
+        return "instruction={}".format(instruction)
+
+    data = getDataContaining(addr)
+    if data is not None:
+        return "data={}".format(data)
+
+    return "location=<unknown>"
+
+
+def iter_strings():
+    listing = currentProgram.getListing()
+    data_iter = listing.getDefinedData(True)
+    while data_iter.hasNext():
+        data = data_iter.next()
+        value = data.getValue()
+        if value is None:
+            continue
+        if hasattr(value, "toString"):
+            try:
+                rendered = value.toString()
+            except:
+                continue
+            if rendered:
+                yield data, rendered
+
+
+def print_refs(target, data, rendered):
+    println("STRING {} @ {} => {}".format(target, data.getAddress(), rendered))
+    refs = list(getReferencesTo(data.getAddress()))
+    if not refs:
+        println("  refs=<none>")
+        return
+
+    for ref in refs:
+        from_addr = ref.getFromAddress()
+        ref_type = ref.getReferenceType()
+        println(
+            "  from={} type={} {}".format(
+                from_addr, ref_type, describe_location(from_addr)
+            )
+        )
+
+        if not ref_type.isFlow():
+            container = getDataContaining(from_addr)
+            if container is not None and container.getAddress() != data.getAddress():
+                println(
+                    "    indirect-data={} {}".format(
+                        container.getAddress(), describe_location(container.getAddress())
+                    )
+                )
+                for nested in getReferencesTo(container.getAddress()):
+                    println(
+                        "      nested-from={} type={} {}".format(
+                            nested.getFromAddress(),
+                            nested.getReferenceType(),
+                            describe_location(nested.getFromAddress()),
+                        )
+                    )
+
+
+args = getScriptArgs()
+if not args:
+    printerr("usage: ghidra_find_string_refs.jy <substring> [<substring> ...]")
+    exit(1)
+
+needles = [arg.lower() for arg in args]
+hits = 0
+
+for data, rendered in iter_strings():
+    lowered = rendered.lower()
+    for needle in needles:
+        if needle in lowered:
+            print_refs(needle, data, rendered)
+            hits += 1
+            break
+
+println("TOTAL_HITS={}".format(hits))

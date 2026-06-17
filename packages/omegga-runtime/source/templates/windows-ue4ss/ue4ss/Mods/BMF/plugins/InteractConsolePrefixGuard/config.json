@@ -1,0 +1,25 @@
+{
+  "policy": {
+    "adminRoles": ["Owner", "Admin"],
+    "ownerIds": ["ff0f7114-85b9-46af-8ff1-85673e6ae0d6"],
+    "savedDir": "C:/Users/tycox/OneDrive/Documents/GitHub/Brickadia/omegga-master/omegga-master/data/Saved",
+    "allowedPrefixes": ["buyweapon:"],
+    "allowedContexts": [],
+    "denyUnknown": true,
+    "allowEmpty": true,
+    "allowSinglePlayerContextLearning": true,
+    "proactivePrimeAllowedContexts": true,
+    "proactivePrimeIntervalSeconds": 2
+  },
+  "native": {
+    "controlPath": "C:/Users/tycox/OneDrive/Documents/GitHub/bmf/artifacts/local/interact-prefix-guard-control.txt",
+    "statusPath": "C:/Users/tycox/OneDrive/Documents/GitHub/bmf/artifacts/local/interact-prefix-guard-status.txt",
+    "eventPath": "C:/Users/tycox/OneDrive/Documents/GitHub/bmf/artifacts/local/interact-prefix-guard-events.tsv",
+    "trace": true
+  },
+  "feedback": {
+    "enabled": true,
+    "message": "BMF blocked that Interactable console tag: your role can only use whitelisted prefixes.",
+    "adminRetryMessage": "BMF allowed that Interactable console tag for your role. Try applying it again."
+  }
+}

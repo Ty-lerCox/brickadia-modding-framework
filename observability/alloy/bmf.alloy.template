@@ -1,0 +1,53 @@
+// BMF Alloy template.
+// BMF Desktop renders {{...}} placeholders per server profile before writing a
+// local Alloy config. Secrets are read with sys.env and must not be committed.
+
+logging {
+  level  = "info"
+  format = "json"
+}
+
+prometheus.remote_write "grafana_cloud" {
+  endpoint {
+    url = sys.env("BMF_GRAFANA_REMOTE_WRITE_URL")
+
+    basic_auth {
+      username = sys.env("BMF_GRAFANA_REMOTE_WRITE_USERNAME")
+      password = sys.env("BMF_GRAFANA_REMOTE_WRITE_TOKEN")
+    }
+
+    proxy_from_environment = true
+  }
+
+  external_labels = {
+    environment    = "{{environment}}",
+    instance       = "{{instance}}",
+    server_profile = "{{server_profile}}",
+    brickadia_build = "{{brickadia_build}}",
+  }
+}
+
+prometheus.scrape "omegga" {
+  targets = [
+    {
+      "__address__" = "127.0.0.1:{{omegga_metrics_port}}",
+      "job" = "bmf-omegga",
+    },
+  ]
+
+  metrics_path    = "/metrics"
+  scrape_interval = "{{scrape_interval}}"
+  forward_to      = [prometheus.remote_write.grafana_cloud.receiver]
+}
+
+prometheus.scrape "alloy_self" {
+  targets = [
+    {
+      "__address__" = "127.0.0.1:{{alloy_ready_port}}",
+      "job" = "bmf-alloy",
+    },
+  ]
+
+  scrape_interval = "{{scrape_interval}}"
+  forward_to      = [prometheus.remote_write.grafana_cloud.receiver]
+}

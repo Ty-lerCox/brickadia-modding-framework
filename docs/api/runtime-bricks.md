@@ -31,6 +31,12 @@ canonical tag `lookup:<uuid>:<purpose>` and only consult existing bindings,
 explicit positions, or the cached native target list before running the bounded
 runtime-id resolver.
 
+Cold native runtime-id resolve is disabled by default and requires both
+`BMF_BRICK_RUNTIME_RESOLVE_ENABLED=1` and
+`BMF_BRICK_RUNTIME_RESOLVE_UNSAFE_NATIVE_ENABLED=1`. The second flag is
+intentional friction: the live array resolver has stalled the BMF command worker
+in local gameplay validation, so enable it only in isolated validation sessions.
+
 ## In-Game ConsoleTag Contract
 
 Author gameplay targets in Brickadia with an Interactable component and set
@@ -71,7 +77,7 @@ local hiddenByUuid = BMF.bricks.setRuntimeStateByGuid({
 local restoredByTag = BMF.bricks.setRuntimeStateByGuid({
   tag = "lookup:222fd538-01c1-457c-9f67-aaab9fe6bbfd:mine",
   visible = true,
-  collision = "restore",
+  collision = "unchanged",
   confirm = "brick-runtime",
 })
 
@@ -115,19 +121,20 @@ capability-gated as `bricks.runtimeState`. Mutation calls are also
 ## Server-Console Commands
 
 ```text
-Omegga.Bridge.BMF bmf.bricks.runtime.set-guid uuid=<uuid> purpose=<purpose> confirm=brick-runtime [visible=true|false|restore|unchanged] [collision=<0-255>|restore|unchanged]
-Omegga.Bridge.BMF bmf.bricks.runtime.set-guid tag=lookup:<uuid>:<purpose> confirm=brick-runtime [visible=true|false|restore|unchanged] [collision=<0-255>|restore|unchanged]
+Omegga.Bridge.BMF bmf.bricks.runtime.set-guid uuid=<uuid> purpose=<purpose> confirm=brick-runtime [visible=true|false|restore|unchanged] [collision=<0-255>|unchanged]
+Omegga.Bridge.BMF bmf.bricks.runtime.set-guid tag=lookup:<uuid>:<purpose> confirm=brick-runtime [visible=true|false|restore|unchanged] [collision=<0-255>|unchanged]
 ```
 
 Queues visibility/collision mutation for every runtime brick currently bound to
-the lookup GUID. If no binding exists, BMF attempts one bounded lookup/resolve
-and then sets the resolved runtime brick.
+the lookup GUID. If no binding exists, BMF attempts only enabled lookup paths.
+The cold native array resolver is validation-only and fails fast unless the
+unsafe native resolve flag is explicitly enabled.
 
 Common examples:
 
 ```text
 Omegga.Bridge.BMF bmf.bricks.runtime.set-guid tag=lookup:222fd538-01c1-457c-9f67-aaab9fe6bbfd:treecut visible=false collision=0 confirm=brick-runtime
-Omegga.Bridge.BMF bmf.bricks.runtime.set-guid tag=lookup:222fd538-01c1-457c-9f67-aaab9fe6bbfd:treecut visible=true collision=restore confirm=brick-runtime
+Omegga.Bridge.BMF bmf.bricks.runtime.set-guid tag=lookup:222fd538-01c1-457c-9f67-aaab9fe6bbfd:treecut visible=true collision=unchanged confirm=brick-runtime
 Omegga.Bridge.BMF bmf.bricks.runtime.set-guid uuid=222fd538-01c1-457c-9f67-aaab9fe6bbfd purpose=mine visible=false collision=unchanged confirm=brick-runtime
 Omegga.Bridge.BMF bmf.bricks.runtime.set-guid uuid=222fd538-01c1-457c-9f67-aaab9fe6bbfd purpose=mine visible=unchanged collision=0 confirm=brick-runtime
 ```
@@ -141,11 +148,17 @@ Binds one bounded lookup result to an opaque GUID. This is an in-memory runtime
 cache, not persistent world state.
 
 ```text
-Omegga.Bridge.BMF bmf.bricks.runtime.set [uuid=<uuid> purpose=<purpose>|tag=lookup:<uuid>:<purpose>|guid=<opaque-id>] confirm=brick-runtime [visible=true|false|restore|unchanged] [collision=<0-255>|restore|unchanged]
+Omegga.Bridge.BMF bmf.bricks.runtime.set [uuid=<uuid> purpose=<purpose>|tag=lookup:<uuid>:<purpose>|guid=<opaque-id>] confirm=brick-runtime [visible=true|false|restore|unchanged] [collision=<0-255>|unchanged]
 ```
 
 Queues a visibility/collision mutation through the UUID/GUID path. BMF attempts
 existing bindings, explicit `x/y/z`, or a cached exact `ConsoleTag` lookup.
+
+`collision=restore` is rejected unless
+`BMF_BRICK_RUNTIME_COLLISION_RESTORE_ENABLED=1` is set. Keep captured collision
+restore disabled in normal gameplay until it has been live-validated against
+the current Brickadia build; prefer `collision=unchanged` on visibility restore
+or an explicit numeric collision value after validation.
 
 ```text
 Omegga.Bridge.BMF bmf.bricks.runtime.resolve guid=<opaque-id> x=<x> y=<y> z=<z> radius=<n> maxscan=<n> [hint=<slot>] [hintwindow=<n>] [hintonly=true]
@@ -153,11 +166,13 @@ Omegga.Bridge.BMF bmf.bricks.runtime.resolve guid=<opaque-id> x=<x> y=<y> z=<z> 
 
 Queues a bounded runtime-id resolve near one world position. When `guid` is
 supplied and the resolve succeeds, BMF binds the resolved runtime id to that
-GUID.
+GUID. This command fails fast with `BRICK_RUNTIME_RESOLVE_UNSAFE_DISABLED`
+unless `BMF_BRICK_RUNTIME_RESOLVE_UNSAFE_NATIVE_ENABLED=1` is set in addition
+to `BMF_BRICK_RUNTIME_RESOLVE_ENABLED=1`.
 
 ```text
 Omegga.Bridge.BMF bmf.bricks.runtime.inspect brickid=<id> [guid=<opaque-id>] [tag=<opaque-tag>]
-Omegga.Bridge.BMF bmf.bricks.runtime.set brickid=<id> [guid=<opaque-id>] confirm=brick-runtime [visible=true|false|restore|unchanged] [collision=<0-255>|restore|unchanged]
+Omegga.Bridge.BMF bmf.bricks.runtime.set brickid=<id> [guid=<opaque-id>] confirm=brick-runtime [visible=true|false|restore|unchanged] [collision=<0-255>|unchanged]
 Omegga.Bridge.BMF bmf.bricks.runtime.bind guid=<opaque-id> brickid=<id>
 Omegga.Bridge.BMF bmf.bricks.runtime.bind guid=<opaque-id> brickids=<id,id,...>
 ```
@@ -184,7 +199,10 @@ command.
 
 ```text
 BMF_BRICK_RUNTIME_SET_ENABLED=1
-BMF_BRICK_RUNTIME_RESOLVE_ENABLED=1     only for bounded runtime-id resolving
+BMF_BRICK_RUNTIME_RESOLVE_ENABLED=1     validation-only runtime-id resolving gate
+BMF_BRICK_RUNTIME_RESOLVE_UNSAFE_NATIVE_ENABLED=1  second validation-only gate required for native array resolve
+BMF_BRICK_RUNTIME_RESOLVE_SCAN_MAX_MS=75 hard cap for normal slot scans
+BMF_BRICK_RUNTIME_RESOLVE_DIRECT_ARRAY_MAX_MS=75 hard cap for sparse direct-array scans
 BMF_BRICK_RUNTIME_LOOKUP_ENABLED=1     only with a verified live runtime id
 BMF_BRICK_VISIBILITY_SET_ENABLED=1      required for visible=...
 BMF_BRICK_COLLISION_SET_ENABLED=1       required for collision=...

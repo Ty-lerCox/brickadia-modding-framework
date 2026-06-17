@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "id": "ue4ss-compatibility",
+  "componentId": "ue4ss-compatibility",
+  "name": "UE4SS Compatibility Assets",
+  "status": "current-layout-package-boundary",
+  "owner": "compat/ue4ss",
+  "compatibilityManifest": "manifests/compatibility.json",
+  "targetBrickadiaBuild": "PC-Shipping-CL13530",
+  "serverExecutable": "BrickadiaServer-Win64-Shipping.exe",
+  "platform": "Windows",
+  "sourceRoots": [
+    "manifests/compatibility.json",
+    "framework/ue4ss/Mods/BMF",
+    "framework/ue4ss/Mods/BMFSocket",
+    "framework/ue4ss/Mods/BMFFrameTelemetry"
+  ],
+  "requiredFiles": [
+    "manifests/compatibility.json",
+    "framework/ue4ss/Mods/BMF/bmf.json",
+    "framework/ue4ss/Mods/BMF/config.json",
+    "framework/ue4ss/Mods/BMF/enabled.txt",
+    "framework/ue4ss/Mods/BMF/Scripts/main.lua",
+    "framework/ue4ss/Mods/BMFSocket/README.md",
+    "framework/ue4ss/Mods/BMFFrameTelemetry/README.md"
+  ],
+  "requiredRuntimeSurfaces": [
+    "RegisterConsoleCommandGlobalHandler",
+    "Omegga.Bridge.BMF",
+    "OmeggaCallFunctionByNameWithArguments",
+    "BMFSocket"
+  ],
+  "guardrails": [
+    "validate-before-release",
+    "preserve-current-install-paths",
+    "keep-compatibility-manifest-authoritative",
+    "do-not-vendor-server-runtime-data",
+    "do-not-promote-unsupported-builds-without-evidence"
+  ]
+}

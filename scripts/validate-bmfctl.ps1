@@ -33,6 +33,47 @@ try {
   if (!(Test-Path -LiteralPath $cliPath)) {
     throw "bmfctl entrypoint is missing: $cliPath"
   }
+  $snapshotPath = Join-Path $Root 'cli/src/snapshot.js'
+  if (!(Test-Path -LiteralPath $snapshotPath)) {
+    throw "bmfctl snapshot module is missing: $snapshotPath"
+  }
+  $snapshotText = Get-Content -Raw -LiteralPath $snapshotPath
+  if ($snapshotText -notmatch [regex]::Escape('BMF_SNAPSHOT_ROOT')) {
+    throw 'bmfctl snapshot module must support BMF_SNAPSHOT_ROOT for installed Desktop shims.'
+  }
+  $cliSourcePath = Join-Path $Root 'cli/src/cli.js'
+  $formatPath = Join-Path $Root 'cli/src/format.js'
+  $orchestratorPath = Join-Path $Root 'cli/src/orchestrator.js'
+  $cliReadmePath = Join-Path $Root 'cli/README.md'
+  $transactionTestPath = Join-Path $Root 'cli/test/transaction.test.js'
+  foreach ($marker in @(
+    @{ Path = $cliSourcePath; Needle = 'bmfctl prerequisites [--json]' },
+    @{ Path = $cliSourcePath; Needle = '--release-manifest <file>' },
+    @{ Path = $cliSourcePath; Needle = "command === 'prerequisites' || command === 'prereqs'" },
+    @{ Path = $formatPath; Needle = 'printPrerequisites' },
+    @{ Path = $orchestratorPath; Needle = 'createPrerequisiteReport' },
+    @{ Path = $orchestratorPath; Needle = 'releaseManifestPath' },
+    @{ Path = $cliReadmePath; Needle = 'transaction repair-stack --apply --confirm apply' },
+    @{ Path = $transactionTestPath; Needle = 'bmfctl repair-stack transaction maps repair actions to concrete steps' }
+  )) {
+    if (Test-Path -LiteralPath $marker.Path) {
+      $markerText = Get-Content -Raw -LiteralPath $marker.Path
+      if ($markerText -notmatch [regex]::Escape($marker.Needle)) {
+        throw "$($marker.Path) is missing prerequisite command marker: $($marker.Needle)"
+      }
+    }
+  }
+
+  $shimPath = Join-Path $Root 'apps/bmf-desktop/packaged-assets/bin/bmfctl.cmd'
+  if (!(Test-Path -LiteralPath $shimPath)) {
+    throw "Installed bmfctl shim is missing: $shimPath"
+  }
+  $shimText = Get-Content -Raw -LiteralPath $shimPath
+  foreach ($marker in @('ELECTRON_RUN_AS_NODE=1', 'BMF Desktop.exe', 'cli\bin\bmfctl.js', '--bmf-root', '--profile-store', '--journal-root', '--service-root', '--download-dir', 'BMF_SNAPSHOT_ROOT')) {
+    if ($shimText -notmatch [regex]::Escape($marker)) {
+      throw "Installed bmfctl shim is missing marker: $marker"
+    }
+  }
 
   $testFiles = @(Get-ChildItem -LiteralPath (Join-Path $Root 'cli/test') -Filter '*.test.js' | ForEach-Object { $_.FullName })
   if ($testFiles.Count -eq 0) {
@@ -45,6 +86,11 @@ try {
   }
 
   Add-Evidence 'file' $cliPath 'bmfctl executable entrypoint'
+  Add-Evidence 'file' $cliSourcePath 'bmfctl command router'
+  Add-Evidence 'file' $formatPath 'bmfctl output formatters'
+  Add-Evidence 'file' $orchestratorPath 'bmfctl orchestrator bridge'
+  Add-Evidence 'file' $shimPath 'Installed BMF Desktop bmfctl Windows shim'
+  Add-Evidence 'file' $snapshotPath 'bmfctl snapshot module'
   foreach ($test in $testFiles) {
     Add-Evidence 'test' $test 'bmfctl node:test suite'
   }

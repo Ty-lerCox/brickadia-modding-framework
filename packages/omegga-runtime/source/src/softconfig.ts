@@ -1,0 +1,146 @@
+import os from 'os';
+import path from 'path';
+import {
+  getConfigHome,
+  getGameBinaryPath,
+  getSteamCmdFilename,
+  POST_INSTALL_SCRIPTS,
+  RPC_PLUGIN_FILES,
+  TEMPLATE_EXECUTABLES,
+} from '@util/platform';
+
+// home directory for omegga config
+export const PROJECT_NAME = 'omegga';
+export const CONFIG_HOME = getConfigHome(PROJECT_NAME);
+export const GLOBAL_TOKEN = path.join(CONFIG_HOME, 'global_auth_token');
+
+export const DEFAULT_PORT = 8080;
+
+// filenames that omegga searches for
+// extensions are added based on the available config formats
+export const CONFIG_FILENAMES = [
+  'omegga-config',
+  'omegga',
+  '.omegga-config',
+  '.omegga',
+];
+
+export const BRICKADIA_INSTALLS = path.join(
+  os.homedir(),
+  '.local/share/brickadia-launcher/brickadia-installs',
+);
+
+export const STEAM_DIR = path.join(CONFIG_HOME, 'steam');
+export const STEAMCMD_PATH = path.join(STEAM_DIR, getSteamCmdFilename());
+export const DEFAULT_STEAM_APP_ID = '3017590'; // Brickadia app ID
+export function getAppId() {
+  return process.env.STEAM_APP_ID ?? DEFAULT_STEAM_APP_ID;
+}
+export const GAME_BIN_PATH = getGameBinaryPath();
+export const LOCAL_LAUNCHER = path.join(
+  CONFIG_HOME,
+  'launcher/brickadia-launcher/main-brickadia-launcher',
+);
+
+export const getOverrideGameDir = () => process.env.BRICKADIA_DIR;
+export function getOverrideGameBinary() {
+  const overrideDir = getOverrideGameDir();
+  if (!overrideDir) return null;
+  return path.join(overrideDir, GAME_BIN_PATH);
+}
+export function getSteamGameDir() {
+  let GAME_DIR = 'Brickadia';
+  if (process.env.STEAM_GAME_DIR) GAME_DIR = process.env.STEAM_GAME_DIR;
+  return process.env.STEAM_GAME_DIR ?? GAME_DIR;
+}
+export function getSteamInstallDir() {
+  let INSTALL_DIR = path.join(CONFIG_HOME, 'steam_installs');
+  if (process.env.STEAM_INSTALLS_DIR)
+    INSTALL_DIR = process.env.STEAM_INSTALLS_DIR;
+  return INSTALL_DIR;
+}
+
+// path to auth files
+export const CONFIG_AUTH_DIR = 'Auth';
+export const CONFIG_SAVED_DIR = 'Saved';
+// files in Brickadia/Saved/Auth
+export const BRICKADIA_AUTH_FILES = [
+  'OfflinePayload.bin',
+  'OfflineSignature.bin',
+  'SessionToken.bin',
+];
+
+// temporary install for generating auth files
+export const TEMP_DIR_NAME = '.omegga-temp-data';
+
+// path to certain info folders
+export const DATA_PATH = './data';
+export const PLUGIN_PATH = './plugins';
+
+// plugin data
+export const PLUGIN_FILE = './plugin.json';
+// post install file
+export const PLUGIN_POSTINSTALL = './setup.sh';
+export const PLUGIN_POSTINSTALL_CANDIDATES = POST_INSTALL_SCRIPTS;
+export const RPC_PLUGIN_CANDIDATES = RPC_PLUGIN_FILES;
+export const TEMPLATE_PLUGIN_EXECUTABLES = TEMPLATE_EXECUTABLES;
+
+// databases
+export const CHAT_STORE = 'chat.db';
+export const PLAYER_STORE = 'players.db';
+export const PLUGIN_STORE = 'plugins.db';
+export const STATUS_STORE = 'status.db';
+export const USER_STORE = 'users.db';
+export const SERVER_STORE = 'store.db';
+export const SESSION_STORE = 'session.db';
+export const ACTIVE_WORLD_FILE = 'active_world';
+
+// website config
+export const WEB_CERTS_DATA = 'web_certs.json';
+export const WEB_SESSION_TOKEN = 'web_session_token';
+
+// how often server status is requested in a heartbeat
+export const METRIC_HEARTBEAT_INTERVAL = 60 * 1000;
+// the number of empty server statuses before metric logging is paused
+export const METRIC_EMPTIES_BEFORE_PAUSE = 3;
+
+// rexport as default
+export default {
+  PROJECT_NAME,
+  CONFIG_HOME,
+  DEFAULT_PORT,
+  CONFIG_FILENAMES,
+  BRICKADIA_INSTALLS,
+  LOCAL_LAUNCHER,
+  CONFIG_AUTH_DIR,
+  CONFIG_SAVED_DIR,
+  BRICKADIA_AUTH_FILES,
+  TEMP_DIR_NAME,
+  DATA_PATH,
+  PLUGIN_PATH,
+  PLUGIN_FILE,
+  PLUGIN_POSTINSTALL,
+  PLUGIN_POSTINSTALL_CANDIDATES,
+  RPC_PLUGIN_CANDIDATES,
+  TEMPLATE_PLUGIN_EXECUTABLES,
+  CHAT_STORE,
+  PLAYER_STORE,
+  PLUGIN_STORE,
+  STATUS_STORE,
+  USER_STORE,
+  SERVER_STORE,
+  SESSION_STORE,
+  WEB_CERTS_DATA,
+  WEB_SESSION_TOKEN,
+  METRIC_HEARTBEAT_INTERVAL,
+  METRIC_EMPTIES_BEFORE_PAUSE,
+  STEAM_DIR,
+  STEAMCMD_PATH,
+  STEAM_BRICKADIA_PATH: GAME_BIN_PATH,
+  GLOBAL_TOKEN,
+  getOverrideGameDir,
+  getOverrideGameBinary,
+  getSteamGameDir,
+  getSteamInstallDir,
+  getAppId,
+};

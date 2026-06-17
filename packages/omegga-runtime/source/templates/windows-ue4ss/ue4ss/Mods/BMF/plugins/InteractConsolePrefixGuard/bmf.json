@@ -1,0 +1,6 @@
+{
+  "name": "InteractConsolePrefixGuard",
+  "version": "0.1.0",
+  "description": "Evaluates Interactable Print-to-Console prefixes with Owner/Admin bypass and a whitelist for everyone else.",
+  "capabilities": ["chat.whisper", "chat.broadcast", "plugins.storage"]
+}

@@ -25,6 +25,49 @@ function makeEnvironment() {
   );
   write(path.join(bmfRoot, 'manifests', 'dependencies.json'), '{}\n');
   write(path.join(bmfRoot, 'manifests', 'compatibility.json'), '{}\n');
+  write(
+    path.join(bmfRoot, 'observability', 'observability-manifest.json'),
+    JSON.stringify({
+      schemaVersion: 1,
+      version: 'test',
+      alloy: {
+        template: 'observability/alloy/bmf.alloy.template',
+        scrapeTargets: ['omegga-metrics', 'alloy-self'],
+        remoteWriteSecretRefs: [
+          'BMF_GRAFANA_REMOTE_WRITE_URL',
+          'BMF_GRAFANA_REMOTE_WRITE_USERNAME',
+          'BMF_GRAFANA_REMOTE_WRITE_TOKEN',
+        ],
+      },
+      grafana: {
+        dashboard: 'observability/grafana/bmf-dashboard.json',
+        import: 'observability/grafana/dashboard-import.json',
+        dashboardUid: 'bmf-standard',
+        dashboardVersion: 'test',
+      },
+      labels: ['environment', 'instance', 'server_profile', 'brickadia_build'],
+      metrics: ['bmf_runtime_status_up'],
+    }, null, 2),
+  );
+  write(
+    path.join(bmfRoot, 'observability', 'alloy', 'bmf.alloy.template'),
+    'prometheus.remote_write "grafana_cloud" { endpoint { url = sys.env("BMF_GRAFANA_REMOTE_WRITE_URL") } }\n' +
+      'prometheus.scrape "omegga" { targets = [{ "__address__" = "127.0.0.1:{{omegga_metrics_port}}", "job" = "bmf-omegga" }] scrape_interval = "{{scrape_interval}}" forward_to = [prometheus.remote_write.grafana_cloud.receiver] }\n' +
+      'prometheus.scrape "alloy_self" { targets = [{ "__address__" = "127.0.0.1:{{alloy_ready_port}}", "job" = "bmf-alloy" }] scrape_interval = "{{scrape_interval}}" forward_to = [prometheus.remote_write.grafana_cloud.receiver] }\n' +
+      'labels = "{{environment}}/{{instance}}/{{server_profile}}/{{brickadia_build}}"\n',
+  );
+  write(
+    path.join(bmfRoot, 'observability', 'grafana', 'bmf-dashboard.json'),
+    JSON.stringify({ uid: 'bmf-standard', title: 'BMF Standard', panels: [] }, null, 2),
+  );
+  write(
+    path.join(bmfRoot, 'observability', 'grafana', 'dashboard-import.json'),
+    JSON.stringify({
+      api: { defaultEndpoint: 'POST /api/dashboards/db' },
+      requiredInputs: ['grafanaBaseUrl', 'grafanaApiToken'],
+      secretFields: ['grafanaApiToken'],
+    }, null, 2),
+  );
   write(path.join(bmfRoot, 'framework', 'ue4ss', 'Mods', 'BMF', 'bmf.json'), '{"name":"BMF"}\n');
   write(path.join(bmfRoot, 'framework', 'ue4ss', 'Mods', 'BMF', 'config.json'), '{}\n');
   write(path.join(bmfRoot, 'framework', 'ue4ss', 'Mods', 'BMF', 'Scripts', 'main.lua'), 'return nil\n');

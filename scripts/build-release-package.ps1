@@ -42,6 +42,29 @@ function Add-Evidence([System.Collections.Generic.List[object]]$Evidence, [strin
   }
 }
 
+function Test-IsExcludedReleaseRelativePath([string]$Relative) {
+  $parts = $Relative -split '[\\/]'
+  foreach ($part in $parts) {
+    if ($part -in @('node_modules', '.angular', 'dist')) {
+      return $true
+    }
+  }
+  return $false
+}
+
+function Copy-ReleaseDirectory([string]$Source, [string]$Destination) {
+  New-Item -ItemType Directory -Force -Path $Destination | Out-Null
+  foreach ($file in Get-ChildItem -LiteralPath $Source -Recurse -File -Force) {
+    $relative = Get-ChildRelativePath $Source $file.FullName
+    if (Test-IsExcludedReleaseRelativePath $relative) {
+      continue
+    }
+    $target = Join-Path $Destination $relative
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
+    Copy-Item -LiteralPath $file.FullName -Destination $target -Force
+  }
+}
+
 if (!$OutDir) {
   $OutDir = Join-Path $Root 'artifacts/local/release'
 }
@@ -89,8 +112,8 @@ try {
     Remove-Item -LiteralPath $zipPath -Force
   }
 
-  $topLevelFiles = @('README.md', 'TODO.md', 'OVERNIGHT_STRATEGY.md')
-  $topLevelDirs = @('framework', 'installer', 'examples', 'docs', 'manifests', 'scripts', 'tests', 'integrations', 'native', 'cli')
+  $topLevelFiles = @('README.md', 'package.json', 'TODO.md', 'OVERNIGHT_STRATEGY.md')
+  $topLevelDirs = @('.github', 'apps', 'framework', 'installer', 'examples', 'docs', 'manifests', 'compat', 'observability', 'packages', 'scripts', 'tests', 'integrations', 'native', 'cli')
 
   foreach ($relative in $topLevelFiles) {
     $source = Join-Path $rootFull $relative
@@ -105,7 +128,7 @@ try {
     if (!(Test-Path -LiteralPath $source)) {
       throw "Release source directory is missing: $relative"
     }
-    Copy-Item -LiteralPath $source -Destination (Join-Path $stagingRoot $relative) -Recurse -Force
+    Copy-ReleaseDirectory $source (Join-Path $stagingRoot $relative)
   }
 
   foreach ($file in Get-ChildItem -LiteralPath $stagingRoot -Recurse -File) {
@@ -128,7 +151,7 @@ try {
     builtAt = (Get-Date).ToUniversalTime().ToString('o')
     package = [ordered]@{
       fileName = [System.IO.Path]::GetFileName($zipPath)
-      excludes = @('artifacts/')
+      excludes = @('artifacts/', 'node_modules/', '.angular/', 'dist/')
       includedRoots = @($topLevelFiles + $topLevelDirs)
     }
     files = $fileRecords.ToArray()

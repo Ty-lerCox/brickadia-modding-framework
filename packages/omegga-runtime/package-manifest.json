@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "id": "omegga-runtime",
+  "componentId": "omegga-runtime",
+  "name": "BMF-compatible Omegga Runtime",
+  "status": "synced-source",
+  "owner": "packages/omegga-runtime",
+  "sourceRepository": "https://github.com/Ty-lerCox/bmf-omegga-fork",
+  "upstreamRepository": "https://github.com/brickadia-community/omegga",
+  "dependencyManifest": "manifests/dependencies.json",
+  "importMode": "local-fork-source-sync",
+  "sourceCommit": "f8757adc38557c5f9ae55f551b8f3434e9a60506",
+  "syncMetadata": "packages/omegga-runtime/sync-metadata.json",
+  "sourceRoots": [
+    "packages/omegga-runtime/source"
+  ],
+  "requiredSurfaces": [
+    "Omegga.Bridge.BMF",
+    "OmeggaExecuteConsoleManagerInput",
+    "OmeggaExecuteKismetConsoleCommand",
+    "OmeggaExecuteCachedConsoleExec",
+    "OmeggaCallFunctionByNameWithArguments",
+    "RegisterConsoleCommandGlobalHandler"
+  ],
+  "provides": [
+    "brickadia-server-supervisor",
+    "managed-ue4ss-install",
+    "omegga-bridge-bmf-command-worker-route",
+    "ue4ss-console-execution-helpers",
+    "player-identity-sync-adapter",
+    "brickadia-and-ue4ss-log-context",
+    "headless-canary-transport"
+  ],
+  "packaging": {
+    "licenseNoticeRequired": true,
+    "doNotVendor": [
+      "node_modules",
+      "runtime server data",
+      "server saves",
+      "logs"
+    ]
+  },
+  "guardrails": [
+    "do-not-vendor-node-modules",
+    "record-fork-commit-before-release",
+    "preserve-upstream-license-notice",
+    "validate-bmf-required-surfaces",
+    "keep-server-data-out-of-source"
+  ]
+}

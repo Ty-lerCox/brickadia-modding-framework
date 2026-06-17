@@ -82,7 +82,7 @@ Current CityRPG pattern:
 - External relays map BMF event names back to CityRPG's legacy application
   event names at the boundary.
 - The packaged Omegga adapter lives at
-  `integrations/omegga/bmf-minigame-events/`.
+  `packages/omegga-plugins/bmf-minigame-events/`.
 
 Snapshot, team, and leaderboard polling remain unsafe opt-ins until BMF has a
 proven native hook or another safe Brickadia data source.

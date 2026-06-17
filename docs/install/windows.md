@@ -121,9 +121,9 @@ uninstall.
 4. Copy `framework/ue4ss/Mods/BMF` into the UE4SS `Mods` folder.
 5. Set `brickadiaSavedDir` in `Mods/BMF/config.json` when BMF should patch
    server files such as `Saved/Server/RoleSetup2.json`.
-6. Install `integrations/omegga/bmf-player-sync` when Omegga-fed player records
-   are desired.
-7. Install `integrations/omegga/bmf-minigame-events` when CityRPG or another
+6. Install `packages/omegga-plugins/bmf-player-sync` when Omegga-fed player
+   records are desired.
+7. Install `packages/omegga-plugins/bmf-minigame-events` when CityRPG or another
    plugin needs legacy-compatible minigame events from BMF.
 8. Confirm `Mods/BMF/enabled.txt` exists.
 9. Start the server.

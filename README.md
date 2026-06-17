@@ -47,6 +47,33 @@ python -m pip install -r requirements-docs.txt
 python -m mkdocs build --strict
 ```
 
+## Root Workspace
+
+The repository now has a root workspace entry point for the consolidated BMF
+runtime program. It keeps Desktop and Omegga dependency installs on their
+existing lockfiles while giving maintainers one place to set up, validate, test,
+and build release artifacts.
+
+```powershell
+npm run setup
+npm run validate
+npm run validate:ci
+npm run test
+npm run release:desktop
+```
+
+Use Node `22.22.3+`, `24.15.0+`, or `26+` so the Angular Desktop build and the
+BMF-supported Omegga runtime agree on the same runtime floor.
+
+For an operator machine, `bmfctl prerequisites` reports the local setup state
+for BMF assets, Brickadia server files, the Omegga install target, Node/npm,
+PowerShell, and optional Grafana Alloy before mutating install/start actions.
+
+GitHub Actions workflow `.github/workflows/unified-runtime.yml` runs workspace
+validation, CLI/core tests, Desktop renderer build, Omegga runtime tests,
+native helper validation, release package validation, docs build, and
+manual/tagged MSI artifact creation.
+
 ## Validate Locally
 
 ```powershell
@@ -73,6 +100,12 @@ manifests/                         Package and compatibility metadata
 scripts/                           Local validation helpers
 native/                            Native transport and telemetry sources
 cli/                               bmfctl manager/troubleshooting CLI
+apps/bmf-desktop/                  Electron and Angular Material desktop app
+packages/orchestrator-core/         Shared install, health, update, and telemetry API
+packages/omegga-runtime/            BMF-supported Omegga runtime package boundary
+packages/omegga-plugins/            Generic Omegga adapters for BMF-aware game modes
+compat/                             UE4SS and Brickadia compatibility package boundaries
+observability/                      Grafana Alloy and dashboard assets
 tests/fixtures/                    Static fixtures for wrapper tests
 artifacts/                         Generated validation evidence
 ```

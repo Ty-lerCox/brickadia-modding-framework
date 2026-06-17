@@ -1,0 +1,3 @@
+@echo off
+REM This script will be run when the plugin is installed...
+exit /b 0

@@ -23,6 +23,7 @@ local COMMAND_EMPTY_READ_RETRY_LIMIT = 5
 BMF_COMMAND_WORKER_DEFAULT_POLL_MS = 250
 BMF_COMMAND_WORKER_FALLBACK_POLL_MS = 1000
 BMF_COMMAND_WORKER_DEFAULT_MAX_FILES_PER_POLL = 1
+BMF_STATUS_HEARTBEAT_DEFAULT_SECONDS = 15
 local SOCKET_DEFAULT_POLL_MS = 25
 
 local state = {
@@ -141,6 +142,8 @@ local state = {
   command_worker_poll_interval_ms = BMF_COMMAND_WORKER_DEFAULT_POLL_MS,
   command_worker_fallback_poll_interval_ms = BMF_COMMAND_WORKER_FALLBACK_POLL_MS,
   command_worker_max_files_per_poll = BMF_COMMAND_WORKER_DEFAULT_MAX_FILES_PER_POLL,
+  status_last_write_epoch = 0,
+  status_heartbeat_interval_seconds = BMF_STATUS_HEARTBEAT_DEFAULT_SECONDS,
   command_dir_ensured = false,
   command_inflight_files = {},
   socket_worker_started = false,
@@ -164,6 +167,8 @@ local state = {
     last_error = "",
     last_status = "",
     last_started_at = "",
+    metadata_last_write_epoch = 0,
+    metadata_heartbeat_interval_seconds = BMF_STATUS_HEARTBEAT_DEFAULT_SECONDS,
   },
   player_cache = nil,
   player_cache_error = "",
@@ -1233,6 +1238,7 @@ local function compatibility_snapshot()
 end
 
 write_status = function()
+  state.status_last_write_epoch = os.time()
   local compatibility = compatibility_snapshot()
   local parts = {
     "\"state\":\"running\"",
@@ -1257,6 +1263,7 @@ write_status = function()
     "\"command_worker_poll_interval_ms\":" .. tostring(state.command_worker_poll_interval_ms or 0),
     "\"command_worker_fallback_poll_interval_ms\":" .. tostring(state.command_worker_fallback_poll_interval_ms or 0),
     "\"command_worker_max_files_per_poll\":" .. tostring(state.command_worker_max_files_per_poll or 0),
+    "\"status_heartbeat_interval_seconds\":" .. tostring(state.status_heartbeat_interval_seconds or 0),
     "\"plugin_tick_count\":" .. tostring(state.plugin_tick_count),
     "\"plugin_tick_active\":" .. tostring(state.plugin_tick_timer_id ~= nil),
     "\"audit_records\":" .. tostring(#state.audit_records),
@@ -1427,6 +1434,45 @@ function BMF_socket_native_available()
     and type(BMFSocketReceive) == "function"
 end
 
+local function BMF_socket_write_metadata()
+  state.socket.metadata_last_write_epoch = os.time()
+  write_file(RUNTIME_DIR .. "/socket.json", json_encode({
+    enabled = state.socket.enabled,
+    available = state.socket.available,
+    started = state.socket.started,
+    host = state.socket.host,
+    port = state.socket.port,
+    token = state.socket.token,
+    pollIntervalMs = state.socket.poll_interval_ms,
+    metadataHeartbeatIntervalSeconds = state.socket.metadata_heartbeat_interval_seconds,
+    workerStarted = state.socket_worker_started,
+    workerMode = state.socket_worker_mode,
+    sentEvents = state.socket.sent_events,
+    sentResponses = state.socket.sent_responses,
+    receivedCommands = state.socket.received_commands,
+    receivedMessages = state.socket.received_messages,
+    pollCount = state.socket.poll_count,
+    lastPollAt = state.socket.last_poll_at,
+    lastDrainCount = state.socket.last_drain_count,
+    lastError = state.socket.last_error,
+    lastStatus = state.socket.last_status,
+    lastStartedAt = state.socket.last_started_at,
+    updatedAt = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+  }))
+end
+
+local function BMF_socket_metadata_heartbeat(force)
+  local interval = tonumber(state.socket.metadata_heartbeat_interval_seconds) or BMF_STATUS_HEARTBEAT_DEFAULT_SECONDS
+  local last_write_epoch = tonumber(state.socket.metadata_last_write_epoch or 0) or 0
+  local now_epoch = os.time()
+  if not force and last_write_epoch > 0 and (now_epoch - last_write_epoch) < interval then
+    return false
+  end
+
+  BMF_socket_write_metadata()
+  return true
+end
+
 function BMF_socket_configure_from_env()
   state.socket.enabled = BMF_socket_enabled_from_env()
   state.socket.available = BMF_socket_native_available()
@@ -1437,15 +1483,10 @@ function BMF_socket_configure_from_env()
   state.socket.port = tonumber(BMF_socket_env("OMEGGA_BMF_SOCKET_PORT")) or 0
   state.socket.token = BMF_socket_env("OMEGGA_BMF_SOCKET_TOKEN")
   state.socket.poll_interval_ms = math.max(5, tonumber(BMF_socket_env("OMEGGA_BMF_SOCKET_POLL_MS")) or SOCKET_DEFAULT_POLL_MS)
-  write_file(RUNTIME_DIR .. "/socket.json", json_encode({
-    enabled = state.socket.enabled,
-    available = state.socket.available,
-    host = state.socket.host,
-    port = state.socket.port,
-    token = state.socket.token,
-    pollIntervalMs = state.socket.poll_interval_ms,
-    updatedAt = os.date("!%Y-%m-%dT%H:%M:%SZ"),
-  }))
+  if type(BMF_status_heartbeat_interval_seconds) == "function" then
+    state.socket.metadata_heartbeat_interval_seconds = BMF_status_heartbeat_interval_seconds()
+  end
+  BMF_socket_write_metadata()
 end
 
 function BMF_socket_send_json(record)
@@ -1565,6 +1606,7 @@ local function run_on_game_thread(callback)
     end
     state.game_thread_callbacks[id] = function()
       local retained = state.game_thread_callbacks[id]
+      state.game_thread_callbacks[id] = nil
       if retained then
         local ok, err = pcall(callback)
         if not ok then
@@ -7605,7 +7647,7 @@ BMF.tools.treeCutNative = {}
 BMF.tools.resourceNative = {}
 BMF.tools.treeCutProbe = {}
 
-do
+(function()
 
 local function native_uobject_parse_lines(text)
   local lines = {}
@@ -9937,6 +9979,40 @@ local function brick_runtime_parse_context_arg(options)
   return text
 end
 
+local function brick_runtime_collision_restore_enabled()
+  return BMF_env_bool("BMF_BRICK_RUNTIME_COLLISION_RESTORE_ENABLED", false)
+end
+
+local function brick_runtime_resolve_unsafe_native_enabled()
+  return BMF_env_bool("BMF_BRICK_RUNTIME_RESOLVE_UNSAFE_NATIVE_ENABLED", false)
+end
+
+local function brick_runtime_resolve_lookup_fallback_enabled()
+  return BMF_env_bool("BMF_BRICK_RUNTIME_RESOLVE_LOOKUP_FALLBACK_ENABLED", false)
+    and BMF_env_bool("BMF_BRICK_RUNTIME_RESOLVE_UNSAFE_LOOKUP_SCAN_ENABLED", false)
+end
+
+local function brick_runtime_resolve_hint_lookup_enabled()
+  return BMF_env_bool("BMF_BRICK_RUNTIME_RESOLVE_HINT_LOOKUP_ENABLED", false)
+    and BMF_env_bool("BMF_BRICK_RUNTIME_UNSAFE_LOOKUP_ENABLED", false)
+end
+
+local function brick_runtime_resolve_direct_array_enabled()
+  return BMF_env_bool("BMF_BRICK_RUNTIME_RESOLVE_DIRECT_ARRAY_ENABLED", false)
+    and brick_runtime_resolve_unsafe_native_enabled()
+end
+
+local function brick_runtime_direct_lookup_enabled()
+  return BMF_env_bool("BMF_BRICK_RUNTIME_UNSAFE_LOOKUP_ENABLED", false)
+end
+
+local function brick_runtime_resolve_native_path_enabled()
+  return brick_runtime_resolve_unsafe_native_enabled()
+    or brick_runtime_resolve_lookup_fallback_enabled()
+    or brick_runtime_resolve_hint_lookup_enabled()
+    or brick_runtime_resolve_direct_array_enabled()
+end
+
 local function brick_runtime_parse_resolve_position_arg(options, allow_positional)
   options = type(options) == "table" and options or {}
   local positional = allow_positional and type(options._positional) == "table" and options._positional or {}
@@ -10021,6 +10097,12 @@ local function brick_runtime_resolve_id_on_game_thread(options, guid, tag)
     lines[#lines + 1] = "ok=false"
     lines[#lines + 1] = "code=BRICK_RUNTIME_RESOLVE_DISABLED"
     lines[#lines + 1] = "detail=runtime brick resolve is disabled"
+    return nil, lines
+  end
+  if not brick_runtime_resolve_native_path_enabled() then
+    lines[#lines + 1] = "ok=false"
+    lines[#lines + 1] = "code=BRICK_RUNTIME_RESOLVE_NATIVE_PATH_DISABLED"
+    lines[#lines + 1] = "detail=native runtime brick resolve is disabled; enable BMF_BRICK_RUNTIME_RESOLVE_UNSAFE_NATIVE_ENABLED=1 only for isolated array-scan validation"
     return nil, lines
   end
 
@@ -10122,6 +10204,20 @@ function BMF.bricks.resolveRuntimeState(options)
       },
     })
   end
+  if not brick_runtime_resolve_native_path_enabled() then
+    runtime.last_error = "native runtime brick resolve is disabled"
+    return result(false, "BRICK_RUNTIME_RESOLVE_NATIVE_PATH_DISABLED", runtime.last_error, {
+      tag = tag,
+      guid = guid,
+      lines = {
+        "ok=false",
+        "code=BRICK_RUNTIME_RESOLVE_NATIVE_PATH_DISABLED",
+        "tag=" .. tag,
+        "guid=" .. guid,
+        "detail=native runtime brick resolve is disabled; enable BMF_BRICK_RUNTIME_RESOLVE_UNSAFE_NATIVE_ENABLED=1 only for isolated array-scan validation",
+      },
+    })
+  end
 
   local radius = option_number(options, "radius", 512)
   local max_scan = option_number(options, "maxscan", option_number(options, "max", 120000))
@@ -10209,6 +10305,20 @@ function BMF.bricks.inspectRuntimeState(options)
         "brick_id=" .. tostring(brick_id),
         "tag=" .. tag,
         "guid=" .. guid,
+      },
+    })
+  end
+  if not brick_runtime_direct_lookup_enabled() then
+    return result(false, "BRICK_RUNTIME_LOOKUP_DISABLED", "explicit runtime brick id inspect is disabled unless unsafe direct lookup is enabled", {
+      brickId = brick_id,
+      lines = {
+        "ok=false",
+        "code=BRICK_RUNTIME_LOOKUP_DISABLED",
+        "brick_id=" .. tostring(brick_id),
+        "tag=" .. tag,
+        "guid=" .. guid,
+        "required_env=BMF_BRICK_RUNTIME_UNSAFE_LOOKUP_ENABLED=1",
+        "detail=saved BRS brickIndex values are not safe runtime ids; inspect requires a verified live runtime id",
       },
     })
   end
@@ -10300,10 +10410,40 @@ function BMF.bricks.setRuntimeState(options)
       },
     })
   end
+  if not brick_runtime_direct_lookup_enabled() then
+    return result(false, "BRICK_RUNTIME_LOOKUP_DISABLED", "explicit runtime brick id set is disabled unless unsafe direct lookup is enabled", {
+      brickId = brick_id,
+      lines = {
+        "ok=false",
+        "code=BRICK_RUNTIME_LOOKUP_DISABLED",
+        "brick_id=" .. tostring(brick_id),
+        "tag=" .. tag,
+        "guid=" .. guid,
+        "required_env=BMF_BRICK_RUNTIME_UNSAFE_LOOKUP_ENABLED=1",
+        "detail=saved BRS brickIndex values are not safe runtime ids; set by GUID or tag requires a live verified runtime binding",
+      },
+    })
+  end
 
   local visible = brick_runtime_parse_visible_arg(options, legacy_tree_confirm and 0 or -1)
   local collision = brick_runtime_parse_collision_arg(options, legacy_tree_confirm and -1 or -2)
   local context = brick_runtime_parse_context_arg(options)
+  if collision == -1 and not brick_runtime_collision_restore_enabled() then
+    return result(false, "BRICK_RUNTIME_COLLISION_RESTORE_DISABLED", "collision=restore is disabled by default for runtime brick-state set", {
+      brickId = brick_id,
+      lines = {
+        "ok=false",
+        "code=BRICK_RUNTIME_COLLISION_RESTORE_DISABLED",
+        "brick_id=" .. tostring(brick_id),
+        "tag=" .. tag,
+        "guid=" .. guid,
+        "visible_arg=" .. tostring(visible),
+        "collision_channels=" .. tostring(collision),
+        "required_env=BMF_BRICK_RUNTIME_COLLISION_RESTORE_ENABLED=1",
+        "detail=use collision=unchanged or an explicit numeric collision channel unless captured restore has been live-validated for this server build",
+      },
+    })
+  end
   if context ~= "" and tostring(options.contextconfirm or options.context_confirm or "") ~= "brick-runtime-context" then
     return result(false, "BRICK_RUNTIME_CONTEXT_CONFIRM_REQUIRED", "contextConfirm=brick-runtime-context is required for explicit diagnostic grid contexts", {
       brickId = brick_id,
@@ -10547,6 +10687,20 @@ function BMF.bricks.setRuntimeStateByGuid(options)
   local visible = brick_runtime_parse_visible_arg(options, -1)
   local collision = brick_runtime_parse_collision_arg(options, -2)
   local context = brick_runtime_parse_context_arg(options)
+  if collision == -1 and not brick_runtime_collision_restore_enabled() then
+    return result(false, "BRICK_RUNTIME_COLLISION_RESTORE_DISABLED", "collision=restore is disabled by default for runtime brick-state set", {
+      guid = guid,
+      lines = {
+        "ok=false",
+        "code=BRICK_RUNTIME_COLLISION_RESTORE_DISABLED",
+        "guid=" .. guid,
+        "visible_arg=" .. tostring(visible),
+        "collision_channels=" .. tostring(collision),
+        "required_env=BMF_BRICK_RUNTIME_COLLISION_RESTORE_ENABLED=1",
+        "detail=use collision=unchanged or an explicit numeric collision channel unless captured restore has been live-validated for this server build",
+      },
+    })
+  end
   if context ~= "" and tostring(options.contextconfirm or options.context_confirm or "") ~= "brick-runtime-context" then
     return result(false, "BRICK_RUNTIME_CONTEXT_CONFIRM_REQUIRED", "contextConfirm=brick-runtime-context is required for explicit diagnostic grid contexts", {
       guid = guid,
@@ -10574,6 +10728,22 @@ function BMF.bricks.setRuntimeStateByGuid(options)
   local tag = brick_runtime_canonical_tag_arg(options, guid)
   local binding = BMF_brick_runtime_guid_binding(guid, false)
   if not binding or #binding.ids == 0 then
+    if not brick_runtime_resolve_native_path_enabled() then
+      return result(false, "BRICK_RUNTIME_GUID_UNBOUND", "No runtime bricks are bound for this GUID and native runtime resolve is disabled", {
+        guid = guid,
+        tag = tag,
+        lines = {
+          "ok=false",
+          "code=BRICK_RUNTIME_GUID_UNBOUND",
+          "guid=" .. guid,
+          "tag=" .. tag,
+          "bound_bricks=0",
+          "lookup_queued=false",
+          "detail=native runtime brick resolve is disabled; bind this GUID from a verified native hit or enable unsafe resolve only for isolated validation",
+        },
+      })
+    end
+
     local sequence = brick_runtime_next_sequence()
     run_on_game_thread(function()
       local resolved, resolve_lines = brick_runtime_resolve_id_on_game_thread(options, guid, tag)
@@ -11404,7 +11574,7 @@ function BMF.tools.treeCutProbe.status()
   })
 end
 
-end
+end)()
 
 BMF.minigames = {}
 
@@ -18445,6 +18615,30 @@ function BMF_command_worker_max_files_per_poll()
   )
 end
 
+function BMF_status_heartbeat_interval_seconds()
+  return BMF_env_number(
+    "BMF_STATUS_HEARTBEAT_SECONDS",
+    BMF_STATUS_HEARTBEAT_DEFAULT_SECONDS,
+    5
+  )
+end
+
+local function write_status_heartbeat(force)
+  if type(write_status) ~= "function" then
+    return false
+  end
+
+  local interval = tonumber(state.status_heartbeat_interval_seconds) or BMF_STATUS_HEARTBEAT_DEFAULT_SECONDS
+  local last_write_epoch = tonumber(state.status_last_write_epoch or 0) or 0
+  local now_epoch = os.time()
+  if not force and last_write_epoch > 0 and (now_epoch - last_write_epoch) < interval then
+    return false
+  end
+
+  write_status()
+  return true
+end
+
 function BMF_drain_command_worker_native_events(limit, defer_emit)
   if state.socket.started then
     return true, 0
@@ -18526,6 +18720,7 @@ function BMF_poll_command_requests_once()
   if processed_files > 0 or native_drained > 0 or not poll_ok then
     BMF_telemetry_record_worker("command_polls", BMF_telemetry_duration_ms(poll_started_clock), poll_ok, "files_processed", processed_files)
   end
+  write_status_heartbeat(false)
 end
 
 poll_command_requests = function()
@@ -18559,6 +18754,7 @@ function BMF_poll_command_requests_async()
     if native_drained > 0 or not poll_ok then
       BMF_telemetry_record_worker("command_polls", BMF_telemetry_duration_ms(poll_started_clock), poll_ok, "files_processed", 0)
     end
+    write_status_heartbeat(false)
     return false
   end
 
@@ -18591,6 +18787,7 @@ function BMF_poll_command_requests_async()
     BMF_telemetry_record_worker("command_polls", BMF_telemetry_duration_ms(poll_started_clock), poll_ok, "files_processed", scheduled_files)
   end
 
+  write_status_heartbeat(false)
   return false
 end
 
@@ -18602,6 +18799,7 @@ local function start_command_worker()
   state.command_worker_poll_interval_ms = BMF_command_worker_poll_interval_ms()
   state.command_worker_fallback_poll_interval_ms = BMF_command_worker_fallback_poll_interval_ms()
   state.command_worker_max_files_per_poll = BMF_command_worker_max_files_per_poll()
+  state.status_heartbeat_interval_seconds = BMF_status_heartbeat_interval_seconds()
   state.command_worker_mode = "starting"
   log("info", "command worker started path=" .. COMMAND_DIR)
   if BMF_start_async_loop(
@@ -18752,6 +18950,7 @@ function BMF_drain_socket_messages(max_count)
     if drained > 0 or native_drained > 0 or not drain_ok then
       BMF_telemetry_record_worker("socket_drains", BMF_telemetry_duration_ms(drain_started_clock), drain_ok, "messages", drained + native_drained)
     end
+    BMF_socket_metadata_heartbeat(false)
     return drained + native_drained
   elseif not ok then
     drain_ok = false
@@ -18762,6 +18961,7 @@ function BMF_drain_socket_messages(max_count)
   if not drain_ok then
     BMF_telemetry_record_worker("socket_drains", BMF_telemetry_duration_ms(drain_started_clock), drain_ok, "messages", 0)
   end
+  BMF_socket_metadata_heartbeat(false)
   return 0
 end
 
@@ -18854,6 +19054,7 @@ function BMF_poll_socket_messages_async()
     BMF_telemetry_record_worker("socket_drains", BMF_telemetry_duration_ms(drain_started_clock), true, "messages", queued_messages + native_drained)
   end
 
+  BMF_socket_metadata_heartbeat(false)
   return false
 end
 
@@ -18889,6 +19090,7 @@ function BMF_start_socket_transport()
   state.socket.last_started_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
   state.socket_worker_started = true
   state.socket_worker_mode = "starting"
+  BMF_socket_write_metadata()
   log("info", "socket transport started host=" .. tostring(state.socket.host) .. " port=" .. tostring(state.socket.port) .. " poll_ms=" .. tostring(state.socket.poll_interval_ms))
   if BMF_env_bool("BMF_RESOURCE_NATIVE_ENABLED", BMF_env_bool("BMF_TREECUT_NATIVE_ENABLED", true)) then
     local resource_ok, resource_result = pcall(BMF.tools.resourceNative.start, {
@@ -18933,6 +19135,8 @@ function BMF_start_socket_transport()
     log("error", "socket worker unavailable: no game-thread scheduler available")
   end
 end
+
+(function()
 
 local function sorted_loaded_plugin_names()
   local names = {}
@@ -19824,3 +20028,5 @@ mark_server_ready({
   commandsRegistered = #command_names(),
 })
 BMF_telemetry_write(true)
+
+end)()

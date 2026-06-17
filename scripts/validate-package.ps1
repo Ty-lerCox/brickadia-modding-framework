@@ -7,12 +7,96 @@ $ErrorActionPreference = 'Stop'
 
 $requiredFiles = @(
   'README.md',
+  'package.json',
+  '.github/workflows/unified-runtime.yml',
   'TODO.md',
   'OVERNIGHT_STRATEGY.md',
   'manifests/bmf-package.json',
   'manifests/compatibility.json',
   'manifests/dependencies.json',
+  'manifests/unified-runtime.json',
+  'manifests/unified-runtime.schema.json',
   'manifests/canary.schema.json',
+  'compat/ue4ss/package-manifest.json',
+  'compat/ue4ss/README.md',
+  'observability/README.md',
+  'observability/observability-manifest.json',
+  'observability/alloy/bmf.alloy.template',
+  'observability/grafana/bmf-dashboard.json',
+  'observability/grafana/dashboard-import.json',
+  'apps/bmf-desktop/package.json',
+  'apps/bmf-desktop/package-lock.json',
+  'apps/bmf-desktop/angular.json',
+  'apps/bmf-desktop/electron-builder.yml',
+  'apps/bmf-desktop/build/icon.ico',
+  'apps/bmf-desktop/tsconfig.json',
+  'apps/bmf-desktop/tsconfig.app.json',
+  'apps/bmf-desktop/README.md',
+  'apps/bmf-desktop/packaged-assets/package.json',
+  'apps/bmf-desktop/packaged-assets/bin/bmfctl.cmd',
+  'apps/bmf-desktop/electron/main.cjs',
+  'apps/bmf-desktop/electron/preload.cjs',
+  'apps/bmf-desktop/src/index.html',
+  'apps/bmf-desktop/src/main.ts',
+  'apps/bmf-desktop/src/styles.scss',
+  'apps/bmf-desktop/src/app/preload-api.ts',
+  'apps/bmf-desktop/src/app/app.component.ts',
+  'apps/bmf-desktop/src/app/app.component.html',
+  'apps/bmf-desktop/src/app/app.component.scss',
+  'packages/orchestrator-core/package.json',
+  'packages/orchestrator-core/README.md',
+  'packages/orchestrator-core/src/file.js',
+  'packages/orchestrator-core/src/manifest.js',
+  'packages/orchestrator-core/src/profiles.js',
+  'packages/orchestrator-core/src/health.js',
+  'packages/orchestrator-core/src/observations.js',
+  'packages/orchestrator-core/src/prerequisites.js',
+  'packages/orchestrator-core/src/operations.js',
+  'packages/orchestrator-core/src/services.js',
+  'packages/orchestrator-core/src/service-actions.js',
+  'packages/orchestrator-core/src/telemetry.js',
+  'packages/orchestrator-core/src/traffic.js',
+  'packages/orchestrator-core/src/logs.js',
+  'packages/orchestrator-core/src/snapshots.js',
+  'packages/orchestrator-core/src/transactions.js',
+  'packages/orchestrator-core/src/index.js',
+  'packages/orchestrator-core/test/manifest.test.js',
+  'packages/bmf-runtime/package-manifest.json',
+  'packages/bmf-runtime/README.md',
+  'packages/bmf-native-socket/package-manifest.json',
+  'packages/bmf-native-socket/README.md',
+  'packages/bmf-frame-telemetry/package-manifest.json',
+  'packages/bmf-frame-telemetry/README.md',
+  'packages/omegga-runtime/package-manifest.json',
+  'packages/omegga-runtime/sync-metadata.json',
+  'packages/omegga-runtime/README.md',
+  'packages/omegga-runtime/source/package.json',
+  'packages/omegga-runtime/source/package-lock.json',
+  'packages/omegga-runtime/source/LICENSE',
+  'packages/omegga-runtime/source/index.js',
+  'packages/omegga-runtime/source/bin/omegga',
+  'packages/omegga-runtime/source/src/brickadia/ue4ssBridge.ts',
+  'packages/omegga-runtime/source/src/omegga/index.ts',
+  'packages/omegga-runtime/source/tools/package-bmf-omegga.js',
+  'packages/omegga-runtime/source/templates/windows-ue4ss/ue4ss/Mods/BMF/Scripts/main.lua',
+  'packages/omegga-plugins/bmf-bridge/plugin.json',
+  'packages/omegga-plugins/bmf-bridge/doc.json',
+  'packages/omegga-plugins/bmf-bridge/access.json',
+  'packages/omegga-plugins/bmf-bridge/README.md',
+  'packages/omegga-plugins/bmf-bridge/omegga.plugin.js',
+  'packages/omegga-plugins/bmf-bridge/omegga.plugin.test.js',
+  'packages/omegga-plugins/bmf-player-sync/plugin.json',
+  'packages/omegga-plugins/bmf-player-sync/doc.json',
+  'packages/omegga-plugins/bmf-player-sync/access.json',
+  'packages/omegga-plugins/bmf-player-sync/README.md',
+  'packages/omegga-plugins/bmf-player-sync/omegga.plugin.js',
+  'packages/omegga-plugins/bmf-player-sync/omegga.plugin.test.js',
+  'packages/omegga-plugins/bmf-minigame-events/plugin.json',
+  'packages/omegga-plugins/bmf-minigame-events/doc.json',
+  'packages/omegga-plugins/bmf-minigame-events/access.json',
+  'packages/omegga-plugins/bmf-minigame-events/README.md',
+  'packages/omegga-plugins/bmf-minigame-events/omegga.plugin.js',
+  'packages/omegga-plugins/bmf-minigame-events/omegga.plugin.test.js',
   'cli/README.md',
   'cli/package.json',
   'cli/bin/bmfctl.js',
@@ -22,13 +106,23 @@ $requiredFiles = @(
   'cli/src/file.js',
   'cli/src/format.js',
   'cli/src/index.js',
+  'cli/src/orchestrator.js',
   'cli/src/mods.js',
   'cli/src/repair.js',
   'cli/src/snapshot.js',
   'cli/test/doctor-repair.test.js',
   'cli/test/helpers.js',
+  'cli/test/health.test.js',
+  'cli/test/logs.test.js',
   'cli/test/mods.test.js',
+  'cli/test/plan.test.js',
+  'cli/test/profiles.test.js',
+  'cli/test/services.test.js',
   'cli/test/snapshot.test.js',
+  'cli/test/telemetry.test.js',
+  'cli/test/traffic.test.js',
+  'cli/test/transaction.test.js',
+  'cli/test/update.test.js',
   'installer/install-bmf.ps1',
   'installer/uninstall-bmf.ps1',
   'framework/ue4ss/Mods/BMF/bmf.json',
@@ -93,22 +187,25 @@ $requiredFiles = @(
   'tests/fixtures/players/empty.json',
   'tests/fixtures/players/one-player.json',
   'tests/fixtures/players/malformed.json',
-  'integrations/omegga/bmf-player-sync/plugin.json',
-  'integrations/omegga/bmf-player-sync/doc.json',
-  'integrations/omegga/bmf-player-sync/access.json',
-  'integrations/omegga/bmf-player-sync/omegga.plugin.js',
-  'integrations/omegga/bmf-player-sync/README.md',
-  'integrations/omegga/bmf-minigame-events/plugin.json',
-  'integrations/omegga/bmf-minigame-events/doc.json',
-  'integrations/omegga/bmf-minigame-events/access.json',
-  'integrations/omegga/bmf-minigame-events/omegga.plugin.js',
-  'integrations/omegga/bmf-minigame-events/omegga.plugin.test.js',
-  'integrations/omegga/bmf-minigame-events/README.md',
   'tests/fixtures/roles/default-role.json',
   'tests/fixtures/roles/role-assignments.json',
   'tests/fixtures/server/GameUserSettings.ini',
   'scripts/validate-windows-installer.ps1',
+  'scripts/validate-workspace.ps1',
+  'scripts/validate-ci-workflows.ps1',
   'scripts/validate-bmfctl.ps1',
+  'scripts/validate-unified-runtime-manifest.ps1',
+  'scripts/validate-orchestrator-core.ps1',
+  'scripts/validate-bmf-runtime-packages.ps1',
+  'scripts/validate-omegga-runtime-package.ps1',
+  'scripts/validate-ue4ss-compat-package.ps1',
+  'scripts/validate-bmf-desktop.ps1',
+  'scripts/build-bmf-desktop-release.ps1',
+  'scripts/sync-omegga-runtime.ps1',
+  'scripts/validate-bmf-desktop-release.ps1',
+  'scripts/validate-observability-assets.ps1',
+  'scripts/validate-bmf-bridge-plugin.ps1',
+  'scripts/validate-bmf-omegga-adapters.ps1',
   'scripts/build-release-package.ps1',
   'scripts/validate-release-package.ps1',
   'scripts/validate-player-fixtures.ps1',
@@ -208,7 +305,34 @@ foreach ($jsonRelative in @(
   'manifests/bmf-package.json',
   'manifests/compatibility.json',
   'manifests/dependencies.json',
+  'manifests/unified-runtime.json',
+  'manifests/unified-runtime.schema.json',
   'manifests/canary.schema.json',
+  'compat/ue4ss/package-manifest.json',
+  'observability/observability-manifest.json',
+  'observability/grafana/bmf-dashboard.json',
+  'observability/grafana/dashboard-import.json',
+  'apps/bmf-desktop/package.json',
+  'apps/bmf-desktop/packaged-assets/package.json',
+  'apps/bmf-desktop/angular.json',
+  'apps/bmf-desktop/tsconfig.json',
+  'apps/bmf-desktop/tsconfig.app.json',
+  'packages/orchestrator-core/package.json',
+  'packages/bmf-runtime/package-manifest.json',
+  'packages/bmf-native-socket/package-manifest.json',
+  'packages/bmf-frame-telemetry/package-manifest.json',
+  'packages/omegga-runtime/package-manifest.json',
+  'packages/omegga-runtime/sync-metadata.json',
+  'packages/omegga-runtime/source/package.json',
+  'packages/omegga-plugins/bmf-bridge/plugin.json',
+  'packages/omegga-plugins/bmf-bridge/doc.json',
+  'packages/omegga-plugins/bmf-bridge/access.json',
+  'packages/omegga-plugins/bmf-player-sync/plugin.json',
+  'packages/omegga-plugins/bmf-player-sync/doc.json',
+  'packages/omegga-plugins/bmf-player-sync/access.json',
+  'packages/omegga-plugins/bmf-minigame-events/plugin.json',
+  'packages/omegga-plugins/bmf-minigame-events/doc.json',
+  'packages/omegga-plugins/bmf-minigame-events/access.json',
   'cli/package.json',
   'examples/AssignRole/bmf.json',
   'framework/ue4ss/Mods/BMF/bmf.json',
@@ -230,12 +354,6 @@ foreach ($jsonRelative in @(
   'tests/fixtures/players/empty.json',
   'tests/fixtures/players/one-player.json',
   'tests/fixtures/players/malformed.json',
-  'integrations/omegga/bmf-player-sync/plugin.json',
-  'integrations/omegga/bmf-player-sync/doc.json',
-  'integrations/omegga/bmf-player-sync/access.json',
-  'integrations/omegga/bmf-minigame-events/plugin.json',
-  'integrations/omegga/bmf-minigame-events/doc.json',
-  'integrations/omegga/bmf-minigame-events/access.json',
   'tests/fixtures/roles/default-role.json',
   'tests/fixtures/roles/role-assignments.json'
 )) {
@@ -285,6 +403,162 @@ if (Test-Path -LiteralPath $mainLua) {
   foreach ($needle in @('BMF.players.sync', 'BMF.players.summary', 'BMF.players.whisperSummary', 'bmf.players.sync', 'bmf.players.summary', 'PLAYER_CACHE_PATH')) {
     if ($source -notmatch [regex]::Escape($needle)) {
       $errors.Add("main.lua does not contain expected player-cache marker: $needle")
+    }
+  }
+}
+
+$workspaceValidator = Join-Path $Root 'scripts/validate-workspace.ps1'
+if (Test-Path -LiteralPath $workspaceValidator) {
+  $workspaceOut = Join-Path $Root 'artifacts/local/workspace-package-validation.json'
+  $workspaceOutput = & $workspaceValidator -Root $Root -OutJson $workspaceOut
+  $workspaceResult = $workspaceOutput | ConvertFrom-Json
+  if ($workspaceResult.status -ne 'passed') {
+    $errors.Add('Root workspace validation failed.')
+    foreach ($errorItem in @($workspaceResult.errors)) {
+      $errors.Add("workspace: $errorItem")
+    }
+  }
+}
+
+$ciWorkflowsValidator = Join-Path $Root 'scripts/validate-ci-workflows.ps1'
+if (Test-Path -LiteralPath $ciWorkflowsValidator) {
+  $ciWorkflowsOut = Join-Path $Root 'artifacts/local/ci-workflows-package-validation.json'
+  $ciWorkflowsOutput = & $ciWorkflowsValidator -Root $Root -OutJson $ciWorkflowsOut
+  $ciWorkflowsResult = $ciWorkflowsOutput | ConvertFrom-Json
+  if ($ciWorkflowsResult.status -ne 'passed') {
+    $errors.Add('CI workflow validation failed.')
+    foreach ($errorItem in @($ciWorkflowsResult.errors)) {
+      $errors.Add("ci-workflows: $errorItem")
+    }
+  }
+}
+
+$unifiedRuntimeValidator = Join-Path $Root 'scripts/validate-unified-runtime-manifest.ps1'
+if (Test-Path -LiteralPath $unifiedRuntimeValidator) {
+  $unifiedRuntimeOut = Join-Path $Root 'artifacts/local/unified-runtime-package-validation.json'
+  $unifiedRuntimeOutput = & $unifiedRuntimeValidator -Root $Root -OutJson $unifiedRuntimeOut
+  $unifiedRuntimeResult = $unifiedRuntimeOutput | ConvertFrom-Json
+  if ($unifiedRuntimeResult.status -ne 'passed') {
+    $errors.Add('Unified runtime manifest validation failed.')
+    foreach ($errorItem in @($unifiedRuntimeResult.errors)) {
+      $errors.Add("unified-runtime: $errorItem")
+    }
+  }
+}
+
+$orchestratorCoreValidator = Join-Path $Root 'scripts/validate-orchestrator-core.ps1'
+if (Test-Path -LiteralPath $orchestratorCoreValidator) {
+  $orchestratorCoreOut = Join-Path $Root 'artifacts/local/orchestrator-core-package-validation.json'
+  $orchestratorCoreOutput = & $orchestratorCoreValidator -Root $Root -OutJson $orchestratorCoreOut
+  $orchestratorCoreResult = $orchestratorCoreOutput | ConvertFrom-Json
+  if ($orchestratorCoreResult.status -ne 'passed') {
+    $errors.Add('orchestrator-core validation failed.')
+    foreach ($errorItem in @($orchestratorCoreResult.errors)) {
+      $errors.Add("orchestrator-core: $errorItem")
+    }
+  }
+}
+
+$bmfRuntimePackagesValidator = Join-Path $Root 'scripts/validate-bmf-runtime-packages.ps1'
+if (Test-Path -LiteralPath $bmfRuntimePackagesValidator) {
+  $bmfRuntimePackagesOut = Join-Path $Root 'artifacts/local/bmf-runtime-packages-package-validation.json'
+  $bmfRuntimePackagesOutput = & $bmfRuntimePackagesValidator -Root $Root -OutJson $bmfRuntimePackagesOut
+  $bmfRuntimePackagesResult = $bmfRuntimePackagesOutput | ConvertFrom-Json
+  if ($bmfRuntimePackagesResult.status -ne 'passed') {
+    $errors.Add('BMF runtime package boundary validation failed.')
+    foreach ($errorItem in @($bmfRuntimePackagesResult.errors)) {
+      $errors.Add("bmf-runtime-packages: $errorItem")
+    }
+  }
+}
+
+$omeggaRuntimePackageValidator = Join-Path $Root 'scripts/validate-omegga-runtime-package.ps1'
+if (Test-Path -LiteralPath $omeggaRuntimePackageValidator) {
+  $omeggaRuntimePackageOut = Join-Path $Root 'artifacts/local/omegga-runtime-package-package-validation.json'
+  $omeggaRuntimePackageOutput = & $omeggaRuntimePackageValidator -Root $Root -OutJson $omeggaRuntimePackageOut
+  $omeggaRuntimePackageResult = $omeggaRuntimePackageOutput | ConvertFrom-Json
+  if ($omeggaRuntimePackageResult.status -ne 'passed') {
+    $errors.Add('Omegga runtime package boundary validation failed.')
+    foreach ($errorItem in @($omeggaRuntimePackageResult.errors)) {
+      $errors.Add("omegga-runtime-package: $errorItem")
+    }
+  }
+}
+
+$ue4ssCompatPackageValidator = Join-Path $Root 'scripts/validate-ue4ss-compat-package.ps1'
+if (Test-Path -LiteralPath $ue4ssCompatPackageValidator) {
+  $ue4ssCompatPackageOut = Join-Path $Root 'artifacts/local/ue4ss-compat-package-package-validation.json'
+  $ue4ssCompatPackageOutput = & $ue4ssCompatPackageValidator -Root $Root -OutJson $ue4ssCompatPackageOut
+  $ue4ssCompatPackageResult = $ue4ssCompatPackageOutput | ConvertFrom-Json
+  if ($ue4ssCompatPackageResult.status -ne 'passed') {
+    $errors.Add('UE4SS compatibility package boundary validation failed.')
+    foreach ($errorItem in @($ue4ssCompatPackageResult.errors)) {
+      $errors.Add("ue4ss-compat-package: $errorItem")
+    }
+  }
+}
+
+$bmfDesktopValidator = Join-Path $Root 'scripts/validate-bmf-desktop.ps1'
+if (Test-Path -LiteralPath $bmfDesktopValidator) {
+  $bmfDesktopOut = Join-Path $Root 'artifacts/local/bmf-desktop-package-validation.json'
+  $bmfDesktopOutput = & $bmfDesktopValidator -Root $Root -OutJson $bmfDesktopOut
+  $bmfDesktopResult = $bmfDesktopOutput | ConvertFrom-Json
+  if ($bmfDesktopResult.status -ne 'passed') {
+    $errors.Add('BMF Desktop validation failed.')
+    foreach ($errorItem in @($bmfDesktopResult.errors)) {
+      $errors.Add("bmf-desktop: $errorItem")
+    }
+  }
+}
+
+$bmfDesktopReleaseValidator = Join-Path $Root 'scripts/validate-bmf-desktop-release.ps1'
+if (Test-Path -LiteralPath $bmfDesktopReleaseValidator) {
+  $bmfDesktopReleaseOut = Join-Path $Root 'artifacts/local/bmf-desktop-release-package-validation.json'
+  $bmfDesktopReleaseOutput = & $bmfDesktopReleaseValidator -Root $Root -OutJson $bmfDesktopReleaseOut
+  $bmfDesktopReleaseResult = $bmfDesktopReleaseOutput | ConvertFrom-Json
+  if ($bmfDesktopReleaseResult.status -ne 'passed') {
+    $errors.Add('BMF Desktop release artifact validation failed.')
+    foreach ($errorItem in @($bmfDesktopReleaseResult.errors)) {
+      $errors.Add("bmf-desktop-release: $errorItem")
+    }
+  }
+}
+
+$observabilityValidator = Join-Path $Root 'scripts/validate-observability-assets.ps1'
+if (Test-Path -LiteralPath $observabilityValidator) {
+  $observabilityOut = Join-Path $Root 'artifacts/local/observability-assets-package-validation.json'
+  $observabilityOutput = & $observabilityValidator -Root $Root -OutJson $observabilityOut
+  $observabilityResult = $observabilityOutput | ConvertFrom-Json
+  if ($observabilityResult.status -ne 'passed') {
+    $errors.Add('Observability assets validation failed.')
+    foreach ($errorItem in @($observabilityResult.errors)) {
+      $errors.Add("observability: $errorItem")
+    }
+  }
+}
+
+$bmfBridgeValidator = Join-Path $Root 'scripts/validate-bmf-bridge-plugin.ps1'
+if (Test-Path -LiteralPath $bmfBridgeValidator) {
+  $bmfBridgeOut = Join-Path $Root 'artifacts/local/bmf-bridge-plugin-package-validation.json'
+  $bmfBridgeOutput = & $bmfBridgeValidator -Root $Root -OutJson $bmfBridgeOut
+  $bmfBridgeResult = $bmfBridgeOutput | ConvertFrom-Json
+  if ($bmfBridgeResult.status -ne 'passed') {
+    $errors.Add('BMF bridge plugin validation failed.')
+    foreach ($errorItem in @($bmfBridgeResult.errors)) {
+      $errors.Add("bmf-bridge: $errorItem")
+    }
+  }
+}
+
+$bmfOmeggaAdaptersValidator = Join-Path $Root 'scripts/validate-bmf-omegga-adapters.ps1'
+if (Test-Path -LiteralPath $bmfOmeggaAdaptersValidator) {
+  $bmfOmeggaAdaptersOut = Join-Path $Root 'artifacts/local/bmf-omegga-adapters-package-validation.json'
+  $bmfOmeggaAdaptersOutput = & $bmfOmeggaAdaptersValidator -Root $Root -OutJson $bmfOmeggaAdaptersOut
+  $bmfOmeggaAdaptersResult = $bmfOmeggaAdaptersOutput | ConvertFrom-Json
+  if ($bmfOmeggaAdaptersResult.status -ne 'passed') {
+    $errors.Add('BMF Omegga adapters validation failed.')
+    foreach ($errorItem in @($bmfOmeggaAdaptersResult.errors)) {
+      $errors.Add("bmf-omegga-adapters: $errorItem")
     }
   }
 }

@@ -1,0 +1,19 @@
+@use '../../css/theme';
+
+.header {
+  align-items: center;
+  background-color: theme.$br-bg-header;
+  color: theme.$br-fg-header;
+  display: flex;
+  font-size: theme.$br-header-font;
+  font-weight: bold;
+  height: theme.$br-header-height;
+  padding-left: 20px;
+  padding-right: 10px;
+  text-transform: uppercase;
+
+  &.attached {
+    border-top-left-radius: theme.$br-radius-md;
+    border-top-right-radius: theme.$br-radius-md;
+  }
+}

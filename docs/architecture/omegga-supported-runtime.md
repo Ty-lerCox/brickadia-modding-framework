@@ -116,9 +116,9 @@ shim unless weather becomes a gameplay hook surface later.
 ## Supported Omegga Assets
 
 BMF packages the current Omegga player sync adapter at
-`integrations/omegga/bmf-player-sync/` and the minigame event adapter at
-`integrations/omegga/bmf-minigame-events/`. The supported fork is expected to
-install or load those adapters when Omegga-fed player identity or BMF-owned
+`packages/omegga-plugins/bmf-player-sync/` and the minigame event adapter at
+`packages/omegga-plugins/bmf-minigame-events/`. The supported fork is expected
+to install or load those adapters when Omegga-fed player identity or BMF-owned
 minigame data/event production is needed.
 
 The supported fork must provide or preserve these bridge/helper

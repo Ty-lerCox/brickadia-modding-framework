@@ -167,9 +167,9 @@ function Plugin.onLoad(BMF)
     return setOneBrick(BMF, args, "bmf.runtimebrick.example.hide", false, 0)
   end)
 
-  BMF.commands.register("bmf.runtimebrick.example.restore", "Show one runtime brick and restore captured collision channels.", function(raw)
+  BMF.commands.register("bmf.runtimebrick.example.restore", "Show one runtime brick without changing collision channels.", function(raw)
     local args = parseArgs(raw)
-    return setOneBrick(BMF, args, "bmf.runtimebrick.example.restore", true, "restore")
+    return setOneBrick(BMF, args, "bmf.runtimebrick.example.restore", true, "unchanged")
   end)
 
   BMF.commands.register("bmf.runtimebrick.example.bind", "Diagnostic: bind verified runtime brick ids to an opaque GUID.", function(raw)
@@ -206,9 +206,9 @@ function Plugin.onLoad(BMF)
     return setGuid(BMF, args, "bmf.runtimebrick.example.hide-guid", false, 0)
   end)
 
-  BMF.commands.register("bmf.runtimebrick.example.restore-guid", "Show all runtime bricks bound to one GUID and restore captured collision.", function(raw)
+  BMF.commands.register("bmf.runtimebrick.example.restore-guid", "Show all runtime bricks bound to one GUID without changing collision.", function(raw)
     local args = parseArgs(raw)
-    return setGuid(BMF, args, "bmf.runtimebrick.example.restore-guid", true, "restore")
+    return setGuid(BMF, args, "bmf.runtimebrick.example.restore-guid", true, "unchanged")
   end)
 
   BMF.commands.register("bmf.runtimebrick.example.hide-lookup", "Hide one runtime brick resolved from tag=lookup:<uuid>:<purpose> or uuid=<id> purpose=<purpose>.", function(raw)
@@ -218,7 +218,7 @@ function Plugin.onLoad(BMF)
 
   BMF.commands.register("bmf.runtimebrick.example.restore-lookup", "Restore one runtime brick resolved from tag=lookup:<uuid>:<purpose> or uuid=<id> purpose=<purpose>.", function(raw)
     local args = parseArgs(raw)
-    return setGuid(BMF, args, "bmf.runtimebrick.example.restore-lookup", true, "restore")
+    return setGuid(BMF, args, "bmf.runtimebrick.example.restore-lookup", true, "unchanged")
   end)
 
   BMF.commands.register("bmf.runtimebrick.example.status", "Show the last runtime brick-state operation result.", function(raw)

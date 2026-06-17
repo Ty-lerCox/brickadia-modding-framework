@@ -48,9 +48,9 @@ try {
   foreach ($required in @(
     $packageJsonPath,
     (Join-Path $Root 'README.md'),
-    (Join-Path $Root 'docs/roadmap/goal.md'),
-    (Join-Path $Root 'docs/roadmap/phase-plan.md'),
-    (Join-Path $Root 'docs/roadmap/monorepo-consolidation.md'),
+    (Join-Path $Root 'planning/roadmap/goal.md'),
+    (Join-Path $Root 'planning/roadmap/phase-plan.md'),
+    (Join-Path $Root 'planning/roadmap/monorepo-consolidation.md'),
     (Join-Path $Root 'apps/bmf-desktop/package-lock.json'),
     (Join-Path $Root 'packages/omegga-runtime/source/package-lock.json')
   )) {
@@ -133,7 +133,7 @@ try {
     }
   }
 
-  $monorepoDocPath = Join-Path $Root 'docs/roadmap/monorepo-consolidation.md'
+  $monorepoDocPath = Join-Path $Root 'planning/roadmap/monorepo-consolidation.md'
   if (Test-Path -LiteralPath $monorepoDocPath) {
     $monorepoText = Get-Content -Raw -LiteralPath $monorepoDocPath
     Add-Evidence $evidence 'markdown' $monorepoDocPath 'monorepo consolidation workspace contract'
@@ -144,7 +144,7 @@ try {
     }
   }
 
-  $phasePlanPath = Join-Path $Root 'docs/roadmap/phase-plan.md'
+  $phasePlanPath = Join-Path $Root 'planning/roadmap/phase-plan.md'
   if (Test-Path -LiteralPath $phasePlanPath) {
     $phasePlanText = Get-Content -Raw -LiteralPath $phasePlanPath
     Add-Evidence $evidence 'markdown' $phasePlanPath 'phase plan workspace exit criteria'
@@ -155,7 +155,7 @@ try {
     }
   }
 
-  $goalPath = Join-Path $Root 'docs/roadmap/goal.md'
+  $goalPath = Join-Path $Root 'planning/roadmap/goal.md'
   if (Test-Path -LiteralPath $goalPath) {
     $goalText = Get-Content -Raw -LiteralPath $goalPath
     Add-Evidence $evidence 'markdown' $goalPath 'goal workspace reference'

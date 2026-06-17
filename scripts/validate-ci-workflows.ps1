@@ -92,6 +92,7 @@ try {
       'native/**',
       'observability/**',
       'packages/**',
+      'planning/**',
       'scripts/**'
     )) {
       if ($workflowText -notmatch [regex]::Escape($pathMarker)) {
@@ -127,9 +128,9 @@ try {
 
   foreach ($doc in @(
     (Join-Path $Root 'README.md'),
-    (Join-Path $Root 'docs/roadmap/phase-plan.md'),
-    (Join-Path $Root 'docs/roadmap/goal.md'),
-    (Join-Path $Root 'docs/roadmap/release-artifacts.md')
+    (Join-Path $Root 'planning/roadmap/phase-plan.md'),
+    (Join-Path $Root 'planning/roadmap/goal.md'),
+    (Join-Path $Root 'planning/roadmap/release-artifacts.md')
   )) {
     if (!(Test-Path -LiteralPath $doc)) {
       $errors.Add("Missing CI documentation target: $doc")

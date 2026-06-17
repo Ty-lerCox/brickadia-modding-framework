@@ -17,6 +17,16 @@ $requiredFiles = @(
   'manifests/unified-runtime.json',
   'manifests/unified-runtime.schema.json',
   'manifests/canary.schema.json',
+  'planning/roadmap/index.md',
+  'planning/roadmap/public-overview.md',
+  'planning/roadmap/goal.md',
+  'planning/roadmap/monorepo-consolidation.md',
+  'planning/roadmap/phase-plan.md',
+  'planning/roadmap/bmf-desktop-control-panel.md',
+  'planning/roadmap/service-health-model.md',
+  'planning/roadmap/grafana-onboarding.md',
+  'planning/roadmap/event-traffic-inspector.md',
+  'planning/roadmap/release-artifacts.md',
   'compat/ue4ss/package-manifest.json',
   'compat/ue4ss/README.md',
   'observability/README.md',
@@ -286,6 +296,20 @@ $requiredFiles = @(
 $errors = New-Object System.Collections.Generic.List[string]
 $files = New-Object System.Collections.Generic.List[object]
 
+function Get-Sha256Hex([string]$Path) {
+  $stream = [System.IO.File]::OpenRead($Path)
+  try {
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+      return ([System.BitConverter]::ToString($sha256.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+    } finally {
+      $sha256.Dispose()
+    }
+  } finally {
+    $stream.Dispose()
+  }
+}
+
 foreach ($relative in $requiredFiles) {
   $path = Join-Path $Root $relative
   if (!(Test-Path -LiteralPath $path)) {
@@ -293,10 +317,9 @@ foreach ($relative in $requiredFiles) {
     continue
   }
 
-  $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $path
   $files.Add([ordered]@{
     path = $relative
-    sha256 = $hash.Hash.ToLowerInvariant()
+    sha256 = Get-Sha256Hex $path
     bytes = (Get-Item -LiteralPath $path).Length
   })
 }

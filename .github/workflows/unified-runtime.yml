@@ -15,6 +15,7 @@ on:
       - native/**
       - observability/**
       - packages/**
+      - planning/**
       - requirements-docs.txt
       - scripts/**
   push:
@@ -33,6 +34,7 @@ on:
       - native/**
       - observability/**
       - packages/**
+      - planning/**
       - requirements-docs.txt
       - scripts/**
   workflow_dispatch:

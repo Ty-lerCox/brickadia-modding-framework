@@ -42,7 +42,7 @@ $evidence = New-Object System.Collections.Generic.List[object]
 $startedAt = (Get-Date).ToUniversalTime().ToString('o')
 $manifestPath = Join-Path $Root 'manifests/unified-runtime.json'
 $schemaPath = Join-Path $Root 'manifests/unified-runtime.schema.json'
-$goalDocPath = Join-Path $Root 'docs/roadmap/goal.md'
+$goalDocPath = Join-Path $Root 'planning/roadmap/goal.md'
 $manifest = $null
 $schema = $null
 
@@ -212,7 +212,7 @@ try {
       $errors.Add("Roadmap doc does not exist: $doc")
       continue
     }
-    if ([string]$doc -ne 'docs/roadmap/goal.md') {
+    if ([string]$doc -ne 'planning/roadmap/goal.md') {
       $linkTarget = Split-Path -Leaf ([string]$doc)
       if ($goalDoc -notmatch [regex]::Escape("($linkTarget)")) {
         $errors.Add("Goal doc does not link to roadmap doc: $doc")

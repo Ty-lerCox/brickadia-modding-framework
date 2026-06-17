@@ -4,7 +4,7 @@
   "status": "planned",
   "goal": {
     "id": "bmf-unified-runtime",
-    "document": "docs/roadmap/goal.md",
+    "document": "planning/roadmap/goal.md",
     "summary": "Deliver a Windows MSI-installed BMF Desktop application that can deploy, run, diagnose, observe, update, and repair the BMF-compatible Brickadia/Omegga/UE4SS runtime stack from one self-sustaining BMF repository."
   },
   "supportedPlatforms": [
@@ -293,14 +293,14 @@
     ]
   },
   "roadmapDocs": [
-    "docs/roadmap/index.md",
-    "docs/roadmap/goal.md",
-    "docs/roadmap/monorepo-consolidation.md",
-    "docs/roadmap/phase-plan.md",
-    "docs/roadmap/bmf-desktop-control-panel.md",
-    "docs/roadmap/service-health-model.md",
-    "docs/roadmap/grafana-onboarding.md",
-    "docs/roadmap/event-traffic-inspector.md",
-    "docs/roadmap/release-artifacts.md"
+    "planning/roadmap/index.md",
+    "planning/roadmap/goal.md",
+    "planning/roadmap/monorepo-consolidation.md",
+    "planning/roadmap/phase-plan.md",
+    "planning/roadmap/bmf-desktop-control-panel.md",
+    "planning/roadmap/service-health-model.md",
+    "planning/roadmap/grafana-onboarding.md",
+    "planning/roadmap/event-traffic-inspector.md",
+    "planning/roadmap/release-artifacts.md"
   ]
 }

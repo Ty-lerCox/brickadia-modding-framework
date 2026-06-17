@@ -1121,8 +1121,23 @@ function backupExisting(targetPath, backupRoot) {
 }
 
 function writeTransactionJournal(transaction) {
-  ensureDir(path.dirname(transaction.journalPath));
-  fs.writeFileSync(transaction.journalPath, `${JSON.stringify(redactTransaction(transaction), null, 2)}\n`, 'utf8');
+  const journalDir = path.dirname(transaction.journalPath);
+  ensureDir(journalDir);
+  const payload = `${JSON.stringify(redactTransaction(transaction), null, 2)}\n`;
+  const tempPath = path.join(journalDir, `.${path.basename(transaction.journalPath)}.${process.pid}.${Date.now()}.tmp`);
+  try {
+    fs.writeFileSync(tempPath, payload, 'utf8');
+    fs.renameSync(tempPath, transaction.journalPath);
+  } catch (error) {
+    if (exists(tempPath)) {
+      try {
+        fs.rmSync(tempPath, { force: true });
+      } catch {
+        // Best-effort cleanup only; keep the original write error.
+      }
+    }
+    throw error;
+  }
 }
 
 function summarizeTransactionSteps(steps, unsupportedActions) {

@@ -29,6 +29,20 @@ function Add-Evidence([string]$Kind, [string]$Path, [string]$Summary) {
   }
 }
 
+function Get-Sha256Hex([string]$Path) {
+  $stream = [System.IO.File]::OpenRead($Path)
+  try {
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+      return ([System.BitConverter]::ToString($sha256.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+    } finally {
+      $sha256.Dispose()
+    }
+  } finally {
+    $stream.Dispose()
+  }
+}
+
 function Test-HasProperty($Object, [string]$Name) {
   if (!$Object) {
     return $false
@@ -159,7 +173,7 @@ try {
   Add-Evidence 'markdown' $releaseNotesPath 'Generated BMF Desktop release notes'
 
   if (Test-Path -LiteralPath $primaryArtifactPath) {
-    $expectedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $primaryArtifactPath).Hash.ToLowerInvariant()
+    $expectedHash = Get-Sha256Hex $primaryArtifactPath
     if ($build -and [string]$build.data.installerSha256 -ne $expectedHash) {
       $errors.Add('Build output installerSha256 does not match the generated MSI hash.')
     }

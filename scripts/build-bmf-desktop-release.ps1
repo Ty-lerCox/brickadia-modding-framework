@@ -34,6 +34,20 @@ function Add-Evidence([System.Collections.Generic.List[object]]$Evidence, [strin
   }
 }
 
+function Get-Sha256Hex([string]$Path) {
+  $stream = [System.IO.File]::OpenRead($Path)
+  try {
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+      return ([System.BitConverter]::ToString($sha256.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+    } finally {
+      $sha256.Dispose()
+    }
+  } finally {
+    $stream.Dispose()
+  }
+}
+
 function Resolve-NodeExecutable([string]$RequestedNodeExe) {
   $candidate = $RequestedNodeExe
   if ([string]::IsNullOrWhiteSpace($candidate)) {
@@ -175,13 +189,12 @@ function Get-SupportedBrickadiaBuild($PackageManifest, $Compatibility) {
 
 function New-FileRecord([string]$Path, [string]$ArtifactRole) {
   $item = Get-Item -LiteralPath $Path
-  $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $Path
   return [ordered]@{
     role = $ArtifactRole
     fileName = $item.Name
     path = $item.Name
     bytes = $item.Length
-    sha256 = $hash.Hash.ToLowerInvariant()
+    sha256 = Get-Sha256Hex $Path
   }
 }
 
@@ -202,12 +215,11 @@ function New-NativeHashRecord([string]$Root, [string]$RelativePath, [string]$Rol
     }
   }
   $item = Get-Item -LiteralPath $path
-  $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $path
   return [ordered]@{
     role = $Role
     path = $RelativePath.Replace('\', '/')
     bytes = $item.Length
-    sha256 = $hash.Hash.ToLowerInvariant()
+    sha256 = Get-Sha256Hex $path
   }
 }
 

@@ -42,6 +42,20 @@ function Add-Evidence([System.Collections.Generic.List[object]]$Evidence, [strin
   }
 }
 
+function Get-Sha256Hex([string]$Path) {
+  $stream = [System.IO.File]::OpenRead($Path)
+  try {
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+      return ([System.BitConverter]::ToString($sha256.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+    } finally {
+      $sha256.Dispose()
+    }
+  } finally {
+    $stream.Dispose()
+  }
+}
+
 function Test-IsExcludedReleaseRelativePath([string]$Relative) {
   $parts = $Relative -split '[\\/]'
   foreach ($part in $parts) {
@@ -113,7 +127,7 @@ try {
   }
 
   $topLevelFiles = @('README.md', 'package.json', 'TODO.md', 'OVERNIGHT_STRATEGY.md')
-  $topLevelDirs = @('.github', 'apps', 'framework', 'installer', 'examples', 'docs', 'manifests', 'compat', 'observability', 'packages', 'scripts', 'tests', 'integrations', 'native', 'cli')
+  $topLevelDirs = @('.github', 'apps', 'framework', 'installer', 'examples', 'docs', 'planning', 'manifests', 'compat', 'observability', 'packages', 'scripts', 'tests', 'integrations', 'native', 'cli')
 
   foreach ($relative in $topLevelFiles) {
     $source = Join-Path $rootFull $relative
@@ -136,11 +150,10 @@ try {
     if ($relative.StartsWith('artifacts/', [System.StringComparison]::OrdinalIgnoreCase)) {
       throw "Release staging unexpectedly contains artifact file: $relative"
     }
-    $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName
     $fileRecords.Add([ordered]@{
       path = $relative
       bytes = $file.Length
-      sha256 = $hash.Hash.ToLowerInvariant()
+      sha256 = Get-Sha256Hex $file.FullName
     })
   }
 
@@ -173,8 +186,7 @@ if ($errors.Count -eq 0) {
 $zipSha256 = $null
 $zipBytes = $null
 if ($zipPath -and (Test-Path -LiteralPath $zipPath)) {
-  $zipHash = Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath
-  $zipSha256 = $zipHash.Hash.ToLowerInvariant()
+  $zipSha256 = Get-Sha256Hex $zipPath
   $zipBytes = (Get-Item -LiteralPath $zipPath).Length
 }
 $zipPathForResult = $null

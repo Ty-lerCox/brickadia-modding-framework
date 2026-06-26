@@ -104,11 +104,11 @@ Snake-case aliases are also present for compatibility.
 ## Server-Console Routes
 
 ```text
-Omegga.Bridge.BMF bmf.minigames.events.emit event=kill player=Player playerid=11111111-1111-4111-8111-111111111111 minigame=CityRPG index=0 leaderboard=0,1,0 oldleaderboard=0,0,0
-Omegga.Bridge.BMF bmf.minigames.events.status
-Omegga.Bridge.BMF bmf.minigames.events.recent event=kill limit=10
-Omegga.Bridge.BMF bmf.minigames.events.canary event=join
-Omegga.Bridge.BMF bmf.minigames.events.synthetic-flow
+bmf.minigames.events.emit event=kill player=Player playerid=11111111-1111-4111-8111-111111111111 minigame=CityRPG index=0 leaderboard=0,1,0 oldleaderboard=0,0,0
+bmf.minigames.events.status
+bmf.minigames.events.recent event=kill limit=10
+bmf.minigames.events.canary event=join
+bmf.minigames.events.synthetic-flow
 ```
 
 `bmf.minigames.events.canary` and `bmf.minigames.events.synthetic-flow` restore
@@ -117,10 +117,10 @@ testing reducer side effects.
 
 ## External Relays
 
-Every emitted event is appended to `runtime/events.jsonl`. When the BMF socket
-bridge is active, the same event record is sent to Omegga plugin clients. See
-the [Supported Runtime Matrix](../../reference/supported-runtime.md) for socket
-versus JSONL fallback behavior.
+Every emitted event is appended to `runtime/events.jsonl` as diagnostic
+evidence. The BMF socket bridge sends the live event record to Omegga plugin
+clients. See the [Supported Runtime Matrix](../../reference/supported-runtime.md)
+for the supported socket transport.
 
 The packaged Omegga producer lives at:
 

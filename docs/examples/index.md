@@ -19,7 +19,7 @@ surface has a documented example.
 | `Experimental/native` | The workflow touches an experimental native or hook-backed surface. |
 | `Validation pattern` | The example is mainly useful for testing framework behavior. |
 
-## Catalog
+## Plugin Basics
 
 | API area | Example | Maturity | Required capabilities |
 | --- | --- | --- | --- |
@@ -28,15 +28,35 @@ surface has a documented example.
 | Commands | [Plugin Command](plugin-command.md) | `Copy-paste` | None |
 | Plugins and storage | [Plugin Storage](plugin-storage.md) | `Copy-paste` | `plugins.storage` |
 | Server settings | [WelcomeMessage](welcome-message.md) | `Runnable folder` | None |
+
+## Server, World, and Assets
+
+| API area | Example | Maturity | Required capabilities |
+| --- | --- | --- | --- |
 | World loading | [LoadThreeCars](load-three-cars.md) | `Runnable folder` | `world.loadAdditive`, `world.saveAs` |
 | Prefabs | [LoadCarBrz](load-car-brz.md) | `Runnable folder` | `prefabs.loadBrz`, `world.saveAs` |
 | Vehicles | [SpawnVehicleSet](spawn-vehicle-set.md) | `Runnable folder` | `vehicles.spawnSet` |
+| Runtime bricks | [RuntimeBrickState](runtime-brick-state.md) | `Runnable folder`, `Experimental/native` | `bricks.runtimeState`; uses `lookup:<uuid>:<purpose>` tags |
+
+## Gameplay Data
+
+| API area | Example | Maturity | Required capabilities |
+| --- | --- | --- | --- |
 | Minigames | [ListMinigames](list-minigames.md) | `Runnable folder` | None |
+| Players | [PlayerSummary](player-summary.md) | `Copy-paste` | None |
+
+## Policy and Permissions
+
+| API area | Example | Maturity | Required capabilities |
+| --- | --- | --- | --- |
 | Permissions | [AssignRole](assign-role.md) | `Runnable folder` | None |
 | Placement policy | [Placement Guards](placement-guards.md) | `Policy workflow`, `Experimental/native` | Varies by guard |
-| Runtime bricks | [RuntimeBrickState](runtime-brick-state.md) | `Runnable folder`, `Experimental/native` | `bricks.runtimeState`; uses `lookup:<uuid>:<purpose>` tags |
+
+## Diagnostics and Validation
+
+| API area | Example | Maturity | Required capabilities |
+| --- | --- | --- | --- |
 | API labels | [InspectApiLabels](inspect-api-labels.md) | `Validation pattern` | None |
-| Players | [PlayerSummary](player-summary.md) | `Copy-paste` | None |
 | Health and compatibility | [HealthCheck](health-check.md) | `Copy-paste` | None |
 | Events and audit | [EventAudit](event-audit.md) | `Copy-paste` | None |
 | Rate limits | [RateLimitedCommand](rate-limited-command.md) | `Copy-paste` | None |

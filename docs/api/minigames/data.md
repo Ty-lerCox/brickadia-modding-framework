@@ -40,18 +40,18 @@ local events = BMF.minigames.recentEvents({ event = "kill", limit = 10 })
 ## Server-Console Routes
 
 ```text
-Omegga.Bridge.BMF bmf.minigames.data.status
-Omegga.Bridge.BMF bmf.minigames.data.snapshot
-Omegga.Bridge.BMF bmf.minigames.data.apply-snapshot name=CityRPG index=0 teams=Police,Criminal
-Omegga.Bridge.BMF bmf.minigames.data.list
-Omegga.Bridge.BMF bmf.minigames.data.get name=CityRPG index=0
-Omegga.Bridge.BMF bmf.minigames.data.players minigame=CityRPG index=0
-Omegga.Bridge.BMF bmf.minigames.data.teams minigame=CityRPG index=0
-Omegga.Bridge.BMF bmf.minigames.data.leaderboard minigame=CityRPG index=0
-Omegga.Bridge.BMF bmf.minigames.data.player player=EventKiller
-Omegga.Bridge.BMF bmf.minigames.data.playerstate player=EventKiller
-Omegga.Bridge.BMF bmf.minigames.data.membership player=EventKiller
-Omegga.Bridge.BMF bmf.minigames.events.recent event=kill limit=10
+bmf.minigames.data.status
+bmf.minigames.data.snapshot
+bmf.minigames.data.apply-snapshot name=CityRPG index=0 teams=Police,Criminal
+bmf.minigames.data.list
+bmf.minigames.data.get name=CityRPG index=0
+bmf.minigames.data.players minigame=CityRPG index=0
+bmf.minigames.data.teams minigame=CityRPG index=0
+bmf.minigames.data.leaderboard minigame=CityRPG index=0
+bmf.minigames.data.player player=EventKiller
+bmf.minigames.data.playerstate player=EventKiller
+bmf.minigames.data.membership player=EventKiller
+bmf.minigames.events.recent event=kill limit=10
 ```
 
 The status command prints compact counts:
@@ -90,5 +90,5 @@ troubleshooting producers without reading full JSONL logs.
 For validation and troubleshooting only, clear the cache explicitly:
 
 ```text
-Omegga.Bridge.BMF bmf.minigames.data.clear confirm=CLEAR_MINIGAME_DATA
+bmf.minigames.data.clear confirm=CLEAR_MINIGAME_DATA
 ```

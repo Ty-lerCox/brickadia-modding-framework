@@ -1,6 +1,6 @@
 {
   "name": "@bmf/desktop",
-  "version": "0.1.0-dev",
+  "version": "0.1.0-ea2.cl13530",
   "private": true,
   "description": "BMF Desktop operations console for managing local Brickadia/Omegga/BMF server profiles.",
   "author": "BMF",
@@ -14,7 +14,8 @@
     "build": "npm run build:renderer",
     "electron:dev": "set BMF_DESKTOP_DEV_SERVER_URL=http://127.0.0.1:4200&& electron .",
     "dist:msi": "npm run build && electron-builder --win msi --x64",
-    "release:local": "powershell -NoProfile -ExecutionPolicy Bypass -File ..\\..\\scripts\\build-bmf-desktop-release.ps1 -BuildMsi -Force",
+    "dist:portable": "npm run build && electron-builder --win portable --x64",
+    "release:local": "powershell -NoProfile -ExecutionPolicy Bypass -File ..\\..\\scripts\\build-bmf-desktop-release.ps1 -BuildMsi -BuildPortable -Force",
     "validate": "powershell -NoProfile -ExecutionPolicy Bypass -File ..\\..\\scripts\\validate-bmf-desktop.ps1"
   },
   "dependencies": {

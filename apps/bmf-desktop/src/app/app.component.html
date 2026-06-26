@@ -1,7 +1,11 @@
 <mat-toolbar class="toolbar">
   <span class="brand">BMF Desktop</span>
   <span class="spacer"></span>
-  <button mat-icon-button matTooltip="Refresh plan" aria-label="Refresh plan" (click)="refreshPlan()">
+  <mat-button-toggle-group class="mode-toggle" [value]="appMode()" aria-label="BMF Desktop mode" (change)="setAppMode($event.value)">
+    <mat-button-toggle value="easy">Easy</mat-button-toggle>
+    <mat-button-toggle value="advanced">Advanced</mat-button-toggle>
+  </mat-button-toggle-group>
+  <button mat-icon-button matTooltip="Refresh" aria-label="Refresh" (click)="refreshCurrentMode()">
     <mat-icon>refresh</mat-icon>
   </button>
   <button mat-icon-button matTooltip="Open Grafana" aria-label="Open Grafana" [disabled]="!dashboardCanOpen()" (click)="openDashboard()">
@@ -18,23 +22,135 @@
     <div class="status-metrics">
       <div class="metric">
         <span>Health</span>
-        <strong>{{ healthStatus() }}</strong>
+        <strong>{{ appMode() === 'easy' ? easyHealthStatus() : healthStatus() }}</strong>
       </div>
       <div class="metric">
-        <span>Operations</span>
-        <strong>{{ bootstrapPlan()?.operations?.length ?? 0 }}</strong>
+        <span>{{ appMode() === 'easy' ? 'Services' : 'Operations' }}</span>
+        <strong>{{ appMode() === 'easy' ? easyServiceRows().length : (bootstrapPlan()?.operations?.length ?? 0) }}</strong>
       </div>
       <div class="metric">
-        <span>Traffic</span>
-        <strong>{{ eventRecords().length }}</strong>
+        <span>{{ appMode() === 'easy' ? 'Last Check' : 'Traffic' }}</span>
+        <strong>{{ appMode() === 'easy' ? easyLastChecked() : eventRecords().length }}</strong>
       </div>
     </div>
-    <button mat-flat-button color="primary" (click)="refreshPlan()">
-      <mat-icon>playlist_add_check</mat-icon>
-      Build Plan
+    <button mat-flat-button color="primary" (click)="refreshCurrentMode()">
+      <mat-icon>{{ appMode() === 'easy' ? 'health_and_safety' : 'playlist_add_check' }}</mat-icon>
+      {{ appMode() === 'easy' ? 'Refresh Health' : 'Build Plan' }}
     </button>
   </section>
 
+  @if (appMode() === 'easy') {
+    <section class="easy-layout">
+      <section class="panel easy-setup-panel" [class.ready]="!easyProfileSetupNeeded()">
+        <div class="setup-copy">
+          <mat-icon>{{ easyProfileSetupNeeded() ? 'folder_open' : 'task_alt' }}</mat-icon>
+          <div>
+            <h2>Brickadia Dedicated Server</h2>
+            <p>{{ easyProfileSetupStatus() }}</p>
+            @if (easyProfileSetupWarning()) {
+              <small>{{ easyProfileSetupWarning() }}</small>
+            }
+          </div>
+        </div>
+        <button mat-flat-button color="primary" [disabled]="brickadiaSetupInFlight()" (click)="setupProfileFromBrickadiaInstall()">
+          <mat-icon>{{ brickadiaSetupInFlight() ? 'hourglass_top' : 'folder_open' }}</mat-icon>
+          {{ profileDraft().paths.brickadiaWin64 ? 'Change Folder' : 'Select Folder' }}
+        </button>
+      </section>
+
+      <div class="easy-summary">
+        <div class="metric healthy">
+          <span>Healthy</span>
+          <strong>{{ easyServiceSummary().healthy }}</strong>
+        </div>
+        <div class="metric degraded">
+          <span>Degraded</span>
+          <strong>{{ easyServiceSummary().degraded }}</strong>
+        </div>
+        <div class="metric unhealthy">
+          <span>Unhealthy</span>
+          <strong>{{ easyServiceSummary().unhealthy }}</strong>
+        </div>
+        <div class="metric unknown">
+          <span>Unknown</span>
+          <strong>{{ easyServiceSummary().unknown }}</strong>
+        </div>
+      </div>
+
+      <section class="panel easy-services-panel">
+        <div class="traffic-header">
+          <h2>Services</h2>
+          <button mat-icon-button matTooltip="Refresh health" aria-label="Refresh health" [disabled]="easyHealthRefreshInFlight()" (click)="refreshEasyMode()">
+            <mat-icon>{{ easyHealthRefreshInFlight() ? 'hourglass_top' : 'sync' }}</mat-icon>
+          </button>
+        </div>
+        <div class="easy-service-list">
+          @if (easyHealthRefreshError()) {
+            <div class="service-row error">
+              <mat-icon>error</mat-icon>
+              <div class="service-row-main">
+                <div class="service-row-title">
+                  <strong>Health refresh failed</strong>
+                  <span>Desktop</span>
+                </div>
+                <p>{{ easyHealthRefreshError() }}</p>
+                <small>Fix the issue, then refresh health again.</small>
+              </div>
+            </div>
+          }
+          @if (easyActionError()) {
+            <div class="service-row error">
+              <mat-icon>error</mat-icon>
+              <div class="service-row-main">
+                <div class="service-row-title">
+                  <strong>Action failed</strong>
+                  <span>Desktop</span>
+                </div>
+                <p>{{ easyActionError() }}</p>
+                <small>Check the profile path, then run the action again.</small>
+              </div>
+            </div>
+          }
+          @if (easyServiceRows().length === 0) {
+            <div class="service-row empty">
+              <mat-icon>folder_open</mat-icon>
+              <div class="service-row-main">
+                <div class="service-row-title">
+                  <strong>Select a Brickadia folder</strong>
+                  <span>Setup</span>
+                </div>
+                <p>Service health will appear after the profile has a Brickadia Dedicated Server folder.</p>
+                <small>{{ easyProfileSetupStatus() }}</small>
+              </div>
+            </div>
+          } @else {
+            @for (row of easyServiceRows(); track row.id) {
+            <div class="service-row" [ngClass]="row.status">
+              <mat-icon>{{ row.source === 'port' ? row.icon : serviceStatusIcon(row.status) }}</mat-icon>
+              <div class="service-row-main">
+                <div class="service-row-title">
+                  <strong>{{ row.name }}</strong>
+                  <span>{{ row.group }}</span>
+                </div>
+                <p>{{ row.summary }}</p>
+                <small>{{ row.detail }}</small>
+              </div>
+              <div class="service-row-actions">
+                @if (row.nextAction && row.status !== 'healthy') {
+                  <button mat-stroked-button color="primary" [disabled]="easyActionInFlight() !== null" (click)="runEasyAction(row.nextAction)">
+                    <mat-icon>{{ easyActionInFlight() === row.nextAction ? 'hourglass_top' : easyActionIcon(row.nextAction) }}</mat-icon>
+                    {{ easyActionLabel(row.nextAction) }}
+                  </button>
+                }
+                <mat-chip>{{ row.status }}</mat-chip>
+              </div>
+            </div>
+            }
+          }
+        </div>
+      </section>
+    </section>
+  } @else {
   <mat-tab-group animationDuration="160ms" class="tabs">
     <mat-tab label="Profiles">
       <section class="panel-grid">
@@ -837,7 +953,8 @@
             @for (source of trafficSources(); track source.id) {
               <mat-list-item>
                 <mat-icon matListItemIcon>{{ source.exists ? 'sensors' : 'sensors_off' }}</mat-icon>
-                <span matListItemTitle>{{ source.id }} / {{ source.records }} record(s)</span>
+                <span matListItemTitle>{{ source.id }} / {{ source.socketRecords ?? source.records }} record(s)</span>
+                <span matListItemLine>{{ source.status || 'observed' }}</span>
                 <span matListItemLine>{{ source.path || 'Not configured' }}</span>
               </mat-list-item>
             }
@@ -940,7 +1057,7 @@
               <mat-icon>chevron_right</mat-icon>
             </button>
           </div>
-          <pre class="log-output">@for (line of paginatedRuntimeLogLines(); track line) {
+          <pre class="log-output">@for (line of paginatedRuntimeLogLines(); track $index) {
 {{ line }}
 }</pre>
         </div>
@@ -958,11 +1075,12 @@
         </div>
         <div class="panel action-log-panel">
           <h2>Action Log</h2>
-          <pre class="log-output action-log-output">@for (line of logLines(); track line) {
+          <pre class="log-output action-log-output">@for (line of logLines(); track $index) {
 {{ line }}
 }</pre>
         </div>
       </section>
     </mat-tab>
   </mat-tab-group>
+  }
 </main>

@@ -1,8 +1,8 @@
 # Runtime Files
 
 BMF writes generated runtime state under `Mods/BMF/runtime/`. These files are
-operational evidence, fallback transport state, or adapter caches. They should
-not be committed.
+operational evidence, socket status, or adapter caches. They should not be
+committed.
 
 ## Who Should Read This?
 
@@ -19,7 +19,7 @@ it when adding a new runtime file or changing ownership rules.
 | `runtime/frame-telemetry.json` | `BMFFrameTelemetry` | Native frame-time samples for `L6 Frame Time` validation. |
 | `runtime/socket.json` | BMF socket transport | Socket connection status, counters, and last error. |
 | `runtime/bmf.log` | BMF | Human-readable framework log. |
-| `runtime/events.jsonl` | BMF | Durable event bus output and socket fallback stream. |
+| `runtime/events.jsonl` | BMF | Durable event evidence for diagnostics and support bundles. |
 | `runtime/audit.jsonl` | BMF | Admin, mutation, denial, capability, and rate-limit audit records. |
 | `runtime/logs/plugins/<PluginName>.log` | BMF | Per-plugin log mirror. |
 | `runtime/players.json` | BMF and Omegga adapter | Safe player identity cache populated by `BMF.players.sync` or Omegga player sync. |
@@ -28,20 +28,17 @@ it when adding a new runtime file or changing ownership rules.
 
 ## Command Worker
 
-`runtime/commands/` is the durable fallback command queue. Omegga adapters and
-validation scripts write request files there when socket transport is not used.
-BMF reads a bounded number of request files per poll and writes response files
-beside them.
-
-The socket path is preferred for latency-sensitive integrations. Keep the
-command directory as a fallback and validation path.
+`runtime/commands/` is a legacy diagnostic command queue. Socket-backed
+integrations should not use it for normal live traffic. BMF still bounds any
+request-file polling work so old validation artifacts cannot create unbounded
+filesystem work.
 
 ## Adapter Files
 
 | Path | Owner | Purpose |
 | --- | --- | --- |
 | `runtime/minigame-adapter-status.json` | Omegga minigame adapter | Adapter mode, skipped unsafe polling reasons, and status for minigame event feeds. |
-| `runtime/events.jsonl` | BMF plus Omegga readers | Durable event log tailed by adapters when socket transport is unavailable. |
+| `runtime/events.jsonl` | BMF | Durable event evidence for diagnostics and support bundles. |
 | `runtime/players.json` | BMF plus Omegga player sync | Safe identity cache for player lookup, summary, and policy feedback. |
 
 ## Cleanup Rules
@@ -50,6 +47,6 @@ command directory as a fallback and validation path.
 - It is safe to archive or delete runtime evidence only when the server is
   stopped and the current validation run no longer needs it.
 - Keep `runtime/commands/` empty before starting a clean canary unless the test
-  intentionally needs queued fallback commands.
+  intentionally exercises legacy command-file handling.
 - Treat JSONL logs as append-only evidence. Rotate or archive them outside the
   running process.

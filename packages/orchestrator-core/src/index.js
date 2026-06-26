@@ -87,7 +87,6 @@ const {
 } = require('./telemetry');
 const {
   DEFAULT_MAX_BYTES_PER_FILE,
-  DEFAULT_MAX_COMMAND_FILES,
   DEFAULT_MAX_RECORDS,
   TRAFFIC_EXPORT_GUARDRAILS,
   TRAFFIC_GUARDRAILS,
@@ -95,6 +94,7 @@ const {
   normalizeEnvelope,
   parseKeyValueResponse,
   redactValue,
+  resetTrafficSocketClients,
   writeTrafficTraceExport,
 } = require('./traffic');
 const {
@@ -127,7 +127,6 @@ const {
 
 module.exports = {
   DEFAULT_MAX_BYTES_PER_FILE,
-  DEFAULT_MAX_COMMAND_FILES,
   DEFAULT_MAX_LOG_BYTES_PER_FILE,
   DEFAULT_MAX_LOG_JOURNALS,
   DEFAULT_MAX_LOG_LINES,
@@ -208,6 +207,7 @@ module.exports = {
   probeTcpPort,
   publicProfile,
   redactValue,
+  resetTrafficSocketClients,
   renderAlloyConfig,
   resolveRuntimePaths,
   saveProfileRegistry,

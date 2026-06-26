@@ -1,4 +1,5 @@
 const path = require('node:path');
+const cliPackage = require('../package.json');
 const { resolveContext } = require('./context');
 const { runDoctor } = require('./doctor');
 const { listMods, setModEnabled } = require('./mods');
@@ -160,7 +161,7 @@ async function main(argv) {
   }
 
   if (command === 'version' || options.version) {
-    console.log('bmfctl 0.1.0-dev');
+    console.log(`bmfctl ${cliPackage.version}`);
     return;
   }
 

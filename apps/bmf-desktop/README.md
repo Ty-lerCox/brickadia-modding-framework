@@ -7,8 +7,18 @@ Current scope:
 
 - Electron shell with context-isolated preload API.
 - Angular standalone renderer using Angular Material 3 components.
+- Easy mode as the default portable app surface, showing a compact service and
+  health-state list backed by the shared health model and configured-port
+  diagnostics.
+- Easy mode first-run Brickadia Dedicated Server folder setup that detects
+  `BrickadiaServer-Win64-Shipping.exe`, saves the local profile, and selects it.
+- Easy mode action buttons for unhealthy or degraded rows, using the same
+  guarded install, repair, start, restart, and telemetry contracts as Advanced
+  mode.
+- Advanced mode preserving the full existing operations console for profiles,
+  components, services, telemetry, traffic, snapshots, logs, and updates.
 - Material 3 theme tokens in `src/styles.scss`.
-- MSI packaging metadata through `electron-builder`.
+- MSI and portable Windows packaging metadata through `electron-builder`.
 - MSI resource bundling for BMF manifests, `bmfctl`, orchestrator-core package
   boundary files, UE4SS mod assets, native helper package boundaries, Omegga
   adapter packages, UE4SS compatibility metadata, and Grafana/Alloy
@@ -72,10 +82,12 @@ containerized game-server launchers. Mutating operations must move through
 `packages/orchestrator-core` and stay behind explicit user actions.
 
 When running from an installed MSI, Desktop reads BMF-owned source assets from
-the bundled `resources/bmf` tree. It writes local profile registries,
-transaction journals, service logs, update downloads, generated Grafana import
-payloads, and troubleshooting snapshots under Electron `userData` unless the
-operator explicitly chooses another path.
+the bundled `resources/bmf` tree. When running as a portable exe, Desktop uses
+the same bundled resources and stores profile data next to the executable under
+`BMF Desktop Data`. It writes local profile registries, transaction journals,
+service logs, update downloads, generated Grafana import payloads, and
+troubleshooting snapshots under Electron `userData` unless the operator
+explicitly chooses another path.
 
 The MSI bundle also includes `resources/bmf/bin/bmfctl.cmd`. The shim runs the
 bundled CLI through the installed Electron executable with
@@ -107,11 +119,17 @@ Build the MSI directly:
 npm --prefix apps/bmf-desktop run dist:msi
 ```
 
-Build the MSI and produce the release manifest, release catalog, checksum, and
+Build the portable Windows executable:
+
+```powershell
+npm --prefix apps/bmf-desktop run dist:portable
+```
+
+Build the MSI, portable exe, release manifest, release catalog, checksums, and
 release notes in `artifacts/local/bmf-desktop-release`:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-bmf-desktop-release.ps1 -BuildMsi -Force
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-bmf-desktop-release.ps1 -BuildMsi -BuildPortable -Force
 ```
 
 From the desktop package, the same local release path is exposed as:
@@ -124,5 +142,5 @@ When the default `node` on `PATH` is not an Angular-supported version, pass a
 specific executable or set `BMF_DESKTOP_NODE_EXE`:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-bmf-desktop-release.ps1 -BuildMsi -NodeExe C:\Tools\node-v24.15.0-win-x64\node.exe -Force
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-bmf-desktop-release.ps1 -BuildMsi -BuildPortable -NodeExe C:\Tools\node-v24.15.0-win-x64\node.exe -Force
 ```

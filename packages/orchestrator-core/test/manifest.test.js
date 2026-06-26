@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
+const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
@@ -46,6 +47,7 @@ const {
   upsertStoredProfile,
   validateDesktopReleaseCatalog,
   validateUnifiedRuntimeManifest,
+  resetTrafficSocketClients,
   writeTrafficTraceExport,
   writeDashboardImportPayload,
   writeTelemetryAlloyConfig,
@@ -53,6 +55,53 @@ const {
 } = require('../src');
 
 const repoRoot = path.resolve(__dirname, '..', '..', '..');
+
+async function createTrafficSocketServer(t, options = {}) {
+  const token = options.token || 'socket-token';
+  const received = [];
+  const server = net.createServer(socket => {
+    socket.setEncoding('utf8');
+    let buffer = '';
+    socket.on('data', chunk => {
+      buffer += String(chunk || '');
+      let index = buffer.indexOf('\n');
+      while (index >= 0) {
+        const line = buffer.slice(0, index).trim();
+        buffer = buffer.slice(index + 1);
+        if (line) {
+          const message = JSON.parse(line);
+          received.push(message);
+          if (message.type === 'hello' && message.token === token) {
+            for (const envelope of options.envelopes || []) {
+              socket.write(`${JSON.stringify(envelope)}\n`);
+            }
+          }
+        }
+        index = buffer.indexOf('\n');
+      }
+    });
+  });
+  t.after(() => {
+    resetTrafficSocketClients();
+    server.close();
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  return {
+    token,
+    received,
+    port: server.address().port,
+  };
+}
+
+async function waitForTrafficSnapshot(input, options, predicate) {
+  let snapshot = collectTrafficSnapshot(input, options);
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    if (predicate(snapshot)) return snapshot;
+    await new Promise(resolve => setTimeout(resolve, 20));
+    snapshot = collectTrafficSnapshot(input, options);
+  }
+  return snapshot;
+}
 
 test('loads and validates the repository unified runtime manifest', () => {
   const { manifest } = loadUnifiedRuntimeManifest({ root: repoRoot });
@@ -67,11 +116,13 @@ test('loads and validates the repository unified runtime manifest', () => {
   assert.equal(manifest.orchestration.defaultMode, 'dry-run');
 });
 
-test('resolves MSI release artifacts for a concrete version', () => {
+test('resolves desktop release artifacts for a concrete version', () => {
   const { manifest } = loadUnifiedRuntimeManifest({ root: repoRoot });
   assert.deepEqual(expectedReleaseArtifacts(manifest, '0.1.0'), [
     'BMF-Desktop-0.1.0-x64.msi',
     'BMF-Desktop-0.1.0-x64.msi.sha256',
+    'BMF-Desktop-0.1.0-portable-x64.exe',
+    'BMF-Desktop-0.1.0-portable-x64.exe.sha256',
     'release-manifest.json',
     'release-catalog.json',
     'RELEASE_NOTES.md',
@@ -1404,12 +1455,64 @@ test('rolls back an applied install-stack transaction from its journal', () => {
   }
 });
 
-test('collects a redacted event traffic snapshot from existing runtime files', () => {
+test('collects redacted event traffic from the live socket stream', async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bmf-orchestrator-traffic-'));
   try {
     const runtimeDir = path.join(root, 'runtime');
     const commandDir = path.join(runtimeDir, 'commands');
     fs.mkdirSync(commandDir, { recursive: true });
+    const socketServer = await createTrafficSocketServer(t, {
+      envelopes: [
+        {
+          type: 'event',
+          source: 'bmf',
+          ts: '2026-06-16T12:00:00Z',
+          record: {
+            ts: '2026-06-16T12:00:00Z',
+            level: 'info',
+            source: 'event',
+            message: 'event emitted: serverReady',
+            data: {
+              event: 'serverReady',
+              payload: { version: '0.1.0-ea2.cl13530', token: 'event-secret-token' },
+              handlers: 1,
+              ok: true,
+            },
+          },
+        },
+        {
+          type: 'event',
+          source: 'bmf',
+          ts: '2026-06-16T12:01:00Z',
+          record: {
+            ts: '2026-06-16T12:01:00Z',
+            level: 'error',
+            source: 'event',
+            message: 'event emitted: interactConsole',
+            data: {
+              event: 'interactConsole',
+              payload: { message: 'hit', apiKey: 'event-api-key' },
+              ok: false,
+            },
+          },
+        },
+        {
+          type: 'response',
+          source: 'bmf',
+          ts: '2026-06-16T12:04:00Z',
+          id: 'socket-response',
+          ok: true,
+          detail: 'ok',
+          response: [
+            'ok=true',
+            'detail=ok',
+            'command=bmf.status token=response-token',
+            'bmf_command_transport=socket',
+            'bmf_command_total_ms=12',
+          ].join('\n'),
+        },
+      ],
+    });
 
     fs.writeFileSync(
       path.join(runtimeDir, 'events.jsonl'),
@@ -1421,7 +1524,7 @@ test('collects a redacted event traffic snapshot from existing runtime files', (
           message: 'event emitted: serverReady',
           data: {
             event: 'serverReady',
-            payload: { version: '0.1.0-dev', token: 'event-secret-token' },
+            payload: { version: '0.1.0-ea2.cl13530', token: 'event-secret-token' },
             handlers: 1,
             ok: true,
           },
@@ -1462,8 +1565,8 @@ test('collects a redacted event traffic snapshot from existing runtime files', (
       JSON.stringify({
         enabled: true,
         host: '127.0.0.1',
-        port: 49152,
-        token: 'socket-token',
+        port: socketServer.port,
+        token: socketServer.token,
       }),
     );
     fs.writeFileSync(
@@ -1487,25 +1590,28 @@ test('collects a redacted event traffic snapshot from existing runtime files', (
       fs.utimesSync(path.join(commandDir, file), commandTime, commandTime);
     }
 
-    const snapshot = collectTrafficSnapshot({
+    const snapshot = await waitForTrafficSnapshot({
       name: 'Traffic Server',
       paths: { bmfRuntimeDir: runtimeDir },
     }, {
       maxRecords: 20,
       maxBytesPerFile: 64 * 1024,
-    });
+    }, snapshot => snapshot.records.some(record => record.event === 'serverReady'));
 
     assert.equal(snapshot.schemaVersion, 1);
-    assert.equal(snapshot.summary.retained, 7);
-    assert.ok(snapshot.guardrails.includes('observe-existing-traffic-only'));
+    assert.ok(snapshot.summary.retained >= 4);
+    assert.ok(snapshot.guardrails.includes('socket-only-live-traffic'));
     assert.ok(snapshot.guardrails.includes('do-not-add-ui-driven-server-probes'));
-    assert.ok(snapshot.sources.some(source => source.id === 'events-jsonl' && source.records === 2));
-    assert.ok(snapshot.sources.some(source => source.id === 'command-files' && source.records === 2));
+    assert.ok(snapshot.sources.some(source => source.id === 'socket-stream' && source.status === 'connected'));
+    assert.equal(snapshot.sources.some(source => source.id === 'events-jsonl'), false);
+    assert.equal(snapshot.sources.some(source => source.id === 'command-files'), false);
 
     const event = snapshot.records.find(record => record.event === 'serverReady');
     assert.equal(event.type, 'event');
     assert.equal(event.payload.token, '[redacted]');
     assert.equal(snapshot.records.find(record => record.type === 'response').durationMs, 12);
+    assert.ok(socketServer.received.find(message => message.type === 'hello' && message.token === socketServer.token));
+    assert.ok(socketServer.received.find(message => message.type === 'subscribe'));
     assert.equal(JSON.stringify(snapshot).includes('event-secret-token'), false);
     assert.equal(JSON.stringify(snapshot).includes('event-api-key'), false);
     assert.equal(JSON.stringify(snapshot).includes('audit-password'), false);
@@ -1514,16 +1620,98 @@ test('collects a redacted event traffic snapshot from existing runtime files', (
     assert.equal(JSON.stringify(snapshot).includes('request-token'), false);
     assert.equal(JSON.stringify(snapshot).includes('response-token'), false);
   } finally {
+    resetTrafficSocketClients();
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
-test('exports a confirmed redacted traffic trace for support bundles', () => {
+test('collects retained bridge socket records after Desktop restart', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bmf-orchestrator-bridge-traffic-'));
+  try {
+    const runtimeDir = path.join(root, 'runtime');
+    fs.mkdirSync(runtimeDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(runtimeDir, 'bmf-bridge-status.json'),
+      JSON.stringify({
+        updatedAt: '2026-06-16T12:02:00Z',
+        transport: 'socket',
+        socket: { connected: true, token: 'bridge-token' },
+        records: { retained: 2, statusLimit: 2, dropped: 0 },
+        recentRecords: [
+          {
+            id: 'retained-older',
+            timestamp: '2026-06-16T12:00:00Z',
+            type: 'event',
+            event: 'minigames.joinminigame',
+            source: 'native.BMFSocketResourceNative',
+            transport: 'socket',
+            status: 'ok',
+            payload: { playerId: 'player-secret-id', token: 'older-secret' },
+          },
+          {
+            id: 'retained-newer',
+            timestamp: '2026-06-16T12:01:00Z',
+            type: 'event',
+            event: 'resource.hit',
+            source: 'native.BMFSocketResourceNative',
+            transport: 'socket',
+            status: 'ok',
+            payload: { apiKey: 'newer-api-key' },
+          },
+        ],
+      }),
+    );
+
+    const snapshot = collectTrafficSnapshot({
+      name: 'Retained Traffic Server',
+      paths: { bmfRuntimeDir: runtimeDir },
+    }, {
+      maxRecords: 10,
+      maxBytesPerFile: 64 * 1024,
+    });
+
+    assert.equal(snapshot.summary.retained, 2);
+    assert.ok(snapshot.sources.some(source => source.id === 'bmf-bridge-status' && source.records === 2));
+    assert.deepEqual(snapshot.records.map(record => record.event), ['resource.hit', 'minigames.joinminigame']);
+    assert.equal(snapshot.records[0].payload.apiKey, '[redacted]');
+    assert.equal(snapshot.records[1].payload.token, '[redacted]');
+    assert.equal(JSON.stringify(snapshot).includes('newer-api-key'), false);
+    assert.equal(JSON.stringify(snapshot).includes('older-secret'), false);
+    assert.equal(JSON.stringify(snapshot).includes('bridge-token'), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('exports a confirmed redacted socket traffic trace for support bundles', async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bmf-orchestrator-traffic-export-'));
   try {
     const runtimeDir = path.join(root, 'runtime');
     const out = path.join(root, 'exports', 'trace.json');
     fs.mkdirSync(runtimeDir, { recursive: true });
+    const socketServer = await createTrafficSocketServer(t, {
+      envelopes: [
+        {
+          type: 'event',
+          source: 'bmf',
+          ts: '2026-06-16T12:00:00Z',
+          record: {
+            ts: '2026-06-16T12:00:00Z',
+            source: 'event',
+            data: {
+              event: 'player.hit',
+              payload: {
+                playerId: 'player-secret-id',
+                displayName: 'Player Secret',
+                remoteAddress: '192.168.10.25',
+                apiKey: 'traffic-api-key',
+              },
+              ok: true,
+            },
+          },
+        },
+      ],
+    });
     fs.writeFileSync(
       path.join(runtimeDir, 'events.jsonl'),
       JSON.stringify({
@@ -1541,6 +1729,15 @@ test('exports a confirmed redacted traffic trace for support bundles', () => {
         },
       }) + '\n',
     );
+    fs.writeFileSync(
+      path.join(runtimeDir, 'socket.json'),
+      JSON.stringify({
+        enabled: true,
+        host: '127.0.0.1',
+        port: socketServer.port,
+        token: socketServer.token,
+      }),
+    );
 
     assert.throws(
       () => writeTrafficTraceExport({
@@ -1553,6 +1750,15 @@ test('exports a confirmed redacted traffic trace for support bundles', () => {
       /--confirm export/,
     );
     assert.equal(fs.existsSync(out), false);
+
+    await waitForTrafficSnapshot({
+      name: 'Trace Export Server',
+      paths: { bmfRuntimeDir: runtimeDir },
+    }, {
+      anonymizePlayers: true,
+      redactPrivateIps: true,
+      maxRecords: 10,
+    }, snapshot => snapshot.records.some(record => record.event === 'player.hit'));
 
     const result = writeTrafficTraceExport({
       name: 'Trace Export Server',
@@ -1569,7 +1775,7 @@ test('exports a confirmed redacted traffic trace for support bundles', () => {
 
     assert.equal(result.status, 'written');
     assert.equal(result.confirmed, true);
-    assert.equal(result.summary.retained, 1);
+    assert.ok(result.summary.retained >= 1);
     assert.equal(result.sha256.length, 64);
     assert.equal(fs.existsSync(out), true);
     const exported = fs.readFileSync(out, 'utf8');
@@ -1582,6 +1788,7 @@ test('exports a confirmed redacted traffic trace for support bundles', () => {
     assert.ok(result.guardrails.includes('explicit-export-confirmation-required'));
     assert.ok(result.guardrails.includes('export-redacted-snapshot-only'));
   } finally {
+    resetTrafficSocketClients();
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
@@ -1765,36 +1972,51 @@ test('plans and writes redacted troubleshooting snapshots through the shared cor
   }
 });
 
-test('retains only the newest bounded traffic records', () => {
+test('retains only the newest bounded socket traffic records', async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bmf-orchestrator-traffic-limit-'));
   try {
     const runtimeDir = path.join(root, 'runtime');
     fs.mkdirSync(runtimeDir, { recursive: true });
-    const lines = [];
+    const envelopes = [];
     for (let index = 0; index < 6; index++) {
-      lines.push(JSON.stringify({
+      envelopes.push({
+        type: 'event',
+        source: 'bmf',
         ts: `2026-06-16T12:0${index}:00Z`,
-        source: 'event',
-        data: {
-          event: `event.${index}`,
-          payload: { index },
-          ok: true,
+        record: {
+          ts: `2026-06-16T12:0${index}:00Z`,
+          source: 'event',
+          data: {
+            event: `event.${index}`,
+            payload: { index },
+            ok: true,
+          },
         },
-      }));
+      });
     }
-    fs.writeFileSync(path.join(runtimeDir, 'events.jsonl'), `${lines.join('\n')}\n`);
+    const socketServer = await createTrafficSocketServer(t, { envelopes });
+    fs.writeFileSync(
+      path.join(runtimeDir, 'socket.json'),
+      JSON.stringify({
+        enabled: true,
+        host: '127.0.0.1',
+        port: socketServer.port,
+        token: socketServer.token,
+      }),
+    );
 
-    const snapshot = collectTrafficSnapshot({
+    const snapshot = await waitForTrafficSnapshot({
       name: 'Traffic Limit Server',
       paths: { bmfRuntimeDir: runtimeDir },
     }, {
       maxRecords: 3,
-    });
+    }, snapshot => snapshot.records.some(record => record.event === 'event.5'));
 
     assert.equal(snapshot.summary.retained, 3);
-    assert.equal(snapshot.summary.dropped, 3);
-    assert.deepEqual(snapshot.records.map(record => record.event), ['event.3', 'event.4', 'event.5']);
+    assert.ok(snapshot.summary.dropped >= 3);
+    assert.deepEqual(snapshot.records.map(record => record.event), ['event.5', 'event.4', 'event.3']);
   } finally {
+    resetTrafficSocketClients();
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
@@ -2155,7 +2377,7 @@ test('collects local profile observations from existing runtime files', () => {
       path.join(runtimeDir, 'status.json'),
       JSON.stringify({
         state: 'running',
-        version: '0.1.0-dev',
+        version: '0.1.0-ea2.cl13530',
         updated_at: '2026-06-16T12:00:00Z',
         server_ready: true,
         command_worker_mode: 'async',
@@ -2169,6 +2391,7 @@ test('collects local profile observations from existing runtime files', () => {
         host: '127.0.0.1',
         port: 49152,
         token: 'secret-token',
+        lastStatus: JSON.stringify({ connected: true }),
       }),
     );
     fs.writeFileSync(

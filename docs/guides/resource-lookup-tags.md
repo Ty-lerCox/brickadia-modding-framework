@@ -80,8 +80,8 @@ BMF.bricks.setRuntimeStateByGuid({
 The equivalent bridge command shape is:
 
 ```text
-Omegga.Bridge.BMF bmf.bricks.runtime.set-guid tag=lookup:<uuid>:<purpose> visible=false collision=0 confirm=brick-runtime
-Omegga.Bridge.BMF bmf.bricks.runtime.set-guid uuid=<uuid> purpose=<purpose> visible=true collision=unchanged confirm=brick-runtime
+bmf.bricks.runtime.set-guid tag=lookup:<uuid>:<purpose> visible=false collision=0 confirm=brick-runtime
+bmf.bricks.runtime.set-guid uuid=<uuid> purpose=<purpose> visible=true collision=unchanged confirm=brick-runtime
 ```
 
 ## Lookup Rules

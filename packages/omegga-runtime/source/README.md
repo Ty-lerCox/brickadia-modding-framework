@@ -31,12 +31,6 @@ in this fork. On UE4SS-backed Windows launches, direct
 routed through `Omegga.Bridge.ForceConsoleExecutor consolemanager ...` because
 the normal console-exec completion path can stall for environment reloads.
 
-This fork also exposes a localhost Prometheus `/metrics` endpoint for
-Brickadia/Omegga/BMF telemetry. See
-`docs/observability-grafana-cloud.md` for the Grafana Alloy setup, Grafana Cloud
-remote-write variables, dashboard import, BMF command-worker metrics, and
-native frame-time telemetry.
-
 The generic install instructions below are upstream Omegga documentation. Use
 them for non-Windows or generic plugin development. For BMF Windows runtime
 work, clone and run the forked repository instead of installing `omegga` from

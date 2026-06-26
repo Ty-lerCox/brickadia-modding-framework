@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedFor": "BMF 0.1.0-dev",
+  "generatedFor": "BMF 0.1.0-ea2.cl13530",
   "status": "planned",
   "goal": {
     "id": "bmf-unified-runtime",
@@ -248,20 +248,17 @@
   },
   "eventTraffic": {
     "preferredTransport": "BMFSocket loopback broker",
-    "fallbackTransports": [
-      "runtime/events.jsonl",
-      "runtime/commands request-response files"
-    ],
+    "fallbackTransports": [],
     "inspectorSources": [
       "socket-event-stream",
-      "events-jsonl",
-      "command-request-response-records",
       "omegga-bridge-plugin-diagnostics",
       "bmf-audit-and-telemetry-summaries"
     ],
     "guardrails": [
       "observe-existing-traffic-only",
+      "socket-only-live-traffic",
       "do-not-add-ui-driven-server-probes",
+      "do-not-send-bmf-commands",
       "redact-secrets-before-display-or-export",
       "bound-retained-record-count",
       "coalesce-repetitive-status-records",
@@ -270,10 +267,13 @@
   },
   "release": {
     "primaryArtifact": "BMF-Desktop-<version>-x64.msi",
+    "portableArtifact": "BMF-Desktop-<version>-portable-x64.exe",
     "catalogArtifact": "release-catalog.json",
     "requiredArtifacts": [
       "BMF-Desktop-<version>-x64.msi",
       "BMF-Desktop-<version>-x64.msi.sha256",
+      "BMF-Desktop-<version>-portable-x64.exe",
+      "BMF-Desktop-<version>-portable-x64.exe.sha256",
       "release-manifest.json",
       "release-catalog.json",
       "RELEASE_NOTES.md"
@@ -288,6 +288,7 @@
       "alloyTemplateVersion",
       "dashboardVersion",
       "installerSha256",
+      "portableSha256",
       "releaseCatalog",
       "releaseChannel"
     ]

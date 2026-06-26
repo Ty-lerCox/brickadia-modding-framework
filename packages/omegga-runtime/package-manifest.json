@@ -15,7 +15,7 @@
     "packages/omegga-runtime/source"
   ],
   "requiredSurfaces": [
-    "Omegga.Bridge.BMF",
+    "BMF Bridge socket",
     "OmeggaExecuteConsoleManagerInput",
     "OmeggaExecuteKismetConsoleCommand",
     "OmeggaExecuteCachedConsoleExec",
@@ -25,7 +25,7 @@
   "provides": [
     "brickadia-server-supervisor",
     "managed-ue4ss-install",
-    "omegga-bridge-bmf-command-worker-route",
+    "bmf-bridge-socket-route",
     "ue4ss-console-execution-helpers",
     "player-identity-sync-adapter",
     "brickadia-and-ue4ss-log-context",

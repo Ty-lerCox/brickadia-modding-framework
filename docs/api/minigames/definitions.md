@@ -46,12 +46,12 @@ ue4ss/main/Mods/BMF/runtime/minigames/definitions.json
 ## Server-Console Routes
 
 ```text
-Omegga.Bridge.BMF bmf.minigames.definitions.status
-Omegga.Bridge.BMF bmf.minigames.definitions.set name=CityRPG index=0 teams=Police,Criminal persistent=true owneronly=false includedbrickmode=all
-Omegga.Bridge.BMF bmf.minigames.definitions.list
-Omegga.Bridge.BMF bmf.minigames.definitions.get name=CityRPG index=0
-Omegga.Bridge.BMF bmf.minigames.definitions.delete name=CityRPG index=0 confirm=DELETE_MINIGAME_DEFINITION
-Omegga.Bridge.BMF bmf.minigames.definitions.reconcile name=CityRPG index=0
+bmf.minigames.definitions.status
+bmf.minigames.definitions.set name=CityRPG index=0 teams=Police,Criminal persistent=true owneronly=false includedbrickmode=all
+bmf.minigames.definitions.list
+bmf.minigames.definitions.get name=CityRPG index=0
+bmf.minigames.definitions.delete name=CityRPG index=0 confirm=DELETE_MINIGAME_DEFINITION
+bmf.minigames.definitions.reconcile name=CityRPG index=0
 ```
 
 ## Reconciliation

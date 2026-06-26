@@ -18,7 +18,7 @@ current safety level matters.
 - `L2 Headless`: `scripts/validate-bmf-console-commands.ps1` starts a
   disposable bridge server and invokes `bmf.status`, `bmf.health`,
   `bmf.version`, `bmf.plugins`, `bmf.commands`, `bmf.canary`, `bmf.unload`,
-  `bmf.load`, and `bmf.reload` through `Omegga.Bridge.BMF`.
+  `bmf.load`, and `bmf.reload` through `BMF Bridge socket`.
 - `L2 Headless`: `scripts/validate-bmf-admin-commands.ps1` invokes
   `bmf.players.list`, `bmf.chat.broadcast`, and the fail-closed
   `bmf.minigames.list` command.

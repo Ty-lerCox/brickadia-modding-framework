@@ -191,15 +191,18 @@ try {
   if ([string]$manifest.release.primaryArtifact -ne 'BMF-Desktop-<version>-x64.msi') {
     $errors.Add('Release primary artifact must be BMF-Desktop-<version>-x64.msi.')
   }
+  if ([string]$manifest.release.portableArtifact -ne 'BMF-Desktop-<version>-portable-x64.exe') {
+    $errors.Add('Release portable artifact must be BMF-Desktop-<version>-portable-x64.exe.')
+  }
   if ([string]$manifest.release.catalogArtifact -ne 'release-catalog.json') {
     $errors.Add('Release catalog artifact must be release-catalog.json.')
   }
-  foreach ($artifact in @('BMF-Desktop-<version>-x64.msi', 'BMF-Desktop-<version>-x64.msi.sha256', 'release-manifest.json', 'release-catalog.json', 'RELEASE_NOTES.md')) {
+  foreach ($artifact in @('BMF-Desktop-<version>-x64.msi', 'BMF-Desktop-<version>-x64.msi.sha256', 'BMF-Desktop-<version>-portable-x64.exe', 'BMF-Desktop-<version>-portable-x64.exe.sha256', 'release-manifest.json', 'release-catalog.json', 'RELEASE_NOTES.md')) {
     if ($artifact -notin @($manifest.release.requiredArtifacts)) {
       $errors.Add("Release required artifacts are missing: $artifact")
     }
   }
-  foreach ($field in @('bmfDesktopVersion', 'bmfRuntimeVersion', 'omeggaRuntimeVersionOrCommit', 'supportedBrickadiaBuild', 'ue4ssBundleId', 'nativeHelperHashes', 'alloyTemplateVersion', 'dashboardVersion', 'installerSha256', 'releaseCatalog', 'releaseChannel')) {
+  foreach ($field in @('bmfDesktopVersion', 'bmfRuntimeVersion', 'omeggaRuntimeVersionOrCommit', 'supportedBrickadiaBuild', 'ue4ssBundleId', 'nativeHelperHashes', 'alloyTemplateVersion', 'dashboardVersion', 'installerSha256', 'portableSha256', 'releaseCatalog', 'releaseChannel')) {
     if ($field -notin @($manifest.release.manifest)) {
       $errors.Add("Release manifest field is missing: $field")
     }

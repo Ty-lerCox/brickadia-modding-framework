@@ -37,7 +37,7 @@ gates, audit records, rate limits, and watchdog handling.
 Runtime policy route:
 
 ```text
-Omegga.Bridge.BMF bmf.sandbox
+bmf.sandbox
 ```
 
 Lua inspection:

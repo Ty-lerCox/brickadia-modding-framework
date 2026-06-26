@@ -9,11 +9,11 @@ self-sustaining project.
 BMF should become the standard Windows distribution for running a fully modded
 Brickadia dedicated server.
 
-A Windows user should be able to download an MSI, install BMF Desktop, create a
-server profile, install the supported runtime stack, start the server, verify
-health, configure Grafana telemetry, inspect BMF/Omegga event traffic, and keep
-the stack updated without manually assembling repositories, scripts, native
-mods, Omegga plugins, or Grafana assets.
+A Windows user should be able to download a portable exe or MSI, open BMF
+Desktop, create a server profile, install the supported runtime stack, start
+the server, verify health, configure Grafana telemetry, inspect BMF/Omegga
+event traffic, and keep the stack updated without manually assembling
+repositories, scripts, native mods, Omegga plugins, or Grafana assets.
 
 BMF Desktop should be able to get the user to that healthy state without an LLM,
 manual shell session, or repository-aware operator. Any recovery step that fixes
@@ -26,10 +26,11 @@ dashboard payload generation, log capture, and troubleshooting snapshots.
 
 The target operator experience is:
 
-1. Download `BMF-Desktop-<version>-x64.msi`.
-2. Install BMF Desktop.
-3. Open the app and create a local Brickadia server profile.
-4. Install or locate Brickadia dedicated server files.
+1. Download `BMF-Desktop-<version>-portable-x64.exe` or
+   `BMF-Desktop-<version>-x64.msi`.
+2. Open BMF Desktop.
+3. Create a local Brickadia server profile.
+4. Locate Brickadia Dedicated Server files.
 5. Install the BMF-compatible Omegga runtime.
 6. Stage UE4SS, BMF Lua runtime, BMFSocket, optional BMFFrameTelemetry, and
    generic Omegga bridge adapters.
@@ -71,6 +72,7 @@ The consolidated BMF repo should own or package:
 | Layer | Requirement |
 | --- | --- |
 | Desktop installer | MSI release artifact for normal Windows users. |
+| Portable desktop | Single portable exe for handing to a Windows server operator. |
 | Desktop app | Electron shell with Angular renderer and Angular Material 3/Material You-style UI. |
 | Orchestration core | Shared install, doctor, repair, launch, telemetry, update, and snapshot API. |
 | CLI | `bmfctl` as a thin wrapper around orchestration core. |
@@ -91,8 +93,8 @@ with this goal and the roadmap docs.
 The root `package.json` is the maintainer entry point for the self-sustaining
 repo. It exposes `npm run setup` for clean-checkout dependency install,
 `npm run validate` for the package validation chain, `npm run test` for the
-current Node test suites, and `npm run release:desktop` for the MSI release
-pipeline.
+current Node test suites, and `npm run release:desktop` for the MSI plus
+portable release pipeline.
 
 `scripts/validate-workspace.ps1` keeps the root scripts, workspace boundaries,
 and dependency-island lockfiles aligned with this goal.
@@ -104,7 +106,7 @@ workflow for the self-sustaining repo. It runs the root workspace/package
 validators, CLI and orchestration-core tests, Desktop renderer build and
 release metadata validation, BMF-supported Omegga runtime install/tests, native
 helper validation with optional UE4SS-source builds, release package
-validation, docs build, and manual/tagged MSI artifact generation.
+validation, docs build, and manual/tagged Desktop artifact generation.
 
 `scripts/validate-ci-workflows.ps1` keeps that workflow aligned with the root
 workspace and Phase 7 release requirements.
@@ -121,10 +123,11 @@ profile, setup readiness, telemetry, update, service, traffic, log, and
 snapshot control surfaces.
 
 The first repeatable desktop release path now lives in
-`scripts/build-bmf-desktop-release.ps1`. With `-BuildMsi`, it validates the
-selected Angular-supported Node runtime, compiles the Angular renderer, invokes
-electron-builder's MSI target, and emits the checksum, release manifest,
-release catalog, and release notes for the produced installer.
+`scripts/build-bmf-desktop-release.ps1`. With `-BuildMsi -BuildPortable`, it
+validates the selected Angular-supported Node runtime, compiles the Angular
+renderer, invokes electron-builder's MSI and portable targets, and emits
+checksums, release manifest, release catalog, and release notes for the
+produced artifacts.
 Managed stack update transactions now consume that same release catalog and
 manifest evidence, verify the MSI checksum before component staging, and write
 `component-update-snapshot.json` for pre-update rollback/troubleshooting state.
@@ -293,12 +296,14 @@ Long-range charts, frame-time analysis, and PromQL exploration stay in Grafana.
 
 ## Release Goal
 
-The normal user release path is an MSI installer.
+The normal user release path is a portable exe for quick setup and an MSI for
+installed deployments.
 
 Each release should publish:
 
 - `BMF-Desktop-<version>-x64.msi`;
-- SHA256 checksum;
+- `BMF-Desktop-<version>-portable-x64.exe`;
+- SHA256 checksums;
 - release manifest;
 - release catalog for desktop and CLI update checks;
 - release notes;
@@ -308,9 +313,9 @@ Each release should publish:
 - native helper versions and hashes;
 - standard dashboard version.
 
-The MSI installs BMF Desktop and its bundled orchestration tooling. The app
-then installs or updates the managed server stack through explicit user
-actions.
+The portable exe runs BMF Desktop with local data beside the executable. The
+MSI installs BMF Desktop and its bundled orchestration tooling. The app then
+installs or updates the managed server stack through explicit user actions.
 
 ## Related Roadmap Documents
 
@@ -330,8 +335,8 @@ the detailed breakdown:
   import, and telemetry setup boundaries.
 - [Event traffic inspector](event-traffic-inspector.md): live socket, JSONL,
   command, response, and payload inspection requirements.
-- [Release artifacts](release-artifacts.md): MSI, checksums, release manifest,
-  signing, and update flow.
+- [Release artifacts](release-artifacts.md): portable exe, MSI, checksums,
+  release manifest, signing, and update flow.
 
 ## Phase Alignment
 
@@ -344,7 +349,7 @@ the detailed breakdown:
 | Grafana onboarding | Make telemetry setup repeatable while keeping Grafana as the dashboard. |
 | Generic bridge plugin | Make BMF socket/file command and event traffic reusable outside CityRPG. |
 | BMF Desktop | Deliver the Angular Material 3 operations console. |
-| Release pipeline | Publish MSI artifacts, manifests, checksums, and update-safe component packages. |
+| Release pipeline | Publish portable/MSI artifacts, manifests, checksums, and update-safe component packages. |
 
 ## Success Criteria
 

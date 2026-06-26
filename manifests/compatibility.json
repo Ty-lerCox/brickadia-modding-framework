@@ -1,5 +1,5 @@
 {
-  "generatedFor": "BMF 0.1.0-dev",
+  "generatedFor": "BMF 0.1.0-ea2.cl13530",
   "brickadia": {
     "primaryTarget": "Brickadia EA2 (PC-Shipping-CL13530)",
     "serverExecutable": "BrickadiaServer-Win64-Shipping.exe",
@@ -40,7 +40,7 @@
     "plugins.lifecycleHooks": {
       "status": "headless-proven",
       "minimumValidation": "L2 Headless for onServerReady, recurring onTick, onError from a tick failure, and onError from a plugin-owned command failure",
-      "notes": "BMF dispatches onServerReady after the command worker starts, runs onTick through a lazy recurring timer only while loaded plugins define it, and calls onError with structured context when plugin hooks or plugin-owned command handlers fail."
+      "notes": "BMF dispatches onServerReady after the runtime starts, runs onTick through a lazy recurring timer only while loaded plugins define it, and calls onError with structured context when plugin hooks or plugin-owned command handlers fail."
     },
     "plugins.loadUnloadCommands": {
       "status": "headless-proven",
@@ -133,7 +133,7 @@
     "commands.console": {
       "status": "headless-proven",
       "minimumValidation": "L2 Headless for bridge console.exec invocation, L3 Live Player before chat/staff auth routing",
-      "notes": "Built-in bmf.status, bmf.health, bmf.version, bmf.plugins, bmf.commands, bmf.load, bmf.unload, bmf.reload, bmf.world.saveas, bmf.prefabs.loadbrz, bmf.prefabs.loadbrdb, bmf.vehicles.spawnset, and bmf.minigames.* lifecycle commands register through UE4SS RegisterConsoleCommandGlobalHandler when available. The current headless proof invokes them through Omegga.Bridge.BMF, which queues a request for the BMF command worker and verifies the response file. Plugin commands can register under the bmf.* namespace."
+      "notes": "Built-in bmf.status, bmf.health, bmf.version, bmf.plugins, bmf.commands, bmf.load, bmf.unload, bmf.reload, bmf.world.saveas, bmf.prefabs.loadbrz, bmf.prefabs.loadbrdb, bmf.vehicles.spawnset, and bmf.minigames.* lifecycle commands register through UE4SS RegisterConsoleCommandGlobalHandler when available. The current headless proof invokes them through BMF Bridge socket, which sends a BMF socket command and verifies the socket response. Plugin commands can register under the bmf.* namespace."
     },
     "commands.prefabLoadBrz": {
       "status": "headless-proven-through-bmf-command-worker",
@@ -158,7 +158,7 @@
     "commands.admin": {
       "status": "headless-proven",
       "minimumValidation": "L2 Headless for broadcast acceptance, empty player list, and minigame-list transport; L3 Live Player for player-visible chat and player identity fields",
-      "notes": "Covers bmf.chat.broadcast, bmf.players.list, and bmf.minigames.list through the BMF command worker."
+      "notes": "Covers bmf.chat.broadcast, bmf.players.list, and bmf.minigames.list through the BMF Bridge socket route."
     },
     "commands.minigameLifecycle": {
       "status": "headless-proven-through-bmf-command-worker",
@@ -182,7 +182,7 @@
     },
     "server.save": {
       "status": "headless-proven",
-      "minimumValidation": "L2 Headless for BMF command worker invocation, SaveAs output file creation, and saved BRDB parsing",
+      "minimumValidation": "L2 Headless for BMF socket command invocation, SaveAs output file creation, and saved BRDB parsing",
       "notes": "BMF.server.save delegates to the proven BMF.world.saveAs path and is exposed through bmf.server.save. Plugin calls require the server.save capability."
     },
     "server.shutdown": {
@@ -264,7 +264,7 @@
     "prefabs.loadBrz": {
       "status": "headless-proven-after-staging",
       "minimumValidation": "L2 Headless for staged archive survival, L3 Live Player for drivable vehicle behavior",
-      "notes": "BRZ staging is handled by the BMF tooling lane; the Lua runtime wrapper delegates the staged world to world.loadAdditive. The bmf.prefabs.loadbrz command exposes the same staged-load path to the server-console command worker."
+      "notes": "BRZ staging is handled by the BMF tooling lane; the Lua runtime wrapper delegates the staged world to world.loadAdditive. The bmf.prefabs.loadbrz command exposes the same staged-load path to the BMF Bridge socket route."
     },
     "prefabs.loadBrdb": {
       "status": "headless-proven-through-bmf-command-worker",

@@ -4,6 +4,7 @@ export interface BmfDesktopApi {
   saveProfile(input?: unknown): Promise<DesktopProfileRegistry>;
   selectProfile(profileId: string, input?: unknown): Promise<DesktopProfileRegistry>;
   chooseProfilePath(field: DesktopProfilePathField, input?: unknown): Promise<DesktopPathPickerResult>;
+  setupProfileFromBrickadiaInstall(input?: unknown): Promise<DesktopProfileSetupResult>;
   getOperationPlan(operationId: string, input?: unknown): Promise<OperationPlan>;
   getOperationTransaction(operationId: string, input?: unknown): Promise<DesktopOperationTransaction>;
   applyOperationTransaction(operationId: string, input?: unknown): Promise<DesktopOperationTransaction>;
@@ -47,6 +48,24 @@ export interface DesktopPathPickerResult {
   field: DesktopProfilePathField;
   canceled: boolean;
   path: string | null;
+}
+
+export interface DesktopProfileSetupResult {
+  canceled: boolean;
+  status: 'created' | 'updated' | 'not-found' | 'canceled' | string;
+  selectedPath: string | null;
+  brickadiaWin64: string | null;
+  profile: DesktopServerProfile | null;
+  registry: DesktopProfileRegistry | null;
+  warnings: string[];
+  search: {
+    executable: string;
+    visitedDirectories: number;
+    maxDirectories: number;
+    maxDepth: number;
+    truncated: boolean;
+    evidence: string[];
+  };
 }
 
 export interface OperationPlan {
@@ -850,9 +869,13 @@ export interface DesktopTrafficSource {
   exists: boolean;
   bytes: number;
   records: number;
+  socketRecords?: number;
   parseErrors: number;
   truncated: boolean;
   transports: string[];
   mtime: string | null;
   error: string | null;
+  status?: string;
+  connects?: number;
+  disconnects?: number;
 }

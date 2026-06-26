@@ -1,6 +1,21 @@
 local MOD_NAME = "BMF"
-local VERSION = "0.1.0-dev"
+local VERSION = "0.1.0-ea2.cl13530"
 local ROOT = "ue4ss/main/Mods/" .. MOD_NAME
+local function append_package_path(path)
+  if type(package) ~= "table" or type(package.path) ~= "string" then
+    return
+  end
+  if not package.path:find(path, 1, true) then
+    package.path = package.path .. ";" .. path
+  end
+end
+
+append_package_path("ue4ss/main/Mods/shared/?.lua")
+append_package_path("ue4ss/main/Mods/shared/?/?.lua")
+append_package_path("ue4ss/main/Mods/shared/?/init.lua")
+append_package_path("ue4ss/Mods/shared/?.lua")
+append_package_path("ue4ss/Mods/shared/?/?.lua")
+append_package_path("ue4ss/Mods/shared/?/init.lua")
 local RUNTIME_DIR = ROOT .. "/runtime"
 local PLUGINS_DIR = ROOT .. "/plugins"
 local CONFIG_PATH = ROOT .. "/config.json"
@@ -12,6 +27,7 @@ local AUDIT_LOG_PATH = RUNTIME_DIR .. "/audit.jsonl"
 local PLUGIN_LOG_DIR = RUNTIME_DIR .. "/logs/plugins"
 local COMMAND_DIR = RUNTIME_DIR .. "/commands"
 local PLAYER_CACHE_PATH = RUNTIME_DIR .. "/players.json"
+local PLAYER_POSITIONS_SNAPSHOT_PATH = RUNTIME_DIR .. "/player-positions.json"
 local MINIGAME_DEFINITIONS_PATH = RUNTIME_DIR .. "/minigames/definitions.json"
 local TARGET_BRICKADIA_BUILD = "PC-Shipping-CL13530"
 local TARGET_BRICKADIA_NAME = "Brickadia EA2"
@@ -172,6 +188,25 @@ local state = {
   },
   player_cache = nil,
   player_cache_error = "",
+  player_position_controller_cache = {
+    records = {},
+    ttl_seconds = 120,
+  },
+  player_position_snapshot_timer_id = nil,
+  player_position_snapshot = {
+    enabled = false,
+    path = PLAYER_POSITIONS_SNAPSHOT_PATH,
+    interval_ms = 2000,
+    limit = 64,
+    writes = 0,
+    failures = 0,
+    last_write_at = "",
+    last_error = "",
+    last_duration_ms = 0,
+    last_positioned = 0,
+    last_ok = false,
+    last_code = "",
+  },
   server_ready = false,
   server_ready_data = nil,
   plugin_tick_timer_id = nil,
@@ -249,7 +284,7 @@ local state = {
   config = {
     allowPluginServerExec = false,
     allowPluginServerShutdown = false,
-    jsonlLogs = true,
+    jsonlLogs = false,
     pluginWatchdogEnabled = true,
     pluginWatchdogMaxErrors = 3,
     allowPluginUnsafeGlobals = false,
@@ -679,10 +714,11 @@ local function write_text_log(path, timestamp, level, message)
   return append_file(path, line)
 end
 
+local function jsonl_logs_enabled()
+  return state.config and state.config.jsonlLogs == true
+end
+
 local function write_log_event(timestamp, level, message, context)
-  if state.config.jsonlLogs == false then
-    return true
-  end
   context = context or {}
   local event = {
     ts = timestamp,
@@ -699,6 +735,9 @@ local function write_log_event(timestamp, level, message, context)
   local encoded = json_encode(event)
   if BMF_socket_send_event_record then
     BMF_socket_send_event_record(event, encoded)
+  end
+  if not jsonl_logs_enabled() then
+    return true
   end
   return append_file(EVENT_LOG_PATH, encoded .. "\n")
 end
@@ -763,15 +802,21 @@ local function audit_record(action, data, context)
     record.data = { value = tostring(data) }
   end
 
-  local written = append_file(AUDIT_LOG_PATH, json_encode(record) .. "\n")
+  local written = true
+  local jsonl_written = false
+  if jsonl_logs_enabled() then
+    written = append_file(AUDIT_LOG_PATH, json_encode(record) .. "\n")
+    jsonl_written = written == true
+  end
   state.audit_records[#state.audit_records + 1] = record
   while #state.audit_records > state.audit_max_records do
     table.remove(state.audit_records, 1)
   end
   write_status()
 
-  return result(written, written and "OK" or "AUDIT_WRITE_FAILED", written and "Audit record written" or "Audit record could not be written", {
+  return result(written, written and "OK" or "AUDIT_WRITE_FAILED", written and "Audit record recorded" or "Audit record could not be written", {
     path = AUDIT_LOG_PATH,
+    jsonlWritten = jsonl_written,
     record = record,
   })
 end
@@ -920,6 +965,20 @@ function BMF_telemetry_snapshot()
     sent_responses = tonumber(state.socket.sent_responses) or 0,
     poll_count = tonumber(state.socket.poll_count) or 0,
     last_drain_count = tonumber(state.socket.last_drain_count) or 0,
+  }
+  telemetry.player_position_snapshot = {
+    enabled = state.player_position_snapshot.enabled and true or false,
+    path = tostring(state.player_position_snapshot.path or PLAYER_POSITIONS_SNAPSHOT_PATH),
+    interval_ms = tonumber(state.player_position_snapshot.interval_ms) or 0,
+    limit = tonumber(state.player_position_snapshot.limit) or 0,
+    writes = tonumber(state.player_position_snapshot.writes) or 0,
+    failures = tonumber(state.player_position_snapshot.failures) or 0,
+    last_write_at = tostring(state.player_position_snapshot.last_write_at or ""),
+    last_error = tostring(state.player_position_snapshot.last_error or ""),
+    last_duration_ms = tonumber(state.player_position_snapshot.last_duration_ms) or 0,
+    last_positioned = tonumber(state.player_position_snapshot.last_positioned) or 0,
+    last_ok = state.player_position_snapshot.last_ok and true or false,
+    last_code = tostring(state.player_position_snapshot.last_code or ""),
   }
   return telemetry
 end
@@ -1118,7 +1177,7 @@ local RUNTIME_HELPER_GROUPS = {
       "ExecuteWithDelay",
       "ExecuteInGameThreadWithDelay",
     },
-    summary = "Schedules BMF timers and the file command worker.",
+    summary = "Schedules BMF timers and legacy opt-in validation workers.",
   },
   {
     id = "consoleCommandRegistration",
@@ -1470,6 +1529,9 @@ local function BMF_socket_metadata_heartbeat(force)
   end
 
   BMF_socket_write_metadata()
+  if type(write_status) == "function" then
+    write_status()
+  end
   return true
 end
 
@@ -1863,12 +1925,19 @@ API_REGISTRY = {
   { name = "BMF.tools.applicator.scanObjects", namespace = "tools", kind = "function", stability = "experimental", risk = "low", validation = "L3 Live Server read-only reflection scan", requiresPlayer = false, capability = "", summary = "Scan live UE objects for applicator/component function discovery." },
   { name = "BMF.tools.applicator.refreshComponentCache", namespace = "tools", kind = "function", stability = "experimental", risk = "unsafe-native", validation = "L2 Headless safe failure; L3 Live Player for reflected component type addresses", requiresPlayer = false, capability = "", summary = "Resolve denied Brickadia component type objects such as ItemSpawn for live applicator enforcement." },
   { name = "BMF.tools.uobject.describe", namespace = "tools", kind = "function", stability = "diagnostic", risk = "low", validation = "L3 Live Server address-only native diagnostic", requiresPlayer = false, capability = "", summary = "Describe one explicit live UObject pointer without global scans; used to decode native trace context pointers." },
+  { name = "BMF.tools.uobject.findNear", namespace = "tools", kind = "function", stability = "diagnostic", risk = "unsafe-native", validation = "L3 Live Server bounded native location scan", requiresPlayer = false, capability = "uobject-physical-state", summary = "Find live actor/component UObject targets near one world coordinate with explicit scan/time caps." },
+  { name = "BMF.tools.uobject.physicalAddress", namespace = "tools", kind = "function", stability = "experimental", risk = "unsafe-native", validation = "L3 Live Server explicit address actor visibility/collision toggle", requiresPlayer = false, capability = "uobject-physical-state", summary = "Toggle actor visibility/collision from one explicit live UObject address without global scans." },
+  { name = "BMF.tools.uobject.physical", namespace = "tools", kind = "function", stability = "experimental", risk = "unsafe-native", validation = "L3 Live Server target UObject visibility/collision toggle", requiresPlayer = false, capability = "uobject-physical-state", summary = "Toggle visibility/collision for one resolved UObject target and a bounded outer chain." },
   { name = "BMF.bricks.inspectRuntimeState", namespace = "bricks", kind = "function", stability = "diagnostic", risk = "medium", validation = "L3 Live Server explicit brick id inspect", requiresPlayer = false, capability = "", summary = "Inspect one explicit runtime brick id for visible/collision state without scanning live UObjects." },
   { name = "BMF.bricks.resolveRuntimeState", namespace = "bricks", kind = "function", stability = "experimental", risk = "unsafe-native", validation = "Env-gated L3 Live Server bounded runtime-array scan", requiresPlayer = false, capability = "", summary = "Resolve a nearby active runtime brick id from a world position and optional saved-slot hint without scanning live UObjects." },
+  { name = "BMF.bricks.scanRuntimeRegion", namespace = "bricks", kind = "function", stability = "experimental", risk = "unsafe-native", validation = "Env-gated L3 Live Server bounded runtime-array diagnostic", requiresPlayer = false, capability = "", summary = "Scan raw active runtime brick fields inside one runtime-local box for diagnostics; not a world-space ClearRegion proof." },
+  { name = "BMF.bricks.scanWorldRegion", namespace = "bricks", kind = "function", stability = "experimental", risk = "world-edit", validation = "Env-gated L3 Live Server Bricks.SaveRegion plus BRS exact-key proof", requiresPlayer = false, capability = "", summary = "Save one bounded world-space brick region and prove every saved brick belongs to one expected ConsoleTag key before callers use ClearRegion." },
   { name = "BMF.bricks.setRuntimeState", namespace = "bricks", kind = "function", stability = "experimental", risk = "unsafe-native", validation = "Env-gated L3 Live Server canary only", requiresPlayer = false, capability = "bricks.runtimeState", summary = "Set runtime brick visibility/collision by explicit runtime id or by UUID-first lookup metadata." },
   { name = "BMF.bricks.bindRuntimeGuid", namespace = "bricks", kind = "function", stability = "experimental", risk = "medium", validation = "L2 Headless + L3 Live Server explicit runtime ids", requiresPlayer = false, capability = "bricks.runtimeState", summary = "Bind explicit runtime brick ids or a bounded lookup result to an opaque gameplay GUID." },
+  { name = "BMF.bricks.bindRuntimeGuidCell", namespace = "bricks", kind = "function", stability = "experimental", risk = "unsafe-native", validation = "L3 Live Server bounded runtime cell binding", requiresPlayer = false, capability = "bricks.runtimeState", summary = "Bind every runtime brick in the same Brickadia cell as an anchor runtime brick to an opaque gameplay GUID." },
   { name = "BMF.bricks.setRuntimeStateByGuid", namespace = "bricks", kind = "function", stability = "experimental", risk = "unsafe-native", validation = "Env-gated L3 Live Server canary only", requiresPlayer = false, capability = "bricks.runtimeState", summary = "Set visibility/collision for runtime bricks bound to, or resolved for, one opaque GUID." },
   { name = "BMF.bricks.runtimeGuidStatus", namespace = "bricks", kind = "function", stability = "diagnostic", risk = "low", validation = "L2 Headless", requiresPlayer = false, capability = "", summary = "Inspect opaque GUID to runtime brick id bindings." },
+  { name = "BMF.bricks.forgetRuntimeGuid", namespace = "bricks", kind = "function", stability = "diagnostic", risk = "low", validation = "L2 Headless", requiresPlayer = false, capability = "", summary = "Clear stale opaque GUID to runtime brick id bindings." },
   { name = "BMF.bricks.runtimeStateStatus", namespace = "bricks", kind = "function", stability = "diagnostic", risk = "low", validation = "L2 Headless safe failure; L3 Live Server result inspection", requiresPlayer = false, capability = "", summary = "Inspect the last queued runtime brick state operation result." },
   { name = "BMF.tools.treeCutTrace.enable", namespace = "tools", kind = "function", stability = "diagnostic", risk = "unsafe-native", validation = "L3 Live Player handaxe/tree trace", requiresPlayer = true, capability = "", summary = "Temporarily register bounded native hooks that summarize handaxe/tree-cut evidence." },
   { name = "BMF.tools.treeCutTrace.disable", namespace = "tools", kind = "function", stability = "diagnostic", risk = "unsafe-native", validation = "L3 Live Server cleanup", requiresPlayer = false, capability = "", summary = "Unregister active tree-cut trace hooks." },
@@ -2848,7 +2917,7 @@ BMF.server.status = function()
     config = {
       allowPluginServerExec = state.config.allowPluginServerExec and true or false,
       allowPluginServerShutdown = state.config.allowPluginServerShutdown and true or false,
-      jsonlLogs = state.config.jsonlLogs ~= false,
+      jsonlLogs = state.config.jsonlLogs == true,
       pluginWatchdogEnabled = plugin_watchdog_enabled(),
       pluginWatchdogMaxErrors = plugin_watchdog_max_errors(),
       allowPluginUnsafeGlobals = state.config.allowPluginUnsafeGlobals == true,
@@ -3509,6 +3578,108 @@ local function register_builtin_commands()
     return telemetry
   end)
 
+  BMF.commands.register("bmf.telemetry.emit", "Emit a normalized socket telemetry event.", function(args)
+    local options = parse_command_options(args)
+    local positional = options._positional or {}
+    local event_name, event_error = normalize_event_name(
+      percent_decode(options.event or options.name or positional[1] or "")
+    )
+    if not event_name then
+      return result(false, "TELEMETRY_EVENT_REQUIRED", event_error or "event is required", {
+        lines = {
+          "ok=false",
+          "code=TELEMETRY_EVENT_REQUIRED",
+        },
+      })
+    end
+
+    local raw_payload = percent_decode(options.payloadenc or options.payload or options.json or "{}")
+    local payload = {}
+    if trim_string(raw_payload) ~= "" then
+      local decoded, decode_error = json_decode(raw_payload)
+      if decode_error then
+        payload = {
+          raw = raw_payload,
+          decodeError = tostring(decode_error),
+        }
+      elseif type(decoded) == "table" then
+        payload = decoded
+      else
+        payload = {
+          value = decoded,
+        }
+      end
+    end
+
+    local timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ")
+    local source = percent_decode(options.source or "bmf.telemetry")
+    if trim_string(source) == "" then
+      source = "bmf.telemetry"
+    end
+    local status = percent_decode(options.status or payload.status or "ok")
+    if trim_string(status) == "" then
+      status = "ok"
+    end
+    local event_id = percent_decode(options.id or payload.id or "")
+    if trim_string(event_id) == "" then
+      event_id = event_name .. ":" .. timestamp .. ":" .. tostring((state.socket.sent_events or 0) + 1)
+    end
+
+    if type(payload._bmf) ~= "table" then
+      payload._bmf = {}
+    end
+    payload._bmf.event = event_name
+    payload._bmf.source = source
+    payload._bmf.emittedAt = timestamp
+    payload._bmf.command = "bmf.telemetry.emit"
+
+    local duration_ms = tonumber(options.durationms or options.duration or payload.durationMs)
+    local record = {
+      id = event_id,
+      timestamp = timestamp,
+      type = "event",
+      event = event_name,
+      source = source,
+      transport = "socket",
+      status = status,
+      payload = payload,
+      durationMs = duration_ms,
+    }
+
+    if not state.socket.started or type(BMF_socket_send_event_record) ~= "function" then
+      return result(false, "SOCKET_EVENT_UNAVAILABLE", "BMF socket event transport is not available", {
+        event = event_name,
+        source = source,
+        status = status,
+        socketStarted = state.socket.started == true,
+        lines = {
+          "ok=false",
+          "code=SOCKET_EVENT_UNAVAILABLE",
+          "event=" .. event_name,
+          "source=" .. source,
+          "socket_started=" .. tostring(state.socket.started == true),
+        },
+      })
+    end
+
+    local sent = BMF_socket_send_event_record(record, json_encode(record))
+    return result(sent, sent and "OK" or "SOCKET_EVENT_SEND_FAILED", sent and "Socket telemetry event emitted" or "Socket telemetry event failed", {
+      event = event_name,
+      source = source,
+      status = status,
+      socketStarted = state.socket.started == true,
+      sent = sent == true,
+      lines = {
+        "ok=" .. tostring(sent == true),
+        "code=" .. (sent and "OK" or "SOCKET_EVENT_SEND_FAILED"),
+        "event=" .. event_name,
+        "source=" .. source,
+        "status=" .. status,
+        "transport=socket",
+      },
+    })
+  end)
+
   BMF.commands.register("bmf.version", "Show BMF version and target build.", function()
     return version_command_response()
   end)
@@ -3843,6 +4014,21 @@ local function register_builtin_commands()
     return BMF.tools.uobject.describe(options)
   end)
 
+  BMF.commands.register("bmf.tools.uobject.find-near", "Find live actor/component UObject targets near one world coordinate.", function(args)
+    local options = parse_command_options(args)
+    return BMF.tools.uobject.findNear(options)
+  end)
+
+  BMF.commands.register("bmf.tools.uobject.physical-address", "Toggle actor visibility/collision from one explicit live UObject address without scanning.", function(args)
+    local options = parse_command_options(args)
+    return BMF.tools.uobject.physicalAddress(options)
+  end)
+
+  BMF.commands.register("bmf.tools.uobject.physical", "Toggle visibility/collision for one UObject target by encoded full name/path.", function(args)
+    local options = parse_command_options(args)
+    return BMF.tools.uobject.physical(options)
+  end)
+
   BMF.commands.register("bmf.tools.applicator.status", "Show live applicator hook status.", function(args)
     local options = parse_command_options(args)
     local refresh = tostring(options.refresh or ""):lower()
@@ -4025,6 +4211,16 @@ local function register_builtin_commands()
     return BMF.bricks.resolveRuntimeState(options)
   end)
 
+  BMF.commands.register("bmf.bricks.runtime.scan-region", "Scan raw active runtime brick fields inside one runtime-local box for diagnostics.", function(args)
+    local options = parse_command_options(args)
+    return BMF.bricks.scanRuntimeRegion(options)
+  end)
+
+  BMF.commands.register("bmf.bricks.world.scan-region", "Save and prove one bounded world-space brick region contains only the expected ConsoleTag key.", function(args)
+    local options = parse_command_options(args)
+    return BMF.bricks.scanWorldRegion(options)
+  end)
+
   BMF.commands.register("bmf.bricks.runtime.set", "Set runtime brick visible/collision state by brick id, GUID, UUID+purpose, or tag.", function(args)
     local options = parse_command_options(args)
     return BMF.bricks.setRuntimeState(options)
@@ -4035,6 +4231,11 @@ local function register_builtin_commands()
     return BMF.bricks.bindRuntimeGuid(options)
   end)
 
+  BMF.commands.register("bmf.bricks.runtime.bind-cell", "Bind every runtime brick in the same Brickadia cell as an anchor runtime brick to an opaque GUID.", function(args)
+    local options = parse_command_options(args)
+    return BMF.bricks.bindRuntimeGuidCell(options)
+  end)
+
   BMF.commands.register("bmf.bricks.runtime.set-guid", "Set visible/collision state for runtime bricks bound to or resolved for one opaque GUID.", function(args)
     local options = parse_command_options(args)
     return BMF.bricks.setRuntimeStateByGuid(options)
@@ -4043,6 +4244,11 @@ local function register_builtin_commands()
   BMF.commands.register("bmf.bricks.runtime.guid-status", "Show runtime brick GUID bindings.", function(args)
     local options = parse_command_options(args)
     return BMF.bricks.runtimeGuidStatus(options)
+  end)
+
+  BMF.commands.register("bmf.bricks.runtime.forget-guid", "Clear runtime brick GUID bindings.", function(args)
+    local options = parse_command_options(args)
+    return BMF.bricks.forgetRuntimeGuid(options)
   end)
 
   BMF.commands.register("bmf.bricks.runtime.status", "Show last runtime brick-state operation.", function()
@@ -4278,6 +4484,7 @@ local function register_builtin_commands()
       unsafe = option_boolean(options, "unsafe", false),
       allowLivePawnRead = option_boolean(options, "allowlivepawnread", false),
       liveController = option_boolean(options, "livecontroller", false),
+      nativeScan = option_boolean(options, "nativescan", false),
       callMethods = option_boolean(options, "methods", false) or option_boolean(options, "callmethods", false),
       includeMissing = option_boolean(options, "includemissing", false),
       fallbackFindAll = option_boolean(options, "fallbackfindall", true),
@@ -7654,7 +7861,7 @@ local function native_uobject_parse_lines(text)
   local fields = {}
   for line in tostring(text or ""):gmatch("[^\r\n]+") do
     lines[#lines + 1] = line
-    local key, value = line:match("^([A-Za-z0-9_]+)=(.*)$")
+    local key, value = line:match("^([A-Za-z0-9_%.]+)=(.*)$")
     if key ~= nil then
       fields[key] = value or ""
     end
@@ -7704,6 +7911,438 @@ function BMF.tools.uobject.describe(options)
   return result(describe_ok, describe_ok and "OK" or "NATIVE_UOBJECT_DESCRIBE_FAILED", tostring(fields.detail or "Native UObject description"), {
     address = address,
     fields = fields,
+    lines = lines,
+  })
+end
+
+function BMF.tools.uobject.findNear(options)
+  options = type(options) == "table" and options or {}
+  local positional = type(options._positional) == "table" and options._positional or {}
+  if type(BMFSocketUObjectFindNear) ~= "function" then
+    return result(false, "NATIVE_UOBJECT_FIND_NEAR_UNAVAILABLE", "BMFSocketUObjectFindNear native helper is unavailable.", {
+      lines = {
+        "ok=false",
+        "code=NATIVE_UOBJECT_FIND_NEAR_UNAVAILABLE",
+      },
+    })
+  end
+
+  local x = tonumber(options.x or options.worldx or positional[1])
+  local y = tonumber(options.y or options.worldy or positional[2])
+  local z = tonumber(options.z or options.worldz or positional[3])
+  if x == nil or y == nil or z == nil then
+    return result(false, "NATIVE_UOBJECT_FIND_NEAR_POSITION_REQUIRED", "Provide x= y= z= world coordinates.", {
+      lines = {
+        "ok=false",
+        "code=NATIVE_UOBJECT_FIND_NEAR_POSITION_REQUIRED",
+      },
+    })
+  end
+
+  local radius = option_number(options, "radius", option_number(options, "r", 750))
+  local limit = option_number(options, "limit", option_number(options, "maxresults", 8))
+  local max_scan = option_number(options, "maxscan", 150000)
+  local max_ms = option_number(options, "maxms", option_number(options, "budgetms", 750))
+
+  local ok, response = pcall(BMFSocketUObjectFindNear, x, y, z, radius, limit, max_scan, max_ms)
+  if not ok then
+    return result(false, "NATIVE_UOBJECT_FIND_NEAR_FAILED", tostring(response or "native helper failed"), {
+      lines = {
+        "ok=false",
+        "code=NATIVE_UOBJECT_FIND_NEAR_FAILED",
+        "detail=" .. tostring(response or "native helper failed"),
+      },
+    })
+  end
+
+  local lines, fields = native_uobject_parse_lines(response)
+  local find_ok = tostring(fields.ok or "") == "true"
+  return result(find_ok, find_ok and "OK" or tostring(fields.code or "NATIVE_UOBJECT_FIND_NEAR_FAILED"), tostring(fields.detail or "Native UObject find near"), {
+    fields = fields,
+    lines = lines,
+  })
+end
+
+function BMF.tools.uobject.physicalAddress(options)
+  options = type(options) == "table" and options or {}
+  local positional = type(options._positional) == "table" and options._positional or {}
+  local confirm = tostring(options.confirm or options.confirmation or "")
+  if confirm ~= "uobject-physical" then
+    return result(false, "UOBJECT_PHYSICAL_CONFIRM_REQUIRED", "confirm=uobject-physical is required for UObject physical-state mutation", {
+      lines = {
+        "ok=false",
+        "code=UOBJECT_PHYSICAL_CONFIRM_REQUIRED",
+        "required_confirm=uobject-physical",
+      },
+    })
+  end
+
+  local address = trim_string(options.address or options.addr or options.pointer or options.target or positional[1] or "")
+  if address == "" then
+    return result(false, "NATIVE_UOBJECT_ADDRESS_REQUIRED", "Provide address=0x... for one live UObject pointer.", {
+      lines = {
+        "ok=false",
+        "code=NATIVE_UOBJECT_ADDRESS_REQUIRED",
+      },
+    })
+  end
+
+  if type(BMFSocketUObjectPhysicalSet) ~= "function" then
+    return result(false, "NATIVE_UOBJECT_PHYSICAL_UNAVAILABLE", "BMFSocketUObjectPhysicalSet native helper is unavailable.", {
+      address = address,
+      lines = {
+        "ok=false",
+        "code=NATIVE_UOBJECT_PHYSICAL_UNAVAILABLE",
+        "address=" .. tostring(address),
+      },
+    })
+  end
+
+  local visible_raw = tostring(options.visible or options.visibility or ""):lower()
+  local visible_requested = visible_raw ~= "" and visible_raw ~= "unchanged" and visible_raw ~= "skip" and visible_raw ~= "same"
+  local visible = visible_requested and (option_boolean({ visible = visible_raw }, "visible", true) and "true" or "false") or "unchanged"
+  local collision_raw = tostring(options.collision or options.collide or "unchanged"):lower()
+  local collision_requested = collision_raw ~= "" and collision_raw ~= "unchanged" and collision_raw ~= "skip" and collision_raw ~= "same"
+  local collision_enabled = not (collision_raw == "0" or collision_raw == "false" or collision_raw == "off" or collision_raw == "none" or collision_raw == "nocollision")
+  local collision = collision_requested and (collision_enabled and "true" or "false") or "unchanged"
+
+  if not visible_requested and not collision_requested then
+    return result(false, "UOBJECT_PHYSICAL_NOOP", "visible or collision must be provided", {
+      address = address,
+      lines = {
+        "ok=false",
+        "code=UOBJECT_PHYSICAL_NOOP",
+        "address=" .. tostring(address),
+      },
+    })
+  end
+
+  local ok, response = pcall(BMFSocketUObjectPhysicalSet, address, visible, collision)
+  if not ok then
+    return result(false, "NATIVE_UOBJECT_PHYSICAL_FAILED", tostring(response or "native helper failed"), {
+      address = address,
+      lines = {
+        "ok=false",
+        "code=NATIVE_UOBJECT_PHYSICAL_FAILED",
+        "address=" .. tostring(address),
+        "detail=" .. tostring(response or "native helper failed"),
+      },
+    })
+  end
+
+  local lines, fields = native_uobject_parse_lines(response)
+  local physical_ok = tostring(fields.ok or "") == "true"
+  return result(physical_ok, physical_ok and "OK" or tostring(fields.code or "NATIVE_UOBJECT_PHYSICAL_FAILED"), tostring(fields.detail or "Native UObject physical state"), {
+    address = address,
+    fields = fields,
+    lines = lines,
+  })
+end
+
+local function uobject_target_decode(value)
+  local text = trim_string(value or "")
+  if text == "" then
+    return ""
+  end
+  return percent_decode(text)
+end
+
+local function tool_object_valid(object)
+  if object == nil then
+    return false
+  end
+  local object_type = type(object)
+  if object_type ~= "userdata" and object_type ~= "table" then
+    return tostring(object or ""):match("UObject:%s*([0-9A-Fa-f]+)") ~= nil
+  end
+  if type(object.IsValid) ~= "function" then
+    return true
+  end
+  local ok, is_valid = pcall(function()
+    return object:IsValid()
+  end)
+  if ok and is_valid == true then
+    return true
+  end
+  return type(object.GetAddress) == "function" or type(object.GetFullName) == "function"
+end
+
+local function tool_object_address_from_string(object)
+  local hex = tostring(object or ""):match("UObject:%s*([0-9A-Fa-f]+)")
+  if hex and hex ~= "" then
+    return "0x" .. hex
+  end
+  return ""
+end
+
+local function tool_object_address(object)
+  if object == nil then
+    return ""
+  end
+  if type(object.GetAddress) == "function" then
+    local ok, address = pcall(function()
+      return object:GetAddress()
+    end)
+    if ok and type(address) == "number" then
+      return string.format("0x%X", address)
+    end
+    if ok and type(address) == "string" then
+      local hex = address:match("0x[0-9A-Fa-f]+") or address:match("([0-9A-Fa-f]+)")
+      if hex and hex ~= "" then
+        if hex:match("^0x") then
+          return hex
+        end
+        return "0x" .. hex
+      end
+    end
+  end
+  return tool_object_address_from_string(object)
+end
+
+local function tool_object_full_name(object)
+  if not tool_object_valid(object) or type(object.GetFullName) ~= "function" then
+    return ""
+  end
+  local ok, full_name = pcall(function()
+    return object:GetFullName()
+  end)
+  if ok and full_name ~= nil then
+    local text = trim_string(full_name)
+    if text ~= "." and text ~= "" then
+      return text
+    end
+  end
+  return ""
+end
+
+local function tool_object_class_full_name(object)
+  if not tool_object_valid(object) or type(object.GetClass) ~= "function" then
+    return ""
+  end
+  local ok, class_object = pcall(function()
+    return object:GetClass()
+  end)
+  if ok and tool_object_valid(class_object) then
+    return tool_object_full_name(class_object)
+  end
+  return ""
+end
+
+local function uobject_static_find_target(name)
+  local target = trim_string(name or "")
+  if target == "" then
+    return nil, "target name is empty", ""
+  end
+  if type(StaticFindObject) ~= "function" then
+    return nil, "StaticFindObject unavailable", ""
+  end
+
+  local candidates = { target }
+  local without_class = target:match("^%S+%s+(.+)$")
+  if without_class and without_class ~= target then
+    candidates[#candidates + 1] = without_class
+  end
+
+  local last_error = "not found"
+  for _, candidate in ipairs(candidates) do
+    local ok, object = pcall(StaticFindObject, candidate)
+    if ok and tool_object_valid(object) then
+      return object, "", candidate
+    end
+    last_error = tostring(object or "not found")
+  end
+  return nil, last_error, ""
+end
+
+local function uobject_outer(object)
+  if not tool_object_valid(object) or type(object.GetOuter) ~= "function" then
+    return nil
+  end
+  local ok, outer = pcall(function()
+    return object:GetOuter()
+  end)
+  if ok and tool_object_valid(outer) then
+    return outer
+  end
+  return nil
+end
+
+local function uobject_physical_targets(object, include_outers, max_depth)
+  local targets = {}
+  local seen = {}
+  local current = object
+  local depth = 0
+  max_depth = math.max(0, math.min(tonumber(max_depth) or 4, 8))
+  while tool_object_valid(current) do
+    local address = tool_object_address(current)
+    local key = address ~= "" and address or tool_object_full_name(current)
+    if key ~= "" and not seen[key] then
+      seen[key] = true
+      targets[#targets + 1] = current
+    end
+    if include_outers ~= true or depth >= max_depth then
+      break
+    end
+    current = uobject_outer(current)
+    depth = depth + 1
+  end
+  return targets
+end
+
+local function uobject_call_by_name(object, command)
+  if type(OmeggaCallFunctionByNameWithArguments) ~= "function" then
+    return false, "CALL_BY_NAME_HELPER_UNAVAILABLE", "native CallFunctionByNameWithArguments helper is unavailable"
+  end
+  local ok, success, output = pcall(OmeggaCallFunctionByNameWithArguments, object, command, object)
+  if not ok then
+    return false, "CALL_BY_NAME_ERROR", tostring(success)
+  end
+  if success == false then
+    return false, "CALL_BY_NAME_FAILED", tostring(output or "")
+  end
+  return true, "OK", tostring(output or "")
+end
+
+function BMF.tools.uobject.physical(options)
+  options = type(options) == "table" and options or {}
+  if not BMF_env_bool("BMF_UOBJECT_PHYSICAL_ENABLED", false) then
+    return result(false, "UOBJECT_PHYSICAL_DISABLED", "Set BMF_UOBJECT_PHYSICAL_ENABLED=1 to allow UObject physical-state mutation diagnostics.", {
+      lines = {
+        "ok=false",
+        "code=UOBJECT_PHYSICAL_DISABLED",
+        "required_env=BMF_UOBJECT_PHYSICAL_ENABLED=1",
+      },
+    })
+  end
+
+  local positional = type(options._positional) == "table" and options._positional or {}
+  local confirm = tostring(options.confirm or options.confirmation or "")
+  if confirm ~= "uobject-physical" then
+    return result(false, "UOBJECT_PHYSICAL_CONFIRM_REQUIRED", "confirm=uobject-physical is required for UObject physical-state mutation", {
+      lines = {
+        "ok=false",
+        "code=UOBJECT_PHYSICAL_CONFIRM_REQUIRED",
+        "required_confirm=uobject-physical",
+      },
+    })
+  end
+
+  local target_name = uobject_target_decode(
+    options.pathenc or options.fullnameenc or options.nameenc or
+    options.path or options.fullname or options.name or options.target or positional[1] or ""
+  )
+  local object, find_error, find_source = uobject_static_find_target(target_name)
+  if not object then
+    return result(false, "UOBJECT_TARGET_NOT_FOUND", tostring(find_error or "target UObject was not found"), {
+      lines = {
+        "ok=false",
+        "code=UOBJECT_TARGET_NOT_FOUND",
+        "target=" .. target_name,
+        "detail=" .. tostring(find_error or "not found"),
+      },
+    })
+  end
+
+  local visible_raw = tostring(options.visible or options.visibility or ""):lower()
+  local visible_requested = visible_raw ~= "" and visible_raw ~= "unchanged"
+  local visible = option_boolean({ visible = visible_raw }, "visible", true)
+  local hidden = not visible
+  local collision_raw = tostring(options.collision or options.collide or "unchanged"):lower()
+  local collision_requested = collision_raw ~= "" and collision_raw ~= "unchanged"
+  local collision_enabled = not (collision_raw == "0" or collision_raw == "false" or collision_raw == "off" or collision_raw == "none" or collision_raw == "nocollision")
+  local include_outers = option_boolean(options, "outers", true)
+  local max_depth = option_number(options, "maxdepth", 4)
+  local dry_run = option_boolean(options, "dryrun", false)
+
+  if not visible_requested and not collision_requested then
+    return result(false, "UOBJECT_PHYSICAL_NOOP", "visible or collision must be provided", {
+      lines = {
+        "ok=false",
+        "code=UOBJECT_PHYSICAL_NOOP",
+        "target=" .. target_name,
+      },
+    })
+  end
+
+  local commands = {}
+  if visible_requested then
+    commands[#commands + 1] = "SetVisibility " .. tostring(visible) .. " true"
+    commands[#commands + 1] = "SetHiddenInGame " .. tostring(hidden) .. " true"
+    commands[#commands + 1] = "SetActorHiddenInGame " .. tostring(hidden)
+  end
+  if collision_requested then
+    commands[#commands + 1] = "SetActorEnableCollision " .. tostring(collision_enabled)
+    if collision_enabled then
+      commands[#commands + 1] = "SetCollisionEnabled QueryAndPhysics"
+      commands[#commands + 1] = "SetCollisionEnabled 3"
+    else
+      commands[#commands + 1] = "SetCollisionEnabled NoCollision"
+      commands[#commands + 1] = "SetCollisionEnabled 0"
+    end
+  end
+
+  local targets = uobject_physical_targets(object, include_outers, max_depth)
+  local lines = {
+    "ok=true",
+    "code=OK",
+    "target=" .. target_name,
+    "resolved_source=" .. tostring(find_source or ""),
+    "resolved_address=" .. tool_object_address(object),
+    "resolved_full_name=" .. tool_object_full_name(object),
+    "resolved_class=" .. tool_object_class_full_name(object),
+    "visible_requested=" .. tostring(visible_requested),
+    "visible=" .. tostring(visible),
+    "collision_requested=" .. tostring(collision_requested),
+    "collision_enabled=" .. tostring(collision_enabled),
+    "target_count=" .. tostring(#targets),
+    "dry_run=" .. tostring(dry_run),
+  }
+
+  local attempted = 0
+  local succeeded = 0
+  local failed = 0
+  for target_index, target in ipairs(targets) do
+    lines[#lines + 1] = "target." .. tostring(target_index) .. ".address=" .. tool_object_address(target)
+    lines[#lines + 1] = "target." .. tostring(target_index) .. ".full_name=" .. tool_object_full_name(target)
+    lines[#lines + 1] = "target." .. tostring(target_index) .. ".class=" .. tool_object_class_full_name(target)
+    for command_index, command in ipairs(commands) do
+      attempted = attempted + 1
+      local prefix = "target." .. tostring(target_index) .. ".command." .. tostring(command_index)
+      lines[#lines + 1] = prefix .. "=" .. command
+      if dry_run then
+        lines[#lines + 1] = prefix .. ".ok=true"
+        lines[#lines + 1] = prefix .. ".code=DRY_RUN"
+        succeeded = succeeded + 1
+      else
+        local ok, code, detail = uobject_call_by_name(target, command)
+        if ok then
+          succeeded = succeeded + 1
+        else
+          failed = failed + 1
+        end
+        lines[#lines + 1] = prefix .. ".ok=" .. tostring(ok)
+        lines[#lines + 1] = prefix .. ".code=" .. tostring(code)
+        if detail ~= "" then
+          lines[#lines + 1] = prefix .. ".detail=" .. tostring(detail)
+        end
+      end
+    end
+  end
+
+  lines[#lines + 1] = "attempted=" .. tostring(attempted)
+  lines[#lines + 1] = "succeeded=" .. tostring(succeeded)
+  lines[#lines + 1] = "failed=" .. tostring(failed)
+  local ok = attempted > 0 and succeeded > 0
+  if not ok then
+    lines[1] = "ok=false"
+    lines[2] = "code=UOBJECT_PHYSICAL_APPLY_FAILED"
+  end
+
+  return result(ok, ok and "OK" or "UOBJECT_PHYSICAL_APPLY_FAILED", ok and "UObject physical state updated" or "No UObject physical-state calls succeeded", {
+    target = target_name,
+    attempted = attempted,
+    succeeded = succeeded,
+    failed = failed,
     lines = lines,
   })
 end
@@ -9665,6 +10304,14 @@ local function brick_runtime_available()
   return tree_cut_physical_available()
 end
 
+local function brick_runtime_batch_available()
+  return type(BMFSocketBrickPhysicalSetMany) == "function"
+end
+
+local function brick_runtime_region_scan_available()
+  return type(BMFSocketBrickPhysicalScanRegion) == "function"
+end
+
 local function brick_runtime_next_sequence()
   local runtime = state.tools.brick_runtime
   runtime.sequence = (tonumber(runtime.sequence) or 0) + 1
@@ -9774,7 +10421,7 @@ BMF_brick_runtime_guid_valid = function(guid)
 end
 
 BMF_brick_runtime_guid_max_bindings = function()
-  return math.max(1, math.min(512, math.floor(BMF_env_number("BMF_BRICK_RUNTIME_GUID_MAX_BRICKS", 64, 1) or 64)))
+  return math.max(1, math.min(1024, math.floor(BMF_env_number("BMF_BRICK_RUNTIME_GUID_MAX_BRICKS", 256, 1) or 256)))
 end
 
 BMF_brick_runtime_guid_cache_max_guids = function()
@@ -9802,6 +10449,8 @@ BMF_brick_runtime_guid_binding = function(guid, create)
     guid = guid,
     ids = {},
     by_id = {},
+    verified_by_id = {},
+    source_by_id = {},
     created_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
     updated_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
   }
@@ -9810,7 +10459,7 @@ BMF_brick_runtime_guid_binding = function(guid, create)
   return binding
 end
 
-BMF_brick_runtime_bind_guid = function(guid, brick_id)
+BMF_brick_runtime_bind_guid = function(guid, brick_id, source)
   if not BMF_brick_runtime_guid_valid(guid) then
     return false, "BRICK_RUNTIME_GUID_INVALID"
   end
@@ -9820,7 +10469,15 @@ BMF_brick_runtime_bind_guid = function(guid, brick_id)
   end
 
   local binding = BMF_brick_runtime_guid_binding(guid, true)
+  local normalized_source = tostring(source or "")
+  local verified = normalized_source == "native-resolve" or normalized_source == "resource-native" or normalized_source == "verified"
   if binding.by_id[brick_id] then
+    if verified then
+      binding.verified_by_id = binding.verified_by_id or {}
+      binding.source_by_id = binding.source_by_id or {}
+      binding.verified_by_id[brick_id] = true
+      binding.source_by_id[brick_id] = normalized_source
+    end
     binding.updated_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
     return true, "OK"
   end
@@ -9830,13 +10487,29 @@ BMF_brick_runtime_bind_guid = function(guid, brick_id)
     local removed = table.remove(binding.ids, 1)
     if removed then
       binding.by_id[removed] = nil
+      if binding.verified_by_id then binding.verified_by_id[removed] = nil end
+      if binding.source_by_id then binding.source_by_id[removed] = nil end
     end
   end
 
   binding.ids[#binding.ids + 1] = brick_id
   binding.by_id[brick_id] = true
+  if verified then
+    binding.verified_by_id = binding.verified_by_id or {}
+    binding.source_by_id = binding.source_by_id or {}
+    binding.verified_by_id[brick_id] = true
+    binding.source_by_id[brick_id] = normalized_source
+  end
   binding.updated_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
   return true, "OK"
+end
+
+BMF_brick_runtime_guid_id_verified = function(guid, brick_id)
+  local binding = BMF_brick_runtime_guid_binding(guid, false)
+  if not binding then return false end
+  brick_id = math.floor(tonumber(brick_id) or 0)
+  if brick_id <= 0 then return false end
+  return binding.verified_by_id and binding.verified_by_id[brick_id] == true
 end
 
 BMF_brick_runtime_parse_brick_ids = function(options)
@@ -9861,6 +10534,36 @@ BMF_brick_runtime_parse_brick_ids = function(options)
   return ids
 end
 
+local function brick_runtime_inspect_fields(brick_id)
+  if type(BMFSocketBrickPhysicalInspect) ~= "function" then
+    return false, {}, {}, "BMFSocketBrickPhysicalInspect unavailable", "BRICK_RUNTIME_UNAVAILABLE"
+  end
+  local ok, response = pcall(BMFSocketBrickPhysicalInspect, brick_id)
+  local text = ok and response or tostring(response)
+  local lines, fields = tree_cut_native_status_lines(text)
+  local code = tostring(fields.code or (ok and "" or "LUA_ERROR"))
+  local native_ok = ok == true and tostring(fields.ok or "") == "true" and code == "OK"
+  return native_ok, fields, lines, tostring(text or ""), code
+end
+
+local function brick_runtime_clear_guid_binding(guid)
+  local runtime = state.tools.brick_runtime
+  runtime.guid_bindings = runtime.guid_bindings or {}
+  runtime.guid_binding_order = runtime.guid_binding_order or {}
+  runtime.guid_bindings[guid] = nil
+  for index = #runtime.guid_binding_order, 1, -1 do
+    if runtime.guid_binding_order[index] == guid then
+      table.remove(runtime.guid_binding_order, index)
+    end
+  end
+end
+
+local function brick_runtime_bind_cell_max_span(options)
+  options = type(options) == "table" and options or {}
+  local configured = option_number(options, "maxspan", option_number(options, "maxSpan", BMF_env_number("BMF_BRICK_RUNTIME_BIND_CELL_MAX_SPAN", 512, 1)))
+  return math.max(0, math.min(4096, math.floor(tonumber(configured) or 512)))
+end
+
 BMF_brick_runtime_format_guid_binding_lines = function(guid, binding)
   local lines = {
     "ok=true",
@@ -9873,6 +10576,8 @@ BMF_brick_runtime_format_guid_binding_lines = function(guid, binding)
     lines[#lines + 1] = "updated_at=" .. tostring(binding.updated_at or "")
     for index, brick_id in ipairs(binding.ids or {}) do
       lines[#lines + 1] = "brick_id." .. tostring(index) .. "=" .. tostring(brick_id)
+      lines[#lines + 1] = "brick_id." .. tostring(index) .. ".verified=" .. tostring(binding.verified_by_id and binding.verified_by_id[brick_id] == true)
+      lines[#lines + 1] = "brick_id." .. tostring(index) .. ".source=" .. tostring(binding.source_by_id and binding.source_by_id[brick_id] or "")
     end
   end
   return lines
@@ -9888,8 +10593,8 @@ local function brick_runtime_store_result(sequence, operation, brick_id, tag, gu
     stored_brick_id = tonumber(fields.best_brick_id or fields.brick_id) or stored_brick_id
   end
   guid = tostring(guid or fields.guid or "")
-  if native_ok and guid ~= "" and stored_brick_id > 0 then
-    BMF_brick_runtime_bind_guid(guid, stored_brick_id)
+  if native_ok and guid ~= "" and stored_brick_id > 0 and tostring(operation or "") == "resolve" then
+    BMF_brick_runtime_bind_guid(guid, stored_brick_id, "native-resolve")
   end
   runtime.last_result = {
     sequence = sequence,
@@ -9979,6 +10684,33 @@ local function brick_runtime_parse_context_arg(options)
   return text
 end
 
+local function brick_runtime_parse_action_source_arg(options)
+  options = type(options) == "table" and options or {}
+  local raw = options.actionsource
+  if raw == nil then raw = options.actionSource end
+  if raw == nil then raw = options.action_source end
+  if raw == nil then raw = options.actionsourceaddress end
+  if raw == nil then raw = options.actionSourceAddress end
+  if raw == nil then raw = options.action_source_address end
+  local text = trim_string(raw or "")
+  if text ~= "" and text:lower() ~= "none" then
+    return text, "explicit"
+  end
+
+  if options.autosource == false or options.autoSource == false or options.auto_action_source == false then
+    return "", "disabled"
+  end
+
+  local candidates = applicator_process_event_context_candidates()
+  for _, candidate in ipairs(candidates or {}) do
+    local address = trim_string(candidate.address or "")
+    if address ~= "" and address ~= "0x0" and address ~= "0x0000000000000000" then
+      return candidate.address, tostring(candidate.source or candidate.className or "BRTool_Applicator")
+    end
+  end
+  return "", "not-found"
+end
+
 local function brick_runtime_collision_restore_enabled()
   return BMF_env_bool("BMF_BRICK_RUNTIME_COLLISION_RESTORE_ENABLED", false)
 end
@@ -10006,9 +10738,12 @@ local function brick_runtime_direct_lookup_enabled()
   return BMF_env_bool("BMF_BRICK_RUNTIME_UNSAFE_LOOKUP_ENABLED", false)
 end
 
+local function brick_runtime_inline_operations_enabled()
+  return BMF_env_bool("BMF_BRICK_RUNTIME_INLINE_OPERATIONS_ENABLED", false)
+end
+
 local function brick_runtime_resolve_native_path_enabled()
-  return brick_runtime_resolve_unsafe_native_enabled()
-    or brick_runtime_resolve_lookup_fallback_enabled()
+  return brick_runtime_resolve_lookup_fallback_enabled()
     or brick_runtime_resolve_hint_lookup_enabled()
     or brick_runtime_resolve_direct_array_enabled()
 end
@@ -10102,7 +10837,7 @@ local function brick_runtime_resolve_id_on_game_thread(options, guid, tag)
   if not brick_runtime_resolve_native_path_enabled() then
     lines[#lines + 1] = "ok=false"
     lines[#lines + 1] = "code=BRICK_RUNTIME_RESOLVE_NATIVE_PATH_DISABLED"
-    lines[#lines + 1] = "detail=native runtime brick resolve is disabled; enable BMF_BRICK_RUNTIME_RESOLVE_UNSAFE_NATIVE_ENABLED=1 only for isolated array-scan validation"
+    lines[#lines + 1] = "detail=native runtime brick resolve has no supported path enabled; use socket object-address physical state or enable a bounded resolver mode only for isolated validation"
     return nil, lines
   end
 
@@ -10139,7 +10874,7 @@ local function brick_runtime_resolve_id_on_game_thread(options, guid, tag)
   lines[#lines + 1] = "ok=true"
   lines[#lines + 1] = "code=OK"
   lines[#lines + 1] = "brick_id=" .. tostring(resolved)
-  BMF_brick_runtime_bind_guid(guid, resolved)
+  BMF_brick_runtime_bind_guid(guid, resolved, "native-resolve")
   return resolved, lines
 end
 
@@ -10160,18 +10895,6 @@ function BMF.bricks.resolveRuntimeState(options)
       lines = {
         "ok=false",
         "code=BRICK_RUNTIME_GUID_INVALID",
-        "tag=" .. tag,
-        "guid=" .. guid,
-      },
-    })
-  end
-  if not (x and y and z) then
-    return result(false, "BRICK_RUNTIME_RESOLVE_POSITION_REQUIRED", "x, y, and z are required for runtime brick resolve", {
-      tag = tag,
-      guid = guid,
-      lines = {
-        "ok=false",
-        "code=BRICK_RUNTIME_RESOLVE_POSITION_REQUIRED",
         "tag=" .. tag,
         "guid=" .. guid,
       },
@@ -10214,7 +10937,7 @@ function BMF.bricks.resolveRuntimeState(options)
         "code=BRICK_RUNTIME_RESOLVE_NATIVE_PATH_DISABLED",
         "tag=" .. tag,
         "guid=" .. guid,
-        "detail=native runtime brick resolve is disabled; enable BMF_BRICK_RUNTIME_RESOLVE_UNSAFE_NATIVE_ENABLED=1 only for isolated array-scan validation",
+        "detail=native runtime brick resolve has no supported path enabled; use socket object-address physical state or enable a bounded resolver mode only for isolated validation",
       },
     })
   end
@@ -10226,19 +10949,41 @@ function BMF.bricks.resolveRuntimeState(options)
   local hint_only = option_boolean(options, "hintonly", option_boolean(options, "hint_only", false))
   local prefer_visible = option_boolean(options, "prefervisible", option_boolean(options, "prefer_visible", false))
   local prefer_collidable = option_boolean(options, "prefercollidable", option_boolean(options, "prefer_collidable", false))
-  x = math.floor(x)
-  y = math.floor(y)
-  z = math.floor(z)
+  if x and y and z then
+    x = math.floor(x)
+    y = math.floor(y)
+    z = math.floor(z)
+  else
+    x, y, z = nil, nil, nil
+  end
   radius = math.max(1, math.floor(tonumber(radius) or 512))
   max_scan = math.max(1, math.floor(tonumber(max_scan) or 120000))
   hint = math.max(0, math.floor(tonumber(hint) or 0))
   hint_window = math.max(0, math.floor(tonumber(hint_window) or 256))
 
   local sequence = brick_runtime_next_sequence()
-  run_on_game_thread(function()
-    local ok, response = pcall(BMFSocketBrickPhysicalResolveNear, x, y, z, radius, max_scan, hint, hint_window, hint_only, prefer_visible, prefer_collidable)
-    brick_runtime_store_result(sequence, "resolve", 0, tag, guid, ok, ok and response or tostring(response))
-  end)
+  local operation = function()
+    if x and y and z then
+      local ok, response = pcall(BMFSocketBrickPhysicalResolveNear, x, y, z, radius, max_scan, hint, hint_window, hint_only, prefer_visible, prefer_collidable)
+      brick_runtime_store_result(sequence, "resolve", 0, tag, guid, ok, ok and response or tostring(response))
+      return
+    end
+
+    local resolved, resolve_lines = brick_runtime_resolve_id_on_game_thread(options, guid, tag)
+    brick_runtime_store_result(
+      sequence,
+      "resolve",
+      tonumber(resolved) or 0,
+      tag,
+      guid,
+      true,
+      table.concat(resolve_lines or {}, "\n"))
+  end
+  if brick_runtime_inline_operations_enabled() then
+    operation()
+  else
+    run_on_game_thread(operation)
+  end
 
   return result(true, "OK", "Runtime brick-state resolve queued on the game thread", {
     queued = true,
@@ -10250,12 +10995,14 @@ function BMF.bricks.resolveRuntimeState(options)
       "code=OK",
       "queued=true",
       "operation=resolve",
+      "execution=" .. (brick_runtime_inline_operations_enabled() and "inline" or "game-thread"),
       "sequence=" .. tostring(sequence),
       "tag=" .. tag,
       "guid=" .. guid,
-      "x=" .. tostring(x),
-      "y=" .. tostring(y),
-      "z=" .. tostring(z),
+      "x=" .. tostring(x or ""),
+      "y=" .. tostring(y or ""),
+      "z=" .. tostring(z or ""),
+      "tag_lookup=" .. tostring(not (x and y and z)),
       "radius=" .. tostring(radius),
       "max_scan=" .. tostring(max_scan),
       "hint_slot=" .. tostring(hint),
@@ -10263,6 +11010,465 @@ function BMF.bricks.resolveRuntimeState(options)
       "hint_only=" .. tostring(hint_only == true),
       "prefer_visible=" .. tostring(prefer_visible == true),
       "prefer_collidable=" .. tostring(prefer_collidable == true),
+    },
+  })
+end
+
+function BMF.bricks.scanRuntimeRegion(options)
+  options = type(options) == "table" and options or {}
+  local runtime = state.tools.brick_runtime
+  local guid = brick_runtime_canonical_guid_arg(options)
+  local tag = brick_runtime_canonical_tag_arg(options, guid)
+  local positional = type(options._positional) == "table" and options._positional or {}
+
+  local confirm = tostring(options.confirm or options.confirmation or "")
+  if confirm ~= "brick-runtime-region" and confirm ~= "brick-runtime" then
+    return result(false, "BRICK_RUNTIME_REGION_CONFIRM_REQUIRED", "confirm=brick-runtime-region is required for runtime region diagnostics", {
+      lines = {
+        "ok=false",
+        "code=BRICK_RUNTIME_REGION_CONFIRM_REQUIRED",
+        "required_confirm=brick-runtime-region",
+        "tag=" .. tag,
+        "guid=" .. guid,
+      },
+    })
+  end
+  if guid ~= "" and not BMF_brick_runtime_guid_valid(guid) then
+    return result(false, "BRICK_RUNTIME_GUID_INVALID", "guid must be an opaque identifier without spaces", {
+      tag = tag,
+      guid = guid,
+      lines = {
+        "ok=false",
+        "code=BRICK_RUNTIME_GUID_INVALID",
+        "tag=" .. tag,
+        "guid=" .. guid,
+      },
+    })
+  end
+  if not brick_runtime_region_scan_available() then
+    runtime.last_error = "BMFSocket brick runtime region scan helper is unavailable"
+    return result(false, "BRICK_RUNTIME_REGION_SCAN_UNAVAILABLE", runtime.last_error, {
+      tag = tag,
+      guid = guid,
+      lines = {
+        "ok=false",
+        "code=BRICK_RUNTIME_REGION_SCAN_UNAVAILABLE",
+        "tag=" .. tag,
+        "guid=" .. guid,
+      },
+    })
+  end
+  if not BMF_env_bool("BMF_BRICK_RUNTIME_REGION_SCAN_ENABLED", false) then
+    runtime.last_error = "runtime brick region scan is disabled"
+    return result(false, "BRICK_RUNTIME_REGION_SCAN_DISABLED", runtime.last_error, {
+      tag = tag,
+      guid = guid,
+      lines = {
+        "ok=false",
+        "code=BRICK_RUNTIME_REGION_SCAN_DISABLED",
+        "tag=" .. tag,
+        "guid=" .. guid,
+        "required_env=BMF_BRICK_RUNTIME_REGION_SCAN_ENABLED=1",
+      },
+    })
+  end
+
+  local x = tonumber(options.x or options.centerx or options.centerX or positional[1])
+  local y = tonumber(options.y or options.centery or options.centerY or positional[2])
+  local z = tonumber(options.z or options.centerz or options.centerZ or positional[3])
+  local extent_x = tonumber(options.ex or options.extentx or options.extentX or options.halfx or options.halfX or positional[4])
+  local extent_y = tonumber(options.ey or options.extenty or options.extentY or options.halfy or options.halfY or positional[5])
+  local extent_z = tonumber(options.ez or options.extentz or options.extentZ or options.halfz or options.halfZ or positional[6])
+  if not (x and y and z and extent_x and extent_y and extent_z) then
+    return result(false, "BRICK_RUNTIME_REGION_ARGUMENTS_REQUIRED", "x y z ex ey ez are required for runtime region scans", {
+      lines = {
+        "ok=false",
+        "code=BRICK_RUNTIME_REGION_ARGUMENTS_REQUIRED",
+        "tag=" .. tag,
+        "guid=" .. guid,
+      },
+    })
+  end
+
+  x = math.floor(x)
+  y = math.floor(y)
+  z = math.floor(z)
+  extent_x = math.max(0, math.floor(extent_x))
+  extent_y = math.max(0, math.floor(extent_y))
+  extent_z = math.max(0, math.floor(extent_z))
+  local max_scan = option_number(options, "maxscan", option_number(options, "maxScan", BMF_env_number("BMF_BRICK_RUNTIME_REGION_SCAN_MAX_SCAN", 500000, 1)))
+  local limit = option_number(options, "limit", option_number(options, "maxresults", option_number(options, "maxResults", BMF_env_number("BMF_BRICK_RUNTIME_REGION_SCAN_LIMIT", 512, 1))))
+  local max_ms = option_number(options, "maxms", option_number(options, "maxMs", option_number(options, "budgetms", BMF_env_number("BMF_BRICK_RUNTIME_REGION_SCAN_MAX_MS", 250, 1))))
+  max_scan = math.max(1, math.floor(tonumber(max_scan) or 500000))
+  limit = math.max(1, math.min(4096, math.floor(tonumber(limit) or 512)))
+  max_ms = math.max(1, math.floor(tonumber(max_ms) or 250))
+
+  local sequence = brick_runtime_next_sequence()
+  local operation = function()
+    local ok, response = pcall(
+      BMFSocketBrickPhysicalScanRegion,
+      x,
+      y,
+      z,
+      extent_x,
+      extent_y,
+      extent_z,
+      max_scan,
+      limit,
+      max_ms)
+    brick_runtime_store_result(sequence, "scan-region", 0, tag, guid, ok, ok and response or tostring(response))
+  end
+  if brick_runtime_inline_operations_enabled() then
+    operation()
+  else
+    run_on_game_thread(operation)
+  end
+
+  return result(true, "OK", "Runtime brick region scan queued on the game thread", {
+    queued = true,
+    sequence = sequence,
+    tag = tag,
+    guid = guid,
+    lines = {
+      "ok=true",
+      "code=OK",
+      "queued=true",
+      "operation=scan-region",
+      "execution=" .. (brick_runtime_inline_operations_enabled() and "inline" or "game-thread"),
+      "sequence=" .. tostring(sequence),
+      "tag=" .. tag,
+      "guid=" .. guid,
+      "x=" .. tostring(x),
+      "y=" .. tostring(y),
+      "z=" .. tostring(z),
+      "extent_x=" .. tostring(extent_x),
+      "extent_y=" .. tostring(extent_y),
+      "extent_z=" .. tostring(extent_z),
+      "max_scan=" .. tostring(max_scan),
+      "limit=" .. tostring(limit),
+      "max_ms=" .. tostring(max_ms),
+    },
+  })
+end
+
+local function brick_world_region_file_exists(path)
+  local handle = io.open(path, "rb")
+  if not handle then
+    return false
+  end
+  handle:close()
+  return true
+end
+
+local function brick_world_region_shell_arg(value)
+  local text = tostring(value or "")
+  if text:match("[\r\n\"]") then
+    return nil
+  end
+  return "\"" .. text .. "\""
+end
+
+local function brick_world_region_shell_command_arg(value)
+  local text = tostring(value or "")
+  if text == "" then
+    return nil
+  end
+  if text:match("[\r\n\"]") then
+    return nil
+  end
+  if text:match("[%s/\\:]") then
+    return brick_world_region_shell_arg(text)
+  end
+  return text
+end
+
+local function brick_world_region_builds_dir()
+  local configured = first_string(
+    BMF_env_string("BMF_BRICK_WORLD_REGION_SCAN_BUILDS_DIR"),
+    BMF_env_string("BMF_BRICKADIA_BUILDS_DIR"))
+  if configured then
+    return configured:gsub("\\", "/"):gsub("/+$", "")
+  end
+
+  local saved_dir = first_string(
+    BMF_env_string("BMF_BRICKADIA_SAVED_DIR"),
+    state.config and state.config.brickadiaSavedDir or "")
+  if saved_dir then
+    return join_path(saved_dir:gsub("\\", "/"), "Builds")
+  end
+
+  return ""
+end
+
+local function brick_world_region_valid_expected_key(key)
+  local text = tostring(key or ""):lower()
+  return text:match("^lookup:[a-z0-9_%-]+:treecut$") ~= nil
+    or text:match("^legacy%-tree:[a-z0-9_%-]+:[%-0-9]+,[%-0-9]+,[%-0-9]+$") ~= nil
+end
+
+local function brick_world_region_helper_path()
+  return join_path(ROOT, "tools/world-region-proof.js")
+end
+
+local function brick_world_region_run_helper(save_path, expected_key, builds_dir, x, y, z, extent_x, extent_y, extent_z)
+  local node = BMF_env_string("BMF_NODE_PATH")
+  if node == "" then
+    node = "node"
+  end
+
+  local node_arg = brick_world_region_shell_command_arg(node)
+  local script_arg = brick_world_region_shell_arg(brick_world_region_helper_path())
+  local save_arg = brick_world_region_shell_arg(save_path)
+  local key_arg = brick_world_region_shell_arg(expected_key)
+  local builds_arg = brick_world_region_shell_arg(builds_dir)
+  if not (node_arg and script_arg and save_arg and key_arg and builds_arg) then
+    return "ok=false\ncode=WORLD_REGION_PROOF_SHELL_ARG_INVALID\ndetail=world-region proof command contained an unsafe shell argument\nsource=BMFWorldRegionProof\noperation=world-scan-region\ncoordinate_space=world\nclear_region_safe=false\nexact_target_only=false"
+  end
+
+  local command = table.concat({
+    node_arg,
+    script_arg,
+    "--save",
+    save_arg,
+    "--expected-key",
+    key_arg,
+    "--builds-dir",
+    builds_arg,
+    "--x",
+    tostring(x),
+    "--y",
+    tostring(y),
+    "--z",
+    tostring(z),
+    "--ex",
+    tostring(extent_x),
+    "--ey",
+    tostring(extent_y),
+    "--ez",
+    tostring(extent_z),
+  }, " ") .. " 2>&1"
+
+  local handle = io.popen(command)
+  if not handle then
+    return "ok=false\ncode=WORLD_REGION_PROOF_PROCESS_FAILED\ndetail=failed to start world-region proof helper\nsource=BMFWorldRegionProof\noperation=world-scan-region\ncoordinate_space=world\nclear_region_safe=false\nexact_target_only=false"
+  end
+  local output = handle:read("*a") or ""
+  handle:close()
+  if trim_string(output) == "" then
+    return "ok=false\ncode=WORLD_REGION_PROOF_EMPTY_RESPONSE\ndetail=world-region proof helper returned no output\nsource=BMFWorldRegionProof\noperation=world-scan-region\ncoordinate_space=world\nclear_region_safe=false\nexact_target_only=false"
+  end
+  return output
+end
+
+local function brick_world_region_timeout_response(save_path, expected_key, builds_dir, attempts, poll_ms)
+  return table.concat({
+    "ok=false",
+    "code=WORLD_REGION_SAVE_FILE_TIMEOUT",
+    "detail=Bricks.SaveRegion did not produce the expected proof file before timeout",
+    "source=BMFWorldRegionProof",
+    "operation=world-scan-region",
+    "coordinate_space=world",
+    "clear_region_safe=false",
+    "exact_target_only=false",
+    "expected_key=" .. tostring(expected_key or ""),
+    "save_path=" .. tostring(save_path or ""),
+    "builds_dir=" .. tostring(builds_dir or ""),
+    "attempts=" .. tostring(attempts or 0),
+    "poll_ms=" .. tostring(poll_ms or 0),
+  }, "\n")
+end
+
+function BMF.bricks.scanWorldRegion(options)
+  options = type(options) == "table" and options or {}
+  local positional = type(options._positional) == "table" and options._positional or {}
+  local guid = brick_runtime_canonical_guid_arg(options)
+  local expected_key = trim_string(
+    options.expectedkey or
+    options.key or
+    options.tag or
+    options.consoletag or
+    options.guid or
+    positional[7] or
+    "")
+  expected_key = expected_key:lower()
+
+  local confirm = tostring(options.confirm or options.confirmation or "")
+  if confirm ~= "brick-world-region" and confirm ~= "tree-clear-region" then
+    return result(false, "BRICK_WORLD_REGION_CONFIRM_REQUIRED", "confirm=brick-world-region is required for world-region proof scans", {
+      lines = {
+        "ok=false",
+        "code=BRICK_WORLD_REGION_CONFIRM_REQUIRED",
+        "required_confirm=brick-world-region",
+        "expected_key=" .. expected_key,
+      },
+    })
+  end
+  if not BMF_env_bool("BMF_BRICK_WORLD_REGION_SCAN_ENABLED", false) then
+    return result(false, "BRICK_WORLD_REGION_SCAN_DISABLED", "world-region proof scans are disabled", {
+      lines = {
+        "ok=false",
+        "code=BRICK_WORLD_REGION_SCAN_DISABLED",
+        "required_env=BMF_BRICK_WORLD_REGION_SCAN_ENABLED=1",
+        "expected_key=" .. expected_key,
+      },
+    })
+  end
+  if expected_key == "" or not brick_world_region_valid_expected_key(expected_key) then
+    return result(false, "BRICK_WORLD_REGION_EXPECTED_KEY_INVALID", "expected tree key must be lookup:<id>:treecut or a legacy-tree anchor key", {
+      lines = {
+        "ok=false",
+        "code=BRICK_WORLD_REGION_EXPECTED_KEY_INVALID",
+        "expected_key=" .. expected_key,
+      },
+    })
+  end
+
+  local x = tonumber(options.x or options.centerx or options.centerX or positional[1])
+  local y = tonumber(options.y or options.centery or options.centerY or positional[2])
+  local z = tonumber(options.z or options.centerz or options.centerZ or positional[3])
+  local extent_x = tonumber(options.ex or options.extentx or options.extentX or options.halfx or options.halfX or positional[4])
+  local extent_y = tonumber(options.ey or options.extenty or options.extentY or options.halfy or options.halfY or positional[5])
+  local extent_z = tonumber(options.ez or options.extentz or options.extentZ or options.halfz or options.halfZ or positional[6])
+  if not (x and y and z and extent_x and extent_y and extent_z) then
+    return result(false, "BRICK_WORLD_REGION_ARGUMENTS_REQUIRED", "x y z ex ey ez are required for world-region proof scans", {
+      lines = {
+        "ok=false",
+        "code=BRICK_WORLD_REGION_ARGUMENTS_REQUIRED",
+        "expected_key=" .. expected_key,
+      },
+    })
+  end
+
+  x = math.floor(x)
+  y = math.floor(y)
+  z = math.floor(z)
+  extent_x = math.max(0, math.floor(extent_x))
+  extent_y = math.max(0, math.floor(extent_y))
+  extent_z = math.max(0, math.floor(extent_z))
+
+  local max_extent = BMF_env_number("BMF_BRICK_WORLD_REGION_SCAN_MAX_EXTENT", 512, 1)
+  local max_extent_z = BMF_env_number("BMF_BRICK_WORLD_REGION_SCAN_MAX_EXTENT_Z", max_extent, 1)
+  if extent_x > max_extent or extent_y > max_extent or extent_z > max_extent_z then
+    return result(false, "BRICK_WORLD_REGION_EXTENT_TOO_LARGE", "world-region proof extent exceeds configured maximum", {
+      lines = {
+        "ok=false",
+        "code=BRICK_WORLD_REGION_EXTENT_TOO_LARGE",
+        "expected_key=" .. expected_key,
+        "extent_x=" .. tostring(extent_x),
+        "extent_y=" .. tostring(extent_y),
+        "extent_z=" .. tostring(extent_z),
+        "max_extent=" .. tostring(max_extent),
+        "max_extent_z=" .. tostring(max_extent_z),
+      },
+    })
+  end
+
+  local builds_dir = brick_world_region_builds_dir()
+  if builds_dir == "" then
+    return result(false, "BRICK_WORLD_REGION_BUILDS_DIR_REQUIRED", "BMF_BRICK_WORLD_REGION_SCAN_BUILDS_DIR or BMF_BRICKADIA_BUILDS_DIR is required", {
+      lines = {
+        "ok=false",
+        "code=BRICK_WORLD_REGION_BUILDS_DIR_REQUIRED",
+        "expected_key=" .. expected_key,
+      },
+    })
+  end
+
+  local sequence = brick_runtime_next_sequence()
+  local save_name = "BMFRegionProof_" .. tostring(sequence) .. "_" .. tostring(os.time())
+  local save_path = join_path(builds_dir, save_name .. ".brs")
+  os.remove(save_path)
+
+  local command = table.concat({
+    "Bricks.SaveRegion",
+    quote_console_string(save_name),
+    tostring(x),
+    tostring(y),
+    tostring(z),
+    tostring(extent_x),
+    tostring(extent_y),
+    tostring(extent_z),
+  }, " ")
+
+  local response = exec_console_manager(command)
+  if not response.ok then
+    brick_runtime_store_result(sequence, "world-scan-region", 0, expected_key, guid, true, table.concat({
+      "ok=false",
+      "code=BRICK_WORLD_REGION_SAVE_COMMAND_FAILED",
+      "detail=" .. tostring(response.message or "SaveRegion command failed"),
+      "source=BMFWorldRegionProof",
+      "operation=world-scan-region",
+      "coordinate_space=world",
+      "clear_region_safe=false",
+      "exact_target_only=false",
+      "expected_key=" .. expected_key,
+      "save_command=" .. command,
+    }, "\n"))
+    return result(false, "BRICK_WORLD_REGION_SAVE_COMMAND_FAILED", "Bricks.SaveRegion command failed", {
+      sequence = sequence,
+      lines = {
+        "ok=false",
+        "code=BRICK_WORLD_REGION_SAVE_COMMAND_FAILED",
+        "sequence=" .. tostring(sequence),
+        "expected_key=" .. expected_key,
+      },
+    })
+  end
+
+  local poll_ms = math.max(50, BMF_env_number("BMF_BRICK_WORLD_REGION_SCAN_POLL_MS", 100, 50))
+  local timeout_ms = math.max(poll_ms, BMF_env_number("BMF_BRICK_WORLD_REGION_SCAN_TIMEOUT_MS", 3000, poll_ms))
+  local max_attempts = math.max(1, math.floor((timeout_ms + poll_ms - 1) / poll_ms))
+  local attempts = 0
+
+  local function finish(text)
+    os.remove(save_path)
+    brick_runtime_store_result(sequence, "world-scan-region", 0, expected_key, guid, true, text)
+  end
+
+  local function attempt()
+    attempts = attempts + 1
+    if brick_world_region_file_exists(save_path) then
+      finish(brick_world_region_run_helper(save_path, expected_key, builds_dir, x, y, z, extent_x, extent_y, extent_z))
+      return
+    end
+    if attempts >= max_attempts then
+      finish(brick_world_region_timeout_response(save_path, expected_key, builds_dir, attempts, poll_ms))
+      return
+    end
+    if not BMF.timers.after(poll_ms, attempt) then
+      finish(brick_world_region_timeout_response(save_path, expected_key, builds_dir, attempts, poll_ms))
+    end
+  end
+
+  if not BMF.timers.after(poll_ms, attempt) then
+    attempt()
+  end
+
+  return result(true, "OK", "World-space brick region proof queued", {
+    queued = true,
+    sequence = sequence,
+    tag = expected_key,
+    guid = guid,
+    lines = {
+      "ok=true",
+      "code=OK",
+      "queued=true",
+      "operation=world-scan-region",
+      "sequence=" .. tostring(sequence),
+      "expected_key=" .. expected_key,
+      "guid=" .. guid,
+      "x=" .. tostring(x),
+      "y=" .. tostring(y),
+      "z=" .. tostring(z),
+      "extent_x=" .. tostring(extent_x),
+      "extent_y=" .. tostring(extent_y),
+      "extent_z=" .. tostring(extent_z),
+      "coordinate_space=world",
+      "save_name=" .. save_name,
+      "save_path=" .. save_path,
+      "builds_dir=" .. builds_dir,
+      "poll_ms=" .. tostring(poll_ms),
+      "timeout_ms=" .. tostring(timeout_ms),
     },
   })
 end
@@ -10324,10 +11530,15 @@ function BMF.bricks.inspectRuntimeState(options)
   end
 
   local sequence = brick_runtime_next_sequence()
-  run_on_game_thread(function()
+  local operation = function()
     local ok, response = pcall(BMFSocketBrickPhysicalInspect, brick_id)
     brick_runtime_store_result(sequence, "inspect", brick_id, tag, guid, ok, ok and response or tostring(response))
-  end)
+  end
+  if brick_runtime_inline_operations_enabled() then
+    operation()
+  else
+    run_on_game_thread(operation)
+  end
 
   return result(true, "OK", "Runtime brick-state inspect queued on the game thread", {
     queued = true,
@@ -10338,6 +11549,7 @@ function BMF.bricks.inspectRuntimeState(options)
       "code=OK",
       "queued=true",
       "operation=inspect",
+      "execution=" .. (brick_runtime_inline_operations_enabled() and "inline" or "game-thread"),
       "sequence=" .. tostring(sequence),
       "brick_id=" .. tostring(brick_id),
       "tag=" .. tag,
@@ -10428,6 +11640,7 @@ function BMF.bricks.setRuntimeState(options)
   local visible = brick_runtime_parse_visible_arg(options, legacy_tree_confirm and 0 or -1)
   local collision = brick_runtime_parse_collision_arg(options, legacy_tree_confirm and -1 or -2)
   local context = brick_runtime_parse_context_arg(options)
+  local action_source, action_source_source = brick_runtime_parse_action_source_arg(options)
   if collision == -1 and not brick_runtime_collision_restore_enabled() then
     return result(false, "BRICK_RUNTIME_COLLISION_RESTORE_DISABLED", "collision=restore is disabled by default for runtime brick-state set", {
       brickId = brick_id,
@@ -10472,11 +11685,36 @@ function BMF.bricks.setRuntimeState(options)
     })
   end
 
+  local unsafe_direct_set = BMF_env_bool("BMF_BRICK_RUNTIME_UNSAFE_SET_DIRECT_ENABLED", false)
+    or BMF_env_bool("BMF_BRICK_RUNTIME_UNSAFE_LOOKUP_ENABLED", false)
+  local verified_direct_set = guid ~= "" and BMF_brick_runtime_guid_id_verified(guid, brick_id)
+  if not unsafe_direct_set and not verified_direct_set then
+    return result(false, "BRICK_RUNTIME_ID_UNVERIFIED", "Direct runtime brick-state set requires a BMF-verified runtime id.", {
+      brickId = brick_id,
+      guid = guid,
+      tag = tag,
+      lines = {
+        "ok=false",
+        "code=BRICK_RUNTIME_ID_UNVERIFIED",
+        "brick_id=" .. tostring(brick_id),
+        "tag=" .. tag,
+        "guid=" .. guid,
+        "required_env=BMF_BRICK_RUNTIME_UNSAFE_SET_DIRECT_ENABLED=1",
+        "detail=explicit saved brick ids are not safe live runtime ids; direct set requires a BMF-verified runtime id",
+      },
+    })
+  end
+
   local sequence = brick_runtime_next_sequence()
-  run_on_game_thread(function()
-    local ok, response = pcall(BMFSocketBrickPhysicalSet, brick_id, visible, collision, context)
+  local operation = function()
+    local ok, response = pcall(BMFSocketBrickPhysicalSet, brick_id, visible, collision, context, action_source)
     brick_runtime_store_result(sequence, "set", brick_id, tag, guid, ok, ok and response or tostring(response))
-  end)
+  end
+  if brick_runtime_inline_operations_enabled() then
+    operation()
+  else
+    run_on_game_thread(operation)
+  end
   if guid ~= "" then
     BMF_brick_runtime_bind_guid(guid, brick_id)
   end
@@ -10488,12 +11726,14 @@ function BMF.bricks.setRuntimeState(options)
     visible = visible,
     collision = collision,
     context = context,
+    actionSource = action_source,
     guid = guid,
     lines = {
       "ok=true",
       "code=OK",
       "queued=true",
       "operation=set",
+      "execution=" .. (brick_runtime_inline_operations_enabled() and "inline" or "game-thread"),
       "sequence=" .. tostring(sequence),
       "brick_id=" .. tostring(brick_id),
       "tag=" .. tag,
@@ -10501,7 +11741,213 @@ function BMF.bricks.setRuntimeState(options)
       "visible_arg=" .. tostring(visible),
       "collision_channels=" .. tostring(collision),
       "grid_context_override=" .. tostring(context),
+      "action_source_override=" .. tostring(action_source),
+      "action_source_source=" .. tostring(action_source_source),
     },
+  })
+end
+
+function BMF.bricks.bindRuntimeGuidCell(options)
+  options = type(options) == "table" and options or {}
+  local runtime = state.tools.brick_runtime
+  local guid = brick_runtime_canonical_guid_arg(options)
+  local tag = brick_runtime_canonical_tag_arg(options, guid)
+  local anchor_brick_id = tree_cut_parse_brick_id(options)
+  if not BMF_brick_runtime_guid_valid(guid) then
+    return result(false, "BRICK_RUNTIME_GUID_INVALID", "guid is required and must be an opaque identifier without spaces", {
+      lines = {
+        "ok=false",
+        "code=BRICK_RUNTIME_GUID_INVALID",
+        "guid=" .. tostring(guid or ""),
+        "tag=" .. tag,
+      },
+    })
+  end
+  if anchor_brick_id <= 0 then
+    return result(false, "BRICK_RUNTIME_ID_REQUIRED", "brickid is required for runtime cell binding", {
+      lines = {
+        "ok=false",
+        "code=BRICK_RUNTIME_ID_REQUIRED",
+        "guid=" .. guid,
+        "tag=" .. tag,
+      },
+    })
+  end
+  if tostring(options.confirm or "") ~= "brick-runtime" then
+    return result(false, "BRICK_RUNTIME_CONFIRM_REQUIRED", "confirm=brick-runtime is required for runtime cell binding", {
+      lines = {
+        "ok=false",
+        "code=BRICK_RUNTIME_CONFIRM_REQUIRED",
+        "guid=" .. guid,
+        "tag=" .. tag,
+        "anchor_brick_id=" .. tostring(anchor_brick_id),
+        "required_confirm=brick-runtime",
+      },
+    })
+  end
+  if not brick_runtime_available() then
+    runtime.last_error = "BMFSocket brick runtime helpers are unavailable"
+    return result(false, "BRICK_RUNTIME_UNAVAILABLE", runtime.last_error, {
+      lines = {
+        "ok=false",
+        "code=BRICK_RUNTIME_UNAVAILABLE",
+        "guid=" .. guid,
+        "tag=" .. tag,
+        "anchor_brick_id=" .. tostring(anchor_brick_id),
+      },
+    })
+  end
+  if not brick_runtime_direct_lookup_enabled() then
+    return result(false, "BRICK_RUNTIME_LOOKUP_DISABLED", "runtime cell binding requires unsafe direct lookup to inspect neighboring live ids", {
+      lines = {
+        "ok=false",
+        "code=BRICK_RUNTIME_LOOKUP_DISABLED",
+        "guid=" .. guid,
+        "tag=" .. tag,
+        "anchor_brick_id=" .. tostring(anchor_brick_id),
+        "required_env=BMF_BRICK_RUNTIME_UNSAFE_LOOKUP_ENABLED=1",
+      },
+    })
+  end
+
+  local anchor_ok, anchor_fields, _, _, anchor_code = brick_runtime_inspect_fields(anchor_brick_id)
+  if not anchor_ok then
+    return result(false, anchor_code ~= "" and anchor_code or "BRICK_RUNTIME_ANCHOR_INSPECT_FAILED", "runtime cell anchor inspect failed", {
+      lines = {
+        "ok=false",
+        "code=" .. (anchor_code ~= "" and anchor_code or "BRICK_RUNTIME_ANCHOR_INSPECT_FAILED"),
+        "guid=" .. guid,
+        "tag=" .. tag,
+        "anchor_brick_id=" .. tostring(anchor_brick_id),
+        "detail=anchor runtime brick could not be inspected",
+      },
+    })
+  end
+
+  local anchor_cell_index = tonumber(anchor_fields.brick_cell_index)
+  if not anchor_cell_index then
+    return result(false, "BRICK_RUNTIME_CELL_UNAVAILABLE", "anchor runtime brick did not report a cell index", {
+      lines = {
+        "ok=false",
+        "code=BRICK_RUNTIME_CELL_UNAVAILABLE",
+        "guid=" .. guid,
+        "tag=" .. tag,
+        "anchor_brick_id=" .. tostring(anchor_brick_id),
+      },
+    })
+  end
+
+  local max_span = brick_runtime_bind_cell_max_span(options)
+  local ids = {}
+  local seen = {}
+  local inspected = 0
+  local inspect_failed = 0
+  local left_boundary = anchor_brick_id
+  local right_boundary = anchor_brick_id
+
+  local function add_candidate(brick_id)
+    if brick_id > 0 and not seen[brick_id] then
+      ids[#ids + 1] = brick_id
+      seen[brick_id] = true
+    end
+  end
+
+  add_candidate(anchor_brick_id)
+  inspected = inspected + 1
+
+  for step = 1, max_span do
+    local brick_id = anchor_brick_id - step
+    if brick_id <= 0 then break end
+    local ok, fields = brick_runtime_inspect_fields(brick_id)
+    inspected = inspected + 1
+    if not ok then
+      inspect_failed = inspect_failed + 1
+      break
+    end
+    if tonumber(fields.brick_cell_index) ~= anchor_cell_index then
+      break
+    end
+    left_boundary = brick_id
+    add_candidate(brick_id)
+  end
+
+  for step = 1, max_span do
+    local brick_id = anchor_brick_id + step
+    local ok, fields = brick_runtime_inspect_fields(brick_id)
+    inspected = inspected + 1
+    if not ok then
+      inspect_failed = inspect_failed + 1
+      break
+    end
+    if tonumber(fields.brick_cell_index) ~= anchor_cell_index then
+      break
+    end
+    right_boundary = brick_id
+    add_candidate(brick_id)
+  end
+
+  table.sort(ids)
+  local max_bindings = BMF_brick_runtime_guid_max_bindings()
+  local truncated = false
+  if #ids > max_bindings then
+    table.sort(ids, function(a, b)
+      local da = math.abs(a - anchor_brick_id)
+      local db = math.abs(b - anchor_brick_id)
+      if da == db then return a < b end
+      return da < db
+    end)
+    while #ids > max_bindings do
+      table.remove(ids)
+      truncated = true
+    end
+    table.sort(ids)
+  end
+
+  local replace = option_boolean(options, "replace", true)
+  if replace then
+    brick_runtime_clear_guid_binding(guid)
+  end
+
+  local bound = 0
+  local failed = 0
+  for _, brick_id in ipairs(ids) do
+    local ok = BMF_brick_runtime_bind_guid(guid, brick_id, "verified")
+    if ok then
+      bound = bound + 1
+    else
+      failed = failed + 1
+    end
+  end
+
+  local binding = BMF_brick_runtime_guid_binding(guid, false)
+  local lines = BMF_brick_runtime_format_guid_binding_lines(guid, binding)
+  lines[1] = "ok=" .. tostring(failed == 0 and bound > 0)
+  lines[2] = "code=" .. (failed == 0 and bound > 0 and "OK" or "BRICK_RUNTIME_CELL_BIND_FAILED")
+  lines[#lines + 1] = "operation=bind-cell"
+  lines[#lines + 1] = "guid=" .. guid
+  lines[#lines + 1] = "tag=" .. tag
+  lines[#lines + 1] = "anchor_brick_id=" .. tostring(anchor_brick_id)
+  lines[#lines + 1] = "anchor_cell_index=" .. tostring(math.floor(anchor_cell_index))
+  lines[#lines + 1] = "anchor_runtime_x=" .. tostring(anchor_fields.runtime_x or "")
+  lines[#lines + 1] = "anchor_runtime_y=" .. tostring(anchor_fields.runtime_y or "")
+  lines[#lines + 1] = "anchor_runtime_z=" .. tostring(anchor_fields.runtime_z or "")
+  lines[#lines + 1] = "left_boundary_brick_id=" .. tostring(left_boundary)
+  lines[#lines + 1] = "right_boundary_brick_id=" .. tostring(right_boundary)
+  lines[#lines + 1] = "max_span=" .. tostring(max_span)
+  lines[#lines + 1] = "inspected=" .. tostring(inspected)
+  lines[#lines + 1] = "inspect_failed=" .. tostring(inspect_failed)
+  lines[#lines + 1] = "bound_requested=" .. tostring(#ids)
+  lines[#lines + 1] = "bound_added=" .. tostring(bound)
+  lines[#lines + 1] = "bind_failed=" .. tostring(failed)
+  lines[#lines + 1] = "replace=" .. tostring(replace == true)
+  lines[#lines + 1] = "truncated=" .. tostring(truncated == true)
+  lines[#lines + 1] = "max_bindings=" .. tostring(max_bindings)
+  write_status()
+  return result(failed == 0 and bound > 0, failed == 0 and bound > 0 and "OK" or "BRICK_RUNTIME_CELL_BIND_FAILED", failed == 0 and bound > 0 and "Runtime brick cell binding updated" or "Runtime brick cell binding failed", {
+    guid = guid,
+    bound = bound,
+    failed = failed,
+    lines = lines,
   })
 end
 
@@ -10537,7 +11983,7 @@ function BMF.bricks.bindRuntimeGuid(options)
     end
 
     local sequence = brick_runtime_next_sequence()
-    run_on_game_thread(function()
+    local operation = function()
       local resolved, lines = brick_runtime_resolve_id_on_game_thread(options, guid, tag)
       if resolved and resolved > 0 then
         lines[#lines + 1] = "operation=bind-guid"
@@ -10551,7 +11997,12 @@ function BMF.bricks.bindRuntimeGuid(options)
         lines[#lines + 1] = "bind_failed=1"
       end
       brick_runtime_store_result(sequence, "bind-guid", resolved or 0, tag, guid, true, table.concat(lines, "\n"))
-    end)
+    end
+    if brick_runtime_inline_operations_enabled() then
+      operation()
+    else
+      run_on_game_thread(operation)
+    end
 
     return result(true, "OK", "Runtime brick GUID lookup/bind queued on the game thread", {
       queued = true,
@@ -10563,6 +12014,7 @@ function BMF.bricks.bindRuntimeGuid(options)
         "code=OK",
         "queued=true",
         "operation=bind-guid",
+        "execution=" .. (brick_runtime_inline_operations_enabled() and "inline" or "game-thread"),
         "sequence=" .. tostring(sequence),
         "guid=" .. guid,
         "tag=" .. tag,
@@ -10572,22 +12024,38 @@ function BMF.bricks.bindRuntimeGuid(options)
 
   local bound = 0
   local failed = 0
+  local rejected_unverified = 0
+  local unsafe_explicit_bind = BMF_env_bool("BMF_BRICK_RUNTIME_UNSAFE_BIND_ENABLED", false)
+    or BMF_env_bool("BMF_BRICK_RUNTIME_UNSAFE_LOOKUP_ENABLED", false)
   for _, brick_id in ipairs(ids) do
-    local ok = BMF_brick_runtime_bind_guid(guid, brick_id)
-    if ok then
-      bound = bound + 1
-    else
+    if not unsafe_explicit_bind and not BMF_brick_runtime_guid_id_verified(guid, brick_id) then
       failed = failed + 1
+      rejected_unverified = rejected_unverified + 1
+    else
+      local ok = BMF_brick_runtime_bind_guid(guid, brick_id, unsafe_explicit_bind and "unsafe-explicit" or "verified")
+      if ok then
+        bound = bound + 1
+      else
+        failed = failed + 1
+      end
     end
   end
 
   local binding = BMF_brick_runtime_guid_binding(guid, false)
   local lines = BMF_brick_runtime_format_guid_binding_lines(guid, binding)
+  local code = failed == 0 and "OK" or rejected_unverified > 0 and "BRICK_RUNTIME_GUID_BIND_UNVERIFIED" or "BRICK_RUNTIME_GUID_BIND_PARTIAL"
+  lines[1] = "ok=" .. tostring(failed == 0)
+  lines[2] = "code=" .. code
   lines[#lines + 1] = "operation=bind-guid"
   lines[#lines + 1] = "bound_requested=" .. tostring(#ids)
   lines[#lines + 1] = "bound_added=" .. tostring(bound)
   lines[#lines + 1] = "bind_failed=" .. tostring(failed)
-  return result(failed == 0, failed == 0 and "OK" or "BRICK_RUNTIME_GUID_BIND_PARTIAL", "Runtime brick GUID binding updated", {
+  lines[#lines + 1] = "rejected_unverified=" .. tostring(rejected_unverified)
+  if rejected_unverified > 0 and not unsafe_explicit_bind then
+    lines[#lines + 1] = "required_env=BMF_BRICK_RUNTIME_UNSAFE_BIND_ENABLED=1"
+    lines[#lines + 1] = "detail=explicit saved brick ids are not safe live runtime ids; bind requires a BMF-verified runtime id"
+  end
+  return result(failed == 0, code, failed == 0 and "Runtime brick GUID binding updated" or "Runtime brick GUID binding rejected unverified brick ids", {
     guid = guid,
     bound = bound,
     failed = failed,
@@ -10646,6 +12114,46 @@ function BMF.bricks.runtimeGuidStatus(options)
   })
 end
 
+function BMF.bricks.forgetRuntimeGuid(options)
+  options = type(options) == "table" and options or {}
+  local guid = brick_runtime_canonical_guid_arg(options)
+  local runtime = state.tools.brick_runtime
+  runtime.guid_bindings = runtime.guid_bindings or {}
+  runtime.guid_binding_order = runtime.guid_binding_order or {}
+
+  if not BMF_brick_runtime_guid_valid(guid) then
+    return result(false, "BRICK_RUNTIME_GUID_INVALID", "guid must be an opaque identifier without spaces", {
+      guid = guid,
+      lines = {
+        "ok=false",
+        "code=BRICK_RUNTIME_GUID_INVALID",
+        "guid=" .. tostring(guid or ""),
+      },
+    })
+  end
+
+  local existed = runtime.guid_bindings[guid] ~= nil
+  runtime.guid_bindings[guid] = nil
+  for index = #runtime.guid_binding_order, 1, -1 do
+    if runtime.guid_binding_order[index] == guid then
+      table.remove(runtime.guid_binding_order, index)
+    end
+  end
+
+  return result(true, "OK", existed and "Runtime brick GUID binding cleared" or "Runtime brick GUID binding was not present", {
+    guid = guid,
+    existed = existed,
+    lines = {
+      "ok=true",
+      "code=OK",
+      "guid=" .. guid,
+      "existed=" .. tostring(existed),
+      "bound_bricks=0",
+      "operation=forget-guid",
+    },
+  })
+end
+
 function BMF.bricks.setRuntimeStateByGuid(options)
   options = type(options) == "table" and options or {}
   local runtime = state.tools.brick_runtime
@@ -10687,6 +12195,7 @@ function BMF.bricks.setRuntimeStateByGuid(options)
   local visible = brick_runtime_parse_visible_arg(options, -1)
   local collision = brick_runtime_parse_collision_arg(options, -2)
   local context = brick_runtime_parse_context_arg(options)
+  local action_source, action_source_source = brick_runtime_parse_action_source_arg(options)
   if collision == -1 and not brick_runtime_collision_restore_enabled() then
     return result(false, "BRICK_RUNTIME_COLLISION_RESTORE_DISABLED", "collision=restore is disabled by default for runtime brick-state set", {
       guid = guid,
@@ -10745,7 +12254,7 @@ function BMF.bricks.setRuntimeStateByGuid(options)
     end
 
     local sequence = brick_runtime_next_sequence()
-    run_on_game_thread(function()
+    local operation = function()
       local resolved, resolve_lines = brick_runtime_resolve_id_on_game_thread(options, guid, tag)
       if not resolved or resolved <= 0 then
         brick_runtime_store_result(sequence, "set-guid", 0, tag, guid, true, table.concat(resolve_lines, "\n"))
@@ -10761,13 +12270,21 @@ function BMF.bricks.setRuntimeStateByGuid(options)
         "requested_visible_arg=" .. tostring(visible),
         "requested_collision_channels=" .. tostring(collision),
         "requested_grid_context_override=" .. tostring(context),
+        "requested_action_source_override=" .. tostring(action_source),
+        "action_source_source=" .. tostring(action_source_source),
         "bound_bricks=1",
       }
       for index, line in ipairs(resolve_lines or {}) do
         lines[#lines + 1] = "lookup." .. tostring(index) .. "=" .. tostring(line)
       end
 
-      local ok, response = pcall(BMFSocketBrickPhysicalSet, resolved, visible, collision, context)
+      if brick_runtime_batch_available() then
+        local ok, response = pcall(BMFSocketBrickPhysicalSetMany, tostring(resolved), visible, collision, context, action_source)
+        brick_runtime_store_result(sequence, "set-guid", resolved, tag, guid, ok, ok and response or tostring(response))
+        return
+      end
+
+      local ok, response = pcall(BMFSocketBrickPhysicalSet, resolved, visible, collision, context, action_source)
       local item_lines, fields = tree_cut_native_status_lines(ok and response or tostring(response))
       local item_ok = ok == true and tostring(fields.ok or "") == "true"
       local code = tostring(fields.code or (ok and "" or "LUA_ERROR"))
@@ -10788,7 +12305,12 @@ function BMF.bricks.setRuntimeStateByGuid(options)
       lines[#lines + 1] = "failed=" .. tostring(item_ok and 0 or 1)
       lines[#lines + 1] = "pending=" .. tostring(code == "BRICK_GRID_CONTEXT_SCAN_PENDING" and 1 or 0)
       brick_runtime_store_result(sequence, "set-guid", resolved, tag, guid, true, table.concat(lines, "\n"))
-    end)
+    end
+    if brick_runtime_inline_operations_enabled() then
+      operation()
+    else
+      run_on_game_thread(operation)
+    end
 
     return result(true, "OK", "Runtime brick-state GUID lookup/set queued on the game thread", {
       queued = true,
@@ -10803,6 +12325,7 @@ function BMF.bricks.setRuntimeStateByGuid(options)
         "code=OK",
         "queued=true",
         "operation=set-guid",
+        "execution=" .. (brick_runtime_inline_operations_enabled() and "inline" or "game-thread"),
         "sequence=" .. tostring(sequence),
         "guid=" .. guid,
         "tag=" .. tag,
@@ -10811,16 +12334,74 @@ function BMF.bricks.setRuntimeStateByGuid(options)
         "visible_arg=" .. tostring(visible),
         "collision_channels=" .. tostring(collision),
         "grid_context_override=" .. tostring(context),
+        "action_source_override=" .. tostring(action_source),
+        "action_source_source=" .. tostring(action_source_source),
       },
     })
   end
 
   local ids = {}
+  local skipped_unverified = 0
+  local unsafe_bound_set = BMF_env_bool("BMF_BRICK_RUNTIME_UNSAFE_SET_BOUND_ENABLED", false)
+    or BMF_env_bool("BMF_BRICK_RUNTIME_UNSAFE_LOOKUP_ENABLED", false)
   for _, brick_id in ipairs(binding.ids) do
-    ids[#ids + 1] = brick_id
+    if unsafe_bound_set or BMF_brick_runtime_guid_id_verified(guid, brick_id) then
+      ids[#ids + 1] = brick_id
+    else
+      skipped_unverified = skipped_unverified + 1
+    end
+  end
+  if #ids == 0 then
+    return result(false, "BRICK_RUNTIME_GUID_UNVERIFIED", "No BMF-verified runtime bricks are bound for this GUID.", {
+      guid = guid,
+      lines = {
+        "ok=false",
+        "code=BRICK_RUNTIME_GUID_UNVERIFIED",
+        "guid=" .. guid,
+        "tag=" .. tag,
+        "bound_bricks=" .. tostring(#binding.ids),
+        "verified_bricks=0",
+        "skipped_unverified=" .. tostring(skipped_unverified),
+        "required_env=BMF_BRICK_RUNTIME_UNSAFE_SET_BOUND_ENABLED=1",
+        "detail=explicit saved brick ids are not safe live runtime ids; set requires a BMF-verified runtime id",
+      },
+    })
   end
   local sequence = brick_runtime_next_sequence()
-  run_on_game_thread(function()
+  local operation = function()
+    if brick_runtime_batch_available() then
+      local ids_csv = table.concat(ids, ",")
+      local ok, response = pcall(BMFSocketBrickPhysicalSetMany, ids_csv, visible, collision, context, action_source)
+      brick_runtime_store_result(sequence, "set-guid", 0, tag, guid, ok, ok and response or tostring(response))
+      return
+    end
+
+    if #ids > 1 then
+        local lines = {
+          "Brick runtime GUID state",
+          "source=BMF",
+          "operation=set-guid",
+          "guid=" .. guid,
+          "tag=" .. tag,
+          "requested_visible_arg=" .. tostring(visible),
+          "requested_collision_channels=" .. tostring(collision),
+          "requested_grid_context_override=" .. tostring(context),
+          "requested_action_source_override=" .. tostring(action_source),
+          "action_source_source=" .. tostring(action_source_source),
+          "bound_bricks=" .. tostring(#ids),
+          "skipped_unverified=" .. tostring(skipped_unverified),
+          "ok=false",
+          "code=BRICK_RUNTIME_BATCH_UNAVAILABLE",
+          "attempted=0",
+          "succeeded=0",
+          "failed=" .. tostring(#ids),
+          "pending=0",
+          "detail=BMFSocketBrickPhysicalSetMany is required for multi-brick runtime GUID mutation",
+        }
+        brick_runtime_store_result(sequence, "set-guid", 0, tag, guid, true, table.concat(lines, "\n"))
+        return
+    end
+
     local lines = {
       "Brick runtime GUID state",
       "source=BMF",
@@ -10830,7 +12411,10 @@ function BMF.bricks.setRuntimeStateByGuid(options)
       "requested_visible_arg=" .. tostring(visible),
       "requested_collision_channels=" .. tostring(collision),
       "requested_grid_context_override=" .. tostring(context),
+      "requested_action_source_override=" .. tostring(action_source),
+      "action_source_source=" .. tostring(action_source_source),
       "bound_bricks=" .. tostring(#ids),
+      "skipped_unverified=" .. tostring(skipped_unverified),
     }
     local attempted = 0
     local succeeded = 0
@@ -10838,7 +12422,7 @@ function BMF.bricks.setRuntimeStateByGuid(options)
     local pending = 0
     for index, brick_id in ipairs(ids) do
       attempted = attempted + 1
-      local ok, response = pcall(BMFSocketBrickPhysicalSet, brick_id, visible, collision, context)
+      local ok, response = pcall(BMFSocketBrickPhysicalSet, brick_id, visible, collision, context, action_source)
       local item_lines, fields = tree_cut_native_status_lines(ok and response or tostring(response))
       local item_ok = ok == true and tostring(fields.ok or "") == "true"
       local code = tostring(fields.code or (ok and "" or "LUA_ERROR"))
@@ -10869,7 +12453,12 @@ function BMF.bricks.setRuntimeStateByGuid(options)
     lines[#lines + 1] = "failed=" .. tostring(failed)
     lines[#lines + 1] = "pending=" .. tostring(pending)
     brick_runtime_store_result(sequence, "set-guid", 0, tag, guid, true, table.concat(lines, "\n"))
-  end)
+  end
+  if brick_runtime_inline_operations_enabled() then
+    operation()
+  else
+    run_on_game_thread(operation)
+  end
 
   return result(true, "OK", "Runtime brick-state set by GUID queued on the game thread", {
     queued = true,
@@ -10883,6 +12472,7 @@ function BMF.bricks.setRuntimeStateByGuid(options)
       "code=OK",
       "queued=true",
       "operation=set-guid",
+      "execution=" .. (brick_runtime_inline_operations_enabled() and "inline" or "game-thread"),
       "sequence=" .. tostring(sequence),
       "guid=" .. guid,
       "tag=" .. tag,
@@ -10890,6 +12480,8 @@ function BMF.bricks.setRuntimeStateByGuid(options)
       "visible_arg=" .. tostring(visible),
       "collision_channels=" .. tostring(collision),
       "grid_context_override=" .. tostring(context),
+      "action_source_override=" .. tostring(action_source),
+      "action_source_source=" .. tostring(action_source_source),
     },
   })
 end
@@ -12176,6 +13768,9 @@ function minigame_live_reflected_functions(object, hints, limit)
 end
 
 function minigame_live_uehelpers()
+  if os.getenv("BMF_MINIGAMES_LIVE_UEHELPERS") ~= "1" then
+    return nil, "UEHelpers live minigame reads are disabled; set BMF_MINIGAMES_LIVE_UEHELPERS=1 to opt in"
+  end
   local ok, helpers = pcall(require, "UEHelpers")
   if ok and type(helpers) == "table" then
     return helpers, ""
@@ -16134,6 +17729,7 @@ end
 BMF.chat = {}
 
 local LIVE_CHAT_CONTROLLER_CLASSES = { "BP_PlayerController_C", "BRPlayerController", "PlayerController" }
+local LIVE_CHAT_MAX_CONTROLLER_TARGETS = 64
 
 local function live_chat_is_valid_object(object)
   if object == nil then
@@ -16210,6 +17806,63 @@ local function live_chat_find_controller_by_name(object_name)
   return nil
 end
 
+local function live_chat_first_property_text(values, names)
+  values = type(values) == "table" and values or {}
+  for _, name in ipairs(names or {}) do
+    local record = values[name]
+    if type(record) == "table" then
+      local text = trim_string(record.text or "")
+      if text ~= "" then
+        return text
+      end
+      text = trim_string(record.objectName or "")
+      if text ~= "" then
+        return text
+      end
+    end
+  end
+  return ""
+end
+
+local function live_chat_controller_metadata(controller)
+  local metadata = {}
+  if not minigame_object_valid(controller) then
+    return metadata
+  end
+
+  local player_state = minigame_try_property(controller, "PlayerState")
+  if minigame_object_valid(player_state) then
+    metadata.playerStatePath = minigame_object_full_name(player_state)
+    metadata.playerStateAddress = minigame_object_address(player_state)
+
+    local values = minigame_live_collect_property_values(
+      player_state,
+      {
+        "UserName",
+        "PlayerNamePrivate",
+        "PlayerName",
+        "DisplayName",
+      },
+      0,
+      false
+    )
+    local player_name = live_chat_first_property_text(values, {
+      "UserName",
+      "PlayerNamePrivate",
+      "PlayerName",
+      "DisplayName",
+    })
+    if player_name ~= "" then
+      metadata.name = player_name
+      metadata.username = player_name
+      metadata.playerName = player_name
+      metadata.displayName = player_name
+    end
+  end
+
+  return metadata
+end
+
 local function live_chat_cached_players()
   local raw = read_file(PLAYER_CACHE_PATH)
   if not raw or trim_string(raw) == "" then
@@ -16228,6 +17881,9 @@ local function live_chat_collect_targets()
   local seen = {}
 
   local function add_target(controller, source, metadata)
+    if #targets >= LIVE_CHAT_MAX_CONTROLLER_TARGETS then
+      return
+    end
     if not live_chat_is_valid_object(controller) then
       return
     end
@@ -16262,11 +17918,32 @@ local function live_chat_collect_targets()
     end
   end
 
-  if type(FindFirstOf) == "function" then
+  if type(FindAllOf) == "function" then
+    for _, class_name in ipairs(LIVE_CHAT_CONTROLLER_CLASSES) do
+      local ok, controllers = pcall(FindAllOf, class_name)
+      if ok and type(controllers) == "table" then
+        for index, controller in ipairs(controllers) do
+          add_target(
+            controller,
+            "FindAllOf(" .. class_name .. ")[" .. tostring(index) .. "]",
+            live_chat_controller_metadata(controller)
+          )
+          if #targets >= LIVE_CHAT_MAX_CONTROLLER_TARGETS then
+            break
+          end
+        end
+      end
+      if #targets >= LIVE_CHAT_MAX_CONTROLLER_TARGETS then
+        break
+      end
+    end
+  end
+
+  if #targets == 0 and type(FindFirstOf) == "function" then
     for _, class_name in ipairs(LIVE_CHAT_CONTROLLER_CLASSES) do
       local ok, controller = pcall(FindFirstOf, class_name)
       if ok then
-        add_target(controller, "FindFirstOf(" .. class_name .. ")")
+        add_target(controller, "FindFirstOf(" .. class_name .. ")", live_chat_controller_metadata(controller))
       end
     end
   end
@@ -17103,12 +18780,22 @@ function player_position_native_attempt(fields, source_value, source_label, raw)
     ok = tostring(fields.ok or "") == "true",
     address = tostring(source_value or ""),
     sourceKind = tostring(fields.source_kind or ""),
+    sourceAddress = tostring(fields.source_address or ""),
+    source_address = tostring(fields.source_address or ""),
     sourceObject = tostring(fields.source_object or ""),
     sourceFullName = tostring(fields.source_full_name or ""),
+    controllerAddress = tostring(fields.controller_address or ""),
+    controller_address = tostring(fields.controller_address or ""),
     controller = tostring(fields.controller or ""),
     controllerFullName = tostring(fields.controller_full_name or ""),
+    pawnAddress = tostring(fields.pawn_address or ""),
+    pawn_address = tostring(fields.pawn_address or ""),
     pawn = tostring(fields.pawn or ""),
     pawnFullName = tostring(fields.pawn_full_name or ""),
+    rootComponentAddress = tostring(fields.root_component_address or ""),
+    root_component_address = tostring(fields.root_component_address or ""),
+    rootComponent = tostring(fields.root_component or ""),
+    rootComponentFullName = tostring(fields.root_component_full_name or ""),
     detail = detail,
     raw = tostring(raw or ""),
   }
@@ -17240,12 +18927,22 @@ function player_position_native_from_controller(controller, query)
         objectName = source.objectName,
         fullName = source.fullName,
         sourceKind = tostring(fields.source_kind or ""),
+        sourceAddress = tostring(fields.source_address or ""),
+        source_address = tostring(fields.source_address or ""),
         sourceObject = tostring(fields.source_object or ""),
         sourceFullName = tostring(fields.source_full_name or ""),
+        controllerAddress = tostring(fields.controller_address or ""),
+        controller_address = tostring(fields.controller_address or ""),
         controller = tostring(fields.controller or ""),
         controllerFullName = tostring(fields.controller_full_name or ""),
+        pawnAddress = tostring(fields.pawn_address or ""),
+        pawn_address = tostring(fields.pawn_address or ""),
         pawn = tostring(fields.pawn or ""),
         pawnFullName = tostring(fields.pawn_full_name or ""),
+        rootComponentAddress = tostring(fields.root_component_address or ""),
+        root_component_address = tostring(fields.root_component_address or ""),
+        rootComponent = tostring(fields.root_component or ""),
+        rootComponentFullName = tostring(fields.root_component_full_name or ""),
         detail = detail,
         raw = tostring(response or ""),
       }
@@ -17278,6 +18975,262 @@ function player_position_native_from_controller(controller, query)
     detail = last_detail,
     attempts = attempts,
   }
+end
+
+function player_position_native_scan_enabled(opts)
+  opts = type(opts) == "table" and opts or {}
+  if os.getenv("BMF_PLAYERS_POSITIONS_NATIVE_SCAN_UNSAFE_GAME_THREAD") ~= "1" then
+    return false
+  end
+  return
+    opts.nativeScan == true or
+    option_boolean(opts, "nativescan", false) or
+    os.getenv("BMF_PLAYERS_POSITIONS_NATIVE_SCAN") == "1"
+end
+
+function player_position_add_native_scan_record(players, fields, limit)
+  fields = type(fields) == "table" and fields or {}
+  if #players >= limit or tostring(fields.ok or "") ~= "true" then
+    return false
+  end
+
+  local position = {
+    x = finite_number(fields.x, nil),
+    y = finite_number(fields.y, nil),
+    z = finite_number(fields.z, nil),
+  }
+  if position.x == nil or position.y == nil or position.z == nil then
+    return false
+  end
+
+  players[#players + 1] = {
+    player = {
+      id = "",
+      uuid = "",
+      name = "",
+      username = "",
+      displayName = "",
+      identitySource = "anonymous-native-scan",
+    },
+    ok = true,
+    position = position,
+    source = "native.BMFSocketPlayerLocation.scan." .. tostring(fields.source_kind or fields.sourceKind or ""),
+    playerState = "",
+    playerStateName = "",
+    controllerAddress = tostring(fields.controller_address or fields.controllerAddress or ""),
+    controller_address = tostring(fields.controller_address or fields.controllerAddress or ""),
+    controller = tostring(fields.controller or ""),
+    controllerName = tostring(fields.controller or ""),
+    controllerFullName = tostring(fields.controller_full_name or fields.controllerFullName or ""),
+    pawnAddress = tostring(fields.pawn_address or fields.pawnAddress or ""),
+    pawn_address = tostring(fields.pawn_address or fields.pawnAddress or ""),
+    pawn = tostring(fields.pawn or ""),
+    pawnName = tostring(fields.pawn or ""),
+    pawnFullName = tostring(fields.pawn_full_name or fields.pawnFullName or ""),
+    pawnSource = tostring(fields.source_kind or fields.sourceKind or "native-scan"),
+    native = fields,
+  }
+  return true
+end
+
+function player_position_native_scan_snapshot(opts, query, limit)
+  opts = type(opts) == "table" and opts or {}
+  query = trim_string(query or "")
+  limit = tonumber(limit) or 32
+
+  local lines = {
+    "source=bmf.players.positions",
+    "query=" .. query,
+    "source_mode=native-scan",
+  }
+  local players = {}
+  local response = ""
+
+  if type(BMFSocketPlayerLocation) ~= "function" then
+    lines[#lines + 1] = "native_available=false"
+    lines[#lines + 1] = "code=POSITION_UNAVAILABLE"
+    lines[#lines + 1] = "reason=BMFSocketPlayerLocation unavailable"
+  else
+    local ok, native_response = pcall(BMFSocketPlayerLocation, "*", query)
+    response = tostring(native_response or "")
+    lines[#lines + 1] = "native_available=true"
+    if not ok then
+      lines[#lines + 1] = "code=POSITION_UNAVAILABLE"
+      lines[#lines + 1] = "reason=" .. tostring(native_response or "native scan failed")
+    else
+      local top_level_fields = {}
+      for line in response:gmatch("[^\r\n]+") do
+        lines[#lines + 1] = "native_" .. line
+        local key, value = line:match("^([A-Za-z0-9_]+)=(.*)$")
+        if key ~= nil then
+          if key:match("^position_%d+$") then
+            player_position_add_native_scan_record(
+              players,
+              player_position_parse_pipe_fields(value),
+              limit
+            )
+          else
+            top_level_fields[key] = value or ""
+          end
+        end
+      end
+      if #players == 0 then
+        player_position_add_native_scan_record(players, top_level_fields, limit)
+      end
+    end
+  end
+
+  lines[#lines + 1] = "players=" .. tostring(#players)
+  lines[#lines + 1] = "returned=" .. tostring(#players)
+  lines[#lines + 1] = "positioned=" .. tostring(#players)
+
+  local data = {
+    source = "bmf.players.positions",
+    checkedAt = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    query = query,
+    sourceMode = "native-scan",
+    playerArrayCount = 0,
+    liveControllerCount = 0,
+    nativeAvailable = type(BMFSocketPlayerLocation) == "function",
+    players = players,
+    nativeResponse = response,
+    counts = {
+      observed = #players,
+      returned = #players,
+      positioned = #players,
+      knownPlayers = 0,
+    },
+    lines = lines,
+  }
+  lines[#lines + 1] = "positions_json=" .. json_encode(data)
+  return data
+end
+
+local function player_position_controller_cache_ttl_seconds()
+  local configured = tonumber(os.getenv("BMF_PLAYERS_POSITIONS_CONTROLLER_CACHE_TTL_SECONDS") or "")
+  if configured ~= nil and configured > 0 then
+    return configured
+  end
+  return tonumber(state.player_position_controller_cache.ttl_seconds) or 120
+end
+
+local function player_position_controller_cache_key(value)
+  local text = trim_string(tostring(value or ""))
+  if text == "" then
+    return ""
+  end
+  return string.lower(text)
+end
+
+local function player_position_prefixed_source(prefix, value)
+  local text = trim_string(tostring(value or ""))
+  if text == "" then
+    return ""
+  end
+  if text:match("^[A-Za-z_][A-Za-z0-9_%-]*:") then
+    return text
+  end
+  return tostring(prefix or "uobject") .. ":" .. text
+end
+
+local function player_position_controller_cache_keys(record)
+  local keys = {}
+  local seen = {}
+  local function add(value)
+    local key = player_position_controller_cache_key(value)
+    if key ~= "" and not seen[key] then
+      seen[key] = true
+      keys[#keys + 1] = key
+    end
+  end
+
+  if type(record) == "table" then
+    add(record.uuid)
+    add(record.id)
+    add(record.playerId)
+    add(record.playerID)
+    add(record.username)
+    add(record.playerName)
+    add(record.displayName)
+    add(record.name)
+  end
+
+  return keys
+end
+
+local function player_position_controller_cache_lookup(player)
+  local cache = state.player_position_controller_cache
+  local records = cache and cache.records or {}
+  local ttl_seconds = player_position_controller_cache_ttl_seconds()
+  local now = os.time()
+  for _, key in ipairs(player_position_controller_cache_keys(player)) do
+    local record = records[key]
+    if type(record) == "table" then
+      local updated_epoch = tonumber(record.updatedEpoch or 0) or 0
+      if updated_epoch > 0 and now >= updated_epoch and (now - updated_epoch) <= ttl_seconds then
+        return record
+      end
+      records[key] = nil
+    end
+  end
+  return nil
+end
+
+local function player_position_controller_cache_upsert(identity, target, native_detail)
+  if type(native_detail) ~= "table" then
+    return
+  end
+
+  local controller_address = first_string(
+    native_detail.controllerAddress,
+    native_detail.controller_address,
+    native_detail.address,
+    target and live_chat_object_key(target.controller, "") or ""
+  )
+  controller_address = trim_string(controller_address or "")
+  if controller_address == "" then
+    return
+  end
+  local pawn_address = trim_string(first_string(
+    native_detail.pawnAddress,
+    native_detail.pawn_address
+  ) or "")
+  local root_component_address = trim_string(first_string(
+    native_detail.rootComponentAddress,
+    native_detail.root_component_address
+  ) or "")
+
+  local player_name = first_string(
+    identity and identity.username,
+    identity and identity.playerName,
+    identity and identity.displayName,
+    target and target.name,
+    target and target.userName,
+    target and target.displayName
+  ) or ""
+
+  local record = {
+    uuid = tostring(identity and (identity.uuid or identity.id) or target and target.playerId or ""),
+    id = tostring(identity and (identity.uuid or identity.id) or target and target.playerId or ""),
+    username = tostring(identity and identity.username or target and target.userName or player_name or ""),
+    playerName = tostring(identity and identity.playerName or target and target.name or player_name or ""),
+    displayName = tostring(identity and identity.displayName or target and target.displayName or player_name or ""),
+    controllerAddress = controller_address,
+    controllerPath = controller_address,
+    controllerFullName = tostring(native_detail.controllerFullName or ""),
+    pawnAddress = pawn_address,
+    pawnPath = pawn_address,
+    rootComponentAddress = root_component_address,
+    rootComponentPath = root_component_address,
+    playerStatePath = tostring(target and target.playerStatePath or ""),
+    updatedAt = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    updatedEpoch = os.time(),
+  }
+
+  local records = state.player_position_controller_cache.records
+  for _, key in ipairs(player_position_controller_cache_keys(record)) do
+    records[key] = record
+  end
 end
 
 function player_position_known_records_snapshot(opts, query, limit)
@@ -17317,8 +19270,38 @@ function player_position_known_records_snapshot(opts, query, limit)
 
     local controller_path = trim_string(player and player.controllerPath or "")
     local player_state_path = trim_string(player and player.playerStatePath or "")
+    local pawn_path = trim_string(player and (player.pawnPath or player.pawnAddress) or "")
+    local root_component_path = trim_string(player and (player.rootComponentPath or player.rootComponentAddress) or "")
+    local controller_cache_record = player_position_controller_cache_lookup(player)
+    if root_component_path == "" and controller_cache_record ~= nil then
+      root_component_path = trim_string(controller_cache_record.rootComponentAddress or controller_cache_record.rootComponentPath or "")
+    end
+    if pawn_path == "" and controller_cache_record ~= nil then
+      pawn_path = trim_string(controller_cache_record.pawnAddress or controller_cache_record.pawnPath or "")
+    end
+    if controller_path == "" and controller_cache_record ~= nil then
+      controller_path = trim_string(controller_cache_record.controllerAddress or controller_cache_record.controllerPath or "")
+    end
+    if player_state_path == "" and controller_cache_record ~= nil then
+      player_state_path = trim_string(controller_cache_record.playerStatePath or "")
+    end
+    if root_component_path ~= "" then
+      source_values[#source_values + 1] = {
+        value = player_position_prefixed_source("component", root_component_path),
+        label = "fast-cache.rootComponentAddress",
+      }
+    end
+    if pawn_path ~= "" then
+      source_values[#source_values + 1] = {
+        value = player_position_prefixed_source("pawn", pawn_path),
+        label = "fast-cache.pawnAddress",
+      }
+    end
     if controller_path ~= "" then
-      source_values[#source_values + 1] = { value = controller_path, label = "cache.controllerPath" }
+      source_values[#source_values + 1] = {
+        value = player_position_prefixed_source("controller", controller_path),
+        label = controller_cache_record ~= nil and "fast-cache.controllerAddress" or "cache.controllerPath",
+      }
     end
     if player_state_path ~= "" then
       source_values[#source_values + 1] = { value = player_state_path, label = "cache.playerStatePath" }
@@ -17360,6 +19343,12 @@ function player_position_known_records_snapshot(opts, query, limit)
       pawn = native_detail and native_detail.pawn or "",
       pawnName = native_detail and native_detail.pawn or "",
       pawnFullName = native_detail and native_detail.pawnFullName or "",
+      pawnAddress = native_detail and native_detail.pawnAddress or tostring(pawn_path or ""),
+      pawn_address = native_detail and native_detail.pawn_address or tostring(pawn_path or ""),
+      rootComponentAddress = native_detail and native_detail.rootComponentAddress or tostring(root_component_path or ""),
+      root_component_address = native_detail and native_detail.root_component_address or tostring(root_component_path or ""),
+      rootComponent = native_detail and native_detail.rootComponent or "",
+      rootComponentFullName = native_detail and native_detail.rootComponentFullName or "",
       pawnSource = native_detail and native_detail.sourceKind or "",
       attempts = opts.includeMissing == true and attempts or nil,
       native = native_detail,
@@ -17506,6 +19495,7 @@ function player_position_live_controller_snapshot(opts, query, limit)
 
     if position ~= nil then
       positioned = positioned + 1
+      player_position_controller_cache_upsert(identity, target, native_detail)
     end
 
     local player_name = first_string(
@@ -17531,12 +19521,20 @@ function player_position_live_controller_snapshot(opts, query, limit)
       source = source,
       playerState = tostring(target and target.playerStatePath or ""),
       playerStateName = tostring(target and target.playerStatePath or ""),
+      controllerAddress = native_detail and native_detail.controllerAddress or "",
+      controller_address = native_detail and native_detail.controller_address or "",
       controller = native_detail and native_detail.address or live_chat_object_key(target and target.controller or nil, ""),
       controllerName = native_detail and native_detail.controller or live_chat_object_label(target and target.controller or nil, ""),
       controllerFullName = native_detail and native_detail.controllerFullName or live_chat_object_full_name(target and target.controller or nil),
+      pawnAddress = native_detail and native_detail.pawnAddress or "",
+      pawn_address = native_detail and native_detail.pawn_address or "",
       pawn = native_detail and native_detail.pawn or pawn_record and pawn_record.address or "",
       pawnName = native_detail and native_detail.pawn or pawn_record and pawn_record.objectName or "",
       pawnFullName = native_detail and native_detail.pawnFullName or "",
+      rootComponentAddress = native_detail and native_detail.rootComponentAddress or "",
+      root_component_address = native_detail and native_detail.root_component_address or "",
+      rootComponent = native_detail and native_detail.rootComponent or "",
+      rootComponentFullName = native_detail and native_detail.rootComponentFullName or "",
       pawnSource = pawn_record and pawn_record.source or "",
       pawnCandidates = pawn_candidates,
       attempts = opts.includeMissing == true and attempts or nil,
@@ -17639,6 +19637,18 @@ BMF.players.positions = function(options)
     local live_controller_counts = live_controller_data.counts or {}
     if tonumber(live_controller_counts.positioned) and tonumber(live_controller_counts.positioned) > 0 then
       return result(true, "OK", "Live controller player positions collected", live_controller_data)
+    end
+
+    if player_position_native_scan_enabled(opts) then
+      local native_scan_data = player_position_native_scan_snapshot(opts, query, limit)
+      local native_scan_counts = native_scan_data.counts or {}
+      if tonumber(native_scan_counts.positioned) and tonumber(native_scan_counts.positioned) > 0 then
+        return result(true, "OK", "Native scanned player positions collected", native_scan_data)
+      end
+      live_controller_data.nativeScan = native_scan_data
+      for _, line in ipairs(native_scan_data.lines or {}) do
+        live_controller_data.lines[#live_controller_data.lines + 1] = "native_scan_" .. tostring(line)
+      end
     end
 
     if not allow_live_pawn_read then
@@ -17825,6 +19835,150 @@ BMF.players.positions = function(options)
 
   local ok = #players > 0 and (query == "" or positioned > 0)
   return result(ok, ok and "OK" or "POSITION_UNAVAILABLE", ok and "Live player positions collected" or "Live player positions were unavailable", data)
+end
+
+local function player_position_snapshot_enabled()
+  return BMF_env_bool("BMF_PLAYERS_POSITIONS_SNAPSHOT_ENABLED", false)
+end
+
+local function player_position_snapshot_path()
+  local configured = trim_string(BMF_env_string("BMF_PLAYERS_POSITIONS_SNAPSHOT_PATH"))
+  if configured ~= "" then
+    return configured
+  end
+  return PLAYER_POSITIONS_SNAPSHOT_PATH
+end
+
+local function player_position_snapshot_interval_ms()
+  local configured = BMF_env_number("BMF_PLAYERS_POSITIONS_SNAPSHOT_MS", 2000, 250)
+  return math.max(1000, math.min(60000, math.floor(tonumber(configured) or 2000)))
+end
+
+local function player_position_snapshot_limit()
+  local configured = BMF_env_number("BMF_PLAYERS_POSITIONS_SNAPSHOT_LIMIT", 64, 1)
+  return math.max(1, math.min(128, math.floor(tonumber(configured) or 64)))
+end
+
+local function write_player_position_snapshot(reason)
+  local snapshot_state = state.player_position_snapshot
+  snapshot_state.path = player_position_snapshot_path()
+  snapshot_state.interval_ms = player_position_snapshot_interval_ms()
+  snapshot_state.limit = player_position_snapshot_limit()
+
+  local started_clock = os.clock()
+  local ok, snapshot_result = pcall(BMF.players.positions, {
+    limit = snapshot_state.limit,
+    nativeCache = true,
+    liveController = true,
+    allowLivePawnRead = false,
+    unsafe = false,
+    includeMissing = false,
+    fallbackFindAll = false,
+  })
+  local duration_ms = BMF_telemetry_duration_ms(started_clock)
+  local data = {}
+  local result_ok = false
+  local result_code = "ERROR"
+  local result_message = ""
+  if ok and type(snapshot_result) == "table" then
+    result_ok = snapshot_result.ok == true
+    result_code = tostring(snapshot_result.code or (result_ok and "OK" or "ERROR"))
+    result_message = tostring(snapshot_result.message or "")
+    if type(snapshot_result.data) == "table" then
+      data = snapshot_result.data
+    end
+  else
+    result_message = tostring(snapshot_result or "snapshot call failed")
+  end
+
+  local generated_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+  if type(data.lines) == "table" then
+    local compact_lines = {}
+    for _, line in ipairs(data.lines) do
+      if not tostring(line or ""):match("^positions_json=") then
+        compact_lines[#compact_lines + 1] = line
+      end
+    end
+    data.lines = compact_lines
+  end
+  data.snapshot = {
+    source = "bmf.players.positions.snapshot",
+    reason = tostring(reason or ""),
+    generatedAt = generated_at,
+    intervalMs = snapshot_state.interval_ms,
+    limit = snapshot_state.limit,
+    ok = result_ok,
+    code = result_code,
+    message = result_message,
+    durationMs = duration_ms,
+  }
+
+  local counts = type(data.counts) == "table" and data.counts or {}
+  local positioned = tonumber(counts.positioned) or 0
+  snapshot_state.last_duration_ms = duration_ms
+  snapshot_state.last_positioned = positioned
+  snapshot_state.last_ok = result_ok
+  snapshot_state.last_code = result_code
+
+  local written = false
+  if ok then
+    written = write_file(snapshot_state.path, json_encode(data) .. "\n")
+  end
+
+  if written then
+    snapshot_state.writes = (tonumber(snapshot_state.writes) or 0) + 1
+    snapshot_state.last_write_at = generated_at
+    snapshot_state.last_error = ""
+  else
+    snapshot_state.failures = (tonumber(snapshot_state.failures) or 0) + 1
+    snapshot_state.last_error = result_message ~= "" and result_message or "snapshot write failed"
+  end
+
+  BMF_telemetry_record_scheduler("snapshot", "player_positions", duration_ms, written)
+  return written
+end
+
+local function ensure_player_position_snapshot_worker()
+  if state.player_position_snapshot_timer_id ~= nil then
+    return
+  end
+
+  state.player_position_snapshot.enabled = player_position_snapshot_enabled()
+  state.player_position_snapshot.path = player_position_snapshot_path()
+  state.player_position_snapshot.interval_ms = player_position_snapshot_interval_ms()
+  state.player_position_snapshot.limit = player_position_snapshot_limit()
+  if not state.player_position_snapshot.enabled then
+    return
+  end
+
+  local timer_id = BMF.timers.every(state.player_position_snapshot.interval_ms, function(id)
+    if not player_position_snapshot_enabled() then
+      state.player_position_snapshot.enabled = false
+      state.player_position_snapshot_timer_id = nil
+      BMF.timers.cancel(id)
+      write_status()
+      return
+    end
+    write_player_position_snapshot("timer")
+  end)
+
+  if timer_id then
+    state.player_position_snapshot_timer_id = timer_id
+    log(
+      "info",
+      "player position snapshot worker started path="
+        .. tostring(state.player_position_snapshot.path)
+        .. " interval_ms="
+        .. tostring(state.player_position_snapshot.interval_ms)
+    )
+    write_player_position_snapshot("start")
+    write_status()
+  else
+    state.player_position_snapshot.enabled = false
+    state.player_position_snapshot.failures = (tonumber(state.player_position_snapshot.failures) or 0) + 1
+    state.player_position_snapshot.last_error = "timer scheduler unavailable"
+    log("warn", "player position snapshot worker could not start: timer scheduler unavailable")
+  end
 end
 
 BMF.players.normalize = function(record)
@@ -18615,6 +20769,10 @@ function BMF_command_worker_max_files_per_poll()
   )
 end
 
+function BMF_command_worker_enabled()
+  return BMF_env_bool("BMF_COMMAND_WORKER_ENABLED", false)
+end
+
 function BMF_status_heartbeat_interval_seconds()
   return BMF_env_number(
     "BMF_STATUS_HEARTBEAT_SECONDS",
@@ -18793,6 +20951,13 @@ end
 
 local function start_command_worker()
   if state.command_worker_started then
+    return
+  end
+  if not BMF_command_worker_enabled() then
+    state.command_worker_started = false
+    state.command_worker_mode = "disabled"
+    state.status_heartbeat_interval_seconds = BMF_status_heartbeat_interval_seconds()
+    log("info", "legacy file command worker disabled; use BMFSocket for BMF commands")
     return
   end
   state.command_worker_started = true
@@ -19058,6 +21223,50 @@ function BMF_poll_socket_messages_async()
   return false
 end
 
+function BMF_schedule_resource_native_tool_resolve(reason, attempt)
+  if not BMF_env_bool("BMF_RESOURCE_NATIVE_RESOLVE_HANDAXE_ON_START", BMF_env_bool("BMF_TREECUT_RESOLVE_HANDAXE_ON_START", true)) then
+    return
+  end
+  local max_attempts = math.max(1, math.min(60, BMF_env_number(
+    "BMF_RESOURCE_NATIVE_RESOLVE_HANDAXE_RETRY_ATTEMPTS",
+    BMF_env_number("BMF_TREECUT_RESOLVE_HANDAXE_RETRY_ATTEMPTS", 24, 1),
+    1)))
+  local delay_ms = math.max(250, math.min(30000, BMF_env_number(
+    "BMF_RESOURCE_NATIVE_RESOLVE_HANDAXE_RETRY_MS",
+    BMF_env_number("BMF_TREECUT_RESOLVE_HANDAXE_RETRY_MS", 2500, 250),
+    250)))
+  local current_attempt = math.max(1, math.floor(tonumber(attempt) or 1))
+  if current_attempt > max_attempts then
+    log("warn", "resource native handaxe resolve retry limit reached reason=" .. tostring(reason or "startup"))
+    return
+  end
+
+  local scheduled = BMF_schedule_delayed_callback("resource_native_tool_resolve", delay_ms, function()
+    if not state.socket.started then
+      return
+    end
+    run_on_game_thread(function()
+      local resolve_ok, resolve_result = pcall(BMF.tools.treeCutNative.resolveHandaxe, {
+        reason = tostring(reason or "startup") .. "-retry-" .. tostring(current_attempt),
+      })
+      if resolve_ok and resolve_result and resolve_result.ok == true then
+        log("info", "resource native handaxe resolved after retry attempt=" .. tostring(current_attempt))
+        return
+      end
+
+      local detail = resolve_ok and tostring(resolve_result and resolve_result.message or "unknown") or tostring(resolve_result)
+      if current_attempt >= max_attempts then
+        log("warn", "resource native handaxe resolve retries exhausted: " .. detail)
+        return
+      end
+      BMF_schedule_resource_native_tool_resolve(reason, current_attempt + 1)
+    end)
+  end)
+  if not scheduled then
+    log("warn", "resource native handaxe resolve retry was not scheduled")
+  end
+end
+
 function BMF_start_socket_transport()
   BMF_socket_configure_from_env()
   if not state.socket.enabled then
@@ -19099,6 +21308,17 @@ function BMF_start_socket_transport()
     if not resource_ok or not resource_result or resource_result.ok ~= true then
       local detail = resource_ok and tostring(resource_result and resource_result.message or "unknown") or tostring(resource_result)
       log("warn", "resource native capture did not start: " .. detail)
+    elseif BMF_env_bool("BMF_RESOURCE_NATIVE_RESOLVE_HANDAXE_ON_START", BMF_env_bool("BMF_TREECUT_RESOLVE_HANDAXE_ON_START", true)) then
+      local resolve_ok, resolve_result = pcall(BMF.tools.treeCutNative.resolveHandaxe, {
+        reason = "socket-start",
+      })
+      if not resolve_ok or not resolve_result or resolve_result.ok ~= true then
+        local detail = resolve_ok and tostring(resolve_result and resolve_result.message or "unknown") or tostring(resolve_result)
+        log("warn", "resource native handaxe resolve did not complete: " .. detail)
+        BMF_schedule_resource_native_tool_resolve("socket-start", 1)
+      else
+        log("info", "resource native handaxe resolved at socket start")
+      end
     end
   end
   if BMF_start_async_loop("socket_worker", state.socket.poll_interval_ms, BMF_poll_socket_messages_async) then
@@ -19203,6 +21423,7 @@ local function mark_server_ready(data)
   state.server_ready_data = copy_table(data or {})
   BMF.events.emit("serverReady", state.server_ready_data)
   dispatch_server_ready_hooks(state.server_ready_data)
+  ensure_player_position_snapshot_worker()
   write_status()
 end
 
@@ -19279,7 +21500,7 @@ local function read_framework_config()
   local raw = read_file(CONFIG_PATH) or ""
   local jsonl_logs = parse_json_boolean_field(raw, "jsonlLogs")
   if jsonl_logs == nil then
-    jsonl_logs = true
+    jsonl_logs = false
   end
   local watchdog_enabled = parse_json_boolean_field(raw, "pluginWatchdogEnabled")
   if watchdog_enabled == nil then
@@ -19656,6 +21877,13 @@ local function create_plugin_api(plugin_name, manifest)
       end)
     end)
   end
+  api.bricks.bindRuntimeGuidCell = function(options)
+    return require_capability(plugin_name, manifest, "bricks.runtimeState", function()
+      return run_plugin_action(function()
+        return BMF.bricks.bindRuntimeGuidCell(options)
+      end)
+    end)
+  end
   api.bricks.setRuntimeStateByGuid = function(options)
     return require_capability(plugin_name, manifest, "bricks.runtimeState", function()
       return run_plugin_action(function()
@@ -19668,9 +21896,19 @@ local function create_plugin_api(plugin_name, manifest)
       return BMF.bricks.runtimeGuidStatus(options)
     end)
   end
+  api.bricks.forgetRuntimeGuid = function(options)
+    return run_plugin_action(function()
+      return BMF.bricks.forgetRuntimeGuid(options)
+    end)
+  end
   api.bricks.resolveRuntimeState = function(options)
     return run_plugin_action(function()
       return BMF.bricks.resolveRuntimeState(options)
+    end)
+  end
+  api.bricks.scanRuntimeRegion = function(options)
+    return run_plugin_action(function()
+      return BMF.bricks.scanRuntimeRegion(options)
     end)
   end
 

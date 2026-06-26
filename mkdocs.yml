@@ -46,23 +46,28 @@ nav:
       - Windows Install: install/windows.md
   - Examples:
       - Catalog: examples/index.md
-      - HelloBroadcast: examples/hello-broadcast.md
-      - TimedBroadcast: examples/timed-broadcast.md
-      - Plugin Command: examples/plugin-command.md
-      - Plugin Storage: examples/plugin-storage.md
-      - WelcomeMessage: examples/welcome-message.md
-      - LoadThreeCars: examples/load-three-cars.md
-      - LoadCarBrz: examples/load-car-brz.md
-      - SpawnVehicleSet: examples/spawn-vehicle-set.md
-      - ListMinigames: examples/list-minigames.md
-      - AssignRole: examples/assign-role.md
-      - Placement Guards: examples/placement-guards.md
-      - RuntimeBrickState: examples/runtime-brick-state.md
-      - InspectApiLabels: examples/inspect-api-labels.md
-      - PlayerSummary: examples/player-summary.md
-      - HealthCheck: examples/health-check.md
-      - EventAudit: examples/event-audit.md
-      - RateLimitedCommand: examples/rate-limited-command.md
+      - Plugin Basics:
+          - HelloBroadcast: examples/hello-broadcast.md
+          - TimedBroadcast: examples/timed-broadcast.md
+          - Plugin Command: examples/plugin-command.md
+          - Plugin Storage: examples/plugin-storage.md
+          - WelcomeMessage: examples/welcome-message.md
+      - Server, World, and Assets:
+          - LoadThreeCars: examples/load-three-cars.md
+          - LoadCarBrz: examples/load-car-brz.md
+          - SpawnVehicleSet: examples/spawn-vehicle-set.md
+          - RuntimeBrickState: examples/runtime-brick-state.md
+      - Gameplay Data:
+          - ListMinigames: examples/list-minigames.md
+          - PlayerSummary: examples/player-summary.md
+      - Policy and Permissions:
+          - AssignRole: examples/assign-role.md
+          - Placement Guards: examples/placement-guards.md
+      - Diagnostics and Validation:
+          - InspectApiLabels: examples/inspect-api-labels.md
+          - HealthCheck: examples/health-check.md
+          - EventAudit: examples/event-audit.md
+          - RateLimitedCommand: examples/rate-limited-command.md
   - Guides:
       - Common Workflows: guides/common-workflows.md
       - Resource Lookup Tags: guides/resource-lookup-tags.md

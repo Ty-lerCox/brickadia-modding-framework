@@ -189,10 +189,53 @@ function observeBmfSocket(paths, bmfStatus, socketMetadata, bridgeStatus, option
   const hasBrokerConfig = socketMetadata?.host && Number(socketMetadata?.port) > 0 && socketMetadata?.token;
   const bmfWorkerStarted = asBoolean(bmfStatus?.socket_worker_started, false);
   const bridgeConnected = asBoolean(bridgeStatus?.socket?.connected, false);
-  if (socketEnabled && hasBrokerConfig && (bmfWorkerStarted || bridgeConnected)) {
-    return healthy('BMF socket metadata is fresh and a socket worker or bridge connection is reported.', evidence);
+  const nativeStatus = socketNativeStatus(socketMetadata);
+  const nativeConnected = socketNativeConnected(socketMetadata, nativeStatus);
+  const nativeRunning = nativeConnected || asBoolean(socketMetadata?.started, false) || asBoolean(nativeStatus?.running, false);
+  const observedActivity = socketActivityObserved(socketMetadata, nativeStatus);
+  const lastError = String(socketMetadata?.lastError || nativeStatus?.lastError || '').trim();
+  if (socketEnabled && hasBrokerConfig && bmfWorkerStarted && nativeRunning && !lastError) {
+    if (nativeConnected) return healthy('BMF native socket client reports an active loopback broker connection.', evidence);
+    if (observedActivity) return healthy('BMF socket worker is fresh and has processed socket traffic without reported errors.', evidence);
+    return healthy('BMF socket worker is running with fresh metadata and no reported socket errors.', evidence);
+  }
+  if (socketEnabled && hasBrokerConfig && bridgeConnected && !nativeConnected) {
+    return degraded('BMF bridge is connected, but the native socket client is not connected to the broker.', evidence, 'restart-stack');
+  }
+  if (socketEnabled && hasBrokerConfig && bmfWorkerStarted) {
+    return degraded(lastError ? `BMF socket worker reported an error: ${lastError}` : 'BMF socket worker is running, but no socket activity has been reported.', evidence, 'restart-stack');
   }
   return degraded('BMF socket metadata exists, but a connected worker has not been reported.', evidence, 'start-stack');
+}
+
+function socketNativeConnected(socketMetadata, nativeStatus = socketNativeStatus(socketMetadata)) {
+  if (asBoolean(socketMetadata?.connected, false)) return true;
+  if (asBoolean(socketMetadata?.nativeConnected, false)) return true;
+  return asBoolean(nativeStatus?.connected, false);
+}
+
+function socketNativeStatus(socketMetadata) {
+  const lastStatus = socketMetadata?.lastStatus;
+  if (!lastStatus) return {};
+  if (typeof lastStatus === 'object') return lastStatus;
+  if (typeof lastStatus !== 'string') return {};
+  try {
+    return JSON.parse(lastStatus);
+  } catch {
+    return {};
+  }
+}
+
+function socketActivityObserved(socketMetadata, nativeStatus = socketNativeStatus(socketMetadata)) {
+  return [
+    socketMetadata?.receivedCommands,
+    socketMetadata?.receivedMessages,
+    socketMetadata?.sentEvents,
+    socketMetadata?.sentResponses,
+    nativeStatus?.sentLines,
+    nativeStatus?.receivedLines,
+    nativeStatus?.connects,
+  ].some(value => Number(value) > 0);
 }
 
 function observeFrameTelemetry(profile, paths, options) {
@@ -259,15 +302,16 @@ function observeLoopbackEndpoint(url, probe, options) {
 }
 
 function buildLogSources(paths) {
-  return [
+  const sources = [
     logSource('bmf-log', 'bmf-runtime', paths.bmfLog),
-    logSource('events-jsonl', 'bmf-runtime', paths.eventsJsonl),
-    logSource('audit-jsonl', 'bmf-runtime', paths.auditJsonl),
     logSource('bmf-status', 'bmf-runtime', paths.bmfStatus),
     logSource('bmf-bridge-status', 'omegga-plugin-bmf-bridge', paths.bridgeStatus),
     logSource('frame-telemetry', 'bmf-frame-telemetry', paths.frameTelemetry),
     logSource('alloy-config', 'grafana-alloy', paths.grafanaAlloyConfig),
-  ].filter(item => item.path);
+  ];
+  if (exists(paths.eventsJsonl)) sources.push(logSource('events-jsonl', 'bmf-runtime', paths.eventsJsonl));
+  if (exists(paths.auditJsonl)) sources.push(logSource('audit-jsonl', 'bmf-runtime', paths.auditJsonl));
+  return sources.filter(item => item.path);
 }
 
 function logSource(id, component, filePath) {

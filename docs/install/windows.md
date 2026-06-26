@@ -1,29 +1,69 @@
-# Windows Install
+# Windows Setup
 
-**Labels:** `experimental`, `windows`, `installer`
+**Labels:** `experimental`, `windows`, `desktop`, `installer`
 
 BMF is installed into the UE4SS working directory for a Windows Brickadia
-dedicated server.
+Dedicated Server.
+
+Current target: Brickadia EA2 PC-Shipping-CL13530.
 
 ## Who Should Read This?
 
-Server operators should use this page to install or verify BMF on Windows.
-BMF maintainers should use it when checking release-package and rollback
-behavior.
+Server operators should use this page to set up BMF on a Windows dedicated
+server. BMF maintainers should use it when checking release-package and
+rollback behavior.
+
+!!! warning
+    BMF's UE4SS path is Windows-only. Linux and WSL are not supported for the
+    UE4SS/BMF dedicated-server runtime.
 
 ## Prerequisites
 
-- Brickadia dedicated server for the supported build.
-- Brickadia-compatible UE4SS runtime.
+- Windows 10 x64, Windows 11 x64, or Windows Server 2019+ x64.
+- Brickadia Dedicated Server for Brickadia EA2 `PC-Shipping-CL13530`.
 - BMF-supported Omegga Windows fork for Windows server launch, command
   transport, bridge helpers, logs, and validation:
   <https://github.com/Ty-lerCox/bmf-omegga-fork>.
-- BMF release package.
+- BMF Desktop portable exe or MSI release artifact.
 - File-system access to the server `Binaries\Win64` directory.
 
 Do not assume an arbitrary upstream Omegga install is enough. See the
 [Supported Runtime Matrix](../reference/supported-runtime.md) for the current
 fork contract.
+
+## Portable Desktop Setup
+
+Use the portable exe for the few-click setup path. It keeps profile data next
+to the executable in `BMF Desktop Data`, so it can be handed to another Windows
+server operator without requiring an installer first.
+
+1. Download `BMF-Desktop-<version>-portable-x64.exe` from the release.
+2. Stop the Brickadia Dedicated Server if it is already running.
+3. Open the portable exe.
+4. In Easy mode, choose the Brickadia Dedicated Server install folder. You can
+   select the install root or the final `Brickadia\Binaries\Win64` folder.
+5. Confirm the detected folder contains `BrickadiaServer-Win64-Shipping.exe`.
+6. Review the Easy health rows.
+7. Use the action buttons shown on unhealthy or degraded rows:
+   - `Install` stages the BMF runtime, UE4SS mod files, native helpers, and
+     managed profile metadata for the selected server path.
+   - `Repair` restores missing BMF/UE4SS files and enablement markers.
+   - `Start` or `Restart` uses the configured BMF-supported Omegga start path
+     when that path is present.
+8. Click `Refresh Health` after each action.
+
+Easy mode only shows optional telemetry, frame-time, socket, and Grafana rows
+when the profile has those features enabled or evidence exists. A clean
+Brickadia-only profile should focus on the core rows first: server files,
+UE4SS/BMF staging, and BMF runtime status.
+
+## MSI Setup
+
+Use the MSI when you want a normal installed application entry, Windows
+installer metadata, and a stable app location. The setup flow inside the app is
+the same as the portable exe: open BMF Desktop, select the Brickadia Dedicated
+Server folder, then apply the Easy-mode action buttons until the core rows are
+healthy.
 
 ## Release Package
 

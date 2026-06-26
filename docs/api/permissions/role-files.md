@@ -103,8 +103,8 @@ writing.
 Server-console routes:
 
 ```text
-Omegga.Bridge.BMF bmf.permissions.enforce-nospawnitem
-Omegga.Bridge.BMF bmf.permissions.enforce-nospawnitem path=C:/tmp/RoleSetup2.json
+bmf.permissions.enforce-nospawnitem
+bmf.permissions.enforce-nospawnitem path=C:/tmp/RoleSetup2.json
 ```
 
 Returned fields include `path`, `changed`, `written`, `backupPath`,
@@ -146,7 +146,7 @@ When `path` is omitted, BMF reads:
 Server-console route:
 
 ```text
-Omegga.Bridge.BMF bmf.permissions.role-assignments
+bmf.permissions.role-assignments
 ```
 
 Describe all saved assignment records:

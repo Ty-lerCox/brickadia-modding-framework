@@ -653,8 +653,6 @@ export default class BrickadiaServer extends EventEmitter {
       command: string,
       options: {
         timeoutMs?: number;
-        fallbackToFile?: boolean;
-        fallbackLogLabel?: string;
       } = {},
     ) => {
       const timeoutMs = Math.max(
@@ -666,26 +664,10 @@ export default class BrickadiaServer extends EventEmitter {
         ),
       );
       if (this.#bmfSocketBridge?.hasBmfClients) {
-        try {
-          return await this.#bmfSocketBridge.execCommand(command, timeoutMs);
-        } catch (error) {
-          if (options.fallbackToFile === false) throw error;
-          Logger.warnp(
-            (
-              options.fallbackLogLabel ||
-              'BMF socket command failed; falling back to file bridge'
-            ).yellow,
-            error instanceof Error ? error.message : String(error),
-          );
-        }
+        return await this.#bmfSocketBridge.execCommand(command, timeoutMs);
       }
 
-      if (options.fallbackToFile === false) {
-        throw new Error('BMF socket bridge has no connected native client.');
-      }
-
-      await this.#ue4ssBridge.execCommand(`Omegga.Bridge.BMF ${command}`);
-      return null;
+      throw new Error('BMF socket bridge has no connected native client.');
     };
 
     const runBridgeBookkeepingCommand = async () => {
@@ -700,19 +682,6 @@ export default class BrickadiaServer extends EventEmitter {
         this.#ue4ssBridge.hasCapability('server_status')
       ) {
         await this.#ue4ssBridge.requestServerStatus();
-        return true;
-      }
-
-      if (normalizedLine === 'GetAll BRPlayerState UserName') {
-        this.emitSyntheticPlayerStateUserNames();
-        return true;
-      }
-
-      const syntheticOwnerMatch = normalizedLine.match(
-        /^GetAll BRPlayerState Owner Name=(.+)$/,
-      );
-      if (syntheticOwnerMatch) {
-        this.emitSyntheticPlayerStateOwner(syntheticOwnerMatch[1]);
         return true;
       }
 
@@ -738,6 +707,19 @@ export default class BrickadiaServer extends EventEmitter {
         await this.#ue4ssBridge.requestPlayers('owners', {
           stateName: ownerMatch[1],
         });
+        return true;
+      }
+
+      if (normalizedLine === 'GetAll BRPlayerState UserName') {
+        this.emitSyntheticPlayerStateUserNames();
+        return true;
+      }
+
+      const syntheticOwnerMatch = normalizedLine.match(
+        /^GetAll BRPlayerState Owner Name=(.+)$/,
+      );
+      if (syntheticOwnerMatch) {
+        this.emitSyntheticPlayerStateOwner(syntheticOwnerMatch[1]);
         return true;
       }
 
@@ -827,8 +809,6 @@ export default class BrickadiaServer extends EventEmitter {
           timeoutMs: Number(
             process.env.OMEGGA_BMF_CHAT_SOCKET_TIMEOUT_MS || 1200,
           ),
-          fallbackLogLabel:
-            'BMF chat socket bridge failed; falling back to file bridge',
         });
 
       const broadcastMatch = normalizedLine.match(/^Chat\.Broadcast\s+(.+)$/);
@@ -1030,25 +1010,14 @@ export default class BrickadiaServer extends EventEmitter {
     const bmfCommand = getBmfCommandFromOmeggaLine(normalizedCommand);
     if (bmfCommand) {
       if (this.#bmfSocketBridge?.hasBmfClients) {
-        try {
-          const response = await this.#bmfSocketBridge.execCommand(
-            bmfCommand,
-            timeoutMs,
-          );
-          return response.response ?? '';
-        } catch (error) {
-          Logger.warnp(
-            'BMF socket command with output failed; falling back to file bridge'
-              .yellow,
-            error instanceof Error ? error.message : String(error),
-          );
-        }
+        const response = await this.#bmfSocketBridge.execCommand(
+          bmfCommand,
+          timeoutMs,
+        );
+        return response.response ?? '';
       }
 
-      return this.#ue4ssBridge.execCommandWithOutput(
-        `Omegga.Bridge.BMF ${bmfCommand}`,
-        timeoutMs,
-      );
+      throw new Error('BMF socket bridge has no connected native client.');
     }
 
     return this.#ue4ssBridge.execCommandWithOutput(command, timeoutMs);

@@ -21,7 +21,7 @@ Returns the standard BMF result shape:
   code = "OK",
   message = "BMF runtime is loaded",
   data = {
-    version = "0.1.0-dev",
+    version = "0.1.0-ea2.cl13530",
     target_build = "PC-Shipping-CL13530",
     compatibility_status = "ok",
     build_detection = "declared-target-only",
@@ -52,8 +52,8 @@ BMF.log("BMF " .. tostring(BMF.version))
 key/value lines. `bmf.version` prints the narrower package/build identity:
 
 ```text
-Omegga.Bridge.BMF bmf.health
-Omegga.Bridge.BMF bmf.version
+bmf.health
+bmf.version
 ```
 
 `bmf.version` includes `version`, `target_build`, `target_name`, `platform`,

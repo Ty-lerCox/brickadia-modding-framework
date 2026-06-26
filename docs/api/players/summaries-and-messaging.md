@@ -30,7 +30,7 @@ record. Otherwise a query is required.
 Server-console command route:
 
 ```text
-Omegga.Bridge.BMF bmf.players.summary target=OriginalBuilder
+bmf.players.summary target=OriginalBuilder
 ```
 
 ## `BMF.players.whisperSummary(player)`
@@ -50,7 +50,7 @@ BMF player summary: username=OriginalBuilder displayName=Build Lead id=11111111-
 Server-console command route:
 
 ```text
-Omegga.Bridge.BMF bmf.players.summary target=OriginalBuilder whisper=true
+bmf.players.summary target=OriginalBuilder whisper=true
 ```
 
 !!! warning

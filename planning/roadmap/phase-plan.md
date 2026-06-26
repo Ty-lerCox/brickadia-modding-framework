@@ -318,15 +318,15 @@ Current seed: `.github/workflows/unified-runtime.yml` defines the first unified
 CI workflow for workspace validation, CLI/core tests, Desktop build and release
 metadata validation, BMF-supported Omegga runtime tests, native helper
 validation with optional UE4SS-source builds, release package validation, docs
-builds, and manual/tagged MSI artifact creation. It is validated by
+builds, and manual/tagged Desktop artifact creation. It is validated by
 `scripts/validate-ci-workflows.ps1`.
 
 Deliverables:
 
 - CI for BMF Lua validation, native builds, Omegga tests, bridge plugin tests,
   CLI tests, docs, and packaging;
-- MSI installers as the primary user-facing BMF Desktop release artifact;
-- signed or hash-verified release artifacts, including MSI checksums and an
+- portable exe and MSI artifacts as the user-facing BMF Desktop release path;
+- signed or hash-verified release artifacts, including checksums and an
   update-safe release manifest and release catalog;
 - component manifests that drive updates;
 - rollback and repair coverage for failed updates;

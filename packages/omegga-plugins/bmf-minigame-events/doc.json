@@ -3,18 +3,13 @@
   "description": "Feeds Omegga-observed Brickadia minigame lifecycle and leaderboard changes into BMF events.",
   "author": "BMF",
   "config": {
-    "commandDir": {
-      "description": "Path to Mods/BMF/runtime/commands. If blank, OMEGGA_BMF_COMMAND_DIR, OMEGGA_BMF_RUNTIME_DIR, or the standard Omegga-managed BMF runtime path is used.",
+    "runtimeDir": {
+      "description": "Path to Mods/BMF/runtime for adapter status files. If blank, OMEGGA_BMF_RUNTIME_DIR or the standard Omegga-managed BMF runtime path is used.",
       "default": "",
       "type": "string"
     },
-    "eventTransport": {
-      "description": "How log-derived minigame events are delivered. event-log writes BMF-compatible runtime/events.jsonl records from Omegga and avoids BMF game-thread command dispatch. command uses bmf.minigames.events.emit so BMF Lua event handlers run.",
-      "default": "event-log",
-      "type": "string"
-    },
-    "eventLogPath": {
-      "description": "Path to Mods/BMF/runtime/events.jsonl for event-log transport. If blank, OMEGGA_BMF_EVENTS_PATH or the runtime directory beside commandDir is used.",
+    "bridgePluginName": {
+      "description": "Name of the loaded BMF Bridge plugin used for socket command delivery.",
       "default": "",
       "type": "string"
     },
@@ -39,7 +34,17 @@
       "type": "boolean"
     },
     "seedCacheTimeoutMs": {
-      "description": "Timeout while waiting for BMF.minigames.data.snapshot command-worker responses used for cache seeding.",
+      "description": "Timeout while waiting for BMF.minigames.data.snapshot socket responses used for cache seeding.",
+      "default": 5000,
+      "type": "number"
+    },
+    "eventCommandTimeoutMs": {
+      "description": "Timeout for BMF minigame event socket commands sent through BMF Bridge.",
+      "default": 5000,
+      "type": "number"
+    },
+    "snapshotImportTimeoutMs": {
+      "description": "Timeout for BMF minigame snapshot import socket commands sent through BMF Bridge.",
       "default": 5000,
       "type": "number"
     },

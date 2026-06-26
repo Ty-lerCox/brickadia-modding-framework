@@ -89,6 +89,19 @@ function cachePlayerRecord(player) {
   };
 }
 
+function playerCacheSignature(records) {
+  return JSON.stringify(records || []);
+}
+
+function readExistingPlayerCacheSignature(cachePath) {
+  try {
+    const cache = JSON.parse(fs.readFileSync(cachePath, 'utf8'));
+    return playerCacheSignature(Array.isArray(cache?.players) ? cache.players : []);
+  } catch (_error) {
+    return '';
+  }
+}
+
 function isoSeconds(date = new Date()) {
   return date.toISOString().replace(/\.\d{3}Z$/, 'Z');
 }
@@ -190,6 +203,7 @@ module.exports = class BmfPlayerSync {
     this.config = config || {};
     this.timer = null;
     this.interval = null;
+    this.lastPlayerCacheSignature = '';
     this.handlePlayerChange = this.handlePlayerChange.bind(this);
     this.handleManualSync = this.handleManualSync.bind(this);
     this.handleInteract = this.handleInteract.bind(this);
@@ -262,7 +276,9 @@ module.exports = class BmfPlayerSync {
       'interact',
       command,
       `[bmf-player-sync] queued interact message for player=${player.id || player.name || 'unknown'}`,
-    );
+    ).catch(error => {
+      console.warn(`[bmf-player-sync] interact forward failed: ${error.message || error}`);
+    });
   }
 
   startPeriodicSync() {
@@ -275,6 +291,7 @@ module.exports = class BmfPlayerSync {
       return;
     }
     if (this.interval) clearInterval(this.interval);
+    console.log(`[bmf-player-sync] periodic sync interval_ms=${intervalMs}`);
     this.interval = setInterval(() => this.scheduleSync('interval'), intervalMs);
   }
 
@@ -284,25 +301,12 @@ module.exports = class BmfPlayerSync {
     return this.config.forwardInteract === true;
   }
 
-  get commandDir() {
-    const configured = String(this.config.commandDir || '').trim();
+  get runtimeDir() {
+    const configured = String(this.config.runtimeDir || '').trim();
     if (configured) return path.resolve(configured);
 
-    const envCommandDir = String(process.env.OMEGGA_BMF_COMMAND_DIR || '').trim();
-    if (envCommandDir) return path.resolve(envCommandDir);
-
-    const envRuntimeDir = String(process.env.OMEGGA_BMF_RUNTIME_DIR || '').trim();
-    if (envRuntimeDir) return path.resolve(envRuntimeDir, 'commands');
-
-    return '';
-  }
-
-  get runtimeDir() {
     const envRuntimeDir = String(process.env.OMEGGA_BMF_RUNTIME_DIR || '').trim();
     if (envRuntimeDir) return path.resolve(envRuntimeDir);
-
-    const commandDir = this.commandDir;
-    if (commandDir) return path.resolve(commandDir, '..');
 
     return '';
   }
@@ -318,28 +322,45 @@ module.exports = class BmfPlayerSync {
     return runtimeDir ? path.join(runtimeDir, 'players.json') : '';
   }
 
-  queueCommand(prefix, command, logMessage) {
-    const commandDir = this.commandDir;
-    if (!commandDir) {
-      console.warn('[bmf-player-sync] commandDir is not configured');
-      return false;
+  async getBmfBridge() {
+    if (typeof this.omegga.getPlugin !== 'function') {
+      throw new Error('BMF Bridge plugin lookup is unavailable.');
     }
+    const names = [
+      String(this.config.bridgePluginName || '').trim(),
+      'BMF Bridge',
+      'bmf-bridge',
+    ].filter(Boolean);
+    for (const name of names) {
+      const bridge = await this.omegga.getPlugin(name);
+      if (bridge && bridge.loaded !== false && typeof bridge.emitPlugin === 'function') {
+        return bridge;
+      }
+    }
+    throw new Error('BMF Bridge plugin is not loaded.');
+  }
 
-    const id = `${prefix || 'command'}_${Date.now()}_${Math.floor(Math.random() * 1000000)}`;
-    const tmpPath = path.join(commandDir, `${id}.request.tmp`);
-    const requestPath = path.join(commandDir, `${id}.request.txt`);
+  async invokeBmfCommand(command, options = {}) {
+    const bridge = await this.getBmfBridge();
+    const response = await bridge.emitPlugin('invokeCommand', command, {
+      timeoutMs: Math.max(100, asNumber(options.timeoutMs, 5000)),
+      source: 'omegga.bmf-player-sync',
+    });
+    if (!response || response.ok === false) {
+      throw new Error(response?.detail || 'BMF bridge command failed.');
+    }
+    return response;
+  }
 
+  async queueCommand(prefix, command, logMessage) {
     try {
-      fs.mkdirSync(commandDir, { recursive: true });
-      fs.writeFileSync(tmpPath, command, 'utf8');
-      fs.renameSync(tmpPath, requestPath);
-      console.log(logMessage || `[bmf-player-sync] queued command ${id}`);
+      await this.invokeBmfCommand(command, {
+        idPrefix: prefix || 'command',
+      });
+      console.log(logMessage || `[bmf-player-sync] sent socket command ${prefix || 'command'}`);
       return true;
     } catch (error) {
-      try {
-        if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
-      } catch (_cleanupError) {}
-      console.warn(`[bmf-player-sync] failed to queue command: ${error.message}`);
+      console.warn(`[bmf-player-sync] failed to send socket command: ${error.message || error}`);
       return false;
     }
   }
@@ -351,12 +372,19 @@ module.exports = class BmfPlayerSync {
       return false;
     }
 
+    const records = players.map(cachePlayerRecord);
+    const signature = playerCacheSignature(records);
+    if (!this.lastPlayerCacheSignature && fs.existsSync(cachePath)) {
+      this.lastPlayerCacheSignature = readExistingPlayerCacheSignature(cachePath);
+    }
+    if (signature === this.lastPlayerCacheSignature) return false;
+
     const cache = {
       schemaVersion: 1,
       adapter: 'omegga-cache',
       source,
       updatedAt: isoSeconds(),
-      players: players.map(cachePlayerRecord),
+      players: records,
       invalid: [],
     };
     const tmpPath = `${cachePath}.${process.pid}.${Date.now()}.tmp`;
@@ -365,6 +393,7 @@ module.exports = class BmfPlayerSync {
       fs.mkdirSync(path.dirname(cachePath), { recursive: true });
       fs.writeFileSync(tmpPath, `${JSON.stringify(cache)}\n`, 'utf8');
       fs.renameSync(tmpPath, cachePath);
+      this.lastPlayerCacheSignature = signature;
       return true;
     } catch (error) {
       try {
@@ -380,17 +409,13 @@ module.exports = class BmfPlayerSync {
     const delay = Math.max(0, asNumber(this.config.syncDelayMs, 250));
     this.timer = setTimeout(() => {
       this.timer = null;
-      this.sync(reason);
+      this.sync(reason).catch(error => {
+        console.warn(`[bmf-player-sync] sync failed: ${error.message || error}`);
+      });
     }, delay);
   }
 
-  sync(reason) {
-    const commandDir = this.commandDir;
-    if (!commandDir) {
-      console.warn('[bmf-player-sync] commandDir is not configured');
-      return;
-    }
-
+  async sync(reason) {
     const omeggaPlayers = compactPlayers(
       typeof this.omegga.getPlayers === 'function'
         ? this.omegga.getPlayers()
@@ -413,7 +438,7 @@ module.exports = class BmfPlayerSync {
         `players=${JSON.stringify(players)}`,
       ].join(' ');
 
-      this.queueCommand(
+      await this.queueCommand(
         'players_sync',
         command,
         `[bmf-player-sync] queued ${players.length} player(s) reason=${reason || 'sync'} omegga=${omeggaPlayers.length} log=${logPlayers.length}`,

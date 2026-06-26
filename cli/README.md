@@ -219,11 +219,10 @@ named by `--grafana-api-token-env`; the token is not stored or printed.
 ## Traffic
 
 `traffic` renders the shared event-inspector snapshot used by BMF Desktop. It
-reads bounded data from `runtime/events.jsonl`, `runtime/audit.jsonl`,
-`runtime/socket.json`, `runtime/bmf-bridge-status.json`, and recent
-`runtime/commands/*.request.txt` / `*.response.txt` files. Payloads are
-redacted before CLI output, and the command does not send BMF commands or
-create server-side probes.
+subscribes to the authenticated BMF socket stream described by
+`runtime/socket.json` and includes `runtime/bmf-bridge-status.json` as
+diagnostic source metadata. Payloads are redacted before CLI output, and the
+command does not send BMF commands or create server-side probes.
 
 ## Logs
 

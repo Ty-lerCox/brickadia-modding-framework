@@ -52,7 +52,7 @@ The same wrapper is exposed to unattended bridge tests through the BMF command
 worker:
 
 ```text
-Omegga.Bridge.BMF bmf.world.saveas name=BMF_AfterThreeCarsAdditive
+bmf.world.saveas name=BMF_AfterThreeCarsAdditive
 ```
 
 Save proof is tracked in

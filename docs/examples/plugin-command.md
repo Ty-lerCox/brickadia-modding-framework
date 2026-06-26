@@ -1,7 +1,7 @@
 # Plugin Command
 
 Registers a server-console command owned by the plugin. Invoke it through the
-BMF command worker as `bmf.example`.
+BMF Bridge socket route as `bmf.example`.
 
 **Maturity:** `Copy-paste`
 **Required capabilities:** None

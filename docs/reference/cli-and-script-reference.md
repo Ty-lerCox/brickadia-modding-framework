@@ -63,7 +63,8 @@ service logs, updates, and snapshots to `%APPDATA%\BMF Desktop`.
 | Build a release zip | `.\scripts\build-release-package.ps1 -OutDir .\artifacts\local\release -Force` |
 | Validate a release zip | `.\scripts\validate-release-package.ps1` |
 | Build BMF Desktop MSI | `npm --prefix .\apps\bmf-desktop run dist:msi` |
-| Build BMF Desktop MSI release | `.\scripts\build-bmf-desktop-release.ps1 -BuildMsi -DownloadBaseUrl https://downloads.example/bmf -Force` |
+| Build BMF Desktop portable exe | `npm --prefix .\apps\bmf-desktop run dist:portable` |
+| Build BMF Desktop release | `.\scripts\build-bmf-desktop-release.ps1 -BuildMsi -BuildPortable -DownloadBaseUrl https://downloads.example/bmf -Force` |
 | Validate BMF Desktop release metadata | `.\scripts\validate-bmf-desktop-release.ps1` |
 | Validate Windows installer behavior | `.\scripts\validate-windows-installer.ps1` |
 | Validate documentation style | `python scripts\validate-docs-style.py` |

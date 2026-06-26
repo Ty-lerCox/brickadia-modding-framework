@@ -18,7 +18,7 @@ See [Vehicles](../vehicles.md) for the runtime facade.
 | Summarize vehicle-like dynamic actor groups | `scripts/summarize-vehicle-graphs.ps1` |
 | Render inventory reports | `scripts/export-vehicle-inventory.ps1` |
 | Snapshot a bridge-connected server | `scripts/snapshot-server-vehicles.ps1` |
-| Snapshot through BMF command worker | `scripts/snapshot-bmf-server-vehicles.ps1` |
+| Snapshot through BMF socket command route | `scripts/snapshot-bmf-server-vehicles.ps1` |
 | Validate one or multiple loaded vehicles | `scripts/validate-server-vehicle-snapshot.ps1`, `scripts/validate-server-multi-vehicle-snapshot.ps1` |
 | Validate runtime spawn sets | `scripts/validate-bmf-vehicle-spawn-set-runtime.ps1` |
 

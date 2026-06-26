@@ -89,6 +89,19 @@ function cachePlayerRecord(player) {
   };
 }
 
+function playerCacheSignature(records) {
+  return JSON.stringify(records || []);
+}
+
+function readExistingPlayerCacheSignature(cachePath) {
+  try {
+    const cache = JSON.parse(fs.readFileSync(cachePath, 'utf8'));
+    return playerCacheSignature(Array.isArray(cache?.players) ? cache.players : []);
+  } catch (_error) {
+    return '';
+  }
+}
+
 function isoSeconds(date = new Date()) {
   return date.toISOString().replace(/\.\d{3}Z$/, 'Z');
 }
@@ -190,6 +203,7 @@ module.exports = class BmfPlayerSync {
     this.config = config || {};
     this.timer = null;
     this.interval = null;
+    this.lastPlayerCacheSignature = '';
     this.handlePlayerChange = this.handlePlayerChange.bind(this);
     this.handleManualSync = this.handleManualSync.bind(this);
     this.handleInteract = this.handleInteract.bind(this);
@@ -275,6 +289,7 @@ module.exports = class BmfPlayerSync {
       return;
     }
     if (this.interval) clearInterval(this.interval);
+    console.log(`[bmf-player-sync] periodic sync interval_ms=${intervalMs}`);
     this.interval = setInterval(() => this.scheduleSync('interval'), intervalMs);
   }
 
@@ -351,12 +366,19 @@ module.exports = class BmfPlayerSync {
       return false;
     }
 
+    const records = players.map(cachePlayerRecord);
+    const signature = playerCacheSignature(records);
+    if (!this.lastPlayerCacheSignature && fs.existsSync(cachePath)) {
+      this.lastPlayerCacheSignature = readExistingPlayerCacheSignature(cachePath);
+    }
+    if (signature === this.lastPlayerCacheSignature) return false;
+
     const cache = {
       schemaVersion: 1,
       adapter: 'omegga-cache',
       source,
       updatedAt: isoSeconds(),
-      players: players.map(cachePlayerRecord),
+      players: records,
       invalid: [],
     };
     const tmpPath = `${cachePath}.${process.pid}.${Date.now()}.tmp`;
@@ -365,6 +387,7 @@ module.exports = class BmfPlayerSync {
       fs.mkdirSync(path.dirname(cachePath), { recursive: true });
       fs.writeFileSync(tmpPath, `${JSON.stringify(cache)}\n`, 'utf8');
       fs.renameSync(tmpPath, cachePath);
+      this.lastPlayerCacheSignature = signature;
       return true;
     } catch (error) {
       try {

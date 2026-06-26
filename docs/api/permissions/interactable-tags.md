@@ -51,7 +51,7 @@ contexts, denial mode, and feedback event paths into the native control file.
 Related command route:
 
 ```text
-Omegga.Bridge.BMF bmf.interact.console message=<tag> player=<uuid> name=<name>
+bmf.interact.console message=<tag> player=<uuid> name=<name>
 ```
 
 That command forwards Omegga-observed Interactable Print-to-Console messages

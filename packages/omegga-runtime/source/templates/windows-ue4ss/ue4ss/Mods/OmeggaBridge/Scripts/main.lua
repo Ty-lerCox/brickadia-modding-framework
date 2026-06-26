@@ -9,7 +9,6 @@ PREFAB_CAPTURE_PATH = os.getenv("OMEGGA_UE4SS_PREFAB_CAPTURE_PATH") or (BRIDGE_D
 PREFAB_CAPTURE_LATEST_PATH = os.getenv("OMEGGA_UE4SS_PREFAB_CAPTURE_LATEST_PATH") or (BRIDGE_DIR .. "/prefab-native-last.txt")
 NATIVE_PREFAB_COMMAND_PATH = os.getenv("OMEGGA_NATIVE_PREFAB_COMMAND_PATH") or "C:\\Users\\tycox\\OneDrive\\Documents\\GitHub\\Brickadia\\brickadia-ue4ss-re\\artifacts\\placeprefab-native-hook-outer-command.txt"
 NATIVE_PREFAB_STATUS_PATH = os.getenv("OMEGGA_NATIVE_PREFAB_STATUS_PATH") or "C:\\Users\\tycox\\OneDrive\\Documents\\GitHub\\Brickadia\\brickadia-ue4ss-re\\artifacts\\placeprefab-native-hook-outer-status.txt"
-BMF_COMMAND_DIR = os.getenv("OMEGGA_BMF_COMMAND_DIR") or "ue4ss/main/Mods/BMF/runtime/commands"
 local SESSION = os.getenv("OMEGGA_UE4SS_SESSION") or ""
 local TOKEN = os.getenv("OMEGGA_UE4SS_TOKEN") or ""
 local TRANSPORT = os.getenv("OMEGGA_UE4SS_TRANSPORT") or "file"
@@ -4045,6 +4044,55 @@ function OmeggaForceConsoleExecutor(spec)
     return "unknown executor: " .. tostring(executor)
 end
 
+function OmeggaClientTravel(spec)
+    local url = trim(tostring(spec or ""))
+    if url == "" then
+        return "client_travel ok=false code=CLIENT_TRAVEL_URL_REQUIRED detail=usage: Omegga.Bridge.ClientTravel <url>"
+    end
+
+    local controller = nil
+    local controller_source = ""
+    for _, class_name in ipairs({ "BP_PlayerController_C", "BRPlayerController", "PlayerController" }) do
+        local candidate = find_first_valid(class_name)
+        if is_valid_object(candidate) then
+            controller = candidate
+            controller_source = class_name
+            break
+        end
+    end
+
+    if not is_valid_object(controller) then
+        return "client_travel ok=false code=CLIENT_TRAVEL_CONTROLLER_UNAVAILABLE detail=no live PlayerController was available"
+    end
+
+    local commands = {
+        "ClientTravel " .. url .. " 0 false (A=0,B=0,C=0,D=0)",
+        "ClientTravel " .. url .. " TRAVEL_Absolute false",
+        "ClientTravel " .. url,
+    }
+    local lines = {
+        "client_travel url=" .. url,
+        "client_travel controller_source=" .. controller_source,
+        "client_travel controller=" .. get_object_label(controller, controller_source),
+    }
+
+    for index, travel_command in ipairs(commands) do
+        local helper_ok, did_succeed, output_or_error =
+            invoke_native_call_by_name(controller, travel_command, controller)
+        table.insert(lines, "client_travel.attempt." .. tostring(index) .. ".command=" .. travel_command)
+        table.insert(lines, "client_travel.attempt." .. tostring(index) .. ".helper_ok=" .. tostring(helper_ok))
+        table.insert(lines, "client_travel.attempt." .. tostring(index) .. ".success=" .. tostring(did_succeed))
+        table.insert(lines, "client_travel.attempt." .. tostring(index) .. ".detail=" .. trim(tostring(output_or_error or "")))
+        if helper_ok and did_succeed then
+            table.insert(lines, "client_travel ok=true code=OK")
+            return table.concat(lines, "\n")
+        end
+    end
+
+    table.insert(lines, "client_travel ok=false code=CLIENT_TRAVEL_FAILED")
+    return table.concat(lines, "\n")
+end
+
 local function try_call_function_by_name(candidate, context)
     if not candidate.object then
         return false, "CallFunctionByNameWithArguments target is unavailable on " .. candidate.object_label
@@ -5253,25 +5301,12 @@ local function try_emulate_command(command)
 
     local bmf_command = command:match("^Omegga%.Bridge%.BMF%s+(.+)$")
     if bmf_command and trim(bmf_command) ~= "" then
-        local spec = trim(bmf_command)
-        local request_id = tostring(os.time()) .. "-" .. tostring(math.random(1000000))
-        local command_dir = tostring(BMF_COMMAND_DIR or "ue4ss/main/Mods/BMF/runtime/commands")
-        local command_dir_windows = command_dir:gsub("/", "\\")
-        os.execute('if not exist "' .. command_dir_windows .. '" mkdir "' .. command_dir_windows .. '"')
-
-        local request_path = command_dir .. "/" .. request_id .. ".request.txt"
-        local response_path = command_dir .. "/" .. request_id .. ".response.txt"
-        if not write_file(request_path, spec .. "\n") then
-            return false, "emulated-bmf-queued", "failed to write BMF command request path=" .. tostring(request_path)
-        end
-
         return true,
-            "emulated-bmf-queued",
+            "emulated-bmf-socket-required",
             table.concat({
-                "queued_bmf_command id=" .. request_id,
-                "command=" .. spec,
-                "request_path=" .. request_path,
-                "response_path=" .. response_path,
+                "ok=false",
+                "detail=BMF commands require the BMF Bridge socket plugin.",
+                "command=" .. trim(bmf_command),
             }, "\n")
     end
 
@@ -5537,6 +5572,14 @@ local function try_emulate_command(command)
     local probe_call_by_name = command:match("^Omegga%.Bridge%.ProbeCallByName%s+(.+)$")
     if probe_call_by_name and trim(probe_call_by_name) ~= "" then
         return true, "emulated-probe-call-by-name", OmeggaProbeCallByName(trim(probe_call_by_name))
+    end
+
+    local client_travel = command:match("^Omegga%.Bridge%.ClientTravel%s+(.+)$")
+    if client_travel and trim(client_travel) ~= "" then
+        local ok, output = pcall(OmeggaClientTravel, trim(client_travel))
+        return true,
+            "emulated-client-travel",
+            ok and tostring(output or "") or ("client travel crashed: " .. tostring(output))
     end
 
     local probe_function_signature = command:match("^Omegga%.Bridge%.ProbeFunctionSignature%s+(.+)$")
@@ -10384,6 +10427,11 @@ local function log_runtime_status_snapshot()
         return
     end
     status_snapshot_logged = true
+
+    if os.getenv("OMEGGA_UE4SS_STATUS_SNAPSHOT_WORLD_READS") ~= "1" then
+        bridge_log("info", "Status snapshot skipped because UEHelpers world reads are disabled")
+        return
+    end
 
     local ok, UEHelpers = pcall(require, "UEHelpers")
     if not ok then

@@ -25,7 +25,7 @@ sequenceDiagram
     participant Server as Brickadia server
     participant UE4SS as UE4SS
     participant BMF as BMF Lua runtime
-    participant Cmd as BMF command worker
+    participant Cmd as BMF command dispatcher
     participant Files as runtime files
 
     Server->>UE4SS: Load UE4SS mods
@@ -33,9 +33,9 @@ sequenceDiagram
     BMF->>BMF: Load config and plugin manifests
     BMF->>Cmd: Register bmf.* console commands
     BMF->>Files: Write status.json and telemetry.json
-    Cmd->>BMF: Dispatch bmf.status / bmf.health
+    Cmd->>BMF: Dispatch bmf.status / bmf.health through an enabled transport
     BMF-->>Cmd: Return ok/code/key-value response
-    Cmd->>Files: Write command response and audit records
+    Cmd->>Files: Write audit records
 ```
 
 Review questions:
@@ -147,19 +147,19 @@ needs UE4SS or Brickadia-specific access.
 sequenceDiagram
     participant Plugin as Omegga plugin
     participant Omegga as Omegga fork
-    participant Bridge as Omegga.Bridge.BMF
-    participant Worker as BMF command worker
+    participant Bridge as BMF Bridge plugin
+    participant Socket as BMFSocket path
     participant BMF as BMF runtime
     participant Server as Brickadia server
 
     Plugin->>Omegga: Request BMF-backed action
-    Omegga->>Bridge: Format Omegga.Bridge.BMF command
-    Bridge->>Worker: Queue command file or socket command
-    Worker->>BMF: Dispatch bmf.* handler
+    Omegga->>Bridge: emitPlugin("invokeCommand", command)
+    Bridge->>Socket: Send authenticated command envelope
+    Socket->>BMF: Dispatch bmf.* handler
     BMF->>Server: Use safe UE4SS/helper path when needed
     Server-->>BMF: Return state or log-confirmed effect
-    BMF-->>Worker: Return ok/code/key-value response
-    Worker-->>Bridge: Write or send response
+    BMF-->>Socket: Return ok/code/key-value response
+    Socket-->>Bridge: Resolve command id
     Bridge-->>Omegga: Resolve command result
     Omegga-->>Plugin: Return Omegga-facing result
 ```
@@ -174,7 +174,7 @@ Review questions:
 
 For low-latency messaging between in-process BMF and external Omegga plugins,
 the supported fork starts an authenticated loopback socket broker. The JSONL
-event file remains the durable fallback and audit trail.
+event file remains durable diagnostic and audit evidence.
 
 ```mermaid
 sequenceDiagram
@@ -183,7 +183,6 @@ sequenceDiagram
     participant Broker as Omegga socket broker
     participant Plugin as Omegga plugin client
     participant Jsonl as runtime/events.jsonl
-    participant Fallback as runtime/commands
 
     Broker->>Broker: Bind loopback and generate token
     Broker-->>BMF: Pass OMEGGA_BMF_SOCKET_* env
@@ -200,14 +199,14 @@ sequenceDiagram
     Native-->>Broker: Forward response
     Broker-->>Plugin: Resolve command id
     alt socket unavailable
-        Plugin->>Fallback: Write command file
-        Fallback-->>Plugin: Read response file
+        Plugin-->>Plugin: Mark integration unhealthy and surface repair action
     end
 ```
 
 Review questions:
 
-- Which messages require socket latency, and which can use file fallback?
+- Which messages require socket latency, and what repair action should surface
+  when the socket is unavailable?
 - Where should authentication, replay protection, and backpressure live?
 - Are event names stable enough for external plugins to depend on?
 
@@ -303,7 +302,7 @@ Review questions:
 Tree cutting is the current concrete example of the hook-ingress pattern. BMF
 does not get this event from Omegga logs first. It captures the Brickadia melee
 impact in native code, drains the native queue into BMF Lua, emits a BMF event,
-and lets CityRPG consume that event over the socket or JSONL fallback.
+and lets CityRPG consume that event over the socket.
 
 ```mermaid
 sequenceDiagram
@@ -330,8 +329,8 @@ sequenceDiagram
     Queue-->>BMF: Return queued native payloads
     BMF->>BMF: Decode payload and mark source BMFSocketResourceNative
     BMF->>Bus: Emit cityrpg.treecut.hit or cityrpg.mine.hit
-    Bus->>Bus: Append runtime/events.jsonl and optional socket envelope
-    Bus-->>Relay: Deliver event by socket or JSONL fallback
+    Bus->>Bus: Append runtime/events.jsonl as evidence and send socket envelope
+    Bus-->>Relay: Deliver event by socket
     Relay->>CityRPG: Emit local treecut or minehit event
 
     Tree->>Tree: Verify itemType=handaxe and itemVerified=true

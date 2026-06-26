@@ -36,7 +36,7 @@ contract until BMF validates a newer fork or upstream release.
 | --- | --- |
 | Server supervisor | Starts and monitors the Brickadia dedicated server. |
 | UE4SS compatibility setup | Installs the pinned UE4SS payload, Brickadia config, signatures, and bridge mod. |
-| Command bridge | Routes `Omegga.Bridge.BMF ...` into the BMF command worker for canaries and admin commands. |
+| Command bridge | Routes BMF Bridge plugin commands through BMFSocket for canaries and admin commands. |
 | BMF socket broker | Provides an authenticated loopback TCP broker for low-latency BMF command responses and event delivery between UE4SS and Omegga plugins. |
 | Console execution helpers | Provides the proven CL13530 console manager and Kismet fallback paths used by world/save APIs and environment preset reloads. |
 | Live call-by-name helper | Enables the validated `ClientPushChatMessage` fanout to live `PlayerController` objects. |
@@ -65,12 +65,10 @@ The bridge has two authenticated client roles:
 - `cityrpg` or `plugin`: Omegga plugin clients that subscribe to BMF event
   records and send BMF command requests.
 
-When the socket bridge is available, integrations should use it first for BMF
-events and command responses. BMF still writes every framework event to
-`runtime/events.jsonl`, and plugins can still fall back to the file-backed
-`runtime/commands` worker when the socket is unavailable. That keeps validation
-and repair workflows durable while letting latency-sensitive gameplay avoid
-multi-second file polling.
+Integrations should use the socket bridge for BMF events and command responses.
+BMF still writes framework events to `runtime/events.jsonl` as diagnostic
+evidence, but socket disconnects are treated as unhealthy integration state
+instead of silently routing live traffic through file polling.
 
 Live validation on June 7, 2026 proved the CityRPG minigame team-assignment
 path using the socket bridge: a `joinminigame` event reached CityRPG and the
@@ -124,7 +122,7 @@ minigame data/event production is needed.
 The supported fork must provide or preserve these bridge/helper
 surfaces until BMF replaces them with equivalent names:
 
-- `Omegga.Bridge.BMF`
+- `BMF Bridge socket`
 - `Omegga.Bridge.ForceConsoleExecutor`
 - `OmeggaExecuteConsoleManagerInput`
 - `OmeggaExecuteKismetConsoleCommand`

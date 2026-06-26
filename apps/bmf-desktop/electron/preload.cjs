@@ -19,6 +19,9 @@ contextBridge.exposeInMainWorld('bmfDesktop', {
       field,
     });
   },
+  setupProfileFromBrickadiaInstall(input) {
+    return ipcRenderer.invoke('bmf:profile-from-brickadia-install', input);
+  },
   getOperationPlan(operationId, input) {
     return ipcRenderer.invoke('bmf:operation-plan', operationId, input);
   },

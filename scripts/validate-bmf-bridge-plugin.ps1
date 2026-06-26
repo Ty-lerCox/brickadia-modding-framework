@@ -59,13 +59,13 @@ try {
       'subscribe(filter, handler)',
       'unsubscribe(id)',
       'invokeCommand(commandText',
+      'emitPlugin(event',
       'normalizeEnvelope',
       'maxRecords',
-      'events.jsonl',
       'socket.json',
       'OMEGGA_BMF_SOCKET_TOKEN',
       'redactValue',
-      'file-command',
+      'unsupported BMF transport',
       'do-not-add-ui-driven-server-probes'
     )) {
       if ($source -notmatch [regex]::Escape($needle)) {
@@ -80,8 +80,7 @@ try {
     foreach ($needle in @(
       'game-mode neutral',
       'BMFSocket',
-      'runtime/events.jsonl',
-      'runtime/commands',
+      'BMF Lua -> BMFSocket -> Omegga socket broker',
       'bounded in-memory buffer',
       'does not start native probes'
     )) {

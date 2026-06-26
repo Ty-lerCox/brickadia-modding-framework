@@ -25,8 +25,8 @@ The first version is intentionally dependency-free CommonJS. It provides:
   automatic Grafana API calls;
 - confirmed Grafana dashboard uploads that require `confirm: import`, read API
   tokens from environment refs, and redact response/error data;
-- bounded redacted traffic snapshots from existing event, audit, socket,
-  bridge-status, and command files;
+- bounded redacted traffic snapshots from a single live BMFSocket loopback
+  subscriber plus socket and bridge status diagnostics;
 - confirmed redacted traffic trace exports for support bundles, with optional
   player anonymization and private-IP redaction;
 - bounded redacted log snapshots from existing runtime logs, JSONL files,
@@ -98,8 +98,9 @@ Telemetry plans render local config and dashboard import payloads only. The
 dashboard upload helper can call Grafana only when the caller passes explicit
 `confirm: import`; it does not push metrics or expose Grafana token values.
 
-Traffic snapshots read existing runtime files only. They do not send BMF
-commands, subscribe to live sockets, or create server-side probes.
+Traffic snapshots subscribe to the local BMFSocket broker in read-only mode and
+retain a bounded in-memory ring. They do not send BMF commands, tail JSONL as a
+live event source, or create server-side probes.
 
 Traffic trace exports reuse the same snapshot path and require
 `confirm: export` before writing a JSON support artifact. Desktop calls this

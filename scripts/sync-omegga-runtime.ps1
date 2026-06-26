@@ -204,7 +204,7 @@ try {
     $errors.Add('Synced Omegga source package.json must expose scripts.package:bmf.')
   }
   foreach ($surface in @(
-    'Omegga.Bridge.BMF',
+    'BmfSocketBridgeHost',
     'OmeggaExecuteConsoleManagerInput',
     'OmeggaExecuteKismetConsoleCommand',
     'OmeggaExecuteCachedConsoleExec',

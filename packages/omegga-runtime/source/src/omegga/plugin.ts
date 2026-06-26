@@ -604,8 +604,12 @@ export class PluginLoader {
 
       // add all the commands into a dictionary
       if (doc.commands) {
-        for (const cmd of doc.commands) {
-          this.commands[cmd.name.toLowerCase()] = cmd;
+        for (const entry of doc.commands) {
+          const cmd =
+            typeof entry === 'string' ? { name: entry } : entry;
+          const commandName = String(cmd?.name || '').trim();
+          if (!commandName) continue;
+          this.commands[commandName.toLowerCase()] = cmd;
           cmd._plugin = plugin;
         }
       }

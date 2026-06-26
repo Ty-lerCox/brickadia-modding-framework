@@ -22,11 +22,11 @@ the workflow map when reviewing docs coverage.
 ## Call BMF From Omegga
 
 1. Confirm the server uses the [Supported Runtime Matrix](../reference/supported-runtime.md).
-2. Use [Commands](../api/commands.md) for `Omegga.Bridge.BMF` command routes.
+2. Use [Commands](../api/commands.md) for `BMF Bridge socket` command routes.
 3. Use [Architecture Patterns](../architecture/architecture-patterns.md) for the
    command and socket sequence diagrams.
-4. Prefer socket transport for latency-sensitive plugin traffic and keep
-   file-backed commands as fallback.
+4. Use socket transport for plugin traffic and treat socket disconnects as an
+   unhealthy integration state.
 
 ## Emit And Consume Events
 
@@ -34,8 +34,8 @@ the workflow map when reviewing docs coverage.
 2. Use [Minigame Events](../api/minigames/events.md) for minigame-specific
    normalized event names and metadata.
 3. Use [Architecture Patterns](../architecture/architecture-patterns.md) for
-   Lua, socket, and JSONL event flow diagrams.
-4. Keep durable audit/fallback behavior through `runtime/events.jsonl`.
+   Lua and socket event flow diagrams.
+4. Keep durable audit evidence through `runtime/events.jsonl`.
 
 ## Validate Frame Time
 
@@ -52,8 +52,8 @@ bursty command/event traffic.
 1. Confirm the runtime path in [Supported Runtime Matrix](../reference/supported-runtime.md).
 2. Run `bmf.socket.status` through [Commands](../api/commands.md).
 3. Check Omegga broker health and BMF native socket counters.
-4. Fall back to file-backed commands or JSONL events when the socket is not
-   available.
+4. Fix the socket path when it is unavailable; do not treat JSONL or command
+   files as the live integration path.
 
 ## Inspect Tree Cutting
 

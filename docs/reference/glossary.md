@@ -11,10 +11,10 @@ link here instead of redefining it.
 | UE4SS | Unreal Engine 4 scripting/runtime layer BMF uses to load Lua and call selected Brickadia/Unreal surfaces. |
 | BMF-supported Omegga fork | The supported Windows Omegga fork used for server launch, UE4SS setup, command transport, player sync, logs, and validation. |
 | Stock upstream Omegga | Upstream Omegga builds outside the supported BMF Windows fork. These are not the current supported BMF runtime. |
-| BMFSocket | Optional native UE4SS C++ transport used by BMF for loopback command responses and event delivery. |
+| BMFSocket | Native UE4SS C++ transport used by BMF for loopback command responses and event delivery. |
 | Socket broker | The authenticated loopback TCP broker started by the supported Omegga fork for BMF and Omegga plugin clients. |
-| File-backed command worker | The durable fallback command path under `Mods/BMF/runtime/commands`. |
-| JSONL fallback | Durable event output such as `runtime/events.jsonl`, used for audit and fallback when socket delivery is unavailable. |
+| File-backed command worker | Legacy diagnostic command path under `Mods/BMF/runtime/commands`; not the normal live Omegga integration transport. |
+| JSONL event evidence | Durable event output such as `runtime/events.jsonl`, used for audit and diagnostics rather than live delivery. |
 | BMFFrameTelemetry | Optional native sampler that writes frame-time metrics to `runtime/frame-telemetry.json`. |
 
 ## Gameplay Terms

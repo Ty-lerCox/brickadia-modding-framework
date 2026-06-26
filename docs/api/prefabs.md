@@ -71,10 +71,10 @@ BMF.prefabs.loadBrz({
 If only `source` is supplied, the wrapper returns `PREFAB_STAGING_REQUIRED`
 instead of trying to run unsafe native prefab code from Lua.
 
-The same staged-load path is available through the BMF command worker:
+The same staged-load path is available through the BMF Bridge socket route:
 
 ```text
-Omegga.Bridge.BMF bmf.prefabs.loadbrz source=Car.brz name=BMF_CarPrefab x=58000 y=0 z=1000 yaw=0
+bmf.prefabs.loadbrz source=Car.brz name=BMF_CarPrefab x=58000 y=0 z=1000 yaw=0
 ```
 
 The command does not convert `.brz` archives inside UE4SS Lua. Stage the archive
@@ -95,7 +95,7 @@ BMF.prefabs.loadBrdb({
 Server-console command route:
 
 ```text
-Omegga.Bridge.BMF bmf.prefabs.loadbrdb name=BMF_ThreeCarsPrefab x=66000 y=0 z=1000 yaw=0
+bmf.prefabs.loadbrdb name=BMF_ThreeCarsPrefab x=66000 y=0 z=1000 yaw=0
 ```
 
 Copy the source `.brdb` into Brickadia `Saved/Worlds` first. The runtime command

@@ -129,8 +129,9 @@ function validateUnifiedRuntimeManifest(manifest, options = {}) {
     errors.push('Event traffic guardrails are missing.');
   } else {
     for (const guardrail of [
-      'observe-existing-traffic-only',
+      'socket-only-live-traffic',
       'do-not-add-ui-driven-server-probes',
+      'do-not-send-bmf-commands',
       'redact-secrets-before-display-or-export',
     ]) {
       if (!manifest.eventTraffic.guardrails.includes(guardrail)) {

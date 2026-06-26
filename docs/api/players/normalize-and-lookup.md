@@ -84,7 +84,7 @@ On a no-player headless server this safely returns `PLAYER_NOT_FOUND` with
 Server-console command route:
 
 ```text
-Omegga.Bridge.BMF bmf.players.find query=<uuid-or-name>
+bmf.players.find query=<uuid-or-name>
 ```
 
 ## `BMF.players.resolve(player)`
@@ -108,5 +108,5 @@ end
 Server-console command route:
 
 ```text
-Omegga.Bridge.BMF bmf.players.getname query=<uuid-or-name>
+bmf.players.getname query=<uuid-or-name>
 ```

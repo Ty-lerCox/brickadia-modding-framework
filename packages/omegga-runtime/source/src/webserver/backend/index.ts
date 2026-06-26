@@ -208,7 +208,7 @@ export default class Webserver {
     // setup the api
     setupApi(this, this.io);
 
-    // unauthenticated localhost scrape target for Grafana Alloy / Prometheus
+    // optional diagnostics scrape target
     setupPrometheusExporter(this);
 
     // setup metrics and tracking

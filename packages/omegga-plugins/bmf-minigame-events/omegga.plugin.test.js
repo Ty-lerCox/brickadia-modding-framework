@@ -6,50 +6,49 @@ const test = require('node:test');
 
 const BmfMinigameEvents = require('./omegga.plugin');
 
-async function waitForRequest(commandDir, timeoutMs = 2000) {
+async function waitForCommand(commands, timeoutMs = 2000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() <= deadline) {
-    if (fs.existsSync(commandDir)) {
-      const request = fs
-        .readdirSync(commandDir)
-        .find(file => file.endsWith('.request.txt'));
-      if (request) return path.join(commandDir, request);
-    }
+    if (commands.length > 0) return commands.shift();
     await new Promise(resolve => setTimeout(resolve, 25));
   }
-  throw new Error('timed out waiting for request file');
+  throw new Error('timed out waiting for socket command');
 }
 
-function readEventLogRecords(eventLogPath) {
-  return fs
-    .readFileSync(eventLogPath, 'utf8')
-    .trim()
-    .split(/\r?\n/)
-    .filter(Boolean)
-    .map(line => JSON.parse(line));
+function bridgeOmegga(commands, extras = {}) {
+  return {
+    ...extras,
+    async getPlugin(name) {
+      if (name !== 'BMF Bridge' && name !== 'bmf-bridge') return null;
+      return {
+        loaded: true,
+        async emitPlugin(event, command, options) {
+          commands.push({ event, command, options });
+          return {
+            ok: true,
+            detail: 'ok',
+            transport: 'socket',
+            response: {
+              text: [
+                'ok=true',
+                'detail=ok',
+                'command=bmf.minigames.data.snapshot',
+                `snapshot_json=${JSON.stringify(extras.snapshotResponse || {})}`,
+                '',
+              ].join('\n'),
+            },
+          };
+        },
+      };
+    },
+  };
 }
 
 test('seeds leave caches from BMF minigame data snapshot response', async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bmf-minigame-events-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
-  const commandDir = path.join(root, 'commands');
-  const adapter = new BmfMinigameEvents(
-    {},
-    {
-      commandDir,
-      seedCacheFromBmfData: true,
-      seedCacheTimeoutMs: 2000,
-    }
-  );
-
-  const seed = adapter.seedCacheFromBmfData('test');
-  const requestPath = await waitForRequest(commandDir);
-  assert.strictEqual(fs.readFileSync(requestPath, 'utf8'), 'bmf.minigames.data.snapshot');
-
-  const requestId = path.basename(requestPath, '.request.txt');
-  fs.rmSync(requestPath, { force: true });
-
+  const commands = [];
   const snapshot = {
     updatedAt: '2026-06-07T16:00:00Z',
     source: 'omegga.bmf-minigame-events',
@@ -114,21 +113,19 @@ test('seeds leave caches from BMF minigame data snapshot response', async t => {
       teamMemberships: 1,
     },
   };
-
-  fs.writeFileSync(
-    path.join(commandDir, `${requestId}.response.txt`),
-    [
-      'ok=true',
-      'detail=ok',
-      'command=bmf.minigames.data.snapshot',
-      'BMF bmf.minigames.data.snapshot OK Minigame data snapshot collected',
-      `snapshot_json=${JSON.stringify(snapshot)}`,
-      '',
-    ].join('\n'),
-    'utf8'
+  const adapter = new BmfMinigameEvents(
+    bridgeOmegga(commands, { snapshotResponse: snapshot }),
+    {
+      runtimeDir: root,
+      seedCacheFromBmfData: true,
+      seedCacheTimeoutMs: 2000,
+    }
   );
 
-  const summary = await seed;
+  const summary = await adapter.seedCacheFromBmfData('test');
+  assert.strictEqual(commands.length, 1);
+  assert.strictEqual(commands[0].event, 'invokeCommand');
+  assert.strictEqual(commands[0].command, 'bmf.minigames.data.snapshot');
   assert.strictEqual(summary.outcome, 'success');
   assert.strictEqual(summary.memberships, 1);
   assert.strictEqual(summary.teamMemberships, 1);
@@ -142,9 +139,9 @@ test('imports changed unsafe minigame snapshots through BMF data apply-snapshot'
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bmf-minigame-events-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
-  const commandDir = path.join(root, 'commands');
+  const commands = [];
   const match = groups => ({ groups });
-  const omegga = {
+  const omegga = bridgeOmegga(commands, {
     async watchLogChunk(command) {
       if (command === 'GetAll BP_Ruleset_C RulesetName') {
         return [
@@ -188,11 +185,11 @@ test('imports changed unsafe minigame snapshots through BMF data apply-snapshot'
       }
       return [];
     },
-  };
+  });
   const adapter = new BmfMinigameEvents(
     omegga,
     {
-      commandDir,
+      runtimeDir: root,
       allowUnsafeConsoleSnapshots: true,
       applySnapshotImports: true,
       emitSnapshotEvents: false,
@@ -202,8 +199,8 @@ test('imports changed unsafe minigame snapshots through BMF data apply-snapshot'
 
   await adapter.minigameCheck('real-minigame-validation');
 
-  const requestPath = await waitForRequest(commandDir);
-  const command = fs.readFileSync(requestPath, 'utf8');
+  const sent = await waitForCommand(commands);
+  const command = sent.command;
   assert.match(command, /^bmf\.minigames\.data\.apply-snapshot payload=/);
   assert.doesNotMatch(command, /^bmf\.minigames\.events\.emit/);
 
@@ -221,23 +218,23 @@ test('imports changed unsafe minigame snapshots through BMF data apply-snapshot'
   assert.strictEqual(adapter.counters.queued, 0);
 });
 
-test('observed JoinTeam command writes BMF-compatible teamchange event log by default', async t => {
+test('observed JoinTeam command emits BMF-compatible teamchange over the socket bridge', async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bmf-minigame-events-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
-  const commandDir = path.join(root, 'commands');
+  const commands = [];
   const player = {
     name: 'Ty',
     displayName: 'Ty',
     id: '33333333-3333-4333-8333-333333333333',
   };
   const adapter = new BmfMinigameEvents(
-    {
+    bridgeOmegga(commands, {
       getPlayer(ref) {
         return ref === 'Ty' ? player : null;
       },
-    },
-    { commandDir }
+    }),
+    { runtimeDir: root }
   );
 
   adapter.playerMinigameCache.set(player.id, {
@@ -247,68 +244,9 @@ test('observed JoinTeam command writes BMF-compatible teamchange event log by de
 
   assert.strictEqual(adapter.handleJoinTeamCommand('Ty', 'Blue'), true);
 
-  const records = readEventLogRecords(path.join(root, 'events.jsonl'));
-  assert.strictEqual(records.length, 1);
-  assert.strictEqual(records[0].source, 'event');
-  assert.strictEqual(records[0].data.event, 'minigames.teamchange');
-  assert.strictEqual(records[0].data.handlers, 0);
-  assert.deepStrictEqual(records[0].data.errors, []);
-  assert.strictEqual(records[0].data.ok, true);
-
-  const payload = records[0].data.payload;
-  assert.strictEqual(payload.source, 'omegga.bmf-minigame-events');
-  assert.strictEqual(payload.reason, 'jointeam-command');
-  assert.strictEqual(payload.player.id, player.id);
-  assert.strictEqual(payload.minigame.name, 'Codex Arena');
-  assert.strictEqual(payload.team.name, 'Blue');
-  assert.strictEqual(payload._bmf.event, 'minigames.teamchange');
-  assert.strictEqual(payload._bmf.legacyEvent, 'teamchange');
-  assert.strictEqual(payload._bmf.minigameKey, 'name:Codex Arena#0');
-  assert.strictEqual(payload._bmf.playerKey, player.id);
-  assert.strictEqual(adapter.counters.lastEvent.transport, 'event-log');
-  assert.strictEqual(adapter.counters.teamChanges, 1);
-  assert.strictEqual(adapter.teamMembershipCache.get(player.id).team.name, 'Blue');
-  assert.strictEqual(
-    fs.existsSync(commandDir)
-      ? fs.readdirSync(commandDir).filter(file => file.endsWith('.request.txt')).length
-      : 0,
-    0
-  );
-
-  assert.strictEqual(adapter.handleJoinTeamCommand('Ty', 'Blue'), false);
-  assert.strictEqual(adapter.counters.teamChanges, 1);
-});
-
-test('command transport queues BMF teamchange event for Lua handlers', async t => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bmf-minigame-events-'));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-
-  const commandDir = path.join(root, 'commands');
-  const player = {
-    name: 'Ty',
-    displayName: 'Ty',
-    id: '33333333-3333-4333-8333-333333333333',
-  };
-  const adapter = new BmfMinigameEvents(
-    {
-      getPlayer(ref) {
-        return ref === 'Ty' ? player : null;
-      },
-    },
-    { commandDir, eventTransport: 'command' }
-  );
-
-  adapter.playerMinigameCache.set(player.id, {
-    name: 'Codex Arena',
-    index: 0,
-  });
-
-  assert.strictEqual(adapter.handleJoinTeamCommand('Ty', 'Blue'), true);
-
-  const requestPath = await waitForRequest(commandDir);
-  const command = fs.readFileSync(requestPath, 'utf8');
+  const sent = await waitForCommand(commands);
+  const command = sent.command;
   assert.match(command, /^bmf\.minigames\.events\.emit event=teamchange payload=/);
-
   const payload = JSON.parse(decodeURIComponent(command.match(/payload=([^ ]+)/)[1]));
   assert.strictEqual(payload.source, 'omegga.bmf-minigame-events');
   assert.strictEqual(payload.reason, 'jointeam-command');
@@ -316,15 +254,11 @@ test('command transport queues BMF teamchange event for Lua handlers', async t =
   assert.strictEqual(payload.minigame.name, 'Codex Arena');
   assert.strictEqual(payload.team.name, 'Blue');
   assert.ok(payload._telemetry.adapterEventQueuedAtMs > 0);
-  assert.strictEqual(adapter.counters.lastEvent.transport, 'command');
+  assert.strictEqual(adapter.counters.lastEvent.transport, 'socket');
   assert.strictEqual(adapter.counters.teamChanges, 1);
   assert.strictEqual(adapter.teamMembershipCache.get(player.id).team.name, 'Blue');
 
   assert.strictEqual(adapter.handleJoinTeamCommand('Ty', 'Blue'), false);
-  assert.strictEqual(
-    fs.readdirSync(commandDir).filter(file => file.endsWith('.request.txt')).length,
-    1
-  );
   assert.strictEqual(adapter.counters.teamChanges, 1);
 });
 

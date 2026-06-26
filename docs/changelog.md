@@ -3,13 +3,33 @@
 Latest updates are listed first. Each update gets a version heading and a short
 set of category sections underneath it.
 
+## BMF v0.1.0-ea2.cl13530 - Portable Desktop Setup (June 26, 2026)
+
+Desktop
+- Added Easy mode as the default portable app surface for selecting a Windows
+  Brickadia Dedicated Server folder and reviewing core BMF health.
+- Added Easy-mode install, repair, start, and restart action buttons for rows
+  that report a remediation action.
+- Fixed packaged portable health checks so stale temporary extraction paths do
+  not keep the UI stuck on placeholder unknown rows.
+
+Release
+- Added portable exe output to the BMF Desktop release shape alongside MSI,
+  release manifest, catalog, checksums, and notes.
+- Labeled the release target as Brickadia EA2 `PC-Shipping-CL13530`.
+
+Docs
+- Reworked the examples navigation into grouped sections.
+- Added a portable-first Windows setup flow and documented that Linux/WSL are
+  not supported for the UE4SS/BMF dedicated-server runtime.
+
 ## BMF v0.1.0 - Foundation Update (June 13, 2026)
 
 Project Direction
 - BMF is being built as a safer server-side Lua framework for Brickadia dedicated servers.
 - The BMF-supported Omegga Windows fork is the main supported runtime for launching, bridging, validation, player sync, events, and metrics.
 - Typed Lua APIs, capability gates, and safe defaults are preferred over broad raw console execution.
-- Socket transport is the preferred path for latency-sensitive gameplay messaging, with file-backed commands and JSONL logs kept as fallbacks.
+- Socket transport is the live path for latency-sensitive gameplay messaging; JSONL logs are kept as diagnostics and audit evidence.
 - Native hooks, live object scans, and runtime brick mutation remain guarded surfaces that need validation before regular gameplay use.
 
 Framework
@@ -24,7 +44,6 @@ Framework
 Commands
 - Added the `bmf.*` command registry for server-console and bridge automation.
 - Added command output that is stable enough for scripts and validation runs to parse.
-- Added file-backed command transport under `Mods/BMF/runtime/commands`.
 - Added socket-backed command transport for faster Omegga-to-BMF calls.
 - Added access-checked command dispatch for routes that already have trustworthy actor identity.
 - Added command validation for success paths, denied paths, unknown commands, reload behavior, and plugin-owned commands.
@@ -34,7 +53,7 @@ Omegga
 - Added Omegga bridge support for BMF commands, player sync, minigame event feeds, chat helper delivery, and validation.
 - Added socket relay support so Omegga plugins can receive BMF events without waiting on file polling.
 - Improved socket polling and team-assignment flows so CityRPG-style plugins can respond faster.
-- Kept file-backed command and event paths available when socket transport is unavailable.
+- Report socket transport outages as unhealthy instead of silently falling back to files.
 
 Players
 - Added normalized player records for safer player identity handling.

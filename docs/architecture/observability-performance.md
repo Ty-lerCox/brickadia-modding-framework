@@ -61,17 +61,23 @@ import, and Alloy troubleshooting.
 
 ## Command Worker Performance Changes
 
-The file-backed command worker is still the durable fallback path for
-`Omegga.Bridge.BMF`, but it is no longer treated as cheap idle work.
+The file-backed command worker is legacy diagnostic plumbing, not the normal
+`BMF Bridge socket` integration path. It is no longer treated as cheap idle
+work.
 
 Current defaults:
 
 ```text
+BMF_COMMAND_WORKER_ENABLED=0
 BMF_COMMAND_WORKER_POLL_MS=250
 BMF_COMMAND_WORKER_FALLBACK_POLL_MS=1000
 BMF_COMMAND_WORKER_MAX_FILES_PER_POLL=1
 BMF_COMMAND_WORKER_ASYNC=1
 ```
+
+Enable `BMF_COMMAND_WORKER_ENABLED=1` only for legacy validation scripts that
+have not yet moved to the socket client. Normal BMF Desktop and Omegga adapter
+flows should use `BMFSocket`.
 
 When `LoopAsync` is available, the command worker enumerates request files from
 an async loop and schedules only the claimed command dispatch onto the game
@@ -94,6 +100,7 @@ Environment knobs:
 ```text
 BMF_ALLOW_LOOPASYNC=1                  allow LoopAsync explicitly
 BMF_ALLOW_LOOPASYNC=0                  force async loop off
+BMF_COMMAND_WORKER_ENABLED=1           opt in to legacy request-file validation
 BMF_COMMAND_WORKER_ASYNC=0             disable async command worker path
 BMF_ALLOW_GAME_THREAD_LOOP=1           allow game-thread loop fallback
 BMF_ALLOW_DELAYED_WORKER_FALLBACK=0    fail closed instead of using recurring delayed callbacks
@@ -126,7 +133,7 @@ OMEGGA_BMF_SOCKET_TOKEN=<token>
 OMEGGA_BMF_SOCKET_POLL_MS=200
 ```
 
-Use `bmf.socket.status` to inspect socket health from the command worker.
+Use `bmf.socket.status` to inspect socket health from the BMF Bridge socket route.
 
 ## Native Frame Telemetry
 
@@ -196,9 +203,9 @@ polling path. Keep it narrow:
 - Allow GUID/tag-only runtime-brick workflows only when they use existing
   bindings, explicit positions, or cached exact target-cache lookups. Do not
   add broad live UObject scans to satisfy convenience lookups.
-- Keep `BMF_BRICK_GRID_CONTEXT_CACHE_TTL_MS` short, currently `5000`, so
-  visibility/collision setters do not reuse native grid-context pointers long
-  after they were captured.
+- Keep `BMF_BRICK_GRID_CONTEXT_CACHE_TTL_MS` bounded, currently `300000`, so
+  visibility/collision setters can survive normal gameplay retry timing without
+  reusing native grid-context pointers indefinitely.
 - Keep native sparse-grid scans bounded with `BMF_BRICK_CONTEXT_SCAN_MAX_MS`.
   Gameplay background scans should stay near owner hints and leave
   `BMF_BRICK_CONTEXT_HINT_FULL_FALLBACK_ENABLED=0` so a miss returns a bounded

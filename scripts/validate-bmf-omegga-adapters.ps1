@@ -97,8 +97,10 @@ try {
     -RelativeRoot 'packages/omegga-plugins/bmf-player-sync' `
     -SourceMarkers @(
       'class BmfPlayerSync',
-      'OMEGGA_BMF_COMMAND_DIR',
+      'OMEGGA_BMF_RUNTIME_DIR',
       'OMEGGA_BMF_PLAYER_CACHE_PATH',
+      'bridgePluginName',
+      'invokeBmfCommand',
       'bmf.players.sync',
       'bmf.interact.console',
       'parseBrickadiaLogPlayers',
@@ -107,7 +109,8 @@ try {
     -ReadmeMarkers @(
       'safe Omegga player identity records',
       'packages/omegga-plugins/bmf-player-sync',
-      'OMEGGA_BMF_COMMAND_DIR',
+      'OMEGGA_BMF_RUNTIME_DIR',
+      'authenticated loopback socket',
       'bmf.players.sync',
       'InteractConsolePrefixGuard'
     )
@@ -118,8 +121,9 @@ try {
     -SourceMarkers @(
       'class BmfMinigameEvents',
       'allowUnsafeConsoleSnapshots',
-      'eventTransport',
-      'events.jsonl',
+      'bridgePluginName',
+      'eventTransport=socket',
+      'invokeBmfCommand',
       'bmf.minigames.events.emit',
       'bmf.minigames.data.apply-snapshot',
       'seedCacheFromBmfData',
@@ -129,7 +133,7 @@ try {
       'Safe by default',
       'allowUnsafeConsoleSnapshots=true',
       '/bmfminigamestatus',
-      'runtime/events.jsonl',
+      'through that socket bridge',
       'packages/omegga-plugins/bmf-minigame-events'
     )
 } catch {

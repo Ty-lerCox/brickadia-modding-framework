@@ -3,8 +3,13 @@
   "description": "Feeds Omegga player identity records into the Brickadia Modding Framework player cache.",
   "author": "BMF",
   "config": {
-    "commandDir": {
-      "description": "Path to Mods/BMF/runtime/commands. If blank, OMEGGA_BMF_COMMAND_DIR or OMEGGA_BMF_RUNTIME_DIR is used.",
+    "runtimeDir": {
+      "description": "Path to Mods/BMF/runtime for players.json when direct cache mode is used. If blank, OMEGGA_BMF_RUNTIME_DIR is used.",
+      "default": "",
+      "type": "string"
+    },
+    "bridgePluginName": {
+      "description": "Name of the loaded BMF Bridge plugin used for socket command delivery.",
       "default": "",
       "type": "string"
     },

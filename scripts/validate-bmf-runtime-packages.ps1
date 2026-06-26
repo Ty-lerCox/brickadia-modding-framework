@@ -141,7 +141,7 @@ try {
     -Name 'BMFSocket' `
     -ComponentId 'bmf-native-socket' `
     -PackageRoot 'packages/bmf-native-socket' `
-    -RequiredGuardrails @('optional-native-transport', 'file-bridge-fallback-required') `
+    -RequiredGuardrails @('required-live-transport', 'report-socket-unavailable-instead-of-file-fallback') `
     -ManifestComponent (Get-Component 'bmf-native-socket')
 
   Test-RuntimePackage `
@@ -154,7 +154,7 @@ try {
   Test-TextMarkers `
     -Path (Join-Path $Root 'framework/ue4ss/Mods/BMF/Scripts/main.lua') `
     -Name 'BMF runtime' `
-    -Markers @('local STATUS_PATH = RUNTIME_DIR .. "/status.json"', 'local EVENT_LOG_PATH = RUNTIME_DIR .. "/events.jsonl"', 'local COMMAND_DIR = RUNTIME_DIR .. "/commands"', 'BMF.commands.register')
+    -Markers @('local STATUS_PATH = RUNTIME_DIR .. "/status.json"', 'local EVENT_LOG_PATH = RUNTIME_DIR .. "/events.jsonl"', 'BMF_command_worker_enabled', 'BMF.commands.register')
 
   Test-TextMarkers `
     -Path (Join-Path $Root 'native/bmf_socket/CMakeLists.txt') `
@@ -164,7 +164,7 @@ try {
   Test-TextMarkers `
     -Path (Join-Path $Root 'framework/ue4ss/Mods/BMFSocket/README.md') `
     -Name 'BMFSocket README' `
-    -Markers @('BMFSocket is the optional UE4SS C++ transport mod', 'file-backed command and event bridge')
+    -Markers @('BMFSocket is the optional UE4SS C++ transport mod', 'report the socket path as unavailable')
 
   Test-TextMarkers `
     -Path (Join-Path $Root 'native/bmf_frame_telemetry/CMakeLists.txt') `

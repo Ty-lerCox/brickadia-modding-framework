@@ -74,7 +74,7 @@ until a dedicated compatibility bundle layout is introduced.
 ## Root Workspace Contract
 
 The root `package.json` is the maintainer entry point for setup, validation,
-tests, Desktop builds, and MSI release packaging. It declares only the
+tests, Desktop builds, and Desktop release packaging. It declares only the
 first-party packages that can safely participate in npm workspaces today:
 `apps/bmf-desktop`, `cli`, and `packages/orchestrator-core`.
 
@@ -101,7 +101,7 @@ top-level package validator.
 | Orchestration core | `packages/orchestrator-core` | Shared install, doctor, repair, launch, telemetry setup, and event inspection API. |
 | CLI | `apps/bmfctl` | Thin command-line wrapper over orchestration core. |
 | Desktop UI | `apps/bmf-desktop` | Electron plus Angular and Angular Material 3 wrapper over orchestration core. |
-| Release packaging | `apps/bmf-desktop` plus `release/` | Produces MSI installers, checksums, manifests, and optional portable developer artifacts. |
+| Release packaging | `apps/bmf-desktop` plus `release/` | Produces portable exe, MSI installer, checksums, manifests, and release notes. |
 
 ## What Not To Vendor
 

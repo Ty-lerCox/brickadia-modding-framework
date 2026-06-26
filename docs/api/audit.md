@@ -44,7 +44,7 @@ adds the plugin name when called from a plugin.
 Server-console command route:
 
 ```text
-Omegga.Bridge.BMF bmf.audit.tail limit=20
+bmf.audit.tail limit=20
 ```
 
 Current built-in audit records include framework/plugin load and unload,

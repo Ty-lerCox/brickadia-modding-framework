@@ -1,20 +1,26 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const net = require('node:net');
 
 const { createServerProfile, publicProfile } = require('./profiles');
 const { resolveRuntimePaths } = require('./observations');
 
 const DEFAULT_MAX_RECORDS = 100;
 const DEFAULT_MAX_BYTES_PER_FILE = 512 * 1024;
-const DEFAULT_MAX_COMMAND_FILES = 50;
+const DEFAULT_SOCKET_CONNECT_TIMEOUT_MS = 1000;
+const DEFAULT_SOCKET_RECONNECT_MS = 2500;
+const DEFAULT_MAX_SOCKET_BUFFER_BYTES = 1024 * 1024;
+const TRAFFIC_SOCKET_CLIENTS = new Map();
 const TRAFFIC_GUARDRAILS = [
-  'observe-existing-traffic-only',
-  'bounded-file-reads',
+  'socket-only-live-traffic',
+  'single-loopback-socket-subscriber',
+  'bounded-socket-buffer',
+  'bounded-status-file-reads',
   'bounded-record-retention',
-  'bounded-command-file-sampling',
   'redact-secrets-before-display-or-export',
   'do-not-add-ui-driven-server-probes',
+  'do-not-send-bmf-commands',
 ];
 const TRAFFIC_EXPORT_GUARDRAILS = [
   ...TRAFFIC_GUARDRAILS,
@@ -33,7 +39,7 @@ function collectTrafficSnapshot(input = {}, options = {}) {
   const limits = {
     maxRecords: boundedInteger(options.maxRecords ?? options.limit, DEFAULT_MAX_RECORDS, 1, 5000),
     maxBytesPerFile: boundedInteger(options.maxBytesPerFile ?? options.maxBytes, DEFAULT_MAX_BYTES_PER_FILE, 4096, 16 * 1024 * 1024),
-    maxCommandFiles: boundedInteger(options.maxCommandFiles, DEFAULT_MAX_COMMAND_FILES, 1, 500),
+    maxSocketBufferBytes: boundedInteger(options.maxSocketBufferBytes, DEFAULT_MAX_SOCKET_BUFFER_BYTES, 64 * 1024, 16 * 1024 * 1024),
   };
   const state = {
     records: [],
@@ -47,36 +53,25 @@ function collectTrafficSnapshot(input = {}, options = {}) {
     redactPrivateIps: Boolean(options.redactPrivateIps),
   };
 
-  readJsonlSource(state, 'events-jsonl', paths.eventsJsonl, {
+  readSocketStreamSource(state, paths, {
     ...redactionOptions,
-    maxBytes: limits.maxBytesPerFile,
-    kind: 'event-log',
-    transport: 'jsonl',
-    source: 'bmf-runtime',
+    maxRecords: limits.maxRecords,
+    maxBufferBytes: limits.maxSocketBufferBytes,
+    connectTimeoutMs: boundedInteger(options.socketConnectTimeoutMs, DEFAULT_SOCKET_CONNECT_TIMEOUT_MS, 100, 10_000),
+    reconnectMs: boundedInteger(options.socketReconnectMs, DEFAULT_SOCKET_RECONNECT_MS, 0, 60_000),
   });
-  readJsonlSource(state, 'audit-jsonl', paths.auditJsonl, {
+  readBridgeStatusSource(state, paths.bridgeStatus, {
     ...redactionOptions,
     maxBytes: limits.maxBytesPerFile,
-    kind: 'audit-log',
-    transport: 'audit-jsonl',
-    source: 'bmf-audit',
-  });
-  readJsonStatusSource(state, 'bmf-bridge-status', paths.bridgeStatus, {
-    ...redactionOptions,
-    maxBytes: limits.maxBytesPerFile,
+    maxRecords: limits.maxRecords,
     source: 'omegga.bmf-bridge',
-    transport: 'bridge-status',
   });
   readJsonStatusSource(state, 'socket-metadata', paths.socketMetadata, {
     ...redactionOptions,
     maxBytes: limits.maxBytesPerFile,
     source: 'bmf-socket',
     transport: 'socket-metadata',
-  });
-  readCommandSources(state, paths.commandDir, {
-    ...redactionOptions,
-    maxFiles: limits.maxCommandFiles,
-    maxBytes: Math.min(limits.maxBytesPerFile, 64 * 1024),
+    includeRecord: false,
   });
 
   const sorted = state.records
@@ -84,12 +79,22 @@ function collectTrafficSnapshot(input = {}, options = {}) {
     .sort((left, right) => {
       const leftTime = timestampMs(left.record.timestamp);
       const rightTime = timestampMs(right.record.timestamp);
-      if (leftTime !== rightTime) return leftTime - rightTime;
-      return left.index - right.index;
-    })
-    .map(item => item.record);
-  const retained = sorted.slice(-limits.maxRecords);
-  state.droppedRecords += Math.max(0, sorted.length - retained.length);
+      if (leftTime !== rightTime) return rightTime - leftTime;
+      return right.index - left.index;
+    });
+  const deduped = [];
+  const seenRecords = new Set();
+  for (const item of sorted) {
+    const key = recordDedupeKey(item.record);
+    if (seenRecords.has(key)) {
+      state.droppedRecords += 1;
+      continue;
+    }
+    seenRecords.add(key);
+    deduped.push(item.record);
+  }
+  const retained = deduped.slice(0, limits.maxRecords);
+  state.droppedRecords += Math.max(0, deduped.length - retained.length);
 
   return {
     schemaVersion: 1,
@@ -107,15 +112,314 @@ function collectTrafficSnapshot(input = {}, options = {}) {
     sources: state.sourceDiagnostics,
     paths: {
       runtimeDir: paths.runtimeDir || null,
-      eventsJsonl: paths.eventsJsonl || null,
-      auditJsonl: paths.auditJsonl || null,
-      commandDir: paths.commandDir || null,
       socketMetadata: paths.socketMetadata || null,
       bridgeStatus: paths.bridgeStatus || null,
     },
     limits,
     guardrails: TRAFFIC_GUARDRAILS,
   };
+}
+
+function readSocketStreamSource(state, paths, options) {
+  const diagnostic = sourceDiagnostic('socket-stream', null);
+  diagnostic.transport = 'socket';
+  diagnostic.status = 'unconfigured';
+  state.sourceDiagnostics.push(diagnostic);
+
+  const metadataPath = paths.socketMetadata;
+  if (!metadataPath || !fs.existsSync(metadataPath)) {
+    diagnostic.error = 'BMF socket metadata was not found.';
+    return;
+  }
+
+  try {
+    const result = readHeadText(metadataPath, 64 * 1024);
+    diagnostic.exists = true;
+    diagnostic.bytes = result.bytes;
+    diagnostic.truncated = result.truncated;
+    diagnostic.mtime = fs.statSync(metadataPath).mtime.toISOString();
+    const parsed = safeJsonParse(result.text);
+    if (!parsed.ok || !parsed.value || typeof parsed.value !== 'object') {
+      diagnostic.parseErrors += 1;
+      state.parseErrors += 1;
+      diagnostic.error = parsed.error || 'invalid socket metadata JSON';
+      return;
+    }
+
+    const metadata = parsed.value;
+    const config = {
+      enabled: asBoolean(metadata.enabled, true),
+      host: String(metadata.host || '127.0.0.1').trim() || '127.0.0.1',
+      port: boundedInteger(metadata.port, 0, 0, 65535),
+      token: String(metadata.token || '').trim(),
+      runtimeDir: paths.runtimeDir || path.dirname(metadataPath),
+      metadataPath,
+    };
+    diagnostic.path = config.port > 0 ? `tcp://${config.host}:${config.port}` : metadataPath;
+
+    if (!config.enabled || !config.port || !config.token) {
+      stopTrafficSocketClient(socketClientKey(config));
+      diagnostic.status = config.enabled ? 'not-configured' : 'disabled';
+      diagnostic.error = config.enabled
+        ? 'Socket metadata is missing host, port, or token.'
+        : 'Socket transport is disabled in metadata.';
+      return;
+    }
+
+    const client = ensureTrafficSocketClient(config, options);
+    const clientState = client.statusSnapshot();
+    diagnostic.status = clientState.status;
+    diagnostic.error = clientState.lastError || null;
+    diagnostic.socketRecords = clientState.records;
+    diagnostic.dropped = clientState.dropped;
+    state.droppedRecords += clientState.dropped;
+    diagnostic.connects = clientState.connects;
+    diagnostic.disconnects = clientState.disconnects;
+    diagnostic.parseErrors = clientState.parseErrors;
+    diagnostic.transports.push('socket');
+    diagnostic.clientId = clientState.clientId;
+
+    for (const record of client.recordsSnapshot(options.maxRecords)) {
+      addRecord(state, diagnostic, record, { transport: record.transport || 'socket' });
+    }
+  } catch (error) {
+    diagnostic.status = 'error';
+    diagnostic.error = error.message || String(error);
+  }
+}
+
+function ensureTrafficSocketClient(config, options) {
+  const key = socketClientKey(config);
+  const existing = TRAFFIC_SOCKET_CLIENTS.get(key);
+  if (existing) {
+    existing.updateOptions(options);
+    return existing;
+  }
+
+  for (const [clientKey, client] of TRAFFIC_SOCKET_CLIENTS.entries()) {
+    if (client.metadataPath === config.metadataPath && clientKey !== key) {
+      client.stop();
+      TRAFFIC_SOCKET_CLIENTS.delete(clientKey);
+    }
+  }
+
+  const client = new TrafficSocketClient(config, options);
+  TRAFFIC_SOCKET_CLIENTS.set(key, client);
+  client.connect();
+  return client;
+}
+
+function stopTrafficSocketClient(key) {
+  const client = TRAFFIC_SOCKET_CLIENTS.get(key);
+  if (!client) return;
+  client.stop();
+  TRAFFIC_SOCKET_CLIENTS.delete(key);
+}
+
+function resetTrafficSocketClients() {
+  for (const client of TRAFFIC_SOCKET_CLIENTS.values()) client.stop();
+  TRAFFIC_SOCKET_CLIENTS.clear();
+}
+
+function socketClientKey(config) {
+  const tokenHash = crypto.createHash('sha256').update(String(config.token || '')).digest('hex').slice(0, 16);
+  return [
+    path.resolve(config.metadataPath || config.runtimeDir || ''),
+    config.host,
+    config.port,
+    tokenHash,
+  ].join('|');
+}
+
+class TrafficSocketClient {
+  constructor(config, options = {}) {
+    this.config = { ...config };
+    this.metadataPath = config.metadataPath;
+    this.clientId = crypto.randomBytes(6).toString('hex');
+    this.records = [];
+    this.socket = null;
+    this.buffer = '';
+    this.reconnectTimer = null;
+    this.status = 'idle';
+    this.lastError = '';
+    this.connects = 0;
+    this.disconnects = 0;
+    this.parseErrors = 0;
+    this.dropped = 0;
+    this.updateOptions(options);
+  }
+
+  updateOptions(options = {}) {
+    this.options = {
+      anonymizePlayers: Boolean(options.anonymizePlayers),
+      redactPrivateIps: Boolean(options.redactPrivateIps),
+      maxRecords: boundedInteger(options.maxRecords, DEFAULT_MAX_RECORDS, 1, 5000),
+      maxBufferBytes: boundedInteger(options.maxBufferBytes, DEFAULT_MAX_SOCKET_BUFFER_BYTES, 64 * 1024, 16 * 1024 * 1024),
+      connectTimeoutMs: boundedInteger(options.connectTimeoutMs, DEFAULT_SOCKET_CONNECT_TIMEOUT_MS, 100, 10_000),
+      reconnectMs: boundedInteger(options.reconnectMs, DEFAULT_SOCKET_RECONNECT_MS, 0, 60_000),
+    };
+    this.trimRecords();
+  }
+
+  connect() {
+    if (this.socket && !this.socket.destroyed) return;
+    if (this.reconnectTimer) return;
+
+    this.status = 'connecting';
+    this.lastError = '';
+    const socket = net.createConnection({
+      host: this.config.host,
+      port: this.config.port,
+    });
+    this.socket = socket;
+    socket.setEncoding('utf8');
+    socket.setNoDelay(true);
+    socket.setTimeout(this.options.connectTimeoutMs);
+    socket.on('connect', () => {
+      this.status = 'connected';
+      this.lastError = '';
+      this.connects += 1;
+      socket.setTimeout(0);
+      this.write({
+        type: 'hello',
+        role: 'plugin',
+        source: 'bmf.desktop',
+        token: this.config.token,
+        version: 1,
+      });
+      this.write({
+        type: 'subscribe',
+        source: 'bmf.desktop',
+        events: ['*'],
+      });
+      this.recordStatus('connected', {
+        host: this.config.host,
+        port: this.config.port,
+      });
+    });
+    socket.on('data', chunk => this.handleData(chunk));
+    socket.on('timeout', () => {
+      this.lastError = `Timed out connecting to BMF socket ${this.config.host}:${this.config.port}.`;
+      socket.destroy();
+    });
+    socket.on('error', error => {
+      this.lastError = error.message || String(error);
+      this.status = 'error';
+    });
+    socket.on('close', () => {
+      if (this.status === 'connected') this.disconnects += 1;
+      if (this.status !== 'stopped') this.status = this.lastError ? 'error' : 'disconnected';
+      this.socket = null;
+      this.scheduleReconnect();
+    });
+  }
+
+  scheduleReconnect() {
+    if (this.status === 'stopped') return;
+    if (this.reconnectTimer || this.options.reconnectMs <= 0) return;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.connect();
+    }, this.options.reconnectMs);
+    if (typeof this.reconnectTimer.unref === 'function') this.reconnectTimer.unref();
+  }
+
+  stop() {
+    this.status = 'stopped';
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    if (this.socket) {
+      this.socket.removeAllListeners();
+      this.socket.destroy();
+    }
+    this.socket = null;
+  }
+
+  write(message) {
+    if (!this.socket || this.socket.destroyed || !this.socket.writable) return false;
+    this.socket.write(`${JSON.stringify(message)}\n`);
+    return true;
+  }
+
+  handleData(chunk) {
+    this.buffer += String(chunk || '');
+    if (Buffer.byteLength(this.buffer, 'utf8') > this.options.maxBufferBytes) {
+      this.lastError = 'BMF socket input buffer exceeded the configured limit.';
+      this.buffer = '';
+      this.recordEnvelope({
+        type: 'drop',
+        source: 'bmf.desktop',
+        ts: toIso(new Date()),
+        payload: { reason: 'socket-buffer-limit' },
+      });
+      return;
+    }
+
+    let index = this.buffer.indexOf('\n');
+    while (index >= 0) {
+      const line = this.buffer.slice(0, index).trim();
+      this.buffer = this.buffer.slice(index + 1);
+      if (line) this.handleLine(line);
+      index = this.buffer.indexOf('\n');
+    }
+  }
+
+  handleLine(line) {
+    const parsed = safeJsonParse(line);
+    if (!parsed.ok || !parsed.value || typeof parsed.value !== 'object') {
+      this.parseErrors += 1;
+      this.lastError = parsed.error || 'invalid socket JSON';
+      return;
+    }
+    this.recordEnvelope(parsed.value);
+  }
+
+  recordStatus(status, payload = {}) {
+    this.recordEnvelope({
+      type: 'status',
+      source: 'bmf.desktop',
+      ts: toIso(new Date()),
+      status,
+      payload,
+    });
+  }
+
+  recordEnvelope(message) {
+    const record = normalizeEnvelope(message, {
+      anonymizePlayers: this.options.anonymizePlayers,
+      redactPrivateIps: this.options.redactPrivateIps,
+      transport: 'socket',
+      source: message.source || 'bmf-socket',
+      observedAt: message.ts || toIso(new Date()),
+    });
+    this.records.push(record);
+    this.trimRecords();
+  }
+
+  trimRecords() {
+    const excess = this.records.length - this.options.maxRecords;
+    if (excess <= 0) return;
+    this.records.splice(0, excess);
+    this.dropped += excess;
+  }
+
+  recordsSnapshot(limit = this.options.maxRecords) {
+    const count = boundedInteger(limit, this.options.maxRecords, 1, 5000);
+    return this.records.slice(-count);
+  }
+
+  statusSnapshot() {
+    return {
+      clientId: this.clientId,
+      status: this.status,
+      lastError: this.lastError,
+      connects: this.connects,
+      disconnects: this.disconnects,
+      parseErrors: this.parseErrors,
+      records: this.records.length,
+      dropped: this.dropped,
+    };
+  }
 }
 
 function writeTrafficTraceExport(input = {}, options = {}) {
@@ -186,37 +490,6 @@ function normalizeProfile(input = {}) {
   return createServerProfile(input);
 }
 
-function readJsonlSource(state, id, filePath, options) {
-  const diagnostic = sourceDiagnostic(id, filePath);
-  state.sourceDiagnostics.push(diagnostic);
-  if (!filePath || !fs.existsSync(filePath)) return;
-
-  try {
-    const result = readTailText(filePath, options.maxBytes);
-    diagnostic.exists = true;
-    diagnostic.bytes = result.bytes;
-    diagnostic.truncated = result.truncated;
-    diagnostic.mtime = fs.statSync(filePath).mtime.toISOString();
-
-    const lines = splitJsonl(result.text, result.truncated);
-    for (const line of lines) {
-      const parsed = safeJsonParse(line);
-      if (!parsed.ok) {
-        diagnostic.parseErrors += 1;
-        state.parseErrors += 1;
-        continue;
-      }
-      const envelope = normalizeEnvelope(parsed.value, {
-        ...options,
-        observedAt: diagnostic.mtime,
-      });
-      addRecord(state, diagnostic, envelope, options);
-    }
-  } catch (error) {
-    diagnostic.error = error.message || String(error);
-  }
-}
-
 function readJsonStatusSource(state, id, filePath, options) {
   const diagnostic = sourceDiagnostic(id, filePath);
   state.sourceDiagnostics.push(diagnostic);
@@ -234,92 +507,67 @@ function readJsonStatusSource(state, id, filePath, options) {
       state.parseErrors += 1;
       return;
     }
-    addRecord(state, diagnostic, normalizeEnvelope(parsed.value, {
-      kind: 'status',
-      source: options.source,
-      transport: options.transport,
-      observedAt: diagnostic.mtime,
-    }), options);
-  } catch (error) {
-    diagnostic.error = error.message || String(error);
-  }
-}
-
-function readCommandSources(state, commandDir, options) {
-  const diagnostic = sourceDiagnostic('command-files', commandDir);
-  state.sourceDiagnostics.push(diagnostic);
-  if (!commandDir || !fs.existsSync(commandDir)) return;
-
-  try {
-    const entries = fs.readdirSync(commandDir, { withFileTypes: true })
-      .filter(entry => entry.isFile())
-      .filter(entry => /\.(request|response)\.(txt|json)$/i.test(entry.name))
-      .map(entry => {
-        const filePath = path.join(commandDir, entry.name);
-        const stat = fs.statSync(filePath);
-        return { filePath, name: entry.name, mtimeMs: stat.mtimeMs, mtime: stat.mtime.toISOString(), bytes: stat.size };
-      })
-      .sort((left, right) => right.mtimeMs - left.mtimeMs)
-      .slice(0, options.maxFiles)
-      .sort((left, right) => left.mtimeMs - right.mtimeMs);
-
-    diagnostic.exists = true;
-    diagnostic.bytes = entries.reduce((total, entry) => total + entry.bytes, 0);
-    diagnostic.truncated = entries.length >= options.maxFiles;
-
-    for (const entry of entries) {
-      const result = readHeadText(entry.filePath, options.maxBytes);
-      const envelope = normalizeCommandFile(entry, result.text, {
-        anonymizePlayers: options.anonymizePlayers,
-        redactPrivateIps: options.redactPrivateIps,
-        truncated: result.truncated,
-      });
-      addRecord(state, diagnostic, envelope, {
-        source: 'bmf-command-files',
-        transport: envelope.transport,
-      });
+    if (options.includeRecord !== false) {
+      addRecord(state, diagnostic, normalizeEnvelope(parsed.value, {
+        kind: 'status',
+        source: options.source,
+        transport: options.transport,
+        observedAt: diagnostic.mtime,
+      }), options);
     }
   } catch (error) {
     diagnostic.error = error.message || String(error);
   }
 }
 
-function normalizeCommandFile(entry, text, options = {}) {
-  const match = entry.name.match(/^(.*)\.(request|response)\.(txt|json)$/i);
-  const id = match ? match[1] : path.basename(entry.name);
-  const kind = match ? match[2].toLowerCase() : 'request';
-  if (kind === 'request') {
-    const commandText = String(text || '').trim();
-    return compactObject(normalizeCommandRecord({
-      id,
-      ts: entry.mtime,
-      command: commandText,
-      source: 'omegga.bmf-bridge',
-      status: 'pending',
-    }, {
-      transport: 'file-command',
-      file: entry.name,
-      truncated: options.truncated,
-    }));
-  }
+function readBridgeStatusSource(state, filePath, options) {
+  const diagnostic = sourceDiagnostic('bmf-bridge-status', filePath);
+  diagnostic.transport = 'socket';
+  state.sourceDiagnostics.push(diagnostic);
+  if (!filePath || !fs.existsSync(filePath)) return;
 
-  const payload = entry.name.toLowerCase().endsWith('.json')
-    ? parseJsonPayload(text)
-    : parseKeyValueResponse(text);
-  return compactObject(normalizeResponseRecord({
-    id,
-    ts: entry.mtime,
-    source: 'bmf',
-    ok: payload.ok,
-    detail: payload.detail,
-    command: payload.command,
-    response: payload,
-  }, {
-    transport: 'file-command',
-    file: entry.name,
-    truncated: options.truncated,
-    durationMs: payload.durationMs,
-  }));
+  try {
+    const result = readHeadText(filePath, options.maxBytes);
+    diagnostic.exists = true;
+    diagnostic.bytes = result.bytes;
+    diagnostic.truncated = result.truncated;
+    diagnostic.mtime = fs.statSync(filePath).mtime.toISOString();
+    const parsed = safeJsonParse(result.text);
+    if (!parsed.ok || !parsed.value || typeof parsed.value !== 'object') {
+      diagnostic.parseErrors += 1;
+      state.parseErrors += 1;
+      diagnostic.error = parsed.error || 'invalid bridge status JSON';
+      return;
+    }
+
+    const status = parsed.value;
+    diagnostic.status = status.socket?.connected === true
+      ? 'connected'
+      : status.socket?.connected === false
+        ? 'disconnected'
+        : String(status.transport || 'unknown');
+    diagnostic.retained = boundedInteger(status.records?.retained, 0, 0, 1_000_000);
+    diagnostic.dropped = boundedInteger(status.records?.dropped, 0, 0, 1_000_000);
+    diagnostic.coalesced = boundedInteger(status.records?.coalesced, 0, 0, 1_000_000);
+    diagnostic.statusLimit = boundedInteger(status.records?.statusLimit, 0, 0, 5000);
+    if (status.transport && !diagnostic.transports.includes(status.transport)) {
+      diagnostic.transports.push(status.transport);
+    }
+
+    const recentRecords = Array.isArray(status.recentRecords) ? status.recentRecords : [];
+    const limit = boundedInteger(options.maxRecords, DEFAULT_MAX_RECORDS, 1, 5000);
+    for (const retainedRecord of recentRecords.slice(-limit)) {
+      const record = normalizeEnvelope(retainedRecord, {
+        ...options,
+        source: retainedRecord?.source || options.source,
+        transport: retainedRecord?.transport || 'socket',
+        observedAt: diagnostic.mtime,
+      });
+      addRecord(state, diagnostic, record, { transport: record.transport || 'socket' });
+    }
+  } catch (error) {
+    diagnostic.error = error.message || String(error);
+  }
 }
 
 function normalizeEnvelope(input, options = {}) {
@@ -340,6 +588,9 @@ function normalizeEnvelope(input, options = {}) {
     record = message.record;
   }
 
+  if (isNormalizedTrafficRecord(record)) {
+    return compactObject(redactNormalizedTrafficRecord(record, options));
+  }
   if (looksLikeEventRecord(record)) {
     return compactObject(normalizeEventRecord(record, message, options));
   }
@@ -356,6 +607,35 @@ function normalizeEnvelope(input, options = {}) {
     return compactObject(normalizeDropRecord(message, options));
   }
   return compactObject(normalizeStatusRecord(message, options));
+}
+
+function isNormalizedTrafficRecord(record) {
+  return !!(
+    record &&
+    typeof record === 'object' &&
+    typeof record.type === 'string' &&
+    record.timestamp &&
+    !record.data
+  );
+}
+
+function redactNormalizedTrafficRecord(record, options) {
+  const redacted = redactValue(record.payload ?? {}, options);
+  return {
+    id: String(record.id || ''),
+    timestamp: String(record.timestamp || record.ts || options.observedAt || toIso(new Date())),
+    type: String(record.type || 'status'),
+    event: String(record.event || ''),
+    command: String(record.command || ''),
+    source: String(record.source || options.source || 'bmf'),
+    transport: String(record.transport || options.transport || 'unknown'),
+    status: String(record.status || 'ok'),
+    payload: redacted.value,
+    durationMs: numberOrUndefined(record.durationMs),
+    consumer: String(record.consumer || ''),
+    coalesced: numberOrUndefined(record.coalesced),
+    redactions: boundedInteger(record.redactions, 0, 0, 1_000_000) + redacted.redactions,
+  };
 }
 
 function looksLikeEventRecord(record) {
@@ -404,7 +684,7 @@ function normalizeAuditRecord(record, options) {
     event: String(record.action || record.auditAction || ''),
     command: commandName(record.data?.command || record.command || ''),
     source: String(record.source || options.source || 'bmf-audit'),
-    transport: options.transport || 'audit-jsonl',
+    transport: options.transport || record.transport || 'unknown',
     status: record.ok === false || record.severity === 'error' ? 'error' : 'ok',
     payload: redacted.value,
     durationMs: numberOrUndefined(record.durationMs || record.data?.durationMs),
@@ -504,7 +784,7 @@ function normalizeStatusRecord(message, options) {
     command: '',
     source: String(message.source || options.source || 'omegga.bmf-bridge'),
     transport: options.transport || message.transport || 'unknown',
-    status: String(message.status || (socketConnected === false ? 'fallback' : 'ok')),
+    status: String(message.status || (socketConnected === false ? 'disconnected' : 'ok')),
     payload: redacted.value,
     durationMs: undefined,
     consumer: '',
@@ -607,32 +887,6 @@ function parseKeyValueResponse(text) {
   };
 }
 
-function parseJsonPayload(text) {
-  const parsed = safeJsonParse(text);
-  if (!parsed.ok || !parsed.value || typeof parsed.value !== 'object') {
-    return { ok: false, detail: parsed.error || 'invalid JSON', command: '', raw: String(text || '') };
-  }
-  return parsed.value;
-}
-
-function readTailText(filePath, maxBytes) {
-  const stat = fs.statSync(filePath);
-  const bytes = Math.min(stat.size, maxBytes);
-  const start = Math.max(0, stat.size - bytes);
-  const buffer = Buffer.alloc(bytes);
-  const fd = fs.openSync(filePath, 'r');
-  try {
-    fs.readSync(fd, buffer, 0, bytes, start);
-  } finally {
-    fs.closeSync(fd);
-  }
-  return {
-    text: buffer.toString('utf8'),
-    bytes,
-    truncated: start > 0,
-  };
-}
-
 function readHeadText(filePath, maxBytes) {
   const stat = fs.statSync(filePath);
   const bytes = Math.min(stat.size, maxBytes);
@@ -648,12 +902,6 @@ function readHeadText(filePath, maxBytes) {
     bytes,
     truncated: stat.size > bytes,
   };
-}
-
-function splitJsonl(text, truncated) {
-  const lines = String(text || '').split(/\r?\n/);
-  if (truncated && lines.length > 0) lines.shift();
-  return lines.map(line => line.trim()).filter(Boolean);
 }
 
 function safeJsonParse(text) {
@@ -708,6 +956,17 @@ function boundedInteger(value, fallback, min, max) {
   return Math.min(max, Math.max(min, Math.floor(parsed)));
 }
 
+function asBoolean(value, fallback = false) {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
+    if (['false', '0', 'no', 'off'].includes(normalized)) return false;
+  }
+  return fallback;
+}
+
 function numberOrUndefined(value) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : undefined;
@@ -718,13 +977,39 @@ function timestampMs(value) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function recordDedupeKey(record) {
+  const type = String(record?.type || '');
+  const event = String(record?.event || '');
+  const command = String(record?.command || '');
+  const id = String(record?.id || '');
+  if (id) return ['id', type, event, command, id].join('|');
+  return [
+    'record',
+    String(record?.timestamp || ''),
+    type,
+    event,
+    command,
+    String(record?.source || ''),
+    String(record?.transport || ''),
+    String(record?.status || ''),
+    payloadDedupeKey(record?.payload),
+  ].join('|');
+}
+
+function payloadDedupeKey(payload) {
+  try {
+    return JSON.stringify(payload) || '';
+  } catch (_error) {
+    return String(payload || '');
+  }
+}
+
 function toIso(value) {
   return new Date(value).toISOString();
 }
 
 module.exports = {
   DEFAULT_MAX_BYTES_PER_FILE,
-  DEFAULT_MAX_COMMAND_FILES,
   DEFAULT_MAX_RECORDS,
   TRAFFIC_EXPORT_GUARDRAILS,
   TRAFFIC_GUARDRAILS,
@@ -732,5 +1017,6 @@ module.exports = {
   normalizeEnvelope,
   parseKeyValueResponse,
   redactValue,
+  resetTrafficSocketClients,
   writeTrafficTraceExport,
 };

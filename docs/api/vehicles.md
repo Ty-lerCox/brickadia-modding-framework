@@ -71,12 +71,12 @@ the expected vehicle-like dynamic actor graphs; see the
 
 ## Command Route
 
-Headless automation can drive the same API through the BMF command worker:
+Headless automation can drive the same API through the BMF Bridge socket route:
 
 ```text
-Omegga.Bridge.BMF bmf.vehicles.spawnset prefix=BMF_VehicleSpawnSet count=3 startX=70000 stepX=2000 y=0 z=1000 yaw=0
-Omegga.Bridge.BMF bmf.world.saveas name=BMF_AfterVehicleSpawnSet
-Omegga.Bridge.BMF bmf.vehicles.snapshot name=BMF_VehicleSnapshot
+bmf.vehicles.spawnset prefix=BMF_VehicleSpawnSet count=3 startX=70000 stepX=2000 y=0 z=1000 yaw=0
+bmf.world.saveas name=BMF_AfterVehicleSpawnSet
+bmf.vehicles.snapshot name=BMF_VehicleSnapshot
 ```
 
 `bmf.vehicles.spawnset` assumes the staged worlds already exist under

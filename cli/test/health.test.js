@@ -22,7 +22,7 @@ test('bmfctl health reads shared local profile observations from runtime files',
     path.join(runtimeDir, 'status.json'),
     JSON.stringify({
       state: 'running',
-      version: '0.1.0-dev',
+      version: '0.1.0-ea2.cl13530',
       updated_at: new Date().toISOString(),
       server_ready: true,
       command_worker_mode: 'async',
@@ -36,6 +36,7 @@ test('bmfctl health reads shared local profile observations from runtime files',
       host: '127.0.0.1',
       port: 49152,
       token: 'socket-token',
+      lastStatus: JSON.stringify({ connected: true }),
     }),
   );
   write(path.join(runtimeDir, 'frame-telemetry.json'), JSON.stringify({ sampleCount: 12, maxFrameMs: 15 }));

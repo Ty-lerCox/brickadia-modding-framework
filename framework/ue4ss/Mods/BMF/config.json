@@ -1,7 +1,7 @@
 {
   "allowPluginServerExec": false,
   "allowPluginServerShutdown": false,
-  "jsonlLogs": true,
+  "jsonlLogs": false,
   "pluginWatchdogEnabled": true,
   "pluginWatchdogMaxErrors": 3,
   "allowPluginUnsafeGlobals": false,

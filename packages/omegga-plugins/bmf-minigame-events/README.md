@@ -1,17 +1,16 @@
 # BMF Minigame Events
 
-Omegga adapter that observes safe Brickadia minigame logs, then queues BMF
-command files:
+Omegga adapter that observes safe Brickadia minigame logs, then sends BMF
+commands through the loaded `BMF Bridge` socket path:
 
 ```text
 bmf.minigames.events.emit event=<name> payload=<percent-encoded-json>
 bmf.minigames.data.apply-snapshot payload=<percent-encoded-json>
 ```
 
-BMF appends those events to `Mods/BMF/runtime/events.jsonl` as namespaced
-events such as `minigames.joinminigame`. CityRPG can tail that JSONL stream
-through its BMF event relay and does not need the legacy `omegga-minigameevents`
-subscriber plugin.
+BMF emits those events through the in-process event bus and BMFSocket as
+namespaced events such as `minigames.joinminigame`. JSONL output, when enabled
+by BMF itself, is diagnostic evidence rather than this adapter's live transport.
 
 Canonical package path:
 
@@ -58,14 +57,14 @@ Unsafe snapshot imports and snapshot-derived events are opt-in only with
 
 ## Install
 
-Copy this folder into Omegga's `plugins` directory. Configure `commandDir`, set
-`OMEGGA_BMF_COMMAND_DIR`/`OMEGGA_BMF_RUNTIME_DIR`, or use the standard
-Omegga-managed BMF runtime path under `%APPDATA%\omegga\steam_installs\main`.
+Copy this folder into Omegga's `plugins` directory together with `bmf-bridge`.
+Configure `runtimeDir` or set `OMEGGA_BMF_RUNTIME_DIR` if adapter status should
+be written outside the standard Omegga-managed BMF runtime path under
+`%APPDATA%\omegga\steam_installs\main`.
 
-The adapter writes request files into `Mods/BMF/runtime/commands`; the BMF
-command worker consumes those files and writes the final BMF data/event records.
-Startup cache seeding and safe manual syncs use the same command worker and
-wait for the matching `.response.txt` file from `bmf.minigames.data.snapshot`.
+The adapter requires the loaded `BMF Bridge` plugin for BMF command delivery.
+Startup cache seeding and safe manual syncs call `bmf.minigames.data.snapshot`
+through that socket bridge and wait for the socket response.
 
 ## Commands
 

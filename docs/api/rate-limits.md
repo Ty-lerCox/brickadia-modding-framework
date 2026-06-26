@@ -57,7 +57,7 @@ Rate-limit denials are written to `runtime/audit.jsonl` as
 Server-console command route:
 
 ```text
-Omegga.Bridge.BMF bmf.ratelimits
+bmf.ratelimits
 ```
 
 ## Validation

@@ -18,7 +18,23 @@ function requestFiles(commandDir) {
     : [];
 }
 
-test('writes a BMF player cache from Omegga player records', t => {
+function bridgeOmegga(commands, extras = {}) {
+  return {
+    ...extras,
+    async getPlugin(name) {
+      if (name !== 'BMF Bridge' && name !== 'bmf-bridge') return null;
+      return {
+        loaded: true,
+        async emitPlugin(event, command, options) {
+          commands.push({ event, command, options });
+          return { ok: true, detail: 'ok', transport: 'socket' };
+        },
+      };
+    },
+  };
+}
+
+test('writes a BMF player cache from Omegga player records', async t => {
   const root = tempRoot(t);
   const commandDir = path.join(root, 'commands');
   const adapter = new BmfPlayerSync(
@@ -30,10 +46,10 @@ test('writes a BMF player cache from Omegga player records', t => {
         ];
       },
     },
-    { commandDir }
+    { runtimeDir: root }
   );
 
-  adapter.sync('unit-test');
+  await adapter.sync('unit-test');
 
   const cachePath = path.join(root, 'players.json');
   assert.equal(fs.existsSync(cachePath), true);
@@ -47,11 +63,29 @@ test('writes a BMF player cache from Omegga player records', t => {
   assert.deepEqual(requestFiles(commandDir), []);
 });
 
-test('queues bmf.players.sync when command bridge mode is enabled', t => {
+test('skips unchanged BMF player cache writes', async t => {
+  const root = tempRoot(t);
+  const cachePath = path.join(root, 'players.json');
+  const player = ['Ty', 'Ty Display', '33333333-3333-4333-8333-333333333333', 'BP_PlayerController_C_1', 'BP_PlayerState_C_1'];
+  const adapter = new BmfPlayerSync({}, { runtimeDir: root });
+
+  assert.equal(adapter.writePlayerCache([player], 'unit-test'), true);
+  const first = fs.readFileSync(cachePath, 'utf8');
+
+  assert.equal(adapter.writePlayerCache([player], 'interval'), false);
+  assert.equal(fs.readFileSync(cachePath, 'utf8'), first);
+
+  const restartedAdapter = new BmfPlayerSync({}, { runtimeDir: root });
+  assert.equal(restartedAdapter.writePlayerCache([player], 'interval-after-restart'), false);
+  assert.equal(fs.readFileSync(cachePath, 'utf8'), first);
+});
+
+test('sends bmf.players.sync over the BMF bridge socket when command bridge mode is enabled', async t => {
   const root = tempRoot(t);
   const commandDir = path.join(root, 'commands');
+  const commands = [];
   const adapter = new BmfPlayerSync(
-    {
+    bridgeOmegga(commands, {
       players: [
         {
           name: 'Ty',
@@ -61,29 +95,32 @@ test('queues bmf.players.sync when command bridge mode is enabled', t => {
           state: 'BP_PlayerState_C_1',
         },
       ],
-    },
+    }),
     {
-      commandDir,
+      runtimeDir: root,
       commandBridge: true,
     }
   );
 
-  adapter.sync('bridge-test');
+  await adapter.sync('bridge-test');
 
-  const files = requestFiles(commandDir);
-  assert.equal(files.length, 1);
-  const command = fs.readFileSync(path.join(commandDir, files[0]), 'utf8');
+  assert.equal(requestFiles(commandDir).length, 0);
+  assert.equal(commands.length, 1);
+  const command = commands[0].command;
   assert.match(command, /^bmf\.players\.sync adapter=omegga-cache source=omegga\.players\.raw\.bridge-test players=/);
+  assert.equal(commands[0].event, 'invokeCommand');
+  assert.equal(commands[0].options.source, 'omegga.bmf-player-sync');
   assert.equal(fs.existsSync(path.join(root, 'players.json')), false);
 });
 
-test('forwards interact events as percent-encoded BMF command requests when explicitly enabled', t => {
+test('forwards interact events as percent-encoded BMF socket commands when explicitly enabled', async t => {
   const root = tempRoot(t);
   const commandDir = path.join(root, 'commands');
+  const commands = [];
   const adapter = new BmfPlayerSync(
-    {},
+    bridgeOmegga(commands),
     {
-      commandDir,
+      runtimeDir: root,
       forwardInteract: true,
     }
   );
@@ -100,9 +137,11 @@ test('forwards interact events as percent-encoded BMF command requests when expl
     position: [1, 2, 3],
   });
 
-  const files = requestFiles(commandDir);
-  assert.equal(files.length, 1);
-  const command = fs.readFileSync(path.join(commandDir, files[0]), 'utf8');
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(requestFiles(commandDir).length, 0);
+  assert.equal(commands.length, 1);
+  const command = commands[0].command;
   assert.match(command, /^bmf\.interact\.console source=omegga\.interact /);
   assert.match(command, /player=33333333-3333-4333-8333-333333333333/);
   assert.match(command, /name=Ty%20Cox/);

@@ -99,7 +99,7 @@ try {
       $errors.Add('Omegga runtime package syncMetadata must point at packages/omegga-runtime/sync-metadata.json.')
     }
     foreach ($surface in @(
-      'Omegga.Bridge.BMF',
+      'BMF Bridge socket',
       'OmeggaExecuteConsoleManagerInput',
       'OmeggaCallFunctionByNameWithArguments',
       'RegisterConsoleCommandGlobalHandler'

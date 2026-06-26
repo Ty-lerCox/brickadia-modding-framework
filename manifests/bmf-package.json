@@ -2,7 +2,7 @@
   "name": "bmf",
   "displayName": "BMF",
   "fullName": "Brickadia Modding Framework",
-  "version": "0.1.0-dev",
+  "version": "0.1.0-ea2.cl13530",
   "status": "experimental",
   "runtime": {
     "type": "UE4SS Lua",

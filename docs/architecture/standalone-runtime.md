@@ -37,7 +37,7 @@ work.
 | --- | --- |
 | Server launch and restart | BMF Supervisor |
 | Server log tailing and crash evidence | BMF Supervisor |
-| `bmf.*` command injection | BMF Supervisor plus BMF command worker |
+| `bmf.*` command injection | BMF Supervisor socket transport |
 | Console command execution inside Brickadia | BMF Native Helpers with provider-neutral names |
 | Broadcasts and whispers | `BMF.chat` through safe PlayerController client RPC calls |
 | Player username, display name, UUID, and counts | `BMF.players` through Brickadia logs, saved caches, and safe live-controller adapters |
@@ -62,8 +62,8 @@ work.
 
 ## Immediate Work Queue
 
-1. Add a BMF command injector that writes command-worker requests directly,
-   replacing `Omegga.Bridge.BMF` for canaries.
+1. Add a BMF Supervisor socket client that can replace Omegga-owned BMF Bridge
+   canaries.
 2. Rename the runtime executor abstraction around provider-neutral helper names,
    while keeping compatibility shims for older helper globals when present.
 3. Promote the Brickadia-log player identity adapter as the default

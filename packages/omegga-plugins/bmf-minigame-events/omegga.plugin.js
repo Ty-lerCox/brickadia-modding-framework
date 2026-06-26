@@ -24,10 +24,6 @@ function unsafeConsoleSnapshotsEnabled(config) {
   return asBoolean(config?.allowUnsafeConsoleSnapshots, false);
 }
 
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
 function responseLineValue(text, key) {
   const prefix = `${key}=`;
   for (const line of String(text || '').split(/\r?\n/)) {
@@ -116,8 +112,24 @@ function minigameEventName(eventName) {
   return text.startsWith('minigames.') ? text : `minigames.${text}`;
 }
 
-function legacyMinigameEventName(eventName) {
-  return String(eventName || '').replace(/^minigames\./, '');
+function standardRuntimeDir() {
+  const appData =
+    String(process.env.APPDATA || '').trim() ||
+    path.join(os.homedir(), 'AppData', 'Roaming');
+  return path.resolve(
+    appData,
+    'omegga',
+    'steam_installs',
+    'main',
+    'Brickadia',
+    'Binaries',
+    'Win64',
+    'ue4ss',
+    'main',
+    'Mods',
+    'BMF',
+    'runtime'
+  );
 }
 
 function minigameFromKey(key) {
@@ -186,7 +198,6 @@ module.exports = class BmfMinigameEvents {
     this.joinTimers = new Set();
     this.minigameCheckInFlight = false;
     this.leaderboardCheckInFlight = false;
-    this.eventSequence = 0;
     this.counters = {
       queued: 0,
       failed: 0,
@@ -279,66 +290,19 @@ module.exports = class BmfMinigameEvents {
     }
   }
 
-  get commandDir() {
-    const configured = String(this.config.commandDir || '').trim();
-    if (configured) return path.resolve(configured);
-
-    const envCommandDir = String(process.env.OMEGGA_BMF_COMMAND_DIR || '').trim();
-    if (envCommandDir) return path.resolve(envCommandDir);
-
-    const envRuntimeDir = String(process.env.OMEGGA_BMF_RUNTIME_DIR || '').trim();
-    if (envRuntimeDir) return path.resolve(envRuntimeDir, 'commands');
-
-    const appData =
-      String(process.env.APPDATA || '').trim() ||
-      path.join(os.homedir(), 'AppData', 'Roaming');
-    if (appData) {
-      return path.resolve(
-        appData,
-        'omegga',
-        'steam_installs',
-        'main',
-        'Brickadia',
-        'Binaries',
-        'Win64',
-        'ue4ss',
-        'main',
-        'Mods',
-        'BMF',
-        'runtime',
-        'commands'
-      );
-    }
-
-    return '';
-  }
-
   get statusPath() {
-    const commandDir = this.commandDir;
-    return commandDir ? path.join(path.dirname(commandDir), 'minigame-adapter-status.json') : '';
+    const runtimeDir = this.runtimeDir;
+    return runtimeDir ? path.join(runtimeDir, 'minigame-adapter-status.json') : '';
   }
 
   get runtimeDir() {
-    const commandDir = this.commandDir;
-    return commandDir ? path.dirname(commandDir) : '';
-  }
-
-  get eventLogPath() {
-    const configured = String(this.config.eventLogPath || '').trim();
+    const configured = String(this.config.runtimeDir || '').trim();
     if (configured) return path.resolve(configured);
 
-    const envEventPath = String(process.env.OMEGGA_BMF_EVENTS_PATH || '').trim();
-    if (envEventPath) return path.resolve(envEventPath);
+    const envRuntimeDir = String(process.env.OMEGGA_BMF_RUNTIME_DIR || '').trim();
+    if (envRuntimeDir) return path.resolve(envRuntimeDir);
 
-    const runtimeDir = this.runtimeDir;
-    return runtimeDir ? path.join(runtimeDir, 'events.jsonl') : '';
-  }
-
-  get eventTransport() {
-    const configured = String(process.env.OMEGGA_BMF_MINIGAME_EVENT_TRANSPORT || this.config.eventTransport || 'event-log')
-      .trim()
-      .toLowerCase();
-    return configured === 'command' ? 'command' : 'event-log';
+    return standardRuntimeDir();
   }
 
   currentPollingMode() {
@@ -354,9 +318,8 @@ module.exports = class BmfMinigameEvents {
 
     const status = {
       updatedAt: new Date().toISOString(),
-      commandDir: this.commandDir,
-      eventTransport: this.eventTransport,
-      eventLogPath: this.eventLogPath,
+      runtimeDir: this.runtimeDir,
+      eventTransport: 'socket',
       polling: this.currentPollingMode(),
       allowUnsafeConsoleSnapshots: this.unsafeConsoleSnapshotsEnabled(),
       serverStarted: this.serverStarted,
@@ -478,10 +441,9 @@ module.exports = class BmfMinigameEvents {
       `checks: minigames=${this.counters.minigameChecks} leaderboards=${this.counters.leaderboardChecks} snapshots=${this.counters.snapshotChanges} imports=${this.counters.snapshotImports} teamChanges=${this.counters.teamChanges}`,
       `leaves: checks=${this.counters.leaveChecks} queued=${this.counters.leaveQueued} misses=${this.counters.leaveCacheMisses} noPlayer=${this.counters.leaveNoPlayer} same=${this.counters.leaveSameMinigame} switches=${this.counters.leaveSwitches} disconnects=${this.counters.leaveDisconnects}`,
       `seed: attempts=${this.counters.seedAttempts} successes=${this.counters.seedSuccesses} failures=${this.counters.seedFailures} players=${this.counters.seedPlayers} memberships=${this.counters.seedMemberships} teamMemberships=${this.counters.seedTeamMemberships}`,
-      `eventTransport=${this.eventTransport}`,
+      'eventTransport=socket',
       `unsafeConsoleSnapshots=${this.unsafeConsoleSnapshotsEnabled() ? 'enabled' : 'disabled'}`,
-      `commandDir=${this.commandDir || '(not configured)'}`,
-      `eventLogPath=${this.eventLogPath || '(not configured)'}`,
+      `runtimeDir=${this.runtimeDir || '(not configured)'}`,
       `statusPath=${this.statusPath || '(not configured)'}`,
     ];
     if (this.counters.lastEvent) {
@@ -1367,55 +1329,49 @@ module.exports = class BmfMinigameEvents {
     return String(player?.id || player?.uuid || player?.state || player?.controller || player?.name || player?.displayName || '');
   }
 
-  writeCommandRequest(command, idPrefix) {
-    const commandDir = this.commandDir;
-    if (!commandDir) {
-      throw new Error('commandDir is not configured');
+  async getBmfBridge() {
+    if (typeof this.omegga.getPlugin !== 'function') {
+      throw new Error('BMF Bridge plugin lookup is unavailable.');
     }
-
-    const safePrefix = String(idPrefix || 'bmf_command').replace(/[^a-zA-Z0-9_-]/g, '_');
-    const id = `${safePrefix}_${Date.now()}_${Math.floor(Math.random() * 1000000)}`;
-    const tmpPath = path.join(commandDir, `${id}.request.tmp`);
-    const requestPath = path.join(commandDir, `${id}.request.txt`);
-    const responsePath = path.join(commandDir, `${id}.response.txt`);
-
-    try {
-      fs.mkdirSync(commandDir, { recursive: true });
-      fs.writeFileSync(tmpPath, command, 'utf8');
-      fs.renameSync(tmpPath, requestPath);
-      return { id, requestPath, responsePath };
-    } catch (error) {
-      try {
-        if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
-      } catch (_cleanupError) {}
-      throw error;
+    const names = [
+      String(this.config.bridgePluginName || '').trim(),
+      'BMF Bridge',
+      'bmf-bridge',
+    ].filter(Boolean);
+    for (const name of names) {
+      const bridge = await this.omegga.getPlugin(name);
+      if (bridge && bridge.loaded !== false && typeof bridge.emitPlugin === 'function') {
+        return bridge;
+      }
     }
+    throw new Error('BMF Bridge plugin is not loaded.');
+  }
+
+  responseTextFromBridgeResult(result) {
+    return String(
+      result?.response?.text ||
+        result?.response?.raw ||
+        result?.envelope?.payload?.response ||
+        result?.text ||
+        ''
+    );
   }
 
   async invokeBmfCommand(command, idPrefix, timeoutMs) {
-    const request = this.writeCommandRequest(command, idPrefix);
-    const deadline = Date.now() + Math.max(100, timeoutMs || 5000);
-
-    while (Date.now() <= deadline) {
-      if (fs.existsSync(request.responsePath)) {
-        const text = fs.readFileSync(request.responsePath, 'utf8');
-        try {
-          fs.unlinkSync(request.responsePath);
-        } catch (_cleanupError) {}
-
-        const ok = responseLineValue(text, 'ok').trim().toLowerCase();
-        if (ok === 'false') {
-          throw new Error(responseLineValue(text, 'detail') || 'BMF command failed');
-        }
-        return {
-          ...request,
-          text,
-        };
-      }
-      await sleep(Math.min(100, Math.max(1, deadline - Date.now())));
+    const bridge = await this.getBmfBridge();
+    const result = await bridge.emitPlugin('invokeCommand', command, {
+      idPrefix,
+      timeoutMs: Math.max(100, timeoutMs || 5000),
+      source: 'omegga.bmf-minigame-events',
+    });
+    if (!result || result.ok === false) {
+      throw new Error(result?.detail || 'BMF bridge command failed');
     }
-
-    throw new Error(`timed out waiting for BMF command response: ${command}`);
+    return {
+      transport: result.transport || 'socket',
+      result,
+      text: this.responseTextFromBridgeResult(result),
+    };
   }
 
   buildQueuedEventPayload(payload, queuedAtMs) {
@@ -1431,67 +1387,6 @@ module.exports = class BmfMinigameEvents {
         adapterEventQueuedAtMs: queuedAtMs,
       },
     };
-  }
-
-  buildEventLogPayload(eventName, payload, queuedAtMs) {
-    const eventPayload = this.buildQueuedEventPayload(payload, queuedAtMs) || {};
-    const namespacedEvent = minigameEventName(eventName);
-    const legacyEvent = legacyMinigameEventName(namespacedEvent);
-    const emittedAt = isoSeconds(new Date(queuedAtMs));
-    const minigame = eventPayload.minigame || (eventPayload.name || eventPayload.ruleset ? eventPayload : null);
-    const player = eventPayload.player || null;
-    const team = eventPayload.team || null;
-    const minigameKeyValue = minigameKey(minigame);
-    const playerKeyValue = playerKey(player);
-    const teamKeyValue = teamKey(team, minigame);
-    const eventId = String(++this.eventSequence);
-
-    return {
-      ...eventPayload,
-      _bmf: compactObject({
-        ...(eventPayload._bmf || {}),
-        emittedAt,
-        emitted_at: emittedAt,
-        event: namespacedEvent,
-        legacyEvent,
-        legacy_event: legacyEvent,
-        eventId,
-        event_id: eventId,
-        source: eventPayload.source || eventPayload._bmf?.source || 'omegga.bmf-minigame-events',
-        minigameKey: minigameKeyValue,
-        minigame_key: minigameKeyValue,
-        playerKey: playerKeyValue,
-        player_key: playerKeyValue,
-        teamKey: teamKeyValue,
-        team_key: teamKeyValue,
-      }),
-    };
-  }
-
-  writeEventLogRecord(eventName, eventPayload) {
-    const eventLogPath = this.eventLogPath;
-    if (!eventLogPath) {
-      throw new Error('eventLogPath is not configured');
-    }
-
-    const namespacedEvent = minigameEventName(eventName);
-    const record = {
-      level: 'info',
-      message: `event emitted: ${namespacedEvent}`,
-      source: 'event',
-      ts: eventPayload?._bmf?.emittedAt || isoSeconds(),
-      data: {
-        event: namespacedEvent,
-        payload: eventPayload || {},
-        handlers: 0,
-        errors: [],
-        ok: true,
-      },
-    };
-
-    fs.mkdirSync(path.dirname(eventLogPath), { recursive: true });
-    fs.appendFileSync(eventLogPath, `${JSON.stringify(record)}\n`, 'utf8');
-    return eventLogPath;
   }
 
   recordDeliveredEvent(eventName, payload, transport) {
@@ -1513,22 +1408,21 @@ module.exports = class BmfMinigameEvents {
   queueEvent(eventName, payload) {
     const queuedAtMs = Date.now();
     try {
-      if (this.eventTransport === 'command') {
-        const eventPayload = this.buildQueuedEventPayload(payload, queuedAtMs);
-        const command = [
-          'bmf.minigames.events.emit',
-          `event=${encodeURIComponent(eventName)}`,
-          `payload=${encodeURIComponent(JSON.stringify(eventPayload || {}))}`,
-        ].join(' ');
+      const eventPayload = this.buildQueuedEventPayload(payload, queuedAtMs);
+      const command = [
+        'bmf.minigames.events.emit',
+        `event=${encodeURIComponent(eventName)}`,
+        `payload=${encodeURIComponent(JSON.stringify(eventPayload || {}))}`,
+      ].join(' ');
 
-        this.writeCommandRequest(command, `minigame_${eventName}`);
-        this.recordDeliveredEvent(eventName, eventPayload, 'command');
-        return true;
-      }
-
-      const eventPayload = this.buildEventLogPayload(eventName, payload, queuedAtMs);
-      this.writeEventLogRecord(eventName, eventPayload);
-      this.recordDeliveredEvent(eventName, eventPayload, 'event-log');
+      this.invokeBmfCommand(command, `minigame_${eventName}`, asNumber(this.config.eventCommandTimeoutMs, 5000))
+        .catch(error => {
+          this.counters.failed += 1;
+          this.counters.lastError = error.message || String(error);
+          console.warn(`[bmf-minigame-events] failed to deliver ${eventName}: ${this.counters.lastError}`);
+          this.writeStatusFile({ failedEvent: eventName });
+        });
+      this.recordDeliveredEvent(eventName, eventPayload, 'socket');
       return true;
     } catch (error) {
       this.counters.failed += 1;
@@ -1551,7 +1445,13 @@ module.exports = class BmfMinigameEvents {
     ].join(' ');
 
     try {
-      this.writeCommandRequest(command, 'minigame_snapshot_import');
+      this.invokeBmfCommand(command, 'minigame_snapshot_import', asNumber(this.config.snapshotImportTimeoutMs, 5000))
+        .catch(error => {
+          this.counters.failed += 1;
+          this.counters.lastError = error.message || String(error);
+          console.warn(`[bmf-minigame-events] failed to send snapshot import: ${this.counters.lastError}`);
+          this.writeStatusFile({ failedSnapshotImport: reason });
+        });
       this.counters.snapshotImports += 1;
       this.counters.lastSnapshotImport = {
         minigames: payload.minigames.length,

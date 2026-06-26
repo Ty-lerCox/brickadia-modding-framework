@@ -64,8 +64,8 @@ local status = BMF.tools.applicator.status({ refresh = true })
 Server-console routes:
 
 ```text
-Omegga.Bridge.BMF bmf.tools.applicator.status refresh=true
-Omegga.Bridge.BMF bmf.tools.applicator.refresh
+bmf.tools.applicator.status refresh=true
+bmf.tools.applicator.refresh
 ```
 
 After a server restart, refresh the native Applicator blocker for the new

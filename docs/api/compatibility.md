@@ -40,7 +40,7 @@ Required helper groups:
 
 - `consoleExecutor`: at least one supported Omegga/UE4SS console executor.
 - `timerScheduler`: `ExecuteWithDelay` or `ExecuteInGameThreadWithDelay`, used
-  by BMF timers and the file command worker.
+  by BMF timers and legacy opt-in validation workers.
 
 Optional helper groups:
 
@@ -57,7 +57,7 @@ Returns only the helper diagnostics from `BMF.compatibility.check()`.
 The console command prints stable key/value lines for automation:
 
 ```text
-Omegga.Bridge.BMF bmf.compatibility
+bmf.compatibility
 ```
 
 Example lines:

@@ -36,9 +36,9 @@ sections.
 ## Start Here
 
 - [First plugin](getting-started/first-plugin.md)
+- [Windows setup](install/windows.md)
 - [Common workflows](guides/common-workflows.md)
 - [Lua examples](examples/index.md)
-- [Windows install](install/windows.md)
 - [Supported runtime matrix](reference/supported-runtime.md)
 - [Glossary](reference/glossary.md)
 - [Architecture patterns](architecture/architecture-patterns.md)

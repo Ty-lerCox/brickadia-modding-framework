@@ -5,11 +5,14 @@ const path = require('path');
 
 const VERSION = '0.1.0';
 const DEFAULT_RECORD_LIMIT = 500;
+const DEFAULT_STATUS_RECORD_LIMIT = 100;
 const GUARDRAILS = [
   'observe-existing-traffic-only',
+  'socket-only-live-traffic',
   'do-not-add-ui-driven-server-probes',
   'bound-retained-record-count',
   'redact-secrets-before-display-or-export',
+  'do-not-silently-fall-back-to-files',
 ];
 const SECRET_KEY_PATTERN = /(token|secret|password|api[-_]?key|authorization|bearer|credential)/i;
 const PRIVATE_IPV4_PATTERN = /\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})\b/g;
@@ -345,11 +348,9 @@ module.exports = class BmfBridge {
     this.socket = null;
     this.socketBuffer = '';
     this.socketConfig = null;
-    this.eventLogOffset = 0;
-    this.eventLogPartial = '';
-    this.eventLogInterval = null;
     this.reconnectTimer = null;
     this.statusInterval = null;
+    this.statusFlushTimer = null;
     this.started = false;
     this.paused = false;
     this.lastStatusWriteError = null;
@@ -365,10 +366,6 @@ module.exports = class BmfBridge {
       socketEvents: 0,
       socketResponses: 0,
       socketCommandsSent: 0,
-      fileEvents: 0,
-      fileCommands: 0,
-      fileResponses: 0,
-      fallbackCommands: 0,
       parseErrors: 0,
       redactions: 0,
       statusWrites: 0,
@@ -391,12 +388,12 @@ module.exports = class BmfBridge {
       this.omegga.on('cmd:bmfbridge', this.handleStatusCommand);
     }
 
-    this.startEventLogTail();
     this.startStatusWrites();
     if (this.preferredTransport === 'socket') {
       this.connectSocket();
     } else {
-      this.counters.transport = 'file-fallback';
+      this.counters.transport = 'socket-required';
+      this.counters.lastError = `unsupported transport: ${this.preferredTransport}`;
     }
 
     this.writeStatusFile({ lifecycle: 'started' });
@@ -408,12 +405,12 @@ module.exports = class BmfBridge {
 
   async stop() {
     this.started = false;
-    if (this.eventLogInterval) clearInterval(this.eventLogInterval);
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     if (this.statusInterval) clearInterval(this.statusInterval);
-    this.eventLogInterval = null;
+    if (this.statusFlushTimer) clearTimeout(this.statusFlushTimer);
     this.reconnectTimer = null;
     this.statusInterval = null;
+    this.statusFlushTimer = null;
 
     if (this.socket) {
       this.socket.removeAllListeners();
@@ -436,12 +433,32 @@ module.exports = class BmfBridge {
     this.writeStatusFile({ lifecycle: 'stopped' });
   }
 
+  async emitPlugin(event, _from, args = []) {
+    const argv = Array.isArray(args) ? args : [];
+    const name = String(event || '').trim();
+    if (name === 'invokeCommand') {
+      return this.invokeCommand(argv[0], argv[1] || {});
+    }
+    if (name === 'recentRecords') {
+      return this.recentRecords(argv[0] || {});
+    }
+    if (name === 'statusSnapshot') {
+      return this.statusSnapshot(argv[0] || {});
+    }
+    throw new Error(`unsupported BMF bridge plugin event: ${name}`);
+  }
+
   get preferredTransport() {
     return String(this.config.preferredTransport || 'socket').trim().toLowerCase();
   }
 
   get maxRecords() {
     return Math.max(1, asNumber(this.config.maxRecords, DEFAULT_RECORD_LIMIT));
+  }
+
+  get statusRecordLimit() {
+    const configured = Math.floor(asNumber(this.config.statusRecordLimit, DEFAULT_STATUS_RECORD_LIMIT));
+    return Math.max(0, Math.min(this.maxRecords, configured));
   }
 
   get runtimeDir() {
@@ -451,30 +468,7 @@ module.exports = class BmfBridge {
     const envRuntimeDir = env('OMEGGA_BMF_RUNTIME_DIR');
     if (envRuntimeDir) return path.resolve(envRuntimeDir);
 
-    const commandDir = String(this.config.commandDir || env('OMEGGA_BMF_COMMAND_DIR') || '').trim();
-    if (commandDir) return path.dirname(path.resolve(commandDir));
-
     return standardRuntimeDir();
-  }
-
-  get commandDir() {
-    const configured = String(this.config.commandDir || '').trim();
-    if (configured) return path.resolve(configured);
-
-    const envCommandDir = env('OMEGGA_BMF_COMMAND_DIR');
-    if (envCommandDir) return path.resolve(envCommandDir);
-
-    return path.join(this.runtimeDir, 'commands');
-  }
-
-  get eventLogPath() {
-    const configured = String(this.config.eventLogPath || '').trim();
-    if (configured) return path.resolve(configured);
-
-    const envEventPath = env('OMEGGA_BMF_EVENTS_PATH');
-    if (envEventPath) return path.resolve(envEventPath);
-
-    return path.join(this.runtimeDir, 'events.jsonl');
   }
 
   get socketMetadataPath() {
@@ -525,8 +519,9 @@ module.exports = class BmfBridge {
     const socketConfig = this.discoverSocketConfig();
     this.socketConfig = socketConfig;
     if (!socketConfig.enabled || !socketConfig.port || !socketConfig.token) {
-      this.counters.transport = 'file-fallback';
-      this.writeStatusFile({ socket: 'unavailable' });
+      this.counters.transport = 'socket-unavailable';
+      this.counters.lastError = 'BMF socket metadata is missing or disabled.';
+      this.writeStatusFile({ socketState: 'unavailable' });
       this.scheduleReconnect();
       return;
     }
@@ -546,6 +541,7 @@ module.exports = class BmfBridge {
         this.counters.socketConnected = true;
         this.counters.socketConnects += 1;
         this.counters.transport = 'socket';
+        this.counters.lastError = '';
         this.sendSocketMessage({
           type: 'hello',
           role: socketConfig.role,
@@ -558,7 +554,7 @@ module.exports = class BmfBridge {
           source: socketConfig.source,
           events: Array.isArray(this.config.socketEvents) ? this.config.socketEvents : ['*'],
         });
-        this.writeStatusFile({ socket: 'connected' });
+        this.writeStatusFile({ socketState: 'connected' });
       }
     );
     socket.setEncoding('utf8');
@@ -571,10 +567,10 @@ module.exports = class BmfBridge {
     socket.on('close', () => {
       const wasConnected = this.counters.socketConnected;
       this.counters.socketConnected = false;
-      this.counters.transport = 'file-fallback';
+      this.counters.transport = 'socket-disconnected';
       if (wasConnected) this.counters.socketDisconnects += 1;
       this.rejectPendingSocketCommands('BMF socket disconnected before response.');
-      this.writeStatusFile({ socket: 'closed' });
+      this.writeStatusFile({ socketState: 'closed' });
       this.scheduleReconnect();
     });
     this.socket = socket;
@@ -618,6 +614,7 @@ module.exports = class BmfBridge {
 
     const message = parsed.value;
     this.counters.socketMessages += 1;
+    this.counters.lastError = '';
     if (message.type === 'ping') {
       this.sendSocketMessage({
         type: 'pong',
@@ -677,91 +674,6 @@ module.exports = class BmfBridge {
     }
   }
 
-  startEventLogTail() {
-    if (!asBoolean(this.config.tailEvents, true)) return;
-    const eventLogPath = this.eventLogPath;
-    if (fs.existsSync(eventLogPath) && !asBoolean(this.config.readExistingEventLog, false)) {
-      this.eventLogOffset = fs.statSync(eventLogPath).size;
-    }
-
-    const intervalMs = Math.max(250, asNumber(this.config.eventPollIntervalMs, 1000));
-    this.eventLogInterval = setInterval(() => this.pollEventLog(), intervalMs);
-    this.pollEventLog();
-  }
-
-  pollEventLog() {
-    const eventLogPath = this.eventLogPath;
-    if (!eventLogPath || !fs.existsSync(eventLogPath)) return;
-
-    let stat;
-    try {
-      stat = fs.statSync(eventLogPath);
-    } catch (error) {
-      this.counters.lastError = error.message || String(error);
-      return;
-    }
-
-    if (this.socketReady() && !asBoolean(this.config.tailEventsWhenSocketConnected, false)) {
-      this.eventLogOffset = stat.size;
-      this.eventLogPartial = '';
-      return;
-    }
-
-    if (stat.size < this.eventLogOffset) {
-      this.eventLogOffset = 0;
-      this.eventLogPartial = '';
-    }
-    if (stat.size <= this.eventLogOffset) return;
-
-    const maxBytes = Math.max(4096, asNumber(this.config.maxReadBytesPerPoll, 65536));
-    let start = this.eventLogOffset;
-    if (stat.size - start > maxBytes) {
-      start = stat.size - maxBytes;
-      this.eventLogPartial = '';
-      this.recordEnvelope(
-        {
-          type: 'drop',
-          source: 'omegga.bmf-bridge',
-          transport: 'events-jsonl',
-          payload: {
-            reason: 'event-log-backpressure',
-            skippedBytes: start - this.eventLogOffset,
-          },
-        },
-        { kind: 'drop', transport: 'events-jsonl' }
-      );
-    }
-
-    const bytesToRead = stat.size - start;
-    const buffer = Buffer.alloc(bytesToRead);
-    const fd = fs.openSync(eventLogPath, 'r');
-    try {
-      fs.readSync(fd, buffer, 0, bytesToRead, start);
-    } finally {
-      fs.closeSync(fd);
-    }
-    this.eventLogOffset = stat.size;
-
-    const text = this.eventLogPartial + buffer.toString('utf8');
-    const endsWithNewline = text.endsWith('\n') || text.endsWith('\r');
-    const lines = text.split(/\r?\n/);
-    this.eventLogPartial = endsWithNewline ? '' : lines.pop() || '';
-    for (const line of lines) {
-      if (line.trim()) this.ingestEventLogLine(line);
-    }
-  }
-
-  ingestEventLogLine(line) {
-    const parsed = safeJsonParse(line);
-    if (!parsed.ok) {
-      this.counters.parseErrors += 1;
-      this.counters.lastError = `events.jsonl parse failed: ${parsed.error?.message || 'invalid JSON'}`;
-      return null;
-    }
-    this.counters.fileEvents += 1;
-    return this.recordEnvelope(parsed.value, { transport: 'events-jsonl' });
-  }
-
   recordEnvelope(input, options = {}) {
     const envelope = normalizeEnvelope(input, {
       ...options,
@@ -796,6 +708,7 @@ module.exports = class BmfBridge {
     });
 
     this.deliverEnvelope(envelope);
+    this.queueStatusWrite();
     return envelope;
   }
 
@@ -869,13 +782,20 @@ module.exports = class BmfBridge {
     const command = String(commandText || '').trim();
     if (!command) throw new Error('BMF command text is required.');
 
-    const preferSocket = String(options.transport || this.preferredTransport).toLowerCase() === 'socket';
-    if (preferSocket && this.socketReady()) {
+    const transport = String(options.transport || this.preferredTransport).toLowerCase();
+    if (transport !== 'socket') {
+      const detail = `unsupported BMF transport: ${transport}`;
+      this.counters.lastError = detail;
+      throw new Error(detail);
+    }
+
+    if (this.socketReady()) {
       return this.invokeSocketCommand(command, options);
     }
 
-    this.counters.fallbackCommands += 1;
-    return this.invokeFileCommand(command, options);
+    const detail = 'BMF socket is not connected.';
+    this.counters.lastError = detail;
+    throw new Error(detail);
   }
 
   invokeSocketCommand(command, options = {}) {
@@ -940,100 +860,6 @@ module.exports = class BmfBridge {
     });
   }
 
-  writeCommandRequest(command, idPrefix = 'bmf_bridge') {
-    const commandDir = this.commandDir;
-    const safePrefix = String(idPrefix || 'bmf_bridge').replace(/[^a-zA-Z0-9_-]/g, '_');
-    const id = `${safePrefix}_${Date.now()}_${++this.commandSequence}`;
-    const tmpPath = path.join(commandDir, `${id}.request.tmp`);
-    const requestPath = path.join(commandDir, `${id}.request.txt`);
-    const responsePath = path.join(commandDir, `${id}.response.txt`);
-
-    fs.mkdirSync(commandDir, { recursive: true });
-    fs.writeFileSync(tmpPath, command, 'utf8');
-    fs.renameSync(tmpPath, requestPath);
-    return { id, requestPath, responsePath };
-  }
-
-  async invokeFileCommand(command, options = {}) {
-    const startedAtMs = Date.now();
-    const timeoutMs = Math.max(100, asNumber(options.timeoutMs, asNumber(this.config.commandTimeoutMs, 5000)));
-    const request = this.writeCommandRequest(command, options.idPrefix || commandName(command) || 'bmf_bridge');
-    this.counters.fileCommands += 1;
-    this.recordEnvelope(
-      {
-        type: 'command',
-        source: 'omegga.bmf-bridge',
-        id: request.id,
-        command,
-      },
-      {
-        kind: 'command',
-        transport: 'file-command',
-        status: 'pending',
-        command,
-      }
-    );
-
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() <= deadline) {
-      if (fs.existsSync(request.responsePath)) {
-        const text = fs.readFileSync(request.responsePath, 'utf8');
-        if (asBoolean(options.cleanupResponse, true)) {
-          try {
-            fs.unlinkSync(request.responsePath);
-          } catch (_cleanupError) {}
-        }
-        const parsed = parseKeyValueResponse(text);
-        this.counters.fileResponses += 1;
-        const envelope = this.recordEnvelope(
-          {
-            type: 'response',
-            source: 'bmf',
-            id: request.id,
-            ok: parsed.ok,
-            detail: parsed.detail,
-            command,
-            response: text,
-          },
-          {
-            kind: 'response',
-            transport: 'file-command',
-            command,
-            durationMs: Date.now() - startedAtMs,
-          }
-        );
-        return {
-          ok: parsed.ok,
-          detail: parsed.detail,
-          transport: 'file-command',
-          request,
-          response: parsed,
-          envelope,
-        };
-      }
-      await new Promise(resolve => setTimeout(resolve, Math.min(50, Math.max(1, deadline - Date.now()))));
-    }
-
-    const error = new Error(`timed out waiting for BMF command response: ${commandName(command)}`);
-    this.recordEnvelope(
-      {
-        type: 'response',
-        source: 'bmf',
-        id: request.id,
-        ok: false,
-        detail: error.message,
-        command,
-      },
-      {
-        kind: 'response',
-        transport: 'file-command',
-        command,
-        durationMs: Date.now() - startedAtMs,
-      }
-    );
-    throw error;
-  }
-
   handleStatusCommand(speaker, action = 'status') {
     const verb = String(action || 'status').trim().toLowerCase();
     if (verb === 'pause') this.setPaused(true);
@@ -1043,11 +869,10 @@ module.exports = class BmfBridge {
     const lines = [
       `BMF bridge: transport=${status.transport} socket=${status.socket.connected ? 'connected' : 'disconnected'} paused=${status.paused ? 'true' : 'false'}`,
       `records: retained=${status.records.retained} dropped=${status.records.dropped} coalesced=${status.records.coalesced} paused_skipped=${status.records.pausedSkipped}`,
-      `commands: socket_sent=${status.commands.socketSent} file_sent=${status.commands.fileSent} fallback=${status.commands.fallback}`,
-      `events: socket=${status.events.socket} file=${status.events.file} parse_errors=${status.events.parseErrors}`,
+      `commands: socket_sent=${status.commands.socketSent} socket_responses=${status.commands.socketResponses}`,
+      `events: socket=${status.events.socket} parse_errors=${status.events.parseErrors}`,
       `paths: runtime=${status.paths.runtimeDir}`,
-      `paths: commands=${status.paths.commandDir}`,
-      `paths: events=${status.paths.eventLogPath}`,
+      `paths: socket=${status.paths.socketMetadataPath}`,
     ];
     if (status.lastError) lines.push(`last_error=${status.lastError}`);
     this.sayToSpeaker(speaker, lines);
@@ -1072,8 +897,19 @@ module.exports = class BmfBridge {
     this.statusInterval = setInterval(() => this.writeStatusFile(), intervalMs);
   }
 
+  queueStatusWrite() {
+    if (!this.started || !this.statusPath || this.statusFlushTimer) return;
+    const intervalMs = Math.max(250, asNumber(this.config.statusRecordFlushIntervalMs, 1000));
+    this.statusFlushTimer = setTimeout(() => {
+      this.statusFlushTimer = null;
+      this.writeStatusFile({ lifecycle: 'recorded' });
+    }, intervalMs);
+    if (typeof this.statusFlushTimer.unref === 'function') this.statusFlushTimer.unref();
+  }
+
   statusSnapshot(extra = {}) {
     const socket = this.socketConfig || this.discoverSocketConfig();
+    const recentRecordLimit = this.statusRecordLimit;
     return {
       updatedAt: isoSeconds(),
       version: VERSION,
@@ -1083,6 +919,7 @@ module.exports = class BmfBridge {
       records: {
         retained: this.records.length,
         max: this.maxRecords,
+        statusLimit: recentRecordLimit,
         dropped: this.counters.dropped,
         coalesced: this.counters.coalesced,
         pausedSkipped: this.counters.pausedSkipped,
@@ -1100,25 +937,20 @@ module.exports = class BmfBridge {
       commands: {
         socketSent: this.counters.socketCommandsSent,
         socketResponses: this.counters.socketResponses,
-        fileSent: this.counters.fileCommands,
-        fileResponses: this.counters.fileResponses,
-        fallback: this.counters.fallbackCommands,
       },
       events: {
         socket: this.counters.socketEvents,
-        file: this.counters.fileEvents,
         parseErrors: this.counters.parseErrors,
         redactions: this.counters.redactions,
       },
       subscribers: this.subscribers.size,
       paths: {
         runtimeDir: this.runtimeDir,
-        commandDir: this.commandDir,
-        eventLogPath: this.eventLogPath,
         socketMetadataPath: this.socketMetadataPath,
         statusPath: this.statusPath,
       },
       lastRecord: this.counters.lastRecord,
+      recentRecords: recentRecordLimit > 0 ? this.recentRecords({ limit: recentRecordLimit }) : [],
       lastError: this.counters.lastError || this.lastStatusWriteError,
       ...extra,
     };

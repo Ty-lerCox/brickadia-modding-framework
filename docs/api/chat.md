@@ -35,7 +35,7 @@ Current chat delivery proof is tracked in
 Server-console command route:
 
 ```text
-Omegga.Bridge.BMF bmf.chat.broadcast message=[BMF] Hello from the server
+bmf.chat.broadcast message=[BMF] Hello from the server
 ```
 
 The result records `data.deliveryMode`, `data.deliveredCount`,
@@ -62,7 +62,7 @@ for the older structured errors (`PLAYER_NOT_FOUND` or
 Server-console command route:
 
 ```text
-Omegga.Bridge.BMF bmf.chat.whisper target=<uuid-or-name> message=<text>
+bmf.chat.whisper target=<uuid-or-name> message=<text>
 ```
 
 The response includes `delivered`, `delivered_count`, `attempted_count`,
@@ -79,7 +79,7 @@ validation.
 Server-console command route:
 
 ```text
-Omegga.Bridge.BMF bmf.chat.statusmessage target=<uuid-or-name> message=<text>
+bmf.chat.statusmessage target=<uuid-or-name> message=<text>
 ```
 
 ## Validation

@@ -1,6 +1,7 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const orchestratorPackage = require('../package.json');
 
 const { createServerProfile, publicProfile } = require('./profiles');
 
@@ -309,7 +310,7 @@ function buildDashboardPlan(profile, assets, labels, options = {}) {
   const folderUid = options.folderUid || 'bmf';
   const datasourceUid = options.prometheusDatasourceUid || 'grafanacloud-prom';
   const dashboardUid = assets.dashboard?.uid || assets.manifest.grafana?.dashboardUid || 'bmf-standard';
-  const dashboardVersion = assets.manifest.grafana?.dashboardVersion || assets.manifest.version || '0.1.0-dev';
+  const dashboardVersion = assets.manifest.grafana?.dashboardVersion || assets.manifest.version || orchestratorPackage.version || 'unknown';
   const dashboardUrl = profile.telemetry?.dashboardUrl
     || (baseUrl ? `${baseUrl.replace(/\/+$/, '')}/d/${encodeURIComponent(dashboardUid)}?var-environment=${encodeURIComponent(labels.environment)}&var-instance=${encodeURIComponent(labels.instance)}&var-server_profile=${encodeURIComponent(labels.server_profile)}&var-brickadia_build=${encodeURIComponent(labels.brickadia_build)}` : null);
   const requiredInputs = Array.isArray(importContract.requiredInputs)

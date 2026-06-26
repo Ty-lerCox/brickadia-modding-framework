@@ -29,7 +29,7 @@ instead of reading crash-prone live player properties.
 Server-console command route:
 
 ```text
-Omegga.Bridge.BMF bmf.players.list
+bmf.players.list
 ```
 
 On a headless no-player server, the current command canary expects
@@ -59,14 +59,15 @@ BMF.players.sync({
 Server-console command route:
 
 ```text
-Omegga.Bridge.BMF bmf.players.sync players=[["OriginalBuilder","Build Lead","11111111-1111-4111-8111-111111111111","BP_PlayerController_C_1073741824","BP_PlayerState_C_2147483648"]]
+bmf.players.sync players=[["OriginalBuilder","Build Lead","11111111-1111-4111-8111-111111111111","BP_PlayerController_C_1073741824","BP_PlayerState_C_2147483648"]]
 ```
 
 The supported Omegga feeder lives at
-`packages/omegga-plugins/bmf-player-sync/`. Configure its `commandDir` to the
-active `Mods/BMF/runtime/commands` directory, or set `OMEGGA_BMF_COMMAND_DIR`.
-It queues syncs on Omegga player-list changes and also runs a periodic fallback
-sync.
+`packages/omegga-plugins/bmf-player-sync/`. In direct cache mode, configure
+`runtimeDir` or set `OMEGGA_BMF_RUNTIME_DIR` so it can write `players.json`.
+When command bridge mode is enabled, it sends `bmf.players.sync` through the
+loaded `BMF Bridge` socket path. It queues syncs on Omegga player-list changes
+and also runs a periodic fallback sync.
 
 On the current Windows UE4SS runtime, Omegga's live player list can stay empty
 when its PlayerState/PlayerController matcher cannot complete. The adapter then

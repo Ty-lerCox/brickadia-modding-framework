@@ -13,6 +13,10 @@
 #include <Unreal/AActor.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
+#include <Unreal/FField.hpp>
+#include <Unreal/NameTypes.hpp>
+#include <Unreal/UActorComponent.hpp>
+#include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 
 #include <algorithm>
@@ -29,6 +33,8 @@
 #include <deque>
 #include <exception>
 #include <iomanip>
+#include <initializer_list>
+#include <limits>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -225,9 +231,20 @@ namespace
             return false;
         }
 
-        if (text.rfind("UObject:", 0) == 0 || text.rfind("uobject:", 0) == 0)
+        const std::string lowered = ascii_lower(text);
+        for (std::string_view prefix : {
+                 std::string_view("uobject:"),
+                 std::string_view("component:"),
+                 std::string_view("root_component:"),
+                 std::string_view("pawn:"),
+                 std::string_view("controller:"),
+             })
         {
-            text = text.substr(text.find(':') + 1);
+            if (lowered.rfind(prefix, 0) == 0)
+            {
+                text = text.substr(prefix.size());
+                break;
+            }
         }
 
         int base = 10;
@@ -270,7 +287,8 @@ namespace
 
     bool native_location_scan_enabled()
     {
-        return env_flag_enabled("BMF_NATIVE_LOCATION_SCAN");
+        return env_flag_enabled("BMF_NATIVE_LOCATION_SCAN") &&
+               env_flag_enabled("BMF_NATIVE_LOCATION_SCAN_UNSAFE_GAME_THREAD");
     }
 
     bool native_location_name_lookup_enabled()
@@ -281,6 +299,7 @@ namespace
     bool is_live_uobject(Unreal::UObject* object)
     {
         return object != nullptr &&
+               is_accessible_memory(reinterpret_cast<uintptr_t>(object), sizeof(uintptr_t)) &&
                Unreal::UObject::IsReal(object) &&
                !object->HasAnyFlags(Unreal::RF_ClassDefaultObject);
     }
@@ -298,6 +317,27 @@ namespace
             return object_class && object_class->HasAnyCastFlag(flags);
         }
         catch (...)
+        {
+            return false;
+        }
+    }
+
+    bool object_class_has_any_cast_flags_guarded(Unreal::UObject* object, Unreal::EClassCastFlags flags)
+    {
+        if (!object ||
+            !is_accessible_memory(reinterpret_cast<uintptr_t>(object), sizeof(uintptr_t)))
+        {
+            return false;
+        }
+
+        __try
+        {
+            auto object_class = object->GetClassPrivate();
+            return object_class &&
+                   is_accessible_memory(reinterpret_cast<uintptr_t>(object_class), sizeof(uintptr_t)) &&
+                   object_class->HasAnyCastFlag(flags);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
         {
             return false;
         }
@@ -536,6 +576,59 @@ namespace
         return nullptr;
     }
 
+    std::mutex g_property_cache_mutex;
+    std::unordered_map<uintptr_t, std::unordered_map<std::string, Unreal::FProperty*>> g_property_cache;
+
+    Unreal::FProperty* get_cached_class_property_by_name_in_chain(Unreal::UObject* object, const CharType* property_name)
+    {
+        if (!object || !property_name)
+        {
+            return nullptr;
+        }
+
+        auto object_class = object->GetClassPrivate();
+        if (!object_class)
+        {
+            return nullptr;
+        }
+
+        const uintptr_t class_address = reinterpret_cast<uintptr_t>(object_class);
+        const std::string property_key = ascii_lower(narrow_string(property_name));
+        {
+            std::lock_guard lock(g_property_cache_mutex);
+            auto class_iter = g_property_cache.find(class_address);
+            if (class_iter != g_property_cache.end())
+            {
+                auto property_iter = class_iter->second.find(property_key);
+                if (property_iter != class_iter->second.end())
+                {
+                    return property_iter->second;
+                }
+            }
+        }
+
+        const Unreal::FName wanted_property_name{property_name, Unreal::FNAME_Find};
+        Unreal::FProperty* found = nullptr;
+        for (Unreal::FProperty* property : Unreal::TFieldRange<Unreal::FProperty>(
+                 object_class,
+                 Unreal::EFieldIterationFlags::IncludeSuper | Unreal::EFieldIterationFlags::IncludeDeprecated))
+        {
+            if (property && property->GetFName().Equals(wanted_property_name))
+            {
+                found = property;
+                break;
+            }
+        }
+
+        {
+            std::lock_guard lock(g_property_cache_mutex);
+            g_property_cache[class_address][property_key] = found;
+        }
+        return found;
+    }
+
+    bool property_is_object_reference(Unreal::FProperty* property);
+
     Unreal::UObject* get_object_property(Unreal::UObject* object, const CharType* property_name)
     {
         if (!is_live_uobject(object) || !property_name)
@@ -545,9 +638,12 @@ namespace
 
         try
         {
-            const Unreal::FName wanted_property_name{property_name, Unreal::FNAME_Find};
-            Unreal::FProperty* property = get_class_property_by_name_in_chain(object, wanted_property_name);
+            Unreal::FProperty* property = get_cached_class_property_by_name_in_chain(object, property_name);
             if (!property)
+            {
+                return nullptr;
+            }
+            if (!property_is_object_reference(property))
             {
                 return nullptr;
             }
@@ -574,8 +670,7 @@ namespace
 
         try
         {
-            const Unreal::FName wanted_property_name{property_name, Unreal::FNAME_Find};
-            Unreal::FProperty* property = get_class_property_by_name_in_chain(object, wanted_property_name);
+            Unreal::FProperty* property = get_cached_class_property_by_name_in_chain(object, property_name);
             if (!property)
             {
                 return false;
@@ -615,8 +710,7 @@ namespace
 
         try
         {
-            const Unreal::FName wanted_property_name{property_name, Unreal::FNAME_Find};
-            Unreal::FProperty* property = get_class_property_by_name_in_chain(object, wanted_property_name);
+            Unreal::FProperty* property = get_cached_class_property_by_name_in_chain(object, property_name);
             if (!property)
             {
                 return false;
@@ -676,18 +770,17 @@ namespace
 
     bool try_actor_root_component_location(Unreal::UObject* pawn,
                                            Unreal::FVector& out_vector,
-                                           std::string& method)
+                                           std::string& method,
+                                           Unreal::UObject** out_root_component = nullptr)
     {
         Unreal::UObject* root_component = get_object_property(pawn, STR("RootComponent"));
+        if (out_root_component)
+        {
+            *out_root_component = root_component;
+        }
         if (!is_live_uobject(root_component))
         {
             return false;
-        }
-
-        if (read_transform_translation_property(root_component, STR("ComponentToWorld"), out_vector))
-        {
-            method = ".root_component.ComponentToWorld";
-            return true;
         }
 
         if (read_vector_property(root_component, STR("RelativeLocation"), out_vector))
@@ -696,6 +789,28 @@ namespace
             return true;
         }
 
+        if (read_transform_translation_property(root_component, STR("ComponentToWorld"), out_vector))
+        {
+            method = ".root_component.ComponentToWorld";
+            return true;
+        }
+
+        return false;
+    }
+
+    bool try_component_relative_location(Unreal::UObject* component,
+                                         Unreal::FVector& out_vector,
+                                         std::string& method)
+    {
+        if (!is_live_uobject(component))
+        {
+            return false;
+        }
+        if (read_vector_property(component, STR("RelativeLocation"), out_vector))
+        {
+            method = "RelativeLocation";
+            return true;
+        }
         return false;
     }
 
@@ -727,6 +842,39 @@ namespace
         }
         catch (...)
         {
+            return false;
+        }
+    }
+
+    bool property_is_object_array_reference(Unreal::FProperty* property,
+                                            Unreal::FArrayProperty*& out_array_property)
+    {
+        out_array_property = nullptr;
+        if (!property)
+        {
+            return false;
+        }
+
+        try
+        {
+            auto* array_property = Unreal::CastField<Unreal::FArrayProperty>(property);
+            if (!array_property)
+            {
+                return false;
+            }
+
+            Unreal::FProperty* inner = array_property->GetInner();
+            if (!property_is_object_reference(inner))
+            {
+                return false;
+            }
+
+            out_array_property = array_property;
+            return true;
+        }
+        catch (...)
+        {
+            out_array_property = nullptr;
             return false;
         }
     }
@@ -868,6 +1016,1382 @@ namespace
         return out.str();
     }
 
+    bool actor_set_hidden_in_game_safe(Unreal::AActor* actor, bool hidden)
+    {
+        if (!actor)
+        {
+            return false;
+        }
+        try
+        {
+            actor->SetActorHiddenInGame(hidden);
+            return true;
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
+    bool actor_set_collision_safe(Unreal::AActor* actor, bool collision_enabled)
+    {
+        if (!actor)
+        {
+            return false;
+        }
+        try
+        {
+            actor->SetActorEnableCollision(collision_enabled);
+            return true;
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
+    bool actor_get_collision_safe(Unreal::AActor* actor, bool& collision_enabled)
+    {
+        if (!actor)
+        {
+            return false;
+        }
+        try
+        {
+            collision_enabled = actor->GetActorEnableCollision();
+            return true;
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
+    struct ReflectedFunctionCandidate
+    {
+        const CharType* short_name;
+        const CharType* path_a;
+        const CharType* path_b;
+        const char* label;
+    };
+
+    Unreal::UFunction* find_reflected_function(Unreal::UObject* object,
+                                               const ReflectedFunctionCandidate& candidate,
+                                               std::string& detail)
+    {
+        if (is_live_uobject(object) && candidate.short_name)
+        {
+            try
+            {
+                if (auto* function = object->GetFunctionByNameInChain(candidate.short_name))
+                {
+                    detail = std::string(candidate.label ? candidate.label : "function") +
+                             " resolved by object function chain";
+                    return function;
+                }
+            }
+            catch (...)
+            {
+            }
+
+            try
+            {
+                if (auto* function = object->GetFunctionByName(candidate.short_name))
+                {
+                    detail = std::string(candidate.label ? candidate.label : "function") +
+                             " resolved by object function table";
+                    return function;
+                }
+            }
+            catch (...)
+            {
+            }
+        }
+
+        for (const CharType* path : {candidate.path_a, candidate.path_b})
+        {
+            if (!path)
+            {
+                continue;
+            }
+
+            try
+            {
+                if (auto* function = Unreal::UObjectGlobals::StaticFindObject<Unreal::UFunction*>(
+                        nullptr,
+                        nullptr,
+                        path))
+                {
+                    detail = std::string(candidate.label ? candidate.label : "function") +
+                             " resolved by static path";
+                    return function;
+                }
+            }
+            catch (...)
+            {
+            }
+        }
+
+        if (candidate.short_name)
+        {
+            try
+            {
+                if (auto* function = reinterpret_cast<Unreal::UFunction*>(
+                        Unreal::UObjectGlobals::FindObject(STR("Function"), candidate.short_name)))
+                {
+                    detail = std::string(candidate.label ? candidate.label : "function") +
+                             " resolved by global function name";
+                    return function;
+                }
+            }
+            catch (...)
+            {
+            }
+        }
+
+        detail = std::string(candidate.label ? candidate.label : "function") +
+                 " not found by object chain, object table, static paths, or global function name";
+        return nullptr;
+    }
+
+    Unreal::UFunction* find_reflected_function(const CharType* path)
+    {
+        try
+        {
+            return Unreal::UObjectGlobals::StaticFindObject<Unreal::UFunction*>(
+                nullptr,
+                nullptr,
+                path);
+        }
+        catch (...)
+        {
+            return nullptr;
+        }
+    }
+
+    bool set_reflected_bool_param(Unreal::UFunction* function,
+                                  void* params,
+                                  const CharType* name,
+                                  bool value,
+                                  std::string& detail)
+    {
+        if (!function || !params || !name)
+        {
+            detail = "invalid bool parameter target";
+            return false;
+        }
+
+        Unreal::FProperty* property = function->FindProperty(
+            Unreal::FName(name, Unreal::FNAME_Find));
+        if (!property)
+        {
+            detail = "bool parameter not found";
+            return false;
+        }
+
+        if (auto* bool_property = Unreal::CastField<Unreal::FBoolProperty>(property))
+        {
+            bool_property->SetPropertyValueInContainer(params, value);
+            return true;
+        }
+
+        *reinterpret_cast<bool*>(
+            static_cast<uint8_t*>(params) + property->GetOffset_Internal()) = value;
+        return true;
+    }
+
+    bool set_reflected_u8_param(Unreal::UFunction* function,
+                                void* params,
+                                const CharType* name,
+                                uint8_t value,
+                                std::string& detail)
+    {
+        if (!function || !params || !name)
+        {
+            detail = "invalid numeric parameter target";
+            return false;
+        }
+
+        Unreal::FProperty* property = function->FindProperty(
+            Unreal::FName(name, Unreal::FNAME_Find));
+        if (!property)
+        {
+            detail = "numeric parameter not found";
+            return false;
+        }
+
+        if (auto* byte_property = Unreal::CastField<Unreal::FByteProperty>(property))
+        {
+            byte_property->SetPropertyValueInContainer(params, value);
+            return true;
+        }
+
+        auto* destination = static_cast<uint8_t*>(params) + property->GetOffset_Internal();
+        const int32_t size = property->GetSize();
+        if (size >= static_cast<int32_t>(sizeof(uint64_t)))
+        {
+            const uint64_t expanded = value;
+            std::memcpy(destination, &expanded, sizeof(expanded));
+        }
+        else if (size >= static_cast<int32_t>(sizeof(uint32_t)))
+        {
+            const uint32_t expanded = value;
+            std::memcpy(destination, &expanded, sizeof(expanded));
+        }
+        else if (size >= static_cast<int32_t>(sizeof(uint16_t)))
+        {
+            const uint16_t expanded = value;
+            std::memcpy(destination, &expanded, sizeof(expanded));
+        }
+        else
+        {
+            *destination = value;
+        }
+        return true;
+    }
+
+    bool call_component_bool_bool(Unreal::UObject* object,
+                                  const ReflectedFunctionCandidate& function_candidate,
+                                  const CharType* first_param,
+                                  bool first_value,
+                                  const CharType* second_param,
+                                  bool second_value,
+                                  std::string& detail)
+    {
+        if (!is_live_uobject(object))
+        {
+            detail = "component target is not live";
+            return false;
+        }
+
+        std::string resolve_detail;
+        Unreal::UFunction* function = find_reflected_function(object, function_candidate, resolve_detail);
+        if (!function)
+        {
+            detail = resolve_detail;
+            return false;
+        }
+
+        const int32_t params_size = function->GetParmsSize();
+        if (params_size <= 0)
+        {
+            detail = resolve_detail + "; component function has no parameter storage";
+            return false;
+        }
+
+        std::vector<uint8_t> params(static_cast<size_t>(params_size), 0);
+        if (!set_reflected_bool_param(function, params.data(), first_param, first_value, detail))
+        {
+            detail = resolve_detail + "; " + detail;
+            return false;
+        }
+        if (second_param &&
+            !set_reflected_bool_param(function, params.data(), second_param, second_value, detail))
+        {
+            detail = resolve_detail + "; " + detail;
+            return false;
+        }
+
+        try
+        {
+            object->ProcessEvent(function, params.data());
+            detail = resolve_detail;
+            return true;
+        }
+        catch (...)
+        {
+            detail = resolve_detail + "; component bool function raised an exception";
+            return false;
+        }
+    }
+
+    bool call_component_collision_enabled(Unreal::UObject* object,
+                                          bool collision_enabled,
+                                          std::string& detail)
+    {
+        if (!is_live_uobject(object))
+        {
+            detail = "component target is not live";
+            return false;
+        }
+
+        const ReflectedFunctionCandidate set_collision_enabled{
+            STR("SetCollisionEnabled"),
+            STR("/Script/Engine.PrimitiveComponent:SetCollisionEnabled"),
+            STR("/Script/Engine.PrimitiveComponent.SetCollisionEnabled"),
+            "PrimitiveComponent.SetCollisionEnabled"};
+
+        std::string resolve_detail;
+        Unreal::UFunction* function = find_reflected_function(
+            object,
+            set_collision_enabled,
+            resolve_detail);
+        if (!function)
+        {
+            detail = resolve_detail;
+            return false;
+        }
+
+        const int32_t params_size = function->GetParmsSize();
+        if (params_size <= 0)
+        {
+            detail = resolve_detail + "; PrimitiveComponent.SetCollisionEnabled has no parameter storage";
+            return false;
+        }
+
+        std::vector<uint8_t> params(static_cast<size_t>(params_size), 0);
+        const uint8_t mode = collision_enabled ? 3 : 0;
+        if (!set_reflected_u8_param(function, params.data(), STR("NewType"), mode, detail))
+        {
+            detail = resolve_detail + "; " + detail;
+            return false;
+        }
+
+        try
+        {
+            object->ProcessEvent(function, params.data());
+            detail = resolve_detail;
+            return true;
+        }
+        catch (...)
+        {
+            detail = resolve_detail + "; PrimitiveComponent.SetCollisionEnabled raised an exception";
+            return false;
+        }
+    }
+
+    bool call_reflected_no_params(Unreal::UObject* object,
+                                  const ReflectedFunctionCandidate& function_candidate,
+                                  std::string& detail)
+    {
+        if (!is_live_uobject(object))
+        {
+            detail = "target is not live";
+            return false;
+        }
+
+        std::string resolve_detail;
+        Unreal::UFunction* function = find_reflected_function(object, function_candidate, resolve_detail);
+        if (!function)
+        {
+            detail = resolve_detail;
+            return false;
+        }
+
+        try
+        {
+            object->ProcessEvent(function, nullptr);
+            detail = resolve_detail;
+            return true;
+        }
+        catch (...)
+        {
+            detail = resolve_detail + "; no-param function raised an exception";
+            return false;
+        }
+    }
+
+    Unreal::FProperty* find_uobject_return_property(Unreal::UFunction* function)
+    {
+        if (!function)
+        {
+            return nullptr;
+        }
+
+        try
+        {
+            for (Unreal::FProperty* property : Unreal::TFieldRange<Unreal::FProperty>(
+                     function,
+                     Unreal::EFieldIterationFlags::IncludeSuper | Unreal::EFieldIterationFlags::IncludeDeprecated))
+            {
+                if (property &&
+                    property->HasAnyPropertyFlags(Unreal::EPropertyFlags::CPF_ReturnParm) &&
+                    property_is_object_reference(property))
+                {
+                    return property;
+                }
+            }
+        }
+        catch (...)
+        {
+        }
+        return nullptr;
+    }
+
+    Unreal::UObject* call_reflected_uobject_no_params(Unreal::UObject* object,
+                                                      const ReflectedFunctionCandidate& function_candidate,
+                                                      std::string& detail)
+    {
+        if (!is_live_uobject(object))
+        {
+            detail = "target is not live";
+            return nullptr;
+        }
+
+        std::string resolve_detail;
+        Unreal::UFunction* function = find_reflected_function(object, function_candidate, resolve_detail);
+        if (!function)
+        {
+            detail = resolve_detail;
+            return nullptr;
+        }
+
+        Unreal::FProperty* return_property = find_uobject_return_property(function);
+        if (!return_property)
+        {
+            detail = resolve_detail + "; UObject return property not found";
+            return nullptr;
+        }
+
+        const int32_t params_size = function->GetParmsSize();
+        if (params_size <= 0)
+        {
+            detail = resolve_detail + "; reflected function has no parameter storage";
+            return nullptr;
+        }
+
+        std::vector<uint8_t> params(static_cast<size_t>(params_size), 0);
+        try
+        {
+            object->ProcessEvent(function, params.data());
+        }
+        catch (...)
+        {
+            detail = resolve_detail + "; reflected UObject function raised an exception";
+            return nullptr;
+        }
+
+        try
+        {
+            auto value = return_property->ContainerPtrToValuePtr<Unreal::UObject*>(params.data());
+            if (!value || !is_live_uobject(*value))
+            {
+                detail = resolve_detail + "; reflected UObject return was empty or stale";
+                return nullptr;
+            }
+            detail = resolve_detail;
+            return *value;
+        }
+        catch (...)
+        {
+            detail = resolve_detail + "; reflected UObject return read failed";
+            return nullptr;
+        }
+    }
+
+    Unreal::UClass* scene_component_class()
+    {
+        try
+        {
+            return Unreal::UObjectGlobals::StaticFindObject<Unreal::UClass*>(
+                nullptr,
+                nullptr,
+                STR("/Script/Engine.SceneComponent"));
+        }
+        catch (...)
+        {
+            return nullptr;
+        }
+    }
+
+    void append_unique_uobject(std::vector<Unreal::UObject*>& objects, Unreal::UObject* object)
+    {
+        if (!is_live_uobject(object))
+        {
+            return;
+        }
+
+        for (Unreal::UObject* existing : objects)
+        {
+            if (existing == object)
+            {
+                return;
+            }
+        }
+        objects.push_back(object);
+    }
+
+    void append_unique_uclass(std::vector<Unreal::UClass*>& classes, Unreal::UObject* object)
+    {
+        if (!is_live_uobject(object))
+        {
+            return;
+        }
+
+        Unreal::UClass* object_class = nullptr;
+        try
+        {
+            object_class = object->GetClassPrivate();
+        }
+        catch (...)
+        {
+            object_class = nullptr;
+        }
+        if (!object_class)
+        {
+            return;
+        }
+
+        for (Unreal::UClass* existing : classes)
+        {
+            if (existing == object_class)
+            {
+                return;
+            }
+        }
+        classes.push_back(object_class);
+    }
+
+    Unreal::AActor* actor_from_component_scan(Unreal::UObject* source,
+                                              std::string& actor_source)
+    {
+        if (!is_live_uobject(source))
+        {
+            return nullptr;
+        }
+
+        std::vector<Unreal::UObject*> needles;
+        needles.reserve(8);
+        append_unique_uobject(needles, source);
+        append_unique_uobject(needles, get_object_property(source, STR("AttachParent")));
+        append_unique_uobject(needles, get_object_property(source, STR("ParentComponent")));
+        append_unique_uobject(needles, get_object_property(source, STR("Owner")));
+
+        Unreal::UObject* outer = nullptr;
+        try
+        {
+            outer = source->GetOuterPrivate();
+        }
+        catch (...)
+        {
+            outer = nullptr;
+        }
+        for (int depth = 0; depth < 3 && is_live_uobject(outer) && outer != source; ++depth)
+        {
+            append_unique_uobject(needles, outer);
+            Unreal::UObject* next = nullptr;
+            try
+            {
+                next = outer->GetOuterPrivate();
+            }
+            catch (...)
+            {
+                next = nullptr;
+            }
+            if (!is_live_uobject(next) || next == outer)
+            {
+                break;
+            }
+            outer = next;
+        }
+
+        std::vector<Unreal::UClass*> component_classes;
+        component_classes.reserve(4);
+        if (Unreal::UClass* engine_scene_component_class = scene_component_class())
+        {
+            component_classes.push_back(engine_scene_component_class);
+        }
+        for (Unreal::UObject* needle : needles)
+        {
+            append_unique_uclass(component_classes, needle);
+        }
+        if (component_classes.empty())
+        {
+            actor_source = "global-component-scan unavailable: no component class resolved";
+            return nullptr;
+        }
+
+        Unreal::AActor* found_actor = nullptr;
+        Unreal::UObject* matched_component = nullptr;
+        uint64_t actors_scanned = 0;
+        uint64_t components_scanned = 0;
+        uint64_t scan_errors = 0;
+        bool truncated = false;
+        constexpr uint64_t kMaxActorsToScan = 2048;
+        constexpr int32_t kMaxComponentsPerActor = 128;
+
+        Unreal::UObjectGlobals::ForEachUObject([&](Unreal::UObject* object, int32_t, int32_t) {
+            if (found_actor)
+            {
+                return LoopAction::Break;
+            }
+            if (!is_live_uobject(object) || !object_is_actor(object))
+            {
+                return LoopAction::Continue;
+            }
+            if (actors_scanned++ >= kMaxActorsToScan)
+            {
+                truncated = true;
+                return LoopAction::Break;
+            }
+
+            try
+            {
+                auto* actor = static_cast<Unreal::AActor*>(object);
+                for (Unreal::UClass* component_class : component_classes)
+                {
+                    if (!component_class)
+                    {
+                        continue;
+                    }
+                    Unreal::TArray<Unreal::UObject*> components =
+                        actor->K2_GetComponentsByClass(component_class);
+                    const int32_t component_count = std::max<int32_t>(
+                        0,
+                        std::min<int32_t>(components.Num(), kMaxComponentsPerActor));
+                    for (int32_t index = 0; index < component_count; ++index)
+                    {
+                        Unreal::UObject* component = components[index];
+                        if (!is_live_uobject(component))
+                        {
+                            continue;
+                        }
+                        ++components_scanned;
+                        for (Unreal::UObject* needle : needles)
+                        {
+                            if (component == needle)
+                            {
+                                found_actor = actor;
+                                matched_component = component;
+                                return LoopAction::Break;
+                            }
+                        }
+                    }
+                    if (found_actor)
+                    {
+                        return LoopAction::Break;
+                    }
+                }
+            }
+            catch (...)
+            {
+                ++scan_errors;
+            }
+
+            return LoopAction::Continue;
+        });
+
+        if (found_actor)
+        {
+            actor_source =
+                "global-component-scan actors=" + std::to_string(actors_scanned) +
+                " components=" + std::to_string(components_scanned) +
+                " class_queries=" + std::to_string(component_classes.size()) +
+                " matched=" + object_address_hex(matched_component);
+            return found_actor;
+        }
+
+        actor_source =
+            "global-component-scan miss actors=" + std::to_string(actors_scanned) +
+            " components=" + std::to_string(components_scanned) +
+            " class_queries=" + std::to_string(component_classes.size()) +
+            " errors=" + std::to_string(scan_errors) +
+            " truncated=" + (truncated ? "true" : "false");
+        return nullptr;
+    }
+
+    Unreal::AActor* actor_from_uobject_or_outer(Unreal::UObject* object,
+                                                std::string& actor_source,
+                                                bool allow_component_scan = true)
+    {
+        if (!is_live_uobject(object))
+        {
+            return nullptr;
+        }
+
+        try
+        {
+            if (object->IsA<Unreal::AActor>())
+            {
+                actor_source = "source";
+                return static_cast<Unreal::AActor*>(object);
+            }
+        }
+        catch (...)
+        {
+        }
+
+        const ReflectedFunctionCandidate get_owner{
+            STR("GetOwner"),
+            STR("/Script/Engine.ActorComponent:GetOwner"),
+            STR("/Script/Engine.ActorComponent.GetOwner"),
+            "ActorComponent.GetOwner"};
+        std::string owner_detail;
+        Unreal::UObject* owner = call_reflected_uobject_no_params(
+            object,
+            get_owner,
+            owner_detail);
+        if (is_live_uobject(owner))
+        {
+            try
+            {
+                if (owner->IsA<Unreal::AActor>())
+                {
+                    actor_source = "ActorComponent.GetOwner";
+                    return static_cast<Unreal::AActor*>(owner);
+                }
+            }
+            catch (...)
+            {
+            }
+        }
+
+        try
+        {
+            Unreal::AActor* outer_actor = object->GetTypedOuter<Unreal::AActor>();
+            if (is_live_uobject(outer_actor))
+            {
+                actor_source = "typed_outer";
+                return outer_actor;
+            }
+        }
+        catch (...)
+        {
+        }
+
+        if (allow_component_scan &&
+            env_flag_enabled("BMF_UOBJECT_PHYSICAL_GLOBAL_COMPONENT_SCAN_ENABLED"))
+        {
+            Unreal::AActor* scanned_actor = actor_from_component_scan(object, actor_source);
+            if (is_live_uobject(scanned_actor))
+            {
+                return scanned_actor;
+            }
+        }
+
+        return nullptr;
+    }
+
+    struct UobjectPhysicalTarget
+    {
+        Unreal::UObject* object{nullptr};
+        std::string source;
+        bool is_actor{false};
+        bool is_scene_component{false};
+        bool is_primitive_component{false};
+    };
+
+    void add_uobject_physical_target(std::vector<UobjectPhysicalTarget>& targets,
+                                     Unreal::UObject* object,
+                                     std::string source)
+    {
+        if (!is_live_uobject(object))
+        {
+            return;
+        }
+
+        for (const UobjectPhysicalTarget& target : targets)
+        {
+            if (target.object == object)
+            {
+                return;
+            }
+        }
+
+        const bool is_actor = object_is_actor(object);
+        const bool is_scene_component =
+            object_class_has_any_cast_flags(object, Unreal::CASTCLASS_USceneComponent);
+        const bool is_primitive_component =
+            object_class_has_any_cast_flags(object, Unreal::CASTCLASS_UPrimitiveComponent);
+        if (!is_actor && !is_scene_component && !is_primitive_component)
+        {
+            return;
+        }
+
+        targets.push_back(UobjectPhysicalTarget{
+            object,
+            std::move(source),
+            is_actor,
+            is_scene_component,
+            is_primitive_component});
+    }
+
+    void add_named_uobject_physical_property(std::vector<UobjectPhysicalTarget>& targets,
+                                             Unreal::UObject* object,
+                                             const CharType* property_name,
+                                             std::string_view source_prefix)
+    {
+        if (!is_live_uobject(object) || !property_name)
+        {
+            return;
+        }
+
+        Unreal::UObject* value = get_object_property(object, property_name);
+        if (!is_live_uobject(value))
+        {
+            return;
+        }
+
+        add_uobject_physical_target(
+            targets,
+            value,
+            std::string(source_prefix) + "." + narrow_string(property_name));
+    }
+
+    void collect_actor_scene_component_targets(std::vector<UobjectPhysicalTarget>& targets,
+                                               Unreal::AActor* actor,
+                                               std::string_view source_prefix,
+                                               int max_components)
+    {
+        if (!is_live_uobject(actor) || max_components <= 0)
+        {
+            return;
+        }
+
+        Unreal::UClass* component_class = scene_component_class();
+        if (!component_class)
+        {
+            return;
+        }
+
+        try
+        {
+            Unreal::TArray<Unreal::UObject*> components =
+                actor->K2_GetComponentsByClass(component_class);
+            const int32_t component_count = std::max<int32_t>(
+                0,
+                std::min<int32_t>(components.Num(), max_components));
+            for (int32_t index = 0; index < component_count; ++index)
+            {
+                Unreal::UObject* component = components[index];
+                if (!is_live_uobject(component))
+                {
+                    continue;
+                }
+
+                add_uobject_physical_target(
+                    targets,
+                    component,
+                    std::string(source_prefix) + ".scene_component[" +
+                        std::to_string(index) + "]");
+            }
+        }
+        catch (...)
+        {
+        }
+
+    }
+
+    void collect_bounded_uobject_physical_property_targets(std::vector<UobjectPhysicalTarget>& targets,
+                                                           Unreal::UObject* object,
+                                                           std::string_view source_prefix,
+                                                           int max_refs)
+    {
+        if (!is_live_uobject(object) || max_refs <= 0)
+        {
+            return;
+        }
+
+        auto object_class = object->GetClassPrivate();
+        if (!object_class)
+        {
+            return;
+        }
+
+        int visited_refs = 0;
+        try
+        {
+            for (Unreal::FProperty* property : Unreal::TFieldRange<Unreal::FProperty>(
+                     object_class,
+                     Unreal::EFieldIterationFlags::IncludeSuper | Unreal::EFieldIterationFlags::IncludeDeprecated))
+            {
+                if (!property || !property_is_object_reference(property))
+                {
+                    continue;
+                }
+                if (visited_refs++ >= max_refs)
+                {
+                    break;
+                }
+
+                auto value = property->ContainerPtrToValuePtr<Unreal::UObject*>(object);
+                if (!value || !is_live_uobject(*value) || *value == object)
+                {
+                    continue;
+                }
+
+                const std::string property_name = narrow_string(property->GetName());
+                add_uobject_physical_target(
+                    targets,
+                    *value,
+                    std::string(source_prefix) + ".ref." + property_name);
+            }
+        }
+        catch (...)
+        {
+        }
+
+    }
+
+    void collect_bounded_uobject_physical_array_targets(std::vector<UobjectPhysicalTarget>& targets,
+                                                        Unreal::UObject* object,
+                                                        std::string_view source_prefix,
+                                                        int max_arrays,
+                                                        int max_items_per_array)
+    {
+        if (!is_live_uobject(object) || max_arrays <= 0 || max_items_per_array <= 0)
+        {
+            return;
+        }
+
+        auto object_class = object->GetClassPrivate();
+        if (!object_class)
+        {
+            return;
+        }
+
+        int visited_arrays = 0;
+        try
+        {
+            for (Unreal::FProperty* property : Unreal::TFieldRange<Unreal::FProperty>(
+                     object_class,
+                     Unreal::EFieldIterationFlags::IncludeSuper | Unreal::EFieldIterationFlags::IncludeDeprecated))
+            {
+                Unreal::FArrayProperty* array_property = nullptr;
+                if (!property || !property_is_object_array_reference(property, array_property))
+                {
+                    continue;
+                }
+                if (visited_arrays++ >= max_arrays)
+                {
+                    break;
+                }
+
+                uint8_t* array_value = property->ContainerPtrToValuePtr<uint8_t>(object);
+                if (!array_value)
+                {
+                    continue;
+                }
+
+                Unreal::FScriptArrayHelper helper(array_property, array_value);
+                const int32_t item_count = std::max<int32_t>(
+                    0,
+                    std::min<int32_t>(helper.Num(), max_items_per_array));
+                const std::string property_name = narrow_string(property->GetName());
+                for (int32_t index = 0; index < item_count; ++index)
+                {
+                    uint8_t* raw = helper.GetRawPtr(index);
+                    if (!raw)
+                    {
+                        continue;
+                    }
+
+                    Unreal::UObject* value = *reinterpret_cast<Unreal::UObject**>(raw);
+                    if (!is_live_uobject(value) || value == object)
+                    {
+                        continue;
+                    }
+
+                    add_uobject_physical_target(
+                        targets,
+                        value,
+                        std::string(source_prefix) + ".array." + property_name +
+                            "[" + std::to_string(index) + "]");
+                }
+            }
+        }
+        catch (...)
+        {
+        }
+
+    }
+
+    std::vector<UobjectPhysicalTarget> collect_bounded_uobject_physical_targets(Unreal::UObject* source)
+    {
+        std::vector<UobjectPhysicalTarget> targets;
+        targets.reserve(48);
+
+        add_uobject_physical_target(targets, source, "source");
+
+        std::string actor_source;
+        Unreal::AActor* actor = actor_from_uobject_or_outer(source, actor_source);
+        if (is_live_uobject(actor))
+        {
+            add_uobject_physical_target(
+                targets,
+                static_cast<Unreal::UObject*>(actor),
+                actor_source.empty() ? "actor" : "actor." + actor_source);
+            collect_actor_scene_component_targets(
+                targets,
+                actor,
+                actor_source.empty() ? "actor" : "actor." + actor_source,
+                96);
+        }
+
+        add_named_uobject_physical_property(targets, source, STR("Owner"), "source");
+        add_named_uobject_physical_property(targets, source, STR("RootComponent"), "source");
+        add_named_uobject_physical_property(targets, source, STR("AttachParent"), "source");
+        add_named_uobject_physical_property(targets, source, STR("ParentComponent"), "source");
+        add_named_uobject_physical_property(targets, source, STR("ComponentTemplate"), "source");
+        collect_bounded_uobject_physical_array_targets(targets, source, "source", 8, 16);
+
+        Unreal::UObject* outer = nullptr;
+        try
+        {
+            outer = source->GetOuterPrivate();
+        }
+        catch (...)
+        {
+            outer = nullptr;
+        }
+        for (int depth = 0; depth < 4 && is_live_uobject(outer) && outer != source; ++depth)
+        {
+            const std::string outer_source = "outer." + std::to_string(depth + 1);
+            add_uobject_physical_target(targets, outer, outer_source);
+            add_named_uobject_physical_property(targets, outer, STR("RootComponent"), outer_source);
+            add_named_uobject_physical_property(targets, outer, STR("Owner"), outer_source);
+            collect_bounded_uobject_physical_array_targets(
+                targets,
+                outer,
+                outer_source,
+                8,
+                16);
+
+            Unreal::UObject* next = nullptr;
+            try
+            {
+                next = outer->GetOuterPrivate();
+            }
+            catch (...)
+            {
+                next = nullptr;
+            }
+            if (!is_live_uobject(next) || next == outer)
+            {
+                break;
+            }
+            outer = next;
+        }
+
+        const size_t primary_count = targets.size();
+        for (size_t index = 0; index < primary_count && index < 16; ++index)
+        {
+            Unreal::UObject* object = targets[index].object;
+            const std::string prefix = "target." + std::to_string(index + 1);
+            add_named_uobject_physical_property(targets, object, STR("RootComponent"), prefix);
+            add_named_uobject_physical_property(targets, object, STR("Owner"), prefix);
+            add_named_uobject_physical_property(targets, object, STR("AttachParent"), prefix);
+            collect_bounded_uobject_physical_property_targets(targets, object, prefix, 24);
+            collect_bounded_uobject_physical_array_targets(targets, object, prefix, 12, 24);
+        }
+
+        collect_bounded_uobject_physical_property_targets(targets, source, "source", 32);
+
+        if (targets.size() > 128)
+        {
+            targets.resize(128);
+        }
+
+        return targets;
+    }
+
+    bool uobject_physical_apply_visibility(Unreal::UObject* object,
+                                           bool is_actor,
+                                           bool is_scene_component,
+                                           bool target_visible,
+                                           std::string& detail)
+    {
+        const bool target_hidden = !target_visible;
+        bool succeeded = false;
+        std::ostringstream detail_stream;
+
+        if (is_actor)
+        {
+            auto* actor = static_cast<Unreal::AActor*>(object);
+            const bool actor_ok = actor_set_hidden_in_game_safe(actor, target_hidden);
+            detail_stream << "SetActorHiddenInGame=" << (actor_ok ? "true" : "false");
+            succeeded = succeeded || actor_ok;
+        }
+
+        if (is_scene_component)
+        {
+            const ReflectedFunctionCandidate set_hidden_in_game{
+                STR("SetHiddenInGame"),
+                STR("/Script/Engine.SceneComponent:SetHiddenInGame"),
+                STR("/Script/Engine.SceneComponent.SetHiddenInGame"),
+                "SceneComponent.SetHiddenInGame"};
+            const ReflectedFunctionCandidate set_visibility{
+                STR("SetVisibility"),
+                STR("/Script/Engine.SceneComponent:SetVisibility"),
+                STR("/Script/Engine.SceneComponent.SetVisibility"),
+                "SceneComponent.SetVisibility"};
+            const ReflectedFunctionCandidate mark_render_state_dirty{
+                STR("MarkRenderStateDirty"),
+                STR("/Script/Engine.ActorComponent:MarkRenderStateDirty"),
+                STR("/Script/Engine.ActorComponent.MarkRenderStateDirty"),
+                "ActorComponent.MarkRenderStateDirty"};
+
+            std::string hidden_detail;
+            const bool hidden_succeeded = call_component_bool_bool(
+                object,
+                set_hidden_in_game,
+                STR("NewHidden"),
+                target_hidden,
+                STR("bPropagateToChildren"),
+                true,
+                hidden_detail);
+            std::string visibility_detail;
+            const bool visibility_call_succeeded = call_component_bool_bool(
+                object,
+                set_visibility,
+                STR("bNewVisibility"),
+                target_visible,
+                STR("bPropagateToChildren"),
+                true,
+                visibility_detail);
+            std::string dirty_detail;
+            const bool dirty_succeeded = call_reflected_no_params(
+                object,
+                mark_render_state_dirty,
+                dirty_detail);
+
+            if (detail_stream.tellp() > 0)
+            {
+                detail_stream << " ";
+            }
+            detail_stream << "SetHiddenInGame=" << (hidden_succeeded ? "true" : "false")
+                          << " SetVisibility=" << (visibility_call_succeeded ? "true" : "false")
+                          << " MarkRenderStateDirty=" << (dirty_succeeded ? "true" : "false")
+                          << " hidden_detail=" << hidden_detail
+                          << " visibility_detail=" << visibility_detail
+                          << " dirty_detail=" << dirty_detail;
+            succeeded = succeeded || hidden_succeeded || visibility_call_succeeded;
+        }
+
+        detail = detail_stream.str();
+        return succeeded;
+    }
+
+    bool uobject_physical_apply_collision(Unreal::UObject* object,
+                                          bool is_actor,
+                                          bool is_primitive_component,
+                                          bool target_collision,
+                                          std::string& detail)
+    {
+        bool succeeded = false;
+        std::ostringstream detail_stream;
+
+        if (is_actor)
+        {
+            auto* actor = static_cast<Unreal::AActor*>(object);
+            const bool actor_ok = actor_set_collision_safe(actor, target_collision);
+            detail_stream << "SetActorEnableCollision=" << (actor_ok ? "true" : "false");
+            succeeded = succeeded || actor_ok;
+        }
+
+        if (is_primitive_component)
+        {
+            std::string collision_detail;
+            const bool component_ok = call_component_collision_enabled(
+                object,
+                target_collision,
+                collision_detail);
+            if (detail_stream.tellp() > 0)
+            {
+                detail_stream << " ";
+            }
+            detail_stream << "SetCollisionEnabled=" << (component_ok ? "true" : "false")
+                          << " collision_detail=" << collision_detail;
+            succeeded = succeeded || component_ok;
+        }
+
+        detail = detail_stream.str();
+        return succeeded;
+    }
+
+    std::string uobject_physical_set_text(std::string_view source_address,
+                                          int64_t visible_arg,
+                                          int64_t collision_arg)
+    {
+        std::ostringstream out;
+        out << "Native UObject physical state\n"
+            << "source=BMFSocketUObjectPhysicalSet\n"
+            << "requested_address=" << json_escape(source_address) << "\n"
+            << "requested_visible_arg=" << visible_arg << "\n"
+            << "requested_collision_arg=" << collision_arg << "\n";
+
+        uintptr_t parsed_source_address = 0;
+        if (!parse_uobject_address(source_address, parsed_source_address))
+        {
+            out << "ok=false\n"
+                << "code=NATIVE_UOBJECT_ADDRESS_REQUIRED\n"
+                << "detail=source address must be a non-zero UObject pointer\n";
+            return out.str();
+        }
+
+        Unreal::UObject* source = reinterpret_cast<Unreal::UObject*>(parsed_source_address);
+        if (!is_live_uobject(source))
+        {
+            out << "ok=false\n"
+                << "code=NATIVE_UOBJECT_NOT_LIVE\n"
+                << "detail=source address does not point to a live UObject\n";
+            return out.str();
+        }
+
+        const bool visible_requested = visible_arg >= 0;
+        const bool collision_requested = collision_arg >= 0;
+        if (!visible_requested && !collision_requested)
+        {
+            out << "ok=false\n"
+                << "code=NATIVE_UOBJECT_PHYSICAL_NOOP\n"
+                << "source_address=" << json_escape(object_address_hex(source)) << "\n"
+                << "detail=visible or collision must be provided\n";
+            return out.str();
+        }
+
+        std::string actor_source;
+        Unreal::AActor* actor = actor_from_uobject_or_outer(source, actor_source, false);
+        const bool source_is_actor = object_is_actor(source);
+        const bool source_is_scene_component =
+            object_class_has_any_cast_flags(source, Unreal::CASTCLASS_USceneComponent);
+        const bool source_is_primitive_component =
+            object_class_has_any_cast_flags(source, Unreal::CASTCLASS_UPrimitiveComponent);
+        std::vector<UobjectPhysicalTarget> targets = collect_bounded_uobject_physical_targets(source);
+
+        if (targets.empty())
+        {
+            out << "ok=false\n"
+                << "code=NATIVE_UOBJECT_PHYSICAL_TARGET_UNSUPPORTED\n"
+                << "source_address=" << json_escape(object_address_hex(source)) << "\n"
+                << "source_name=" << json_escape(object_name(source)) << "\n"
+                << "source_full_name=" << json_escape(object_full_name(source)) << "\n"
+                << "source_class=" << json_escape(object_class_name(source)) << "\n"
+                << "source_class_full_name=" << json_escape(object_class_full_name(source)) << "\n"
+                << "source_is_actor=" << (source_is_actor ? "true" : "false") << "\n"
+                << "source_is_scene_component=" << (source_is_scene_component ? "true" : "false") << "\n"
+                << "source_is_primitive_component=" << (source_is_primitive_component ? "true" : "false") << "\n"
+                << "detail=no actor, scene component, primitive component, or bounded owner/root candidate was found\n";
+            return out.str();
+        }
+
+        const bool target_visible = visible_arg != 0;
+        const bool target_collision = collision_arg != 0;
+        const bool visibility_attempted = visible_requested;
+        const bool collision_attempted = collision_requested;
+        size_t visibility_successes = 0;
+        size_t collision_successes = 0;
+        size_t visibility_attempts = 0;
+        size_t collision_attempts = 0;
+        std::vector<std::string> target_lines;
+        target_lines.reserve(targets.size() * 12);
+
+        for (size_t index = 0; index < targets.size(); ++index)
+        {
+            UobjectPhysicalTarget& target = targets[index];
+            const std::string prefix = "target." + std::to_string(index + 1);
+            target_lines.push_back(prefix + ".source=" + json_escape(target.source));
+            target_lines.push_back(prefix + ".address=" + json_escape(object_address_hex(target.object)));
+            target_lines.push_back(prefix + ".name=" + json_escape(object_name(target.object)));
+            target_lines.push_back(prefix + ".full_name=" + json_escape(object_full_name(target.object)));
+            target_lines.push_back(prefix + ".class=" + json_escape(object_class_name(target.object)));
+            target_lines.push_back(prefix + ".class_full_name=" + json_escape(object_class_full_name(target.object)));
+            target_lines.push_back(prefix + ".is_actor=" + std::string(target.is_actor ? "true" : "false"));
+            target_lines.push_back(prefix + ".is_scene_component=" + std::string(target.is_scene_component ? "true" : "false"));
+            target_lines.push_back(prefix + ".is_primitive_component=" + std::string(target.is_primitive_component ? "true" : "false"));
+
+            if (visible_requested)
+            {
+                ++visibility_attempts;
+                std::string visibility_detail;
+                const bool visibility_ok = uobject_physical_apply_visibility(
+                    target.object,
+                    target.is_actor,
+                    target.is_scene_component,
+                    target_visible,
+                    visibility_detail);
+                if (visibility_ok)
+                {
+                    ++visibility_successes;
+                }
+                target_lines.push_back(prefix + ".visibility_attempted=true");
+                target_lines.push_back(prefix + ".visibility_succeeded=" + std::string(visibility_ok ? "true" : "false"));
+                target_lines.push_back(prefix + ".visibility_detail=" + json_escape(visibility_detail));
+            }
+            else
+            {
+                target_lines.push_back(prefix + ".visibility_attempted=false");
+            }
+
+            if (collision_requested)
+            {
+                if (target.is_actor || target.is_primitive_component)
+                {
+                    ++collision_attempts;
+                    std::string collision_detail;
+                    const bool collision_ok = uobject_physical_apply_collision(
+                        target.object,
+                        target.is_actor,
+                        target.is_primitive_component,
+                        target_collision,
+                        collision_detail);
+                    if (collision_ok)
+                    {
+                        ++collision_successes;
+                    }
+                    target_lines.push_back(prefix + ".collision_attempted=true");
+                    target_lines.push_back(prefix + ".collision_succeeded=" + std::string(collision_ok ? "true" : "false"));
+                    target_lines.push_back(prefix + ".collision_detail=" + json_escape(collision_detail));
+                }
+                else
+                {
+                    target_lines.push_back(prefix + ".collision_attempted=false");
+                    target_lines.push_back(prefix + ".collision_detail=target is not actor or primitive component");
+                }
+            }
+            else
+            {
+                target_lines.push_back(prefix + ".collision_attempted=false");
+            }
+        }
+
+        const bool visibility_succeeded = !visible_requested || visibility_successes > 0;
+        const bool collision_succeeded = !collision_requested || collision_successes > 0;
+        const bool ok = visibility_succeeded && collision_succeeded;
+        const char* code = ok
+            ? "OK"
+            : (!visibility_succeeded
+                   ? "NATIVE_UOBJECT_VISIBILITY_SET_FAILED"
+                   : "NATIVE_UOBJECT_COLLISION_SET_FAILED");
+
+        out << "ok=" << (ok ? "true" : "false") << "\n"
+            << "code=" << code << "\n"
+            << "source_address=" << json_escape(object_address_hex(source)) << "\n"
+            << "source_name=" << json_escape(object_name(source)) << "\n"
+            << "source_full_name=" << json_escape(object_full_name(source)) << "\n"
+            << "source_class=" << json_escape(object_class_name(source)) << "\n"
+            << "source_class_full_name=" << json_escape(object_class_full_name(source)) << "\n"
+            << "source_is_actor=" << (source_is_actor ? "true" : "false") << "\n"
+            << "source_is_scene_component=" << (source_is_scene_component ? "true" : "false") << "\n"
+            << "source_is_primitive_component=" << (source_is_primitive_component ? "true" : "false") << "\n"
+            << "actor_address=" << json_escape(is_live_uobject(actor) ? object_address_hex(actor) : "") << "\n"
+            << "actor_name=" << json_escape(is_live_uobject(actor) ? object_name(actor) : "") << "\n"
+            << "actor_full_name=" << json_escape(is_live_uobject(actor) ? object_full_name(actor) : "") << "\n"
+            << "actor_class=" << json_escape(is_live_uobject(actor) ? object_class_name(actor) : "") << "\n"
+            << "actor_class_full_name=" << json_escape(is_live_uobject(actor) ? object_class_full_name(actor) : "") << "\n"
+            << "actor_source=" << json_escape(actor_source) << "\n"
+            << "visibility_requested=" << (visible_requested ? "true" : "false") << "\n"
+            << "target_visible=" << (target_visible ? "true" : "false") << "\n"
+            << "visibility_set_attempted=" << (visibility_attempted ? "true" : "false") << "\n"
+            << "visibility_set_succeeded=" << (visibility_succeeded ? "true" : "false") << "\n"
+            << "visibility_attempts=" << visibility_attempts << "\n"
+            << "visibility_successes=" << visibility_successes << "\n"
+            << "collision_requested=" << (collision_requested ? "true" : "false") << "\n"
+            << "target_collision=" << (target_collision ? "true" : "false") << "\n"
+            << "collision_set_attempted=" << (collision_attempted ? "true" : "false") << "\n"
+            << "collision_set_succeeded=" << (collision_succeeded ? "true" : "false") << "\n"
+            << "collision_attempts=" << collision_attempts << "\n"
+            << "collision_successes=" << collision_successes << "\n"
+            << "physical_target_count=" << targets.size() << "\n"
+            << "detail=" << (ok
+                   ? "physical state updated across bounded explicit UObject target graph"
+                   : "one or more requested physical state changes failed across the bounded target graph") << "\n";
+        for (const std::string& line : target_lines)
+        {
+            out << line << "\n";
+        }
+        return out.str();
+    }
+
     using NativeFunc = void(__fastcall*)(void* context, void* stack, void* result);
 
     constexpr uintptr_t kTreeCutFuncOffset = 0xD8;
@@ -897,6 +2421,13 @@ namespace
     std::atomic<uint64_t> g_treecut_target_cache_last_refresh_ms{0};
     std::atomic<uint64_t> g_treecut_console_tag_hits{0};
     std::atomic<uint64_t> g_treecut_console_tag_misses{0};
+    std::atomic<uint64_t> g_treecut_damage_target_hits{0};
+    std::atomic<uint64_t> g_treecut_damage_target_misses{0};
+    std::atomic<uintptr_t> g_treecut_last_damage_target{0};
+    std::atomic<uintptr_t> g_treecut_last_damage_target_context{0};
+    std::atomic<uintptr_t> g_treecut_last_damage_target_locals{0};
+    std::atomic<uintptr_t> g_treecut_last_damage_target_offset{0};
+    std::atomic<uint64_t> g_treecut_last_damage_target_tick_ms{0};
     std::atomic<uintptr_t> g_treecut_function{0};
     std::atomic<uintptr_t> g_treecut_slot{0};
     std::atomic<uintptr_t> g_treecut_original{0};
@@ -908,6 +2439,11 @@ namespace
     std::atomic<bool> g_treecut_pickaxe_class_attempted{false};
     std::atomic<uintptr_t> g_treecut_last_context{0};
     std::atomic<uintptr_t> g_treecut_last_context_class{0};
+    std::atomic<uint64_t> g_treecut_action_owner_cache_hits{0};
+    std::atomic<uint64_t> g_treecut_action_owner_cache_failures{0};
+    std::atomic<uintptr_t> g_treecut_last_action_source{0};
+    std::atomic<uintptr_t> g_treecut_last_action_owner{0};
+    std::atomic<uintptr_t> g_treecut_last_action_owner_surface{0};
     std::mutex g_treecut_mutex;
     std::deque<std::string> g_treecut_queue;
     std::string g_treecut_last_error;
@@ -923,6 +2459,9 @@ namespace
     std::string g_treecut_last_target_detail;
     std::string g_treecut_last_console_tag;
     std::string g_treecut_last_console_tag_source;
+    std::string g_treecut_last_damage_target_source;
+    std::string g_treecut_last_action_owner_source;
+    std::string g_treecut_last_action_owner_detail;
 
     struct TreeCutTargetCandidate
     {
@@ -937,6 +2476,7 @@ namespace
         std::string console_tag;
         std::string console_tag_source;
         std::string console_tag_source_object;
+        std::string resolver;
         bool tagged_component{false};
     };
 
@@ -952,6 +2492,8 @@ namespace
     void __fastcall treecut_probe_detour_6(void* context, void* stack, void* result);
     void __fastcall treecut_probe_detour_7(void* context, void* stack, void* result);
     void __fastcall treecut_probe_detour_8(void* context, void* stack, void* result);
+    bool treecut_record_process_impact_target(void* context, uintptr_t locals);
+    bool treecut_record_receive_hit_target(void* context, uintptr_t locals);
 
     std::string pointer_hex(uintptr_t value)
     {
@@ -963,6 +2505,20 @@ namespace
         out << "0x" << std::hex << std::uppercase << std::setw(sizeof(uintptr_t) * 2)
             << std::setfill('0') << value;
         return out.str();
+    }
+
+    int capture_structured_exception(EXCEPTION_POINTERS* info,
+                                     DWORD& code,
+                                     uintptr_t& address)
+    {
+        code = 0;
+        address = 0;
+        if (info && info->ExceptionRecord)
+        {
+            code = info->ExceptionRecord->ExceptionCode;
+            address = reinterpret_cast<uintptr_t>(info->ExceptionRecord->ExceptionAddress);
+        }
+        return EXCEPTION_EXECUTE_HANDLER;
     }
 
     std::string system_utc_iso()
@@ -1120,6 +2676,24 @@ namespace
     bool read_u32_at(uintptr_t address, uint32_t& out_value)
     {
         if (!is_accessible_memory(address, sizeof(uint32_t)))
+        {
+            return false;
+        }
+
+        __try
+        {
+            std::memcpy(&out_value, reinterpret_cast<void*>(address), sizeof(out_value));
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+        return true;
+    }
+
+    bool read_u16_at(uintptr_t address, uint16_t& out_value)
+    {
+        if (!is_accessible_memory(address, sizeof(uint16_t)))
         {
             return false;
         }
@@ -1340,6 +2914,234 @@ namespace
                env_flag_enabled("BMF_TREECUT_EVENT_UOBJECT_ENRICHMENT_ENABLED");
     }
 
+    bool treecut_damage_target_hook_enabled()
+    {
+        const char* raw = std::getenv("BMF_TREECUT_DAMAGE_TARGET_HOOK_ENABLED");
+        if (!raw)
+        {
+            return true;
+        }
+        return env_flag_enabled("BMF_TREECUT_DAMAGE_TARGET_HOOK_ENABLED");
+    }
+
+    bool treecut_damage_target_metadata_enabled()
+    {
+        return env_flag_enabled("BMF_TREECUT_DAMAGE_TARGET_METADATA_ENABLED");
+    }
+
+    uint64_t treecut_damage_target_max_age_ms()
+    {
+        return env_u64("BMF_TREECUT_DAMAGE_TARGET_MAX_AGE_MS", 1000, 0, 10000);
+    }
+
+    std::string treecut_damage_target_offset_label(uintptr_t offset)
+    {
+        std::ostringstream out;
+        out << "ApplyDamage.locals+0x" << std::hex << std::uppercase << offset;
+        return out.str();
+    }
+
+    Unreal::UObject* find_apply_damage_function_object()
+    {
+        for (const CharType* candidate : {
+                 STR("/Script/Engine.GameplayStatics:ApplyDamage"),
+                 STR("/Script/Engine.GameplayStatics.ApplyDamage"),
+             })
+        {
+            try
+            {
+                if (auto* function = Unreal::UObjectGlobals::StaticFindObject(nullptr, nullptr, candidate))
+                {
+                    return function;
+                }
+            }
+            catch (...)
+            {
+            }
+        }
+
+        return nullptr;
+    }
+
+    int treecut_damage_target_param_score(Unreal::FProperty* property, Unreal::UObject* object)
+    {
+        if (!property || !is_live_uobject(object))
+        {
+            return 0;
+        }
+
+        const std::string name = ascii_lower(narrow_string(property->GetName()));
+        int score = 0;
+        if (name == "damagedactor" || name == "damaged_actor")
+        {
+            score += 1000;
+        }
+        if (contains_ascii_case_insensitive(name, "damaged"))
+        {
+            score += 200;
+        }
+        if (contains_ascii_case_insensitive(name, "target"))
+        {
+            score += 80;
+        }
+        if (contains_ascii_case_insensitive(name, "actor"))
+        {
+            score += 40;
+        }
+        if (object_is_actor(object))
+        {
+            score += 25;
+        }
+
+        if (contains_ascii_case_insensitive(name, "instigator") ||
+            contains_ascii_case_insensitive(name, "causer") ||
+            contains_ascii_case_insensitive(name, "controller") ||
+            contains_ascii_case_insensitive(name, "damageevent") ||
+            contains_ascii_case_insensitive(name, "damagetype"))
+        {
+            score -= 500;
+        }
+
+        return score;
+    }
+
+    Unreal::UObject* treecut_read_damage_target_from_metadata(uintptr_t locals,
+                                                              uintptr_t& source_offset,
+                                                              std::string& source_label)
+    {
+        Unreal::UObject* function_object = find_apply_damage_function_object();
+        if (!is_live_uobject(function_object))
+        {
+            return nullptr;
+        }
+
+        auto* function = reinterpret_cast<Unreal::UFunction*>(function_object);
+        Unreal::UObject* best_object = nullptr;
+        int best_score = 0;
+        uintptr_t best_offset = 0;
+        std::string best_name;
+
+        try
+        {
+            for (Unreal::FProperty* property : Unreal::TFieldRange<Unreal::FProperty>(
+                     function,
+                     Unreal::EFieldIterationFlags::IncludeDeprecated))
+            {
+                if (!property ||
+                    !property->HasAnyPropertyFlags(Unreal::EPropertyFlags::CPF_Parm) ||
+                    !property_is_object_reference(property))
+                {
+                    continue;
+                }
+
+                const int32_t raw_offset = property->GetOffset_Internal();
+                if (raw_offset < 0)
+                {
+                    continue;
+                }
+
+                const uintptr_t offset = static_cast<uintptr_t>(raw_offset);
+                Unreal::UObject* object = read_uobject_at(locals + offset);
+                if (!is_live_uobject(object))
+                {
+                    continue;
+                }
+
+                const int score = treecut_damage_target_param_score(property, object);
+                if (score > best_score)
+                {
+                    best_score = score;
+                    best_object = object;
+                    best_offset = offset;
+                    best_name = narrow_string(property->GetName());
+                }
+            }
+        }
+        catch (...)
+        {
+            return nullptr;
+        }
+
+        if (!is_live_uobject(best_object) || best_score <= 0)
+        {
+            return nullptr;
+        }
+
+        source_offset = best_offset;
+        source_label = "ApplyDamage." + best_name + "+0x";
+        {
+            std::ostringstream suffix;
+            suffix << std::uppercase << std::hex << best_offset;
+            source_label += suffix.str();
+        }
+        return best_object;
+    }
+
+    Unreal::UObject* treecut_read_damage_target_from_locals(uintptr_t locals,
+                                                            uintptr_t& source_offset,
+                                                            std::string& source_label)
+    {
+        if (treecut_damage_target_metadata_enabled())
+        {
+            if (Unreal::UObject* metadata_target =
+                    treecut_read_damage_target_from_metadata(locals, source_offset, source_label))
+            {
+                return metadata_target;
+            }
+        }
+
+        for (uintptr_t offset : {
+                 static_cast<uintptr_t>(0x0),
+                 static_cast<uintptr_t>(0x8),
+                 static_cast<uintptr_t>(0x10),
+                 static_cast<uintptr_t>(0x18),
+                 static_cast<uintptr_t>(0x20),
+                 static_cast<uintptr_t>(0x28),
+                 static_cast<uintptr_t>(0x30),
+                 static_cast<uintptr_t>(0x38),
+             })
+        {
+            Unreal::UObject* object = read_uobject_at(locals + offset);
+            if (!is_live_uobject(object))
+            {
+                continue;
+            }
+
+            source_offset = offset;
+            source_label = treecut_damage_target_offset_label(offset);
+            return object;
+        }
+
+        source_offset = 0;
+        source_label.clear();
+        return nullptr;
+    }
+
+    void treecut_record_damage_target(void* context, uintptr_t locals)
+    {
+        uintptr_t source_offset = 0;
+        std::string source_label;
+        Unreal::UObject* target = treecut_read_damage_target_from_locals(locals, source_offset, source_label);
+        if (!is_live_uobject(target))
+        {
+            g_treecut_damage_target_misses.fetch_add(1);
+            return;
+        }
+
+        g_treecut_damage_target_hits.fetch_add(1);
+        g_treecut_last_damage_target.store(reinterpret_cast<uintptr_t>(target));
+        g_treecut_last_damage_target_context.store(reinterpret_cast<uintptr_t>(context));
+        g_treecut_last_damage_target_locals.store(locals);
+        g_treecut_last_damage_target_offset.store(source_offset);
+        g_treecut_last_damage_target_tick_ms.store(GetTickCount64());
+        {
+            std::lock_guard lock(g_treecut_mutex);
+            g_treecut_last_damage_target_source = source_label.empty()
+                ? treecut_damage_target_offset_label(source_offset)
+                : std::move(source_label);
+        }
+    }
+
     void scan_fstring_like_console_tags(uintptr_t base, uint32_t bytes, std::vector<std::string>& tags, bool allow_plain)
     {
         if (base == 0 || bytes < 16 || !is_accessible_memory(base, bytes))
@@ -1540,6 +3342,80 @@ namespace
         catch (...)
         {
         }
+
+        int visited_arrays = 0;
+        try
+        {
+            for (Unreal::FProperty* property : Unreal::TFieldRange<Unreal::FProperty>(
+                     object->GetClassPrivate(),
+                     Unreal::EFieldIterationFlags::IncludeSuper | Unreal::EFieldIterationFlags::IncludeDeprecated))
+            {
+                Unreal::FArrayProperty* array_property = nullptr;
+                if (!property || !property_is_object_array_reference(property, array_property))
+                {
+                    continue;
+                }
+                if (visited_arrays++ >= 8)
+                {
+                    break;
+                }
+
+                const std::string property_name = narrow_string(property->GetName());
+                const bool likely_component_array =
+                    contains_ascii_case_insensitive(property_name, "component") ||
+                    contains_ascii_case_insensitive(property_name, "interact") ||
+                    contains_ascii_case_insensitive(property_name, "attach") ||
+                    contains_ascii_case_insensitive(property_name, "children");
+                if (!likely_component_array)
+                {
+                    continue;
+                }
+
+                uint8_t* array_value = property->ContainerPtrToValuePtr<uint8_t>(object);
+                if (!array_value)
+                {
+                    continue;
+                }
+
+                Unreal::FScriptArrayHelper helper(array_property, array_value);
+                const int32_t item_count = std::max<int32_t>(
+                    0,
+                    std::min<int32_t>(helper.Num(), 32));
+                for (int32_t index = 0; index < item_count; ++index)
+                {
+                    uint8_t* raw = helper.GetRawPtr(index);
+                    if (!raw)
+                    {
+                        continue;
+                    }
+
+                    Unreal::UObject* value = *reinterpret_cast<Unreal::UObject**>(raw);
+                    if (!is_live_uobject(value) || value == object)
+                    {
+                        continue;
+                    }
+
+                    const size_t child_before = info.tags.size();
+                    treecut_collect_console_tags_from_object(
+                        info,
+                        value,
+                        std::string(source) + "." + property_name +
+                            "[" + std::to_string(index) + "]",
+                        depth - 1);
+                    if (info.tags.size() > child_before && info.source.empty())
+                    {
+                        treecut_note_console_tag_source(
+                            info,
+                            std::string(source) + "." + property_name +
+                                "[" + std::to_string(index) + "]",
+                            value);
+                    }
+                }
+            }
+        }
+        catch (...)
+        {
+        }
     }
 
     void treecut_collect_console_tags_from_locals(uintptr_t locals, TreeCutConsoleTagInfo& info)
@@ -1619,7 +3495,9 @@ namespace
             << ",\"consoleTagSource\":\"" << json_escape(info.source) << "\"";
         if (!info.source_object.empty())
         {
-            out << ",\"consoleTagSourceObject\":\"" << json_escape(info.source_object) << "\"";
+            out << ",\"consoleTagSourceObject\":\"" << json_escape(info.source_object) << "\""
+                << ",\"objectAddress\":\"" << json_escape(info.source_object) << "\""
+                << ",\"targetAddress\":\"" << json_escape(info.source_object) << "\"";
         }
 
         out << ",\"consoleTags\":[";
@@ -2023,6 +3901,39 @@ namespace
         }
     }
 
+    TreeCutResourceTool treecut_classify_context_text(Unreal::UObject* object, Unreal::UClass* object_class)
+    {
+        if (!is_live_uobject(object))
+        {
+            return TreeCutResourceTool::None;
+        }
+
+        std::string text = ascii_lower(
+            object_name(object) + " " +
+            object_full_name(object) + " " +
+            object_class_name(object) + " " +
+            object_class_full_name(object));
+        if (object_class && is_live_uobject(object_class))
+        {
+            text += " ";
+            text += ascii_lower(
+                object_name(object_class) + " " +
+                object_full_name(object_class) + " " +
+                object_class_name(object_class) + " " +
+                object_class_full_name(object_class));
+        }
+
+        if (text.find("handaxe") != std::string::npos)
+        {
+            return TreeCutResourceTool::Handaxe;
+        }
+        if (text.find("pickaxe") != std::string::npos)
+        {
+            return TreeCutResourceTool::Pickaxe;
+        }
+        return TreeCutResourceTool::None;
+    }
+
     TreeCutResourceTool classify_treecut_context_resource_tool(void* context)
     {
         Unreal::UObject* object = reinterpret_cast<Unreal::UObject*>(context);
@@ -2068,6 +3979,37 @@ namespace
             g_treecut_last_error.clear();
             return TreeCutResourceTool::Pickaxe;
         }
+
+        const TreeCutResourceTool text_tool = treecut_classify_context_text(object, object_class);
+        if (text_tool == TreeCutResourceTool::Handaxe)
+        {
+            if (!handaxe_class && object_class)
+            {
+                treecut_cache_handaxe_class_unlocked(
+                    object_class,
+                    "context-text",
+                    "handaxe class accepted from live hit context text");
+            }
+            g_treecut_last_item_type = "handaxe";
+            g_treecut_last_reject_reason.clear();
+            g_treecut_last_error.clear();
+            return TreeCutResourceTool::Handaxe;
+        }
+        if (text_tool == TreeCutResourceTool::Pickaxe)
+        {
+            if (!pickaxe_class && object_class)
+            {
+                treecut_cache_pickaxe_class_unlocked(
+                    object_class,
+                    "context-text",
+                    "pickaxe class accepted from live hit context text");
+            }
+            g_treecut_last_item_type = "pickaxe";
+            g_treecut_last_reject_reason.clear();
+            g_treecut_last_error.clear();
+            return TreeCutResourceTool::Pickaxe;
+        }
+
         g_treecut_last_item_type = "non-resource-tool";
         if (!handaxe_class && !pickaxe_class)
         {
@@ -2189,6 +4131,262 @@ namespace
         return false;
     }
 
+    struct NativeUObjectNearCandidate
+    {
+        Unreal::UObject* object{nullptr};
+        std::string address;
+        std::string name;
+        std::string full_name;
+        std::string class_name;
+        std::string class_full_name;
+        Unreal::FVector location{};
+        std::string location_method;
+        double distance_sq{0.0};
+        double score{0.0};
+        bool is_actor{false};
+        bool is_scene_component{false};
+        bool is_primitive_component{false};
+    };
+
+    bool native_uobject_near_text_is_excluded(std::string_view lower_text)
+    {
+        return lower_text.find("playercontroller") != std::string::npos ||
+               lower_text.find("playerstate") != std::string::npos ||
+               lower_text.find("gamemode") != std::string::npos ||
+               lower_text.find("gamestate") != std::string::npos ||
+               lower_text.find("spectator") != std::string::npos ||
+               lower_text.find("camera") != std::string::npos ||
+               lower_text.find("weapon_") != std::string::npos ||
+               lower_text.find("handaxe") != std::string::npos ||
+               lower_text.find("pickaxe") != std::string::npos;
+    }
+
+    double native_uobject_near_score(const NativeUObjectNearCandidate& candidate)
+    {
+        double score = candidate.distance_sq;
+        const std::string lower_text = ascii_lower(
+            candidate.name + " " +
+            candidate.full_name + " " +
+            candidate.class_name + " " +
+            candidate.class_full_name);
+
+        if (lower_text.find("tree") != std::string::npos)
+        {
+            score -= 250000.0;
+        }
+        if (lower_text.find("brick") != std::string::npos)
+        {
+            score -= 100000.0;
+        }
+        if (lower_text.find("mesh") != std::string::npos)
+        {
+            score -= 50000.0;
+        }
+        if (candidate.is_primitive_component)
+        {
+            score -= 25000.0;
+        }
+        else if (candidate.is_scene_component)
+        {
+            score -= 10000.0;
+        }
+        return score;
+    }
+
+    std::string native_uobject_find_near_text(double target_x,
+                                              double target_y,
+                                              double target_z,
+                                              double radius,
+                                              size_t max_results,
+                                              uint64_t max_scan,
+                                              uint64_t max_ms)
+    {
+        constexpr double kDefaultRadius = 750.0;
+        constexpr size_t kMaxResultsLimit = 32;
+        constexpr uint64_t kMaxScanLimit = 750000;
+        constexpr uint64_t kMaxMsLimit = 5000;
+
+        if (!std::isfinite(target_x) || !std::isfinite(target_y) || !std::isfinite(target_z))
+        {
+            std::ostringstream out;
+            out << "Native UObject find near\n"
+                << "source=BMFSocketUObjectFindNear\n"
+                << "ok=false\n"
+                << "code=NATIVE_UOBJECT_FIND_NEAR_POSITION_REQUIRED\n"
+                << "detail=x, y, and z must be finite world coordinates\n";
+            return out.str();
+        }
+
+        if (!std::isfinite(radius) || radius <= 0.0)
+        {
+            radius = kDefaultRadius;
+        }
+        radius = std::min<double>(50000.0, std::max<double>(1.0, radius));
+        max_results = std::max<size_t>(1, std::min<size_t>(max_results == 0 ? 8 : max_results, kMaxResultsLimit));
+        max_scan = std::max<uint64_t>(1, std::min<uint64_t>(max_scan == 0 ? 150000 : max_scan, kMaxScanLimit));
+        max_ms = std::max<uint64_t>(1, std::min<uint64_t>(max_ms == 0 ? 750 : max_ms, kMaxMsLimit));
+
+        const double radius_sq = radius * radius;
+        const ULONGLONG started_ms = GetTickCount64();
+        uint64_t scanned = 0;
+        uint64_t location_checked = 0;
+        uint64_t matched = 0;
+        uint64_t excluded = 0;
+        uint64_t errors = 0;
+        bool truncated = false;
+        bool timed_out = false;
+        std::vector<NativeUObjectNearCandidate> candidates;
+        candidates.reserve(max_results + 4);
+
+        auto add_candidate = [&](NativeUObjectNearCandidate candidate) {
+            candidate.score = native_uobject_near_score(candidate);
+            ++matched;
+            candidates.push_back(std::move(candidate));
+            std::sort(candidates.begin(), candidates.end(), [](const auto& left, const auto& right) {
+                if (left.score != right.score)
+                {
+                    return left.score < right.score;
+                }
+                return left.distance_sq < right.distance_sq;
+            });
+            if (candidates.size() > max_results)
+            {
+                candidates.resize(max_results);
+            }
+        };
+
+        Unreal::UObjectGlobals::ForEachUObject([&](Unreal::UObject* object, int32_t, int32_t) {
+            const ULONGLONG now_ms = GetTickCount64();
+            if (now_ms - started_ms >= max_ms)
+            {
+                timed_out = true;
+                return LoopAction::Break;
+            }
+            if (scanned >= max_scan)
+            {
+                truncated = true;
+                return LoopAction::Break;
+            }
+            ++scanned;
+
+            if (!is_live_uobject(object))
+            {
+                return LoopAction::Continue;
+            }
+
+            try
+            {
+                const bool is_actor = object_is_actor(object);
+                const bool is_scene_component =
+                    object_class_has_any_cast_flags(object, Unreal::CASTCLASS_USceneComponent);
+                const bool is_primitive_component =
+                    object_class_has_any_cast_flags(object, Unreal::CASTCLASS_UPrimitiveComponent);
+                if (!is_actor && !is_scene_component && !is_primitive_component)
+                {
+                    return LoopAction::Continue;
+                }
+
+                const std::string name = object_name(object);
+                const std::string full_name = object_full_name(object);
+                const std::string class_name = object_class_name(object);
+                const std::string class_full_name = object_class_full_name(object);
+                const std::string lower_text = ascii_lower(
+                    name + " " + full_name + " " + class_name + " " + class_full_name);
+                if (native_uobject_near_text_is_excluded(lower_text))
+                {
+                    ++excluded;
+                    return LoopAction::Continue;
+                }
+
+                Unreal::FVector location{};
+                std::string location_method;
+                if (!treecut_try_object_location(object, location, location_method))
+                {
+                    return LoopAction::Continue;
+                }
+                ++location_checked;
+
+                const double dx = static_cast<double>(location.X()) - target_x;
+                const double dy = static_cast<double>(location.Y()) - target_y;
+                const double dz = static_cast<double>(location.Z()) - target_z;
+                const double distance_sq = dx * dx + dy * dy + dz * dz;
+                if (!std::isfinite(distance_sq) || distance_sq > radius_sq)
+                {
+                    return LoopAction::Continue;
+                }
+
+                NativeUObjectNearCandidate candidate;
+                candidate.object = object;
+                candidate.address = object_address_hex(object);
+                candidate.name = name;
+                candidate.full_name = full_name;
+                candidate.class_name = class_name;
+                candidate.class_full_name = class_full_name;
+                candidate.location = location;
+                candidate.location_method = location_method;
+                candidate.distance_sq = distance_sq;
+                candidate.is_actor = is_actor;
+                candidate.is_scene_component = is_scene_component;
+                candidate.is_primitive_component = is_primitive_component;
+                add_candidate(std::move(candidate));
+            }
+            catch (...)
+            {
+                ++errors;
+            }
+
+            return LoopAction::Continue;
+        });
+
+        const ULONGLONG duration_ms = GetTickCount64() - started_ms;
+        const bool ok = !candidates.empty();
+        std::ostringstream out;
+        out << "Native UObject find near\n"
+            << "source=BMFSocketUObjectFindNear\n"
+            << "requested_x=" << std::setprecision(17) << target_x << "\n"
+            << "requested_y=" << std::setprecision(17) << target_y << "\n"
+            << "requested_z=" << std::setprecision(17) << target_z << "\n"
+            << "radius=" << std::setprecision(17) << radius << "\n"
+            << "max_results=" << max_results << "\n"
+            << "max_scan=" << max_scan << "\n"
+            << "max_ms=" << max_ms << "\n"
+            << "ok=" << (ok ? "true" : "false") << "\n"
+            << "code=" << (ok ? "OK" : (timed_out ? "NATIVE_UOBJECT_FIND_NEAR_TIMED_OUT" : "NATIVE_UOBJECT_FIND_NEAR_NOT_FOUND")) << "\n"
+            << "matches=" << candidates.size() << "\n"
+            << "matched_total=" << matched << "\n"
+            << "scanned=" << scanned << "\n"
+            << "location_checked=" << location_checked << "\n"
+            << "excluded=" << excluded << "\n"
+            << "errors=" << errors << "\n"
+            << "truncated=" << (truncated ? "true" : "false") << "\n"
+            << "timed_out=" << (timed_out ? "true" : "false") << "\n"
+            << "duration_ms=" << duration_ms << "\n";
+
+        for (size_t index = 0; index < candidates.size(); ++index)
+        {
+            const NativeUObjectNearCandidate& candidate = candidates[index];
+            const std::string prefix = "candidate." + std::to_string(index + 1);
+            const double distance = std::sqrt(std::max<double>(0.0, candidate.distance_sq));
+            out << prefix << ".address=" << json_escape(candidate.address) << "\n"
+                << prefix << ".source=uobject-find-near\n"
+                << prefix << ".name=" << json_escape(candidate.name) << "\n"
+                << prefix << ".full_name=" << json_escape(candidate.full_name) << "\n"
+                << prefix << ".class=" << json_escape(candidate.class_name) << "\n"
+                << prefix << ".class_full_name=" << json_escape(candidate.class_full_name) << "\n"
+                << prefix << ".location_method=" << json_escape(candidate.location_method) << "\n"
+                << prefix << ".x=" << std::setprecision(17) << static_cast<double>(candidate.location.X()) << "\n"
+                << prefix << ".y=" << std::setprecision(17) << static_cast<double>(candidate.location.Y()) << "\n"
+                << prefix << ".z=" << std::setprecision(17) << static_cast<double>(candidate.location.Z()) << "\n"
+                << prefix << ".distance=" << std::setprecision(17) << distance << "\n"
+                << prefix << ".score=" << std::setprecision(17) << candidate.score << "\n"
+                << prefix << ".is_actor=" << (candidate.is_actor ? "true" : "false") << "\n"
+                << prefix << ".is_scene_component=" << (candidate.is_scene_component ? "true" : "false") << "\n"
+                << prefix << ".is_primitive_component=" << (candidate.is_primitive_component ? "true" : "false") << "\n";
+        }
+
+        return out.str();
+    }
+
     bool treecut_try_direct_tree_id_console_tag(Unreal::UObject* object, TreeCutConsoleTagInfo& info)
     {
         if (!is_live_uobject(object))
@@ -2214,6 +4412,48 @@ namespace
         }
 
         treecut_note_console_tag_source(info, "target-cache.ConsoleTag", object);
+        return true;
+    }
+
+    bool treecut_build_target_candidate_from_object(Unreal::UObject* object,
+                                                    std::string_view resolver,
+                                                    TreeCutTargetCandidate& candidate)
+    {
+        if (!is_live_uobject(object))
+        {
+            return false;
+        }
+
+        candidate = TreeCutTargetCandidate{};
+        candidate.actor = object;
+        candidate.address = object_address_hex(object);
+        candidate.name = object_name(object);
+        candidate.full_name = object_full_name(object);
+        candidate.class_name = object_class_name(object);
+        candidate.class_full_name = object_class_full_name(object);
+        candidate.resolver = std::string(resolver);
+        candidate.tagged_component = !object_is_actor(object);
+
+        TreeCutConsoleTagInfo tag_info;
+        treecut_collect_console_tags_from_object(tag_info, object, resolver, 1);
+        candidate.console_tag = treecut_first_tree_id_console_tag(tag_info.tags);
+        candidate.console_tag_source = tag_info.source;
+        candidate.console_tag_source_object = tag_info.source_object;
+
+        if (candidate.console_tag.empty() && !treecut_actor_text_is_tree_like(candidate))
+        {
+            return false;
+        }
+
+        if (!treecut_try_object_location(object, candidate.location, candidate.location_method))
+        {
+            return false;
+        }
+
+        if (!candidate.resolver.empty())
+        {
+            candidate.location_method = candidate.resolver + "." + candidate.location_method;
+        }
         return true;
     }
 
@@ -2257,6 +4497,7 @@ namespace
                     candidate.console_tag_source = tag_info.source;
                     candidate.console_tag_source_object = tag_info.source_object;
                     candidate.tagged_component = !object_is_actor(object);
+                    candidate.resolver = "target-cache";
 
                     if (!candidate.console_tag.empty() &&
                         treecut_try_object_location(object, candidate.location, candidate.location_method))
@@ -2279,6 +4520,7 @@ namespace
                 candidate.full_name = object_full_name(object);
                 candidate.class_name = object_class_name(object);
                 candidate.class_full_name = object_class_full_name(object);
+                candidate.resolver = "target-cache";
 
                 if (!treecut_actor_text_is_tree_like(candidate))
                 {
@@ -2325,6 +4567,101 @@ namespace
         double distance_sq{0.0};
     };
 
+    bool treecut_target_distance_sq(const TreeCutTargetCandidate& candidate,
+                                    const double values[7],
+                                    double& distance_sq)
+    {
+        const double dx = static_cast<double>(candidate.location.X()) - values[1];
+        const double dy = static_cast<double>(candidate.location.Y()) - values[2];
+        const double dz = static_cast<double>(candidate.location.Z()) - values[3];
+        distance_sq = dx * dx + dy * dy + dz * dz;
+        return std::isfinite(distance_sq) && distance_sq <= kTreeCutTargetResolveRadiusSq;
+    }
+
+    void treecut_record_resolved_target(const TreeCutResolvedTarget& target, const char* detail_prefix)
+    {
+        if (!target.found)
+        {
+            return;
+        }
+
+        std::lock_guard lock(g_treecut_mutex);
+        g_treecut_target_resolve_hits.fetch_add(1);
+        g_treecut_last_target_name = target.candidate.name;
+        g_treecut_last_target_full_name = target.candidate.full_name;
+        g_treecut_last_target_class = target.candidate.class_name;
+        g_treecut_last_target_detail =
+            std::string(detail_prefix ? detail_prefix : "resolved") +
+            " distance=" + std::to_string(std::sqrt(target.distance_sq)) +
+            " tagged=" + (target.candidate.console_tag.empty() ? "false" : "true") +
+            " resolver=" + target.candidate.resolver +
+            " radius=" + std::to_string(kTreeCutTargetResolveRadius);
+    }
+
+    TreeCutResolvedTarget treecut_resolve_target_from_locals(uintptr_t locals, const double values[7])
+    {
+        TreeCutResolvedTarget best_any;
+        TreeCutResolvedTarget best_tagged;
+        double best_any_distance_sq = kTreeCutTargetResolveRadiusSq;
+        double best_tagged_distance_sq = kTreeCutTargetResolveRadiusSq;
+        std::vector<Unreal::UObject*> seen;
+
+        if (locals == 0 || !is_accessible_memory(locals, 0x300))
+        {
+            return {};
+        }
+
+        for (uintptr_t offset = 0; offset + sizeof(uintptr_t) <= 0x300; offset += sizeof(uintptr_t))
+        {
+            Unreal::UObject* object = read_uobject_at(locals + offset);
+            if (!is_live_uobject(object) ||
+                std::find(seen.begin(), seen.end(), object) != seen.end())
+            {
+                continue;
+            }
+            seen.push_back(object);
+
+            std::ostringstream resolver;
+            resolver << "locals+0x" << std::uppercase << std::hex << offset;
+
+            TreeCutTargetCandidate candidate;
+            if (!treecut_build_target_candidate_from_object(object, resolver.str(), candidate))
+            {
+                continue;
+            }
+
+            double distance_sq = 0.0;
+            if (!treecut_target_distance_sq(candidate, values, distance_sq))
+            {
+                continue;
+            }
+
+            if (!candidate.console_tag.empty())
+            {
+                if (distance_sq <= best_tagged_distance_sq)
+                {
+                    best_tagged.found = true;
+                    best_tagged.candidate = candidate;
+                    best_tagged.distance_sq = distance_sq;
+                    best_tagged_distance_sq = distance_sq;
+                }
+                continue;
+            }
+
+            if (distance_sq <= best_any_distance_sq)
+            {
+                best_any.found = true;
+                best_any.candidate = candidate;
+                best_any.distance_sq = distance_sq;
+                best_any_distance_sq = distance_sq;
+            }
+        }
+
+        TreeCutResolvedTarget best = best_tagged.found ? best_tagged : best_any;
+        treecut_record_resolved_target(best, "resolved direct-locals");
+        return best;
+    }
+
     void treecut_merge_target_console_tag(TreeCutConsoleTagInfo& info, const TreeCutResolvedTarget& target)
     {
         if (!target.found || target.candidate.console_tag.empty())
@@ -2345,8 +4682,6 @@ namespace
 
     TreeCutResolvedTarget treecut_resolve_target_actor(const double values[7])
     {
-        g_treecut_target_resolve_attempts.fetch_add(1);
-
         std::vector<TreeCutTargetCandidate> candidates;
         {
             std::lock_guard lock(g_treecut_mutex);
@@ -2405,8 +4740,9 @@ namespace
                 g_treecut_last_target_full_name = best.candidate.full_name;
                 g_treecut_last_target_class = best.candidate.class_name;
                 g_treecut_last_target_detail =
-                    "resolved distance=" + std::to_string(std::sqrt(best.distance_sq)) +
+                    "resolved cache distance=" + std::to_string(std::sqrt(best.distance_sq)) +
                     " tagged=" + (best.candidate.console_tag.empty() ? "false" : "true") +
+                    " resolver=" + best.candidate.resolver +
                     " radius=" + std::to_string(kTreeCutTargetResolveRadius);
             }
             else
@@ -2457,8 +4793,81 @@ namespace
             out << "\"consoleTag\":\"" << json_escape(target.candidate.console_tag) << "\","
                 << "\"consoleTagSource\":\"" << json_escape(target.candidate.console_tag_source) << "\",";
         }
-        out << "\"resolver\":\"cached_nearest_tree_actor\""
+        out << "\"resolver\":\"" << json_escape(target.candidate.resolver.empty()
+                  ? "cached_nearest_tree_actor"
+                  : target.candidate.resolver) << "\""
             << "}";
+    }
+
+    void write_treecut_damage_target_json(std::ostringstream& out, bool write_primary_target)
+    {
+        const uintptr_t target_address = g_treecut_last_damage_target.load();
+        const uint64_t target_tick_ms = g_treecut_last_damage_target_tick_ms.load();
+        const uint64_t now_ms = GetTickCount64();
+        const uint64_t max_age_ms = treecut_damage_target_max_age_ms();
+        const bool expired = target_tick_ms == 0 ||
+                             now_ms < target_tick_ms ||
+                             (max_age_ms > 0 && now_ms - target_tick_ms > max_age_ms);
+
+        if (target_address == 0 || expired)
+        {
+            out << ",\"damageTargetResolved\":false";
+            return;
+        }
+
+        Unreal::UObject* source = reinterpret_cast<Unreal::UObject*>(target_address);
+        if (!is_live_uobject(source))
+        {
+            out << ",\"damageTargetResolved\":false";
+            return;
+        }
+
+        std::string actor_source;
+        Unreal::AActor* actor = actor_from_uobject_or_outer(source, actor_source);
+        Unreal::UObject* primary = is_live_uobject(actor) ? static_cast<Unreal::UObject*>(actor) : source;
+
+        const uintptr_t source_offset = g_treecut_last_damage_target_offset.load();
+        std::string source_label;
+        {
+            std::lock_guard lock(g_treecut_mutex);
+            source_label = g_treecut_last_damage_target_source;
+        }
+        if (source_label.empty())
+        {
+            source_label = treecut_damage_target_offset_label(source_offset);
+        }
+        const std::string source_address = object_address_hex(source);
+        const std::string primary_address = object_address_hex(primary);
+        std::string primary_full_name = object_full_name(primary);
+        if (primary_full_name.empty())
+        {
+            primary_full_name = "damage-target:" + primary_address;
+        }
+
+        out << ",\"damageTargetResolved\":true"
+            << ",\"damageTargetAddress\":\"" << json_escape(source_address) << "\""
+            << ",\"damageTargetSource\":\"" << json_escape(source_label) << "\""
+            << ",\"damageTargetAgeMs\":" << (now_ms - target_tick_ms)
+            << ",\"damageTargetActorResolved\":" << (is_live_uobject(actor) ? "true" : "false");
+
+        if (write_primary_target)
+        {
+            out << ",\"objectAddress\":\"" << json_escape(source_address) << "\""
+                << ",\"targetAddress\":\"" << json_escape(primary_address) << "\""
+                << ",\"targetActor\":{"
+                << "\"id\":\"" << json_escape(primary_full_name) << "\","
+                << "\"address\":\"" << json_escape(primary_address) << "\","
+                << "\"objectAddress\":\"" << json_escape(source_address) << "\","
+                << "\"sourceAddress\":\"" << json_escape(source_address) << "\","
+                << "\"name\":\"" << json_escape(object_name(primary)) << "\","
+                << "\"fullName\":\"" << json_escape(primary_full_name) << "\","
+                << "\"path\":\"" << json_escape(primary_full_name) << "\","
+                << "\"className\":\"" << json_escape(object_class_name(primary)) << "\","
+                << "\"classFullName\":\"" << json_escape(object_class_full_name(primary)) << "\","
+                << "\"source\":\"" << json_escape(source_label) << "\","
+                << "\"actorSource\":\"" << json_escape(actor_source) << "\""
+                << "}";
+        }
     }
 
     struct TreeCutProbeSlot
@@ -2542,6 +4951,9 @@ namespace
     };
 
     constexpr size_t kTreeCutProbeSlotCount = sizeof(g_treecut_probe_slots) / sizeof(g_treecut_probe_slots[0]);
+    constexpr size_t kTreeCutProcessImpactProbeIndex = 4;
+    constexpr size_t kTreeCutApplyDamageProbeIndex = 5;
+    constexpr size_t kTreeCutReceiveHitProbeIndex = 8;
 
     using TreeCutProbeDetour = void(__fastcall*)(void*, void*, void*);
     TreeCutProbeDetour g_treecut_probe_detours[kTreeCutProbeSlotCount] = {
@@ -2957,6 +5369,30 @@ namespace
         if (index < kTreeCutProbeSlotCount)
         {
             TreeCutProbeSlot& probe = g_treecut_probe_slots[index];
+            uintptr_t locals = 0;
+            const bool locals_read = read_process_event_locals(stack, locals);
+            if (treecut_damage_target_hook_enabled() && locals_read)
+            {
+                if (index == kTreeCutProcessImpactProbeIndex)
+                {
+                    if (!treecut_record_process_impact_target(context, locals))
+                    {
+                        g_treecut_damage_target_misses.fetch_add(1);
+                    }
+                }
+                else if (index == kTreeCutApplyDamageProbeIndex)
+                {
+                    treecut_record_damage_target(context, locals);
+                }
+                else if (index == kTreeCutReceiveHitProbeIndex)
+                {
+                    if (!treecut_record_receive_hit_target(context, locals))
+                    {
+                        g_treecut_damage_target_misses.fetch_add(1);
+                    }
+                }
+            }
+
             if (g_treecut_probe_enabled.load())
             {
                 const uint64_t hit_count = probe.hits.fetch_add(1) + 1;
@@ -2964,8 +5400,7 @@ namespace
                 probe.last_stack.store(reinterpret_cast<uintptr_t>(stack));
                 probe.last_tick_ms.store(GetTickCount64());
 
-                uintptr_t locals = 0;
-                if (read_process_event_locals(stack, locals))
+                if (locals_read)
                 {
                     g_treecut_probe_last_locals[index].store(locals);
                     if (should_capture_treecut_probe_summary(probe) &&
@@ -3134,13 +5569,20 @@ namespace
 
     std::string treecut_find_console_tag_text(std::string_view raw_tag, size_t max_results, uint64_t max_scan)
     {
+        const ULONGLONG started_ms = GetTickCount64();
+        const uint64_t scan_budget_ms = env_u64(
+            "BMF_TREECUT_FIND_TAG_SCAN_MAX_MS",
+            50,
+            1,
+            5000);
         const std::string wanted = ascii_lower(trim_ascii(raw_tag));
         std::ostringstream out;
         out << "Resource console tag lookup\n"
             << "source=BMFSocketResourceFindTag\n"
             << "tag=" << json_escape(wanted) << "\n"
             << "max_results=" << max_results << "\n"
-            << "max_scan=" << max_scan << "\n";
+            << "max_scan=" << max_scan << "\n"
+            << "scan_budget_ms=" << scan_budget_ms << "\n";
 
         if (wanted.empty())
         {
@@ -3161,6 +5603,10 @@ namespace
         size_t inspected = 0;
         size_t matches = 0;
         bool truncated = false;
+        bool timed_out = false;
+        uint64_t scanned = 0;
+        uint64_t scan_inspected = 0;
+        uint64_t errors = 0;
         for (const TreeCutTargetCandidate& candidate : candidates)
         {
             ++inspected;
@@ -3186,16 +5632,119 @@ namespace
             }
         }
 
+        const bool unsafe_scan_enabled = env_flag_enabled("BMF_TREECUT_FIND_TAG_SCAN_ENABLED");
+        const bool direct_console_tag_scan_enabled =
+            env_flag_enabled("BMF_TREECUT_FIND_TAG_SCAN_DIRECT_CONSOLETAG_ENABLED");
+        if (unsafe_scan_enabled && matches < std::max<size_t>(1, max_results) && max_scan > 0)
+        {
+            Unreal::UObjectGlobals::ForEachUObject([&](Unreal::UObject* object, int32_t, int32_t) {
+                if (GetTickCount64() - started_ms >= scan_budget_ms)
+                {
+                    timed_out = true;
+                    truncated = true;
+                    return LoopAction::Break;
+                }
+                if (scanned >= max_scan)
+                {
+                    truncated = true;
+                    return LoopAction::Break;
+                }
+                ++scanned;
+                if (!is_live_uobject(object))
+                {
+                    return LoopAction::Continue;
+                }
+
+                try
+                {
+                    TreeCutConsoleTagInfo tag_info;
+                    const bool object_text_may_have_tag = treecut_object_text_may_have_console_tag(object);
+                    if (direct_console_tag_scan_enabled && object_text_may_have_tag)
+                    {
+                        ++scan_inspected;
+                        treecut_collect_console_tags_from_object(tag_info, object, "find-tag.direct", 0);
+                    }
+                    if (tag_info.tags.empty())
+                    {
+                        if (!object_text_may_have_tag)
+                        {
+                            return LoopAction::Continue;
+                        }
+                        ++scan_inspected;
+                        treecut_collect_console_tags_from_object(tag_info, object, "find-tag.scan", 1);
+                    }
+                    if (!treecut_tags_include_exact(tag_info.tags, wanted))
+                    {
+                        return LoopAction::Continue;
+                    }
+
+                    Unreal::UObject* target_object = object;
+                    uintptr_t source_address = 0;
+                    if (!tag_info.source_object.empty() &&
+                        parse_uobject_address(tag_info.source_object, source_address))
+                    {
+                        Unreal::UObject* source_object = reinterpret_cast<Unreal::UObject*>(source_address);
+                        if (is_live_uobject(source_object))
+                        {
+                            target_object = source_object;
+                        }
+                    }
+
+                    TreeCutTargetCandidate candidate;
+                    candidate.actor = target_object;
+                    candidate.address = object_address_hex(target_object);
+                    candidate.name = object_name(target_object);
+                    candidate.full_name = object_full_name(target_object);
+                    candidate.class_name = object_class_name(target_object);
+                    candidate.class_full_name = object_class_full_name(target_object);
+                    candidate.console_tag = wanted;
+                    candidate.console_tag_source = tag_info.source.empty() ? "find-tag.scan" : tag_info.source;
+                    candidate.console_tag_source_object = tag_info.source_object;
+                    candidate.resolver = "find-tag.scan";
+                    candidate.tagged_component = !object_is_actor(target_object);
+                    if (treecut_try_object_location(target_object, candidate.location, candidate.location_method))
+                    {
+                        candidate.location_method = "find-tag.scan." + candidate.location_method;
+                    }
+                    else
+                    {
+                        candidate.location_method = "unresolved";
+                    }
+
+                    if (!found)
+                    {
+                        best = candidate;
+                        found = true;
+                    }
+                    ++matches;
+                    if (matches >= std::max<size_t>(1, max_results))
+                    {
+                        return LoopAction::Break;
+                    }
+                }
+                catch (...)
+                {
+                    ++errors;
+                }
+
+                return LoopAction::Continue;
+            });
+        }
+
         out << "ok=" << (found ? "true" : "false") << "\n"
             << "code=" << (found ? "OK" : "TREE_CUT_FIND_TAG_NOT_FOUND") << "\n"
             << "matches=" << matches << "\n"
             << "cache_candidates=" << candidates.size() << "\n"
-            << "scanned=0\n"
+            << "scanned=" << scanned << "\n"
             << "inspected=" << inspected << "\n"
-            << "errors=0\n"
+            << "scan_inspected=" << scan_inspected << "\n"
+            << "errors=" << errors << "\n"
             << "truncated=" << (truncated ? "true" : "false") << "\n"
-            << "duration_ms=0\n"
-            << "detail=searched existing tree-cut target cache only; no UObject scan was run\n";
+            << "timed_out=" << (timed_out ? "true" : "false") << "\n"
+            << "duration_ms=" << static_cast<uint64_t>(GetTickCount64() - started_ms) << "\n"
+            << "unsafe_scan_enabled=" << (unsafe_scan_enabled ? "true" : "false") << "\n"
+            << "direct_console_tag_scan_enabled=" << (direct_console_tag_scan_enabled ? "true" : "false") << "\n"
+            << "detail=searched existing tree-cut target cache; bounded UObject ConsoleTag scan requires BMF_TREECUT_FIND_TAG_SCAN_ENABLED=1 and stops at max_scan or BMF_TREECUT_FIND_TAG_SCAN_MAX_MS\n";
         if (found)
         {
             out << std::setprecision(17)
@@ -3217,12 +5766,30 @@ namespace
     constexpr uintptr_t kBrickRegistryOffset = 0x788B098;
     constexpr uintptr_t kBrickArrayBaseOffset = 0x788AFE0;
     constexpr uintptr_t kBrickActiveFlagsArrayOffset = 0x788B050;
+    constexpr uintptr_t kBrickWorldOccupancyArrayOffset = 0x788B058;
+    constexpr uintptr_t kBrickWorldOccupancyCountOffset = 0x788B060;
+    constexpr uintptr_t kBrickWorldOccupancyBaseOffset = 0x788B068;
     constexpr uintptr_t kBrickSetVisibilityOffset = 0x4355210;
     constexpr uintptr_t kBrickSetCollisionChannelsOffset = 0x43548C0;
+    constexpr uintptr_t kBrickApplicatorSetVisibilityOffset = 0x4864A00;
+    constexpr uintptr_t kBrickApplicatorSetCollisionChannelsOffset = 0x4864CE0;
+    constexpr uintptr_t kBrickActionOwnerSurfaceResolveOffset = 0x47E06C0;
+    constexpr uintptr_t kBrickActionListClassOffset = 0x420E610;
+    constexpr uintptr_t kBrickActionTextTokenInitOffset = 0x105AD0;
+    constexpr uintptr_t kBrickActionTextCreateOffset = 0x0E2130;
+    constexpr uintptr_t kBrickActionTextAssignOffset = 0x0E21B0;
+    constexpr uintptr_t kBrickActionListConstructParamsInitOffset = 0x501950;
+    constexpr uintptr_t kBrickActionListConstructObjectOffset = 0x5019A0;
+    constexpr uintptr_t kBrickActionNewObjectGuardOffset = 0x5058B0;
+    constexpr uintptr_t kBrickActionChunkAllocOffset = 0x4302E50;
+    constexpr uintptr_t kBrickActionFinalizeOffset = 0x43DF4F0;
     constexpr uintptr_t kBrickPlaceActionMethodBlockOffset = 0x6C77CE0;
     constexpr uintptr_t kBrickVisibilityActionMethodBlockOffset = 0x6C78230;
     constexpr uintptr_t kBrickCollisionActionMethodBlockOffset = 0x6C78450;
     constexpr uintptr_t kBrickActionApplySlotOffset = 0x18;
+    constexpr size_t kBrickActionChunkAllocSize = 0x7FF0;
+    constexpr uint16_t kBrickActionChunkCapacity = 0x7FD8;
+    constexpr uint16_t kBrickPhysicalActionEntrySize = 0x20;
     constexpr size_t kBrickRuntimeStride = 0x78;
     constexpr uintptr_t kBrickOwnerOffset = 0x08;
     constexpr uintptr_t kBrickRuntimeIdOffset = 0x24;
@@ -3240,12 +5807,36 @@ namespace
     constexpr uint32_t kBrickRuntimeResolveMaxHintWindow = 10000;
     constexpr uint32_t kBrickRuntimeResolveHintLookupDefaultMaxIds = 1024;
     constexpr uint32_t kBrickRuntimeResolveHintLookupMaxIdsLimit = 4096;
+    constexpr uint32_t kBrickRuntimeRegionScanDefaultMaxScan = 500000;
+    constexpr uint32_t kBrickRuntimeRegionScanDefaultLimit = 512;
+    constexpr uint32_t kBrickRuntimeRegionScanMaxLimit = 4096;
+
+    uint8_t brick_runtime_public_visible_to_byte(int64_t visible_arg)
+    {
+        return visible_arg != 0 ? 0 : 1;
+    }
+
+    bool brick_runtime_byte_is_public_visible(uint8_t visible_byte)
+    {
+        return visible_byte == 0;
+    }
 
     using BrickLookupFn = uintptr_t(__fastcall*)(uintptr_t, uint32_t);
     using BrickSetVisibilityFn = void(__fastcall*)(uintptr_t, uintptr_t, uint8_t);
     using BrickSetCollisionChannelsFn = void(__fastcall*)(uintptr_t, uintptr_t, uint8_t);
     using BrickActionApplyFn = void(__fastcall*)(void*, void*, void*, void*, void*, void*);
     using BrickLowSetterFn = void(__fastcall*)(uintptr_t, uintptr_t, uint8_t);
+    using BrickActionOwnerSurfaceResolveFn = uintptr_t(__fastcall*)(uintptr_t);
+    using BrickActionListClassFn = uintptr_t(__fastcall*)();
+    using BrickActionTextTokenInitFn = void(__fastcall*)(void*, void*);
+    using BrickActionTextCreateFn = void(__fastcall*)(void*, void*, void*, const wchar_t*);
+    using BrickActionTextAssignFn = void(__fastcall*)(uintptr_t, void*);
+    using BrickActionListConstructParamsInitFn = void(__fastcall*)(void*, uintptr_t);
+    using BrickActionListConstructObjectFn = uintptr_t(__fastcall*)(void*);
+    using BrickActionNewObjectGuardFn = void(__fastcall*)(uintptr_t, const wchar_t*);
+    using BrickActionChunkAllocFn = uintptr_t(__fastcall*)(size_t);
+    using BrickActionFinalizeFn = uint8_t(__fastcall*)(uintptr_t, uintptr_t, uint8_t, uintptr_t);
+    using BrickApplicatorSetPhysicalFn = void(__fastcall*)(uintptr_t, uint64_t, uint8_t);
 
     struct InlineDetour
     {
@@ -3274,6 +5865,24 @@ namespace
         uint64_t verified_tick_ms{0};
     };
 
+    struct BrickRuntimeHandleInfo
+    {
+        bool ok{false};
+        uint32_t slot{UINT32_MAX};
+        uint32_t active_generation{0};
+        uint64_t packed_handle{0};
+        uint32_t bucket_key{0};
+        uint32_t bucket_base{0};
+        uint32_t bucket_count{0};
+        uint32_t bucket_index{UINT32_MAX};
+        uint16_t bucket_value{0};
+        uintptr_t array_base{0};
+        uintptr_t active_flags_base{0};
+        uintptr_t bucket_base_address{0};
+        std::string code{"BRICK_HANDLE_UNAVAILABLE"};
+        std::string detail;
+    };
+
     std::mutex g_brick_physical_mutex;
     std::unordered_map<uint32_t, BrickPhysicalOriginal> g_brick_physical_originals;
     std::unordered_map<uint32_t, BrickRuntimeVerifiedCandidate> g_brick_runtime_verified_candidates;
@@ -3297,6 +5906,17 @@ namespace
     std::atomic<uint64_t> g_brick_collision_low_setter_hits{0};
     std::atomic<uint64_t> g_brick_context_capture_hits{0};
     std::atomic<uint64_t> g_brick_context_capture_rejects{0};
+    std::atomic<uintptr_t> g_brick_action_owner_cached{0};
+    std::atomic<uintptr_t> g_brick_action_owner_surface_cached{0};
+    std::atomic<uintptr_t> g_brick_action_owner_source_cached{0};
+    std::atomic<uint64_t> g_brick_action_owner_cached_at_ms{0};
+    std::atomic<uint64_t> g_brick_action_owner_scan_requests{0};
+    std::atomic<uint64_t> g_brick_action_owner_scan_failures{0};
+    std::atomic<uint64_t> g_brick_action_set_attempts{0};
+    std::atomic<uint64_t> g_brick_action_set_successes{0};
+    std::atomic<uint64_t> g_brick_action_set_failures{0};
+    std::string g_brick_action_owner_cached_source;
+    std::string g_brick_action_owner_last_error;
     std::atomic<bool> g_brick_grid_context_background_scan_running{false};
     std::atomic<uint64_t> g_brick_grid_context_background_scan_started_at_ms{0};
     std::atomic<uint64_t> g_brick_grid_context_background_scan_requests{0};
@@ -3353,6 +5973,30 @@ namespace
     {
         return brick_runtime_resolve_direct_array_requested() &&
                brick_runtime_resolve_unsafe_native_enabled();
+    }
+
+    bool brick_runtime_region_scan_enabled()
+    {
+        return env_flag_enabled("BMF_BRICK_RUNTIME_REGION_SCAN_ENABLED");
+    }
+
+    bool brick_runtime_region_scan_direct_array_enabled()
+    {
+        return (env_flag_enabled("BMF_BRICK_RUNTIME_REGION_SCAN_DIRECT_ARRAY_ENABLED") ||
+                env_flag_enabled("BMF_BRICK_RUNTIME_RESOLVE_DIRECT_ARRAY_ENABLED")) &&
+               brick_runtime_resolve_unsafe_native_enabled();
+    }
+
+    uint64_t brick_runtime_region_scan_max_ms(uint64_t requested)
+    {
+        const uint64_t fallback = requested == 0
+                                      ? env_u64(
+                                            "BMF_BRICK_RUNTIME_REGION_SCAN_MAX_MS",
+                                            250,
+                                            1,
+                                            5000)
+                                      : requested;
+        return std::max<uint64_t>(1, std::min<uint64_t>(fallback, 5000));
     }
 
     bool brick_runtime_resolve_lookup_fallback_enabled()
@@ -3434,7 +6078,7 @@ namespace
     {
         return env_u64(
             "BMF_BRICK_GRID_CONTEXT_CACHE_TTL_MS",
-            5000,
+            300000,
             1,
             600000);
     }
@@ -4166,6 +6810,10 @@ namespace
 
         const uintptr_t brick_address =
             snapshot.array_base + static_cast<uintptr_t>(slot) * kBrickRuntimeStride;
+        if (!is_accessible_memory(brick_address, kBrickRuntimeStride))
+        {
+            return false;
+        }
 
         uint32_t brick_id = 0;
         uint32_t cell_index = 0;
@@ -4267,6 +6915,107 @@ namespace
             return UINT32_MAX;
         }
         return static_cast<uint32_t>(slot);
+    }
+
+    bool brick_runtime_handle_for_address(uintptr_t module_base,
+                                          uintptr_t brick_address,
+                                          BrickRuntimeHandleInfo& out_info)
+    {
+        out_info = BrickRuntimeHandleInfo{};
+        if (module_base == 0 || brick_address == 0)
+        {
+            out_info.code = "BRICK_HANDLE_INPUT_INVALID";
+            out_info.detail = "module base and brick address are required";
+            return false;
+        }
+
+        uint64_t array_base_raw = 0;
+        uint64_t active_flags_base_raw = 0;
+        uint64_t bucket_base_address_raw = 0;
+        uint32_t bucket_count = 0;
+        uint32_t bucket_base = 0;
+        if (!read_u64_at(module_base + kBrickArrayBaseOffset, array_base_raw) ||
+            array_base_raw == 0)
+        {
+            out_info.code = "BRICK_HANDLE_ARRAY_UNAVAILABLE";
+            out_info.detail = "runtime brick array base global is not readable";
+            return false;
+        }
+        if (!read_u64_at(module_base + kBrickActiveFlagsArrayOffset, active_flags_base_raw) ||
+            active_flags_base_raw == 0)
+        {
+            out_info.code = "BRICK_HANDLE_ACTIVE_FLAGS_UNAVAILABLE";
+            out_info.detail = "runtime brick active-flags global is not readable";
+            return false;
+        }
+        read_u64_at(module_base + kBrickWorldOccupancyArrayOffset, bucket_base_address_raw);
+        read_u32_at(module_base + kBrickWorldOccupancyCountOffset, bucket_count);
+        read_u32_at(module_base + kBrickWorldOccupancyBaseOffset, bucket_base);
+
+        out_info.array_base = static_cast<uintptr_t>(array_base_raw);
+        out_info.active_flags_base = static_cast<uintptr_t>(active_flags_base_raw);
+        out_info.bucket_base_address = static_cast<uintptr_t>(bucket_base_address_raw);
+        out_info.bucket_count = bucket_count;
+        out_info.bucket_base = bucket_base;
+
+        if (brick_address < out_info.array_base)
+        {
+            out_info.code = "BRICK_HANDLE_ADDRESS_BEFORE_ARRAY";
+            out_info.detail = "brick address is before the runtime brick array base";
+            return false;
+        }
+        const uint64_t delta = static_cast<uint64_t>(brick_address - out_info.array_base);
+        if (delta % kBrickRuntimeStride != 0)
+        {
+            out_info.code = "BRICK_HANDLE_UNALIGNED";
+            out_info.detail = "brick address is not aligned to the runtime brick stride";
+            return false;
+        }
+
+        const uint64_t slot64 = delta / kBrickRuntimeStride;
+        if (slot64 > UINT32_MAX)
+        {
+            out_info.code = "BRICK_HANDLE_SLOT_OVERFLOW";
+            out_info.detail = "runtime brick slot does not fit in the packed handle";
+            return false;
+        }
+        out_info.slot = static_cast<uint32_t>(slot64);
+
+        const uintptr_t active_flags_address =
+            out_info.active_flags_base + static_cast<uintptr_t>(out_info.slot) * sizeof(uint32_t);
+        if (!read_u32_at(active_flags_address, out_info.active_generation))
+        {
+            out_info.code = "BRICK_HANDLE_ACTIVE_FLAGS_UNREADABLE";
+            out_info.detail = "runtime brick active generation was not readable";
+            return false;
+        }
+        if ((out_info.active_generation & 1U) == 0)
+        {
+            out_info.code = "BRICK_HANDLE_SLOT_INACTIVE";
+            out_info.detail = "runtime brick slot is not active";
+            return false;
+        }
+
+        out_info.bucket_key = out_info.slot >> 10;
+        if (out_info.bucket_key >= out_info.bucket_base)
+        {
+            out_info.bucket_index = out_info.bucket_key - out_info.bucket_base;
+            if (out_info.bucket_base_address != 0 &&
+                out_info.bucket_index < out_info.bucket_count)
+            {
+                read_u16_at(
+                    out_info.bucket_base_address +
+                        static_cast<uintptr_t>(out_info.bucket_index) * sizeof(uint16_t),
+                    out_info.bucket_value);
+            }
+        }
+
+        out_info.packed_handle =
+            (static_cast<uint64_t>(out_info.active_generation) << 32) |
+            static_cast<uint64_t>(out_info.slot);
+        out_info.ok = true;
+        out_info.code = "OK";
+        return true;
     }
 
     bool brick_runtime_lookup_address(uintptr_t module_base,
@@ -5181,6 +7930,548 @@ namespace
         }
     }
 
+    struct BrickRuntimeRegionScanResult
+    {
+        uint64_t scanned_slots{0};
+        uint64_t active_slots{0};
+        uint64_t matched_count{0};
+        uint64_t returned_count{0};
+        uint64_t time_budget_ms{0};
+        bool timed_out{false};
+        bool truncated{false};
+        bool direct_array_attempted{false};
+        bool direct_array_enabled{false};
+        bool direct_array_used{false};
+        std::vector<BrickRuntimeSlotCandidate> matches;
+    };
+
+    bool brick_runtime_region_contains(const BrickRuntimeSlotCandidate& candidate,
+                                       int64_t min_x,
+                                       int64_t max_x,
+                                       int64_t min_y,
+                                       int64_t max_y,
+                                       int64_t min_z,
+                                       int64_t max_z)
+    {
+        return candidate.x >= min_x && candidate.x <= max_x &&
+               candidate.y >= min_y && candidate.y <= max_y &&
+               candidate.z >= min_z && candidate.z <= max_z;
+    }
+
+    bool brick_runtime_region_seen(const std::vector<BrickRuntimeSlotCandidate>& matches,
+                                   uint32_t brick_id)
+    {
+        for (const auto& candidate : matches)
+        {
+            if (candidate.brick_id == brick_id)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void brick_runtime_region_add_match(BrickRuntimeRegionScanResult& result,
+                                        const BrickRuntimeSlotCandidate& candidate,
+                                        uint32_t limit)
+    {
+        result.matched_count++;
+        if (brick_runtime_region_seen(result.matches, candidate.brick_id))
+        {
+            return;
+        }
+        if (result.matches.size() >= limit)
+        {
+            result.truncated = true;
+            return;
+        }
+        result.matches.push_back(candidate);
+        result.returned_count = result.matches.size();
+    }
+
+    void brick_runtime_scan_region_slots(const BrickRuntimeArraySnapshot& snapshot,
+                                         uint32_t start_slot,
+                                         uint32_t end_slot,
+                                         int64_t center_x,
+                                         int64_t center_y,
+                                         int64_t center_z,
+                                         int64_t min_x,
+                                         int64_t max_x,
+                                         int64_t min_y,
+                                         int64_t max_y,
+                                         int64_t min_z,
+                                         int64_t max_z,
+                                         uint32_t limit,
+                                         BrickRuntimeRegionScanResult& result)
+    {
+        if (result.timed_out || start_slot >= snapshot.accessible_slots)
+        {
+            return;
+        }
+        end_slot = std::min<uint32_t>(end_slot, snapshot.accessible_slots);
+        if (end_slot <= start_slot)
+        {
+            return;
+        }
+
+        const uint64_t start_offset = static_cast<uint64_t>(start_slot) * kBrickRuntimeStride;
+        const uint64_t end_offset = static_cast<uint64_t>(end_slot) * kBrickRuntimeStride;
+        if (snapshot.array_base > UINTPTR_MAX - start_offset ||
+            snapshot.array_base > UINTPTR_MAX - end_offset)
+        {
+            result.truncated = true;
+            return;
+        }
+
+        const uintptr_t scan_start = snapshot.array_base + static_cast<uintptr_t>(start_offset);
+        const uintptr_t scan_end = snapshot.array_base + static_cast<uintptr_t>(end_offset);
+        const auto started = std::chrono::steady_clock::now();
+        auto timed_out = [&]() -> bool {
+            const uint64_t elapsed_ms = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - started)
+                    .count());
+            return elapsed_ms >= result.time_budget_ms;
+        };
+
+        uintptr_t cursor = scan_start;
+        while (cursor < scan_end)
+        {
+            if (timed_out())
+            {
+                result.timed_out = true;
+                result.truncated = true;
+                return;
+            }
+
+            MEMORY_BASIC_INFORMATION mbi{};
+            if (VirtualQuery(reinterpret_cast<void*>(cursor), &mbi, sizeof(mbi)) == 0)
+            {
+                result.truncated = true;
+                return;
+            }
+
+            const uintptr_t region_start_raw = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+            if (region_start_raw > UINTPTR_MAX - mbi.RegionSize)
+            {
+                result.truncated = true;
+                return;
+            }
+            uintptr_t region_end = region_start_raw + mbi.RegionSize;
+            if (region_end <= cursor)
+            {
+                result.truncated = true;
+                return;
+            }
+
+            const uintptr_t region_start = std::max<uintptr_t>(cursor, region_start_raw);
+            region_end = std::min<uintptr_t>(region_end, scan_end);
+            if (brick_runtime_region_readable(mbi) &&
+                region_end > region_start &&
+                region_end - region_start >= kBrickRuntimeStride)
+            {
+                uint64_t first_slot = 0;
+                if (region_start > snapshot.array_base)
+                {
+                    const uint64_t delta = region_start - snapshot.array_base;
+                    first_slot = (delta + kBrickRuntimeStride - 1) / kBrickRuntimeStride;
+                }
+                const uint64_t last_slot_exclusive =
+                    (static_cast<uint64_t>(region_end - snapshot.array_base) - kBrickRuntimeStride) /
+                        kBrickRuntimeStride +
+                    1;
+
+                const uint32_t first = static_cast<uint32_t>(
+                    std::max<uint64_t>(first_slot, start_slot));
+                const uint32_t last = static_cast<uint32_t>(
+                    std::min<uint64_t>(last_slot_exclusive, end_slot));
+
+                for (uint32_t slot = first; slot < last; ++slot)
+                {
+                    if ((result.scanned_slots & 0x0FFF) == 0 && timed_out())
+                    {
+                        result.timed_out = true;
+                        result.truncated = true;
+                        return;
+                    }
+
+                    result.scanned_slots++;
+                    BrickRuntimeSlotCandidate candidate{};
+                    if (!brick_runtime_read_slot_candidate(
+                            snapshot,
+                            slot,
+                            center_x,
+                            center_y,
+                            center_z,
+                            candidate))
+                    {
+                        continue;
+                    }
+                    result.active_slots++;
+                    if (!brick_runtime_region_contains(
+                            candidate,
+                            min_x,
+                            max_x,
+                            min_y,
+                            max_y,
+                            min_z,
+                            max_z))
+                    {
+                        continue;
+                    }
+                    brick_runtime_region_add_match(result, candidate, limit);
+                }
+            }
+
+            cursor = region_end;
+        }
+    }
+
+    void brick_runtime_scan_region_direct_array_slots(const BrickRuntimeArraySnapshot& snapshot,
+                                                      uint32_t start_slot,
+                                                      uint32_t end_slot,
+                                                      int64_t center_x,
+                                                      int64_t center_y,
+                                                      int64_t center_z,
+                                                      int64_t min_x,
+                                                      int64_t max_x,
+                                                      int64_t min_y,
+                                                      int64_t max_y,
+                                                      int64_t min_z,
+                                                      int64_t max_z,
+                                                      uint32_t limit,
+                                                      BrickRuntimeRegionScanResult& result)
+    {
+        result.direct_array_attempted = true;
+        result.direct_array_enabled = brick_runtime_region_scan_direct_array_enabled();
+        if (!result.direct_array_enabled || result.timed_out || start_slot >= snapshot.requested_slots)
+        {
+            return;
+        }
+        end_slot = std::min<uint32_t>(end_slot, snapshot.requested_slots);
+        if (end_slot <= start_slot)
+        {
+            return;
+        }
+
+        const uint64_t start_offset = static_cast<uint64_t>(start_slot) * kBrickRuntimeStride;
+        const uint64_t end_offset = static_cast<uint64_t>(end_slot) * kBrickRuntimeStride;
+        if (snapshot.array_base > UINTPTR_MAX - start_offset ||
+            snapshot.array_base > UINTPTR_MAX - end_offset)
+        {
+            result.truncated = true;
+            return;
+        }
+
+        const uintptr_t scan_start = snapshot.array_base + static_cast<uintptr_t>(start_offset);
+        const uintptr_t scan_end = snapshot.array_base + static_cast<uintptr_t>(end_offset);
+        const auto started = std::chrono::steady_clock::now();
+        auto timed_out = [&]() -> bool {
+            const uint64_t elapsed_ms = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - started)
+                    .count());
+            return elapsed_ms >= result.time_budget_ms;
+        };
+
+        uintptr_t cursor = scan_start;
+        while (cursor < scan_end)
+        {
+            if (timed_out())
+            {
+                result.timed_out = true;
+                result.truncated = true;
+                return;
+            }
+
+            MEMORY_BASIC_INFORMATION mbi{};
+            if (VirtualQuery(reinterpret_cast<void*>(cursor), &mbi, sizeof(mbi)) == 0)
+            {
+                result.truncated = true;
+                return;
+            }
+
+            const uintptr_t region_start_raw = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+            if (region_start_raw > UINTPTR_MAX - mbi.RegionSize)
+            {
+                result.truncated = true;
+                return;
+            }
+            uintptr_t region_end = region_start_raw + mbi.RegionSize;
+            if (region_end <= cursor)
+            {
+                result.truncated = true;
+                return;
+            }
+
+            const uintptr_t region_start = std::max<uintptr_t>(cursor, region_start_raw);
+            region_end = std::min<uintptr_t>(region_end, scan_end);
+            if (brick_runtime_region_readable(mbi) &&
+                region_end > region_start &&
+                region_end - region_start >= kBrickRuntimeStride)
+            {
+                uint64_t first_slot = 0;
+                if (region_start > snapshot.array_base)
+                {
+                    const uint64_t delta = region_start - snapshot.array_base;
+                    first_slot = (delta + kBrickRuntimeStride - 1) / kBrickRuntimeStride;
+                }
+                const uint64_t last_slot_exclusive =
+                    (static_cast<uint64_t>(region_end - snapshot.array_base) - kBrickRuntimeStride) /
+                        kBrickRuntimeStride +
+                    1;
+
+                const uint32_t first = static_cast<uint32_t>(
+                    std::max<uint64_t>(first_slot, start_slot));
+                const uint32_t last = static_cast<uint32_t>(
+                    std::min<uint64_t>(last_slot_exclusive, end_slot));
+
+                for (uint32_t slot = first; slot < last; ++slot)
+                {
+                    if ((result.scanned_slots & 0x0FFF) == 0 && timed_out())
+                    {
+                        result.timed_out = true;
+                        result.truncated = true;
+                        return;
+                    }
+
+                    result.scanned_slots++;
+                    BrickRuntimeSlotCandidate candidate{};
+                    if (!brick_runtime_read_direct_slot_candidate(
+                            snapshot,
+                            slot,
+                            center_x,
+                            center_y,
+                            center_z,
+                            candidate))
+                    {
+                        continue;
+                    }
+                    result.active_slots++;
+                    if (!brick_runtime_region_contains(
+                            candidate,
+                            min_x,
+                            max_x,
+                            min_y,
+                            max_y,
+                            min_z,
+                            max_z))
+                    {
+                        continue;
+                    }
+                    result.direct_array_used = true;
+                    brick_runtime_region_add_match(result, candidate, limit);
+                }
+            }
+
+            cursor = region_end;
+        }
+    }
+
+    std::string brick_physical_scan_region_text(int64_t center_x,
+                                                int64_t center_y,
+                                                int64_t center_z,
+                                                int64_t extent_x,
+                                                int64_t extent_y,
+                                                int64_t extent_z,
+                                                uint32_t max_scan,
+                                                uint32_t limit,
+                                                uint64_t max_ms)
+    {
+        if (max_scan == 0)
+        {
+            max_scan = kBrickRuntimeRegionScanDefaultMaxScan;
+        }
+        max_scan = std::min<uint32_t>(max_scan, kBrickRuntimeResolveMaxScanLimit);
+        if (limit == 0)
+        {
+            limit = kBrickRuntimeRegionScanDefaultLimit;
+        }
+        limit = std::min<uint32_t>(limit, kBrickRuntimeRegionScanMaxLimit);
+
+        const uint64_t time_budget_ms = brick_runtime_region_scan_max_ms(max_ms);
+        const auto started = std::chrono::steady_clock::now();
+        std::ostringstream out;
+        out << "Brick runtime region scan\n"
+            << "source=BMFSocketBrickPhysical\n"
+            << "operation=scan-region\n"
+            << "center_x=" << center_x << "\n"
+            << "center_y=" << center_y << "\n"
+            << "center_z=" << center_z << "\n"
+            << "extent_x=" << extent_x << "\n"
+            << "extent_y=" << extent_y << "\n"
+            << "extent_z=" << extent_z << "\n"
+            << "coordinate_space=runtime-local\n"
+            << "world_space_clear_region_safe=false\n"
+            << "max_scan=" << max_scan << "\n"
+            << "limit=" << limit << "\n"
+            << "max_ms=" << time_budget_ms << "\n";
+
+        if (center_x < INT32_MIN || center_x > INT32_MAX ||
+            center_y < INT32_MIN || center_y > INT32_MAX ||
+            center_z < INT32_MIN || center_z > INT32_MAX ||
+            extent_x < 0 || extent_y < 0 || extent_z < 0 ||
+            extent_x > INT32_MAX || extent_y > INT32_MAX || extent_z > INT32_MAX)
+        {
+            out << "ok=false\n"
+                << "code=BRICK_RUNTIME_REGION_SCAN_INPUT_OUT_OF_RANGE\n"
+                << "detail=center coordinates must fit int32 and extents must be non-negative int32 values\n";
+            return out.str();
+        }
+
+        if (!brick_runtime_region_scan_enabled())
+        {
+            out << "ok=false\n"
+                << "code=BRICK_RUNTIME_REGION_SCAN_DISABLED\n"
+                << "detail=set BMF_BRICK_RUNTIME_REGION_SCAN_ENABLED=1 to allow bounded runtime brick region validation\n";
+            return out.str();
+        }
+
+        BrickRuntimeArraySnapshot snapshot{};
+        if (!brick_runtime_array_snapshot(max_scan, snapshot))
+        {
+            out << "ok=false\n"
+                << "code=" << snapshot.code << "\n"
+                << "module_base=" << json_escape(pointer_hex(snapshot.module_base)) << "\n"
+                << "array_base_address=" << json_escape(pointer_hex(snapshot.array_base)) << "\n"
+                << "active_flags_address=" << json_escape(pointer_hex(snapshot.active_flags_base)) << "\n"
+                << "array_region_state=" << hex_u64(snapshot.array_region_state) << "\n"
+                << "active_flags_region_state=" << hex_u64(snapshot.active_flags_region_state) << "\n"
+                << "array_region_protect=" << hex_u64(snapshot.array_region_protect) << "\n"
+                << "active_flags_region_protect=" << hex_u64(snapshot.active_flags_region_protect) << "\n"
+                << "array_region_size=" << snapshot.array_region_size << "\n"
+                << "active_flags_region_size=" << snapshot.active_flags_region_size << "\n"
+                << "detail=" << json_escape(snapshot.detail) << "\n";
+            return out.str();
+        }
+
+        const int64_t min_x = center_x - extent_x;
+        const int64_t max_x = center_x + extent_x;
+        const int64_t min_y = center_y - extent_y;
+        const int64_t max_y = center_y + extent_y;
+        const int64_t min_z = center_z - extent_z;
+        const int64_t max_z = center_z + extent_z;
+
+        BrickRuntimeRegionScanResult scan{};
+        scan.time_budget_ms = time_budget_ms;
+        brick_runtime_scan_region_slots(
+            snapshot,
+            0,
+            snapshot.accessible_slots,
+            center_x,
+            center_y,
+            center_z,
+            min_x,
+            max_x,
+            min_y,
+            max_y,
+            min_z,
+            max_z,
+            limit,
+            scan);
+
+        const uint64_t total_active_slots =
+            std::min<uint64_t>(snapshot.array_region_slots, snapshot.active_flags_region_slots);
+        if (snapshot.accessible_slots < total_active_slots)
+        {
+            scan.truncated = true;
+        }
+
+        if ((snapshot.sparse || scan.active_slots == 0) && brick_runtime_region_scan_direct_array_enabled())
+        {
+            brick_runtime_scan_region_direct_array_slots(
+                snapshot,
+                0,
+                snapshot.requested_slots,
+                center_x,
+                center_y,
+                center_z,
+                min_x,
+                max_x,
+                min_y,
+                max_y,
+                min_z,
+                max_z,
+                limit,
+                scan);
+            if (snapshot.requested_slots < snapshot.array_region_slots)
+            {
+                scan.truncated = true;
+            }
+        }
+
+        std::sort(scan.matches.begin(), scan.matches.end(), [](const auto& a, const auto& b)
+        {
+            return a.brick_id < b.brick_id;
+        });
+        scan.returned_count = scan.matches.size();
+
+        const uint64_t duration_ms = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - started)
+                .count());
+        const bool complete = !scan.truncated && !scan.timed_out && scan.matched_count == scan.returned_count;
+        const std::string code = complete
+                                     ? "OK"
+                                     : (scan.timed_out
+                                            ? "BRICK_RUNTIME_REGION_SCAN_TIMEOUT"
+                                            : "BRICK_RUNTIME_REGION_SCAN_TRUNCATED");
+
+        out << "ok=" << (complete ? "true" : "false") << "\n"
+            << "code=" << code << "\n"
+            << "module_base=" << json_escape(pointer_hex(snapshot.module_base)) << "\n"
+            << "array_base_address=" << json_escape(pointer_hex(snapshot.array_base)) << "\n"
+            << "active_flags_address=" << json_escape(pointer_hex(snapshot.active_flags_base)) << "\n"
+            << "array_region_state=" << hex_u64(snapshot.array_region_state) << "\n"
+            << "active_flags_region_state=" << hex_u64(snapshot.active_flags_region_state) << "\n"
+            << "array_region_protect=" << hex_u64(snapshot.array_region_protect) << "\n"
+            << "active_flags_region_protect=" << hex_u64(snapshot.active_flags_region_protect) << "\n"
+            << "array_region_size=" << snapshot.array_region_size << "\n"
+            << "active_flags_region_size=" << snapshot.active_flags_region_size << "\n"
+            << "requested_slots=" << snapshot.requested_slots << "\n"
+            << "array_region_slots=" << snapshot.array_region_slots << "\n"
+            << "active_flags_region_slots=" << snapshot.active_flags_region_slots << "\n"
+            << "accessible_slots=" << snapshot.accessible_slots << "\n"
+            << "sparse=" << (snapshot.sparse ? "true" : "false") << "\n"
+            << "min_x=" << min_x << "\n"
+            << "max_x=" << max_x << "\n"
+            << "min_y=" << min_y << "\n"
+            << "max_y=" << max_y << "\n"
+            << "min_z=" << min_z << "\n"
+            << "max_z=" << max_z << "\n"
+            << "scanned_slots=" << scan.scanned_slots << "\n"
+            << "active_slots=" << scan.active_slots << "\n"
+            << "matched_count=" << scan.matched_count << "\n"
+            << "returned_count=" << scan.returned_count << "\n"
+            << "truncated=" << (scan.truncated ? "true" : "false") << "\n"
+            << "timed_out=" << (scan.timed_out ? "true" : "false") << "\n"
+            << "direct_array_attempted=" << (scan.direct_array_attempted ? "true" : "false") << "\n"
+            << "direct_array_enabled=" << (scan.direct_array_enabled ? "true" : "false") << "\n"
+            << "direct_array_used=" << (scan.direct_array_used ? "true" : "false") << "\n"
+            << "duration_ms=" << duration_ms << "\n"
+            << "detail=" << json_escape(complete ? "runtime-local region scan completed" : "runtime-local region scan was incomplete") << "\n";
+
+        size_t index = 0;
+        for (const auto& candidate : scan.matches)
+        {
+            ++index;
+            const std::string prefix = "brick." + std::to_string(index);
+            out << prefix << ".id=" << candidate.brick_id << "\n"
+                << prefix << ".slot=" << candidate.slot << "\n"
+                << prefix << ".cell_index=" << candidate.cell_index << "\n"
+                << prefix << ".sub_index=" << candidate.sub_index << "\n"
+                << prefix << ".x=" << candidate.x << "\n"
+                << prefix << ".y=" << candidate.y << "\n"
+                << prefix << ".z=" << candidate.z << "\n"
+                << prefix << ".visible=" << static_cast<unsigned int>(candidate.visible) << "\n"
+                << prefix << ".public_visible=" << (brick_runtime_byte_is_public_visible(candidate.visible) ? "true" : "false") << "\n"
+                << prefix << ".collision_channels=" << static_cast<unsigned int>(candidate.collision_channels) << "\n"
+                << prefix << ".address=" << json_escape(pointer_hex(candidate.address)) << "\n";
+        }
+
+        return out.str();
+    }
+
     std::string brick_physical_resolve_near_text(int64_t target_x,
                                                  int64_t target_y,
                                                  int64_t target_z,
@@ -5556,7 +8847,8 @@ namespace
                 resolve);
         }
 
-        if (!resolve.found && hint_slot > 0 && hint_window > 0)
+        const bool direct_array_enabled = brick_runtime_resolve_direct_array_enabled();
+        if (!resolve.found && direct_array_enabled && hint_slot > 0 && hint_window > 0)
         {
             const uint32_t start_slot = hint_slot > hint_window ? hint_slot - hint_window : 0;
             const uint32_t end_slot =
@@ -5589,20 +8881,24 @@ namespace
                 prefer_visible,
                 prefer_collidable,
                 resolve);
-            const uint32_t direct_full_end = std::min<uint32_t>(max_scan, snapshot.requested_slots);
-            brick_runtime_scan_direct_array_slots(
-                snapshot,
-                0,
-                direct_full_end,
-                target_x,
-                target_y,
-                target_z,
-                radius_sq,
-                prefer_visible,
-                prefer_collidable,
-                resolve);
+            uint32_t direct_full_end = 0;
+            if (direct_array_enabled)
+            {
+                direct_full_end = std::min<uint32_t>(max_scan, snapshot.requested_slots);
+                brick_runtime_scan_direct_array_slots(
+                    snapshot,
+                    0,
+                    direct_full_end,
+                    target_x,
+                    target_y,
+                    target_z,
+                    radius_sq,
+                    prefer_visible,
+                    prefer_collidable,
+                    resolve);
+            }
             resolve.truncated = full_end < snapshot.accessible_slots ||
-                                direct_full_end < snapshot.requested_slots;
+                                (direct_array_enabled && direct_full_end < snapshot.requested_slots);
         }
 
         const uint64_t duration_ms = static_cast<uint64_t>(
@@ -6428,9 +9724,28 @@ namespace
                !env_flag_enabled("BMF_BRICK_VISIBILITY_SET_DISABLED");
     }
 
+    bool env_string_equals(const char* name, std::string_view expected)
+    {
+        const char* raw = std::getenv(name);
+        if (!raw)
+        {
+            return false;
+        }
+
+        return ascii_lower(trim_ascii(raw)) == ascii_lower(std::string(expected));
+    }
+
+    bool brick_direct_byte_write_confirmed()
+    {
+        return env_string_equals(
+            "BMF_BRICK_RUNTIME_DIRECT_BYTE_WRITE_CONFIRM",
+            "diagnostic-byte-write");
+    }
+
     bool brick_visibility_direct_write_enabled()
     {
-        return env_flag_enabled("BMF_BRICK_VISIBILITY_DIRECT_WRITE_ENABLED") &&
+        return brick_direct_byte_write_confirmed() &&
+               env_flag_enabled("BMF_BRICK_VISIBILITY_DIRECT_WRITE_ENABLED") &&
                !env_flag_enabled("BMF_BRICK_VISIBILITY_DIRECT_WRITE_DISABLED");
     }
 
@@ -6441,7 +9756,8 @@ namespace
 
     bool brick_collision_direct_write_enabled()
     {
-        return env_flag_enabled("BMF_BRICK_COLLISION_DIRECT_WRITE_ENABLED") &&
+        return brick_direct_byte_write_confirmed() &&
+               env_flag_enabled("BMF_BRICK_COLLISION_DIRECT_WRITE_ENABLED") &&
                !env_flag_enabled("BMF_BRICK_COLLISION_DIRECT_WRITE_DISABLED");
     }
 
@@ -6836,7 +10152,13 @@ namespace
         uint8_t state_flags = 0;
         uint32_t brick_cell_index = 0;
         uint32_t brick_sub_index = 0;
+        uint32_t brick_action_key = 0;
         uint32_t slot_id = 0;
+        int32_t runtime_x = 0;
+        int32_t runtime_y = 0;
+        int32_t runtime_z = 0;
+        bool runtime_position_read = false;
+        BrickRuntimeHandleInfo handle_info;
 
         read_u64_at(module_base + kBrickArrayBaseOffset, array_base);
         read_u64_at(brick_address + kBrickOwnerOffset, owner_address);
@@ -6849,12 +10171,34 @@ namespace
         read_u8_at(brick_address + kBrickStateFlagsOffset, state_flags);
         read_u32_at(brick_address, brick_cell_index);
         read_u32_at(brick_address + 0x04, brick_sub_index);
+        read_u32_at(brick_address + kBrickRuntimeIdOffset, brick_action_key);
+        runtime_position_read =
+            read_i32_at(brick_address + kBrickPositionXOffset, runtime_x) &&
+            read_i32_at(brick_address + kBrickPositionYOffset, runtime_y) &&
+            read_i32_at(brick_address + kBrickPositionZOffset, runtime_z);
         if (array_base != 0 &&
             brick_address >= static_cast<uintptr_t>(array_base) &&
             ((brick_address - static_cast<uintptr_t>(array_base)) % kBrickRuntimeStride) == 0)
         {
             slot_id = static_cast<uint32_t>(
                 (brick_address - static_cast<uintptr_t>(array_base)) / kBrickRuntimeStride);
+        }
+        brick_runtime_handle_for_address(module_base, brick_address, handle_info);
+        if (runtime_position_read)
+        {
+            BrickRuntimeSlotCandidate verified{};
+            verified.slot = slot_id;
+            verified.brick_id = brick_id;
+            verified.cell_index = brick_cell_index;
+            verified.sub_index = brick_sub_index;
+            verified.x = runtime_x;
+            verified.y = runtime_y;
+            verified.z = runtime_z;
+            verified.visible = visible;
+            verified.collision_channels = collision_channels;
+            verified.distance_sq = 0;
+            verified.address = brick_address;
+            brick_runtime_cache_verified_candidate(verified);
         }
 
         bool has_original = false;
@@ -6882,8 +10226,25 @@ namespace
         out << "array_base_address=" << json_escape(pointer_hex(static_cast<uintptr_t>(array_base))) << "\n"
             << "runtime_slot=" << slot_id << "\n"
             << "slot_matches_id=" << (slot_id == brick_id ? "true" : "false") << "\n"
+            << "brick_action_key=" << brick_action_key << "\n"
+            << "packed_handle_ok=" << (handle_info.ok ? "true" : "false") << "\n"
+            << "packed_handle_code=" << json_escape(handle_info.code) << "\n"
+            << "packed_handle=" << json_escape(handle_info.packed_handle == 0 ? "" : hex_u64(handle_info.packed_handle)) << "\n"
+            << "packed_handle_slot=" << handle_info.slot << "\n"
+            << "packed_handle_generation=" << handle_info.active_generation << "\n"
+            << "packed_handle_bucket_key=" << handle_info.bucket_key << "\n"
+            << "packed_handle_bucket_base=" << handle_info.bucket_base << "\n"
+            << "packed_handle_bucket_index=" << handle_info.bucket_index << "\n"
+            << "packed_handle_bucket_count=" << handle_info.bucket_count << "\n"
+            << "packed_handle_bucket_value=" << handle_info.bucket_value << "\n"
+            << "active_flags_base_address=" << json_escape(pointer_hex(handle_info.active_flags_base)) << "\n"
+            << "world_occupancy_base_address=" << json_escape(pointer_hex(handle_info.bucket_base_address)) << "\n"
             << "brick_cell_index=" << brick_cell_index << "\n"
             << "brick_sub_index=" << brick_sub_index << "\n"
+            << "runtime_x=" << runtime_x << "\n"
+            << "runtime_y=" << runtime_y << "\n"
+            << "runtime_z=" << runtime_z << "\n"
+            << "verified_cached=" << (runtime_position_read ? "true" : "false") << "\n"
             << "owner_address=" << json_escape(pointer_hex(static_cast<uintptr_t>(owner_address))) << "\n"
             << "grid_context_address=" << json_escape(pointer_hex(static_cast<uintptr_t>(grid_context_address))) << "\n"
             << "grid_context_accessible=" << (
@@ -6892,11 +10253,18 @@ namespace
                    ? "true"
                    : "false") << "\n"
             << "visible=" << static_cast<unsigned int>(visible) << "\n"
+            << "public_visible=" << (brick_runtime_byte_is_public_visible(visible) ? "true" : "false") << "\n"
             << "collision_channels=" << static_cast<unsigned int>(collision_channels) << "\n"
             << "state_flags=" << static_cast<unsigned int>(state_flags) << "\n"
             << "original_captured=" << (has_original ? "true" : "false") << "\n"
             << "original_visible=" << static_cast<unsigned int>(original.visible) << "\n"
+            << "original_public_visible=" << (brick_runtime_byte_is_public_visible(original.visible) ? "true" : "false") << "\n"
             << "original_collision_channels=" << static_cast<unsigned int>(original.collision_channels) << "\n";
+        out << "visibility_setter_enabled=" << (brick_visibility_setter_enabled() ? "true" : "false") << "\n"
+            << "collision_setter_enabled=" << (brick_collision_setter_enabled() ? "true" : "false") << "\n"
+            << "direct_byte_write_confirmed=" << (brick_direct_byte_write_confirmed() ? "true" : "false") << "\n"
+            << "visibility_direct_write_enabled=" << (brick_visibility_direct_write_enabled() ? "true" : "false") << "\n"
+            << "collision_direct_write_enabled=" << (brick_collision_direct_write_enabled() ? "true" : "false") << "\n";
         out << "context_hook_enabled=" << (brick_runtime_context_hooks_enabled() ? "true" : "false") << "\n"
             << "context_hooks_installed=" << (g_brick_runtime_context_hooks_installed.load() ? "true" : "false") << "\n"
             << "context_hook_error=" << json_escape(context_hook_error) << "\n"
@@ -6988,10 +10356,2953 @@ namespace
         return true;
     }
 
+    bool brick_runtime_action_set_enabled()
+    {
+        return env_flag_enabled("BMF_BRICK_RUNTIME_ACTION_SET_ENABLED");
+    }
+
+    bool brick_runtime_action_force_resync_enabled()
+    {
+        return env_flag_enabled("BMF_BRICK_RUNTIME_ACTION_FORCE_RESYNC");
+    }
+
+    bool brick_runtime_action_metadata_enabled()
+    {
+        return env_flag_enabled("BMF_BRICK_RUNTIME_ACTION_METADATA_ENABLED");
+    }
+
+    bool brick_runtime_applicator_set_enabled()
+    {
+        return env_flag_enabled("BMF_BRICK_RUNTIME_APPLICATOR_SET_ENABLED");
+    }
+
+    bool brick_runtime_action_list_after_applicator_failure_enabled()
+    {
+        return env_flag_enabled("BMF_BRICK_RUNTIME_ACTION_LIST_AFTER_APPLICATOR_FAILURE_ENABLED");
+    }
+
+    uint64_t brick_runtime_action_batch_max_ids()
+    {
+        return env_u64("BMF_BRICK_RUNTIME_ACTION_BATCH_MAX_IDS", 192, 1, 512);
+    }
+
+    uint64_t brick_runtime_applicator_batch_max_ids()
+    {
+        return env_u64("BMF_BRICK_RUNTIME_APPLICATOR_BATCH_MAX_IDS", 192, 1, 512);
+    }
+
+    bool brick_action_owner_scan_enabled()
+    {
+        return env_flag_enabled("BMF_BRICK_ACTION_OWNER_SCAN_ENABLED");
+    }
+
+    bool brick_action_owner_brick_owner_fallback_enabled()
+    {
+        return env_flag_enabled("BMF_BRICK_ACTION_OWNER_BRICK_OWNER_FALLBACK");
+    }
+
+    bool brick_action_owner_direct_scan_enabled()
+    {
+        return env_flag_enabled("BMF_BRICK_ACTION_OWNER_DIRECT_SCAN_ENABLED");
+    }
+
+    bool brick_action_owner_surface_scan_enabled()
+    {
+        return env_flag_enabled("BMF_BRICK_ACTION_OWNER_SURFACE_SCAN_ENABLED");
+    }
+
+    bool brick_action_owner_surface_hint_fallback_enabled()
+    {
+        return env_flag_enabled("BMF_BRICK_ACTION_OWNER_SURFACE_HINT_FALLBACK_ENABLED");
+    }
+
+    uint64_t brick_action_owner_cache_ttl_ms()
+    {
+        return env_u64("BMF_BRICK_ACTION_OWNER_CACHE_TTL_MS", 300000, 1000, 3600000);
+    }
+
+    struct BrickActionOwnerCandidate
+    {
+        uintptr_t owner{0};
+        uintptr_t owner_surface{0};
+        uintptr_t source{0};
+        std::string source_label;
+        std::string detail;
+        std::vector<std::string> probe_details;
+        uint32_t owner_queue_count{0};
+        uint8_t owner_busy{0xff};
+        size_t scanned_objects{0};
+        size_t controller_candidates{0};
+        size_t surface_hint_candidates{0};
+    };
+
+    struct BrickPhysicalActionSetResult
+    {
+        bool ok{false};
+        bool finalized{false};
+        uint8_t finalize_result{0};
+        uintptr_t action_list{0};
+        uintptr_t action_owner{0};
+        uintptr_t action_owner_surface{0};
+        uintptr_t action_owner_source{0};
+        uintptr_t action_owner_finalize_context{0};
+        DWORD finalize_exception_code{0};
+        uintptr_t finalize_exception_address{0};
+        std::string action_owner_source_label;
+        std::string detail;
+        std::string code{"BRICK_ACTION_SET_FAILED"};
+        uint32_t entries{0};
+        uint32_t visibility_entries{0};
+        uint32_t collision_entries{0};
+        uint32_t forced_resync_entries{0};
+        bool action_metadata_enabled{false};
+        bool action_metadata_attempted{false};
+        bool action_metadata_ok{false};
+        bool applicator_attempted{false};
+        bool applicator_ok{false};
+        uint32_t applicator_visibility_calls{0};
+        uint32_t applicator_collision_calls{0};
+        uint32_t applicator_exceptions{0};
+        uint32_t owner_queue_count{0};
+        uint8_t owner_busy_before{0xff};
+        uint8_t owner_busy_after{0xff};
+        size_t owner_scan_objects{0};
+        size_t owner_scan_controller_candidates{0};
+        size_t owner_scan_surface_hint_candidates{0};
+        std::vector<std::string> owner_probe_details;
+    };
+
+    struct BrickPhysicalBatchItem
+    {
+        uint32_t requested_id{0};
+        uint32_t action_key{0};
+        uint32_t packed_handle_slot{UINT32_MAX};
+        uint32_t packed_handle_generation{0};
+        uint64_t packed_handle{0};
+        bool packed_handle_ok{false};
+        uintptr_t brick_address{0};
+        uint64_t owner_address{0};
+        uint32_t cell_index{0};
+        uint32_t sub_index{0};
+        bool lookup_ok{false};
+        bool ok{false};
+        bool visibility_requested{false};
+        bool collision_requested{false};
+        bool visibility_ok{true};
+        bool collision_ok{true};
+        uint8_t before_visible{0};
+        uint8_t before_collision_channels{0};
+        uint8_t target_visible{0};
+        uint8_t target_collision_channels{0};
+        uint8_t after_visible{0};
+        uint8_t after_collision_channels{0};
+        uint32_t action_entries{0};
+        uint32_t visibility_entries{0};
+        uint32_t collision_entries{0};
+        uint32_t forced_resync_entries{0};
+        uint32_t applicator_visibility_calls{0};
+        uint32_t applicator_collision_calls{0};
+        std::string visibility_method;
+        std::string collision_method;
+        std::string code{"PENDING"};
+        std::string detail;
+        BrickPhysicalOriginal original{};
+    };
+
+    void brick_action_owner_add_probe(BrickActionOwnerCandidate& candidate,
+                                      std::string detail)
+    {
+        constexpr size_t kMaxActionOwnerProbeDetails = 16;
+        constexpr size_t kMaxActionOwnerProbeDetailLength = 512;
+        if (candidate.probe_details.size() >= kMaxActionOwnerProbeDetails)
+        {
+            return;
+        }
+        if (detail.size() > kMaxActionOwnerProbeDetailLength)
+        {
+            detail.resize(kMaxActionOwnerProbeDetailLength);
+            detail += "...";
+        }
+        candidate.probe_details.push_back(std::move(detail));
+    }
+
+    void brick_action_owner_copy_probe_details(BrickActionOwnerCandidate& target,
+                                               const BrickActionOwnerCandidate& source)
+    {
+        for (const std::string& detail : source.probe_details)
+        {
+            brick_action_owner_add_probe(target, detail);
+        }
+    }
+
+    void write_brick_action_owner_probe_lines(std::ostringstream& out,
+                                              const BrickPhysicalActionSetResult& result)
+    {
+        out << "action_owner_probe_count=" << result.owner_probe_details.size() << "\n";
+        size_t index = 1;
+        for (const std::string& detail : result.owner_probe_details)
+        {
+            out << "action_owner_probe." << index++ << "=" << json_escape(detail) << "\n";
+        }
+    }
+
+    bool brick_action_owner_shape_is_plausible(uintptr_t owner,
+                                               uint8_t* busy_out = nullptr,
+                                               uint32_t* queue_count_out = nullptr)
+    {
+        if (!is_accessible_memory(owner, 0x140))
+        {
+            return false;
+        }
+
+        uint8_t busy = 0xff;
+        uint32_t queue_count = 0;
+        uint64_t queue_array = 0;
+        if (!read_u8_at(owner + 0x120, busy) ||
+            !read_u32_at(owner + 0x118, queue_count) ||
+            !read_u64_at(owner + 0x110, queue_array))
+        {
+            return false;
+        }
+        if (queue_count == 0 || queue_count > 256)
+        {
+            return false;
+        }
+        if (queue_array == 0 || !is_accessible_memory(static_cast<uintptr_t>(queue_array), sizeof(uintptr_t)))
+        {
+            return false;
+        }
+        const uintptr_t queue_array_address = static_cast<uintptr_t>(queue_array);
+        const uintptr_t last_record = queue_array_address + (static_cast<uintptr_t>(queue_count) - 1U) * 0x28U;
+        if (!is_accessible_memory(last_record, 0x28))
+        {
+            return false;
+        }
+        uint64_t action_list_array = 0;
+        uint32_t action_list_count = 0;
+        if (!read_u64_at(last_record, action_list_array) ||
+            !read_u32_at(last_record + 0x08, action_list_count))
+        {
+            return false;
+        }
+        if (action_list_count > 1024)
+        {
+            return false;
+        }
+        if (action_list_count > 0)
+        {
+            const uintptr_t action_list_array_address = static_cast<uintptr_t>(action_list_array);
+            if (action_list_array_address == 0 ||
+                !is_accessible_memory(action_list_array_address + (static_cast<uintptr_t>(action_list_count) - 1U) * sizeof(uintptr_t),
+                                      sizeof(uintptr_t)))
+            {
+                return false;
+            }
+            uint64_t last_action_list = 0;
+            if (!read_u64_at(action_list_array_address + (static_cast<uintptr_t>(action_list_count) - 1U) * sizeof(uintptr_t),
+                             last_action_list))
+            {
+                return false;
+            }
+            if (last_action_list != 0 && !is_accessible_memory(static_cast<uintptr_t>(last_action_list), 0x68))
+            {
+                return false;
+            }
+        }
+
+        if (busy_out)
+        {
+            *busy_out = busy;
+        }
+        if (queue_count_out)
+        {
+            *queue_count_out = queue_count;
+        }
+        return true;
+    }
+
+    bool brick_action_owner_is_plausible(uintptr_t owner,
+                                         uint8_t* busy_out = nullptr,
+                                         uint32_t* queue_count_out = nullptr)
+    {
+        auto* object = reinterpret_cast<Unreal::UObject*>(owner);
+        if (!is_live_uobject(object))
+        {
+            return false;
+        }
+        return brick_action_owner_shape_is_plausible(owner, busy_out, queue_count_out);
+    }
+
+    bool brick_action_source_surface_hint(Unreal::UObject* object,
+                                          uintptr_t& surface_out,
+                                          uintptr_t& owner_out,
+                                          uint8_t& busy_out,
+                                          uint32_t& queue_count_out)
+    {
+        surface_out = 0;
+        owner_out = 0;
+        busy_out = 0xff;
+        queue_count_out = 0;
+        const uintptr_t source = reinterpret_cast<uintptr_t>(object);
+        if (!object || !is_accessible_memory(source + 0x168, sizeof(uintptr_t)))
+        {
+            return false;
+        }
+
+        uint64_t surface = 0;
+        if (!read_u64_at(source + 0x160, surface) || surface == 0 ||
+            !is_accessible_memory(static_cast<uintptr_t>(surface) + 0x988, sizeof(uintptr_t)))
+        {
+            return false;
+        }
+
+        uint64_t owner = 0;
+        if (!read_u64_at(static_cast<uintptr_t>(surface) + 0x988, owner) || owner == 0)
+        {
+            return false;
+        }
+        if (!brick_action_owner_is_plausible(static_cast<uintptr_t>(owner), &busy_out, &queue_count_out))
+        {
+            return false;
+        }
+
+        surface_out = static_cast<uintptr_t>(surface);
+        owner_out = static_cast<uintptr_t>(owner);
+        return true;
+    }
+
+    bool brick_action_source_likely_controller(Unreal::UObject* object)
+    {
+        return object_class_has_any_cast_flags_guarded(object, Unreal::CASTCLASS_APlayerController);
+    }
+
+    std::string brick_action_source_object_name_guarded(Unreal::UObject* object)
+    {
+        if (!object ||
+            !is_accessible_memory(reinterpret_cast<uintptr_t>(object), sizeof(uintptr_t)))
+        {
+            return "";
+        }
+
+        try
+        {
+            return narrow_string(object->GetName());
+        }
+        catch (...)
+        {
+            return "";
+        }
+    }
+
+    std::string brick_action_source_class_name_guarded(Unreal::UObject* object)
+    {
+        if (!object ||
+            !is_accessible_memory(reinterpret_cast<uintptr_t>(object), sizeof(uintptr_t)))
+        {
+            return "";
+        }
+
+        try
+        {
+            auto object_class = object->GetClassPrivate();
+            if (!object_class ||
+                !is_accessible_memory(reinterpret_cast<uintptr_t>(object_class), sizeof(uintptr_t)))
+            {
+                return "";
+            }
+            return narrow_string(object_class->GetName());
+        }
+        catch (...)
+        {
+            return "";
+        }
+    }
+
+    bool brick_action_source_likely_tool(Unreal::UObject* object)
+    {
+        if (!object ||
+            !is_accessible_memory(reinterpret_cast<uintptr_t>(object), sizeof(uintptr_t)))
+        {
+            return false;
+        }
+
+        const std::string name = brick_action_source_object_name_guarded(object);
+        const std::string class_name = brick_action_source_class_name_guarded(object);
+        const std::string source_text =
+            name + " " +
+            class_name;
+        return contains_ascii_case_insensitive(source_text, "BRTool") ||
+               contains_ascii_case_insensitive(source_text, "Applicator") ||
+               contains_ascii_case_insensitive(source_text, "Selector") ||
+               contains_ascii_case_insensitive(source_text, "Weapon_") ||
+               contains_ascii_case_insensitive(source_text, "Handaxe") ||
+               contains_ascii_case_insensitive(source_text, "Pickaxe");
+    }
+
+    bool brick_action_source_likely_tool_or_controller(Unreal::UObject* object)
+    {
+        return brick_action_source_likely_controller(object) ||
+               brick_action_source_likely_tool(object);
+    }
+
+    std::string brick_action_source_scan_label(Unreal::UObject* object)
+    {
+        std::ostringstream label;
+        label << "scan-source:" << pointer_hex(reinterpret_cast<uintptr_t>(object))
+              << ":" << brick_action_source_class_name_guarded(object)
+              << ":" << brick_action_source_object_name_guarded(object);
+        return label.str();
+    }
+
+    struct BrickActionSourceCandidate
+    {
+        Unreal::UObject* object{nullptr};
+        std::string label;
+    };
+
+    void append_unique_action_source_candidate(
+        std::vector<BrickActionSourceCandidate>& candidates,
+        Unreal::UObject* object,
+        std::string label)
+    {
+        if (!is_live_uobject(object))
+        {
+            return;
+        }
+
+        for (const BrickActionSourceCandidate& existing : candidates)
+        {
+            if (existing.object == object)
+            {
+                return;
+            }
+        }
+
+        if (label.empty())
+        {
+            label = "related-source";
+        }
+        candidates.push_back({object, std::move(label)});
+    }
+
+    Unreal::UObject* brick_action_source_outer_guarded(Unreal::UObject* object)
+    {
+        if (!is_live_uobject(object))
+        {
+            return nullptr;
+        }
+
+        try
+        {
+            Unreal::UObject* outer = object->GetOuterPrivate();
+            return is_live_uobject(outer) ? outer : nullptr;
+        }
+        catch (...)
+        {
+            return nullptr;
+        }
+    }
+
+    void append_action_source_property_candidate(
+        std::vector<BrickActionSourceCandidate>& candidates,
+        Unreal::UObject* source,
+        const CharType* property_name,
+        std::string_view label_prefix)
+    {
+        Unreal::UObject* value = get_object_property(source, property_name);
+        if (!value)
+        {
+            return;
+        }
+
+        std::string property_label;
+        try
+        {
+            property_label = narrow_string(property_name);
+        }
+        catch (...)
+        {
+            property_label = "property";
+        }
+        append_unique_action_source_candidate(
+            candidates,
+            value,
+            std::string(label_prefix) + "." + property_label);
+    }
+
+    std::vector<BrickActionSourceCandidate> brick_action_source_related_candidates(
+        Unreal::UObject* source,
+        std::string_view source_label)
+    {
+        std::vector<BrickActionSourceCandidate> candidates;
+        append_unique_action_source_candidate(
+            candidates,
+            source,
+            source_label.empty() ? "source" : std::string(source_label));
+
+        const std::array<const CharType*, 9> direct_properties{
+            STR("InstigatorController"),
+            STR("Controller"),
+            STR("Owner"),
+            STR("Pawn"),
+            STR("AcknowledgedPawn"),
+            STR("Character"),
+            STR("Instigator"),
+            STR("PlayerState"),
+            STR("PlayerController"),
+        };
+
+        for (const CharType* property_name : direct_properties)
+        {
+            append_action_source_property_candidate(
+                candidates,
+                source,
+                property_name,
+                source_label.empty() ? "source" : source_label);
+        }
+
+        const size_t first_pass_count = candidates.size();
+        for (size_t index = 0; index < first_pass_count; ++index)
+        {
+            Unreal::UObject* candidate = candidates[index].object;
+            const std::string base_label = candidates[index].label;
+            append_action_source_property_candidate(
+                candidates,
+                candidate,
+                STR("Controller"),
+                base_label);
+            append_action_source_property_candidate(
+                candidates,
+                candidate,
+                STR("InstigatorController"),
+                base_label);
+            append_action_source_property_candidate(
+                candidates,
+                candidate,
+                STR("Owner"),
+                base_label);
+        }
+
+        Unreal::UObject* outer = brick_action_source_outer_guarded(source);
+        for (int depth = 1; depth <= 4 && outer && outer != source; ++depth)
+        {
+            const std::string outer_label =
+                std::string(source_label.empty() ? "source" : source_label) +
+                ".outer" + std::to_string(depth);
+            append_unique_action_source_candidate(candidates, outer, outer_label);
+            outer = brick_action_source_outer_guarded(outer);
+        }
+
+        return candidates;
+    }
+
+    bool brick_action_resolve_surface_guarded(uintptr_t resolve_address,
+                                              uintptr_t source,
+                                              uintptr_t& owner_surface)
+    {
+        owner_surface = 0;
+        __try
+        {
+            auto resolve_surface = reinterpret_cast<BrickActionOwnerSurfaceResolveFn>(resolve_address);
+            owner_surface = resolve_surface(source);
+            return true;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            owner_surface = 0;
+            return false;
+        }
+    }
+
+    bool brick_action_owner_from_surface_object(Unreal::UObject* surface,
+                                                BrickActionOwnerCandidate& candidate,
+                                                std::string_view source_label)
+    {
+        const uintptr_t surface_address = reinterpret_cast<uintptr_t>(surface);
+        candidate.source = surface_address;
+        candidate.source_label = source_label.empty()
+            ? pointer_hex(surface_address)
+            : std::string(source_label);
+
+        auto add_probe = [&](std::string_view reason,
+                             uintptr_t owner = 0,
+                             uint8_t busy = 0xff,
+                             uint32_t queue_count = 0) {
+            std::ostringstream probe;
+            probe << candidate.source_label
+                  << " surface=" << pointer_hex(surface_address)
+                  << " class=" << brick_action_source_class_name_guarded(surface)
+                  << " name=" << brick_action_source_object_name_guarded(surface)
+                  << " owner=" << pointer_hex(owner)
+                  << " busy=" << static_cast<unsigned int>(busy)
+                  << " queue_count=" << queue_count
+                  << " reason=" << reason;
+            brick_action_owner_add_probe(candidate, probe.str());
+        };
+
+        if (!surface || !is_live_uobject(surface) ||
+            !is_accessible_memory(surface_address + 0x990, sizeof(uintptr_t)))
+        {
+            candidate.detail = "surface object is not a readable Brickadia action-owner surface";
+            add_probe(candidate.detail);
+            return false;
+        }
+
+        uint64_t owner = 0;
+        if (!read_u64_at(surface_address + 0x988, owner) || owner == 0)
+        {
+            candidate.detail = "surface object did not expose an action owner at +0x988";
+            add_probe(candidate.detail);
+            return false;
+        }
+
+        uint8_t busy = 0xff;
+        uint32_t queue_count = 0;
+        if (!brick_action_owner_is_plausible(static_cast<uintptr_t>(owner), &busy, &queue_count))
+        {
+            candidate.detail = "surface +0x988 did not match the Brickadia action-owner shape";
+            add_probe(candidate.detail, static_cast<uintptr_t>(owner), busy, queue_count);
+            return false;
+        }
+        if (busy != 0)
+        {
+            candidate.detail = "surface action owner is busy";
+            add_probe(candidate.detail, static_cast<uintptr_t>(owner), busy, queue_count);
+            return false;
+        }
+
+        candidate.owner = static_cast<uintptr_t>(owner);
+        candidate.owner_surface = surface_address;
+        candidate.owner_busy = busy;
+        candidate.owner_queue_count = queue_count;
+        candidate.detail = "resolved action owner from surface +0x988";
+        add_probe("resolved-surface", candidate.owner, busy, queue_count);
+        return true;
+    }
+
+    bool brick_action_owner_from_source(uintptr_t module_base,
+                                        Unreal::UObject* source,
+                                        BrickActionOwnerCandidate& candidate,
+                                        std::string_view source_label)
+    {
+        const uintptr_t source_address = reinterpret_cast<uintptr_t>(source);
+        candidate.source = source_address;
+        candidate.source_label = source_label.empty()
+            ? pointer_hex(source_address)
+            : std::string(source_label);
+
+        auto add_failure_probe = [&](std::string_view reason,
+                                     uintptr_t owner_surface = 0,
+                                     uintptr_t owner = 0,
+                                     uint8_t busy = 0xff,
+                                     uint32_t queue_count = 0) {
+            uint64_t surface_hint = 0;
+            const bool surface_hint_read =
+                source_address != 0 &&
+                is_accessible_memory(source_address + 0x168, sizeof(uintptr_t)) &&
+                read_u64_at(source_address + 0x160, surface_hint);
+            std::ostringstream probe;
+            probe << candidate.source_label
+                  << " source=" << pointer_hex(source_address)
+                  << " class=" << brick_action_source_class_name_guarded(source)
+                  << " name=" << brick_action_source_object_name_guarded(source)
+                  << " source_plus_160=" << (surface_hint_read ? pointer_hex(static_cast<uintptr_t>(surface_hint)) : "unreadable")
+                  << " resolved_surface=" << pointer_hex(owner_surface)
+                  << " owner=" << pointer_hex(owner)
+                  << " busy=" << static_cast<unsigned int>(busy)
+                  << " queue_count=" << queue_count
+                  << " reason=" << reason;
+            brick_action_owner_add_probe(candidate, probe.str());
+        };
+
+        if (!source ||
+            !is_accessible_memory(source_address, sizeof(uintptr_t)))
+        {
+            candidate.detail = "source address does not point to a readable UObject";
+            add_failure_probe(candidate.detail);
+            return false;
+        }
+
+        BrickActionOwnerCandidate direct_surface_candidate;
+        if (brick_action_owner_from_surface_object(
+                source,
+                direct_surface_candidate,
+                candidate.source_label + ":surface+0x988"))
+        {
+            candidate = direct_surface_candidate;
+            return true;
+        }
+        brick_action_owner_copy_probe_details(candidate, direct_surface_candidate);
+
+        uintptr_t hinted_surface = 0;
+        uintptr_t hinted_owner = 0;
+        uint8_t hinted_busy = 0xff;
+        uint32_t hinted_queue_count = 0;
+        const bool has_surface_hint = brick_action_source_surface_hint(
+            source,
+            hinted_surface,
+            hinted_owner,
+            hinted_busy,
+            hinted_queue_count);
+        auto accept_surface_hint = [&](std::string_view reason) -> bool {
+            if (!has_surface_hint)
+            {
+                return false;
+            }
+            if (!brick_action_owner_surface_hint_fallback_enabled())
+            {
+                candidate.detail =
+                    "source+0x160 surface hint fallback is disabled; resolver must return a live Brickadia action-owner surface";
+                add_failure_probe(candidate.detail, hinted_surface, hinted_owner, hinted_busy, hinted_queue_count);
+                return false;
+            }
+            if (!brick_action_source_likely_tool_or_controller(source))
+            {
+                candidate.detail =
+                    "source+0x160 surface hint fallback ignored because source was not a live tool/controller";
+                add_failure_probe(candidate.detail, hinted_surface, hinted_owner, hinted_busy, hinted_queue_count);
+                return false;
+            }
+            if (hinted_busy != 0)
+            {
+                candidate.detail =
+                    "source+0x160 surface hint resolved a busy Brickadia action owner after " +
+                    std::string(reason);
+                add_failure_probe(candidate.detail, hinted_surface, hinted_owner, hinted_busy, hinted_queue_count);
+                return false;
+            }
+            candidate.owner = hinted_owner;
+            candidate.owner_surface = hinted_surface;
+            candidate.owner_busy = hinted_busy;
+            candidate.owner_queue_count = hinted_queue_count;
+            candidate.detail =
+                "resolved action owner from source+0x160 surface hint after " +
+                std::string(reason);
+            add_failure_probe(candidate.detail, hinted_surface, hinted_owner, hinted_busy, hinted_queue_count);
+            return true;
+        };
+
+        const uintptr_t resolve_address = module_base + kBrickActionOwnerSurfaceResolveOffset;
+        if (!is_executable_memory(resolve_address))
+        {
+            candidate.detail = "Brickadia action-owner surface resolver is not executable";
+            add_failure_probe(candidate.detail);
+            return accept_surface_hint(candidate.detail);
+        }
+
+        uintptr_t owner_surface = 0;
+        if (!brick_action_resolve_surface_guarded(
+                resolve_address,
+                source_address,
+                owner_surface))
+        {
+            candidate.detail = "Brickadia action-owner surface resolver raised a structured exception";
+            add_failure_probe(candidate.detail);
+            return accept_surface_hint(candidate.detail);
+        }
+
+        if (owner_surface == 0 || !is_accessible_memory(owner_surface + 0x988, sizeof(uintptr_t)))
+        {
+            candidate.detail = "resolved action-owner surface is not readable";
+            add_failure_probe(candidate.detail, owner_surface);
+            return accept_surface_hint(candidate.detail);
+        }
+
+        uint64_t owner = 0;
+        if (!read_u64_at(owner_surface + 0x988, owner) || owner == 0)
+        {
+            candidate.detail = "resolved action-owner surface did not expose owner at +0x988";
+            add_failure_probe(candidate.detail, owner_surface, static_cast<uintptr_t>(owner));
+            return accept_surface_hint(candidate.detail);
+        }
+
+        uint8_t busy = 0xff;
+        uint32_t queue_count = 0;
+        if (!brick_action_owner_is_plausible(static_cast<uintptr_t>(owner), &busy, &queue_count))
+        {
+            candidate.detail = "resolved action owner did not match the Brickadia action-owner shape";
+            add_failure_probe(candidate.detail, owner_surface, static_cast<uintptr_t>(owner), busy, queue_count);
+            return accept_surface_hint(candidate.detail);
+        }
+        if (busy != 0)
+        {
+            candidate.detail = "resolved action owner is busy";
+            add_failure_probe(candidate.detail, owner_surface, static_cast<uintptr_t>(owner), busy, queue_count);
+            return accept_surface_hint(candidate.detail);
+        }
+
+        candidate.owner = static_cast<uintptr_t>(owner);
+        candidate.owner_surface = owner_surface;
+        candidate.owner_busy = busy;
+        candidate.owner_queue_count = queue_count;
+        candidate.detail = "resolved action owner from " + candidate.source_label;
+        add_failure_probe("resolved", owner_surface, candidate.owner, busy, queue_count);
+        return true;
+    }
+
+    bool brick_action_owner_from_related_source(uintptr_t module_base,
+                                                Unreal::UObject* source,
+                                                BrickActionOwnerCandidate& candidate,
+                                                std::string_view source_label)
+    {
+        const std::vector<BrickActionSourceCandidate> candidates =
+            brick_action_source_related_candidates(source, source_label);
+        if (candidates.empty())
+        {
+            candidate.detail = "source and related action-source candidates were not live UObjects";
+            return false;
+        }
+
+        std::string last_failure;
+        for (const BrickActionSourceCandidate& source_candidate : candidates)
+        {
+            BrickActionOwnerCandidate probed;
+            const std::string label =
+                source_candidate.label + ":" +
+                pointer_hex(reinterpret_cast<uintptr_t>(source_candidate.object)) +
+                ":" + brick_action_source_class_name_guarded(source_candidate.object) +
+                ":" + brick_action_source_object_name_guarded(source_candidate.object);
+            if (brick_action_owner_from_source(
+                    module_base,
+                    source_candidate.object,
+                    probed,
+                    label))
+            {
+                candidate = probed;
+                candidate.detail =
+                    "resolved action owner from related source " + candidate.source_label;
+                return true;
+            }
+
+            brick_action_owner_copy_probe_details(candidate, probed);
+            last_failure = label + ": " + probed.detail;
+        }
+
+        candidate.detail =
+            "no related action source yielded a Brickadia action owner; tried=" +
+            std::to_string(candidates.size()) +
+            (last_failure.empty() ? "" : "; last=" + last_failure);
+        return false;
+    }
+
+    bool brick_action_owner_cached_is_usable(BrickActionOwnerCandidate& candidate)
+    {
+        const uintptr_t owner = g_brick_action_owner_cached.load();
+        const uintptr_t owner_surface = g_brick_action_owner_surface_cached.load();
+        const uintptr_t source = g_brick_action_owner_source_cached.load();
+        const uint64_t cached_at = g_brick_action_owner_cached_at_ms.load();
+        if (owner == 0 || owner_surface == 0 || cached_at == 0 ||
+            monotonic_ms() - cached_at > brick_action_owner_cache_ttl_ms())
+        {
+            return false;
+        }
+
+        uint8_t busy = 0xff;
+        uint32_t queue_count = 0;
+        if (!brick_action_owner_is_plausible(owner, &busy, &queue_count))
+        {
+            return false;
+        }
+        if (busy != 0)
+        {
+            return false;
+        }
+        if (!is_accessible_memory(owner_surface + 0x988, sizeof(uintptr_t)))
+        {
+            return false;
+        }
+        uint64_t surface_owner = 0;
+        if (!read_u64_at(owner_surface + 0x988, surface_owner) ||
+            static_cast<uintptr_t>(surface_owner) != owner)
+        {
+            return false;
+        }
+
+        candidate.owner = owner;
+        candidate.owner_surface = owner_surface;
+        candidate.source = source;
+        candidate.owner_busy = busy;
+        candidate.owner_queue_count = queue_count;
+        {
+            std::lock_guard lock(g_brick_physical_mutex);
+            candidate.source_label = g_brick_action_owner_cached_source;
+        }
+        candidate.detail = "reused cached Brickadia action owner";
+        return true;
+    }
+
+    void brick_action_owner_cache_store(const BrickActionOwnerCandidate& candidate)
+    {
+        g_brick_action_owner_cached.store(candidate.owner);
+        g_brick_action_owner_surface_cached.store(candidate.owner_surface);
+        g_brick_action_owner_source_cached.store(candidate.source);
+        g_brick_action_owner_cached_at_ms.store(monotonic_ms());
+        {
+            std::lock_guard lock(g_brick_physical_mutex);
+            g_brick_action_owner_cached_source = candidate.source_label;
+            g_brick_action_owner_last_error.clear();
+        }
+    }
+
+    bool brick_action_owner_candidate_is_accepted_for_replication(
+        const BrickActionOwnerCandidate& candidate)
+    {
+        return candidate.owner_surface != 0;
+    }
+
+    bool brick_physical_action_owner_is_accepted_for_replication(
+        const BrickPhysicalActionSetResult& result)
+    {
+        return result.action_owner_surface != 0;
+    }
+
+    bool brick_physical_action_result_is_replicated(
+        const BrickPhysicalActionSetResult& result)
+    {
+        return result.ok &&
+               (result.entries == 0 || result.finalized) &&
+               brick_physical_action_owner_is_accepted_for_replication(result);
+    }
+
+    bool brick_action_owner_scan(uintptr_t module_base, BrickActionOwnerCandidate& candidate)
+    {
+        if (!brick_action_owner_scan_enabled())
+        {
+            candidate.detail = "set BMF_BRICK_ACTION_OWNER_SCAN_ENABLED=1 to discover a live tool/controller action owner";
+            return false;
+        }
+
+        g_brick_action_owner_scan_requests.fetch_add(1);
+        bool found = false;
+        constexpr uint64_t kMaxActionOwnerScanObjects = 250000;
+        Unreal::UObjectGlobals::ForEachUObject([&](Unreal::UObject* object, int32_t, int32_t) {
+            ++candidate.scanned_objects;
+            if (found)
+            {
+                return LoopAction::Continue;
+            }
+            if (candidate.scanned_objects > kMaxActionOwnerScanObjects)
+            {
+                candidate.detail = "action-owner tool/controller scan exceeded bounded object count";
+                return LoopAction::Break;
+            }
+
+            if (brick_action_owner_direct_scan_enabled())
+            {
+                uint8_t busy = 0xff;
+                uint32_t queue_count = 0;
+                const uintptr_t direct_owner = reinterpret_cast<uintptr_t>(object);
+                const std::string direct_class_name =
+                    brick_action_source_class_name_guarded(object);
+                const std::string direct_object_name =
+                    brick_action_source_object_name_guarded(object);
+                if (brick_action_owner_shape_is_plausible(direct_owner, &busy, &queue_count) &&
+                    busy == 0 &&
+                    (!direct_class_name.empty() || !direct_object_name.empty()))
+                {
+                    candidate.owner = direct_owner;
+                    candidate.owner_surface = 0;
+                    candidate.source = direct_owner;
+                    candidate.source_label =
+                        "direct-owner-scan:" + pointer_hex(direct_owner) +
+                        ":" + direct_class_name +
+                        ":" + direct_object_name;
+                    candidate.detail =
+                        "using live UObject that matches the Brickadia action-owner queue shape";
+                    candidate.owner_busy = busy;
+                    candidate.owner_queue_count = queue_count;
+                    found = true;
+                    return LoopAction::Break;
+                }
+            }
+
+            if (brick_action_owner_surface_scan_enabled())
+            {
+                const std::string surface_class_name =
+                    brick_action_source_class_name_guarded(object);
+                const std::string surface_object_name =
+                    brick_action_source_object_name_guarded(object);
+                if (surface_class_name.empty() && surface_object_name.empty())
+                {
+                    return LoopAction::Continue;
+                }
+
+                BrickActionOwnerCandidate surface_candidate;
+                surface_candidate.scanned_objects = candidate.scanned_objects;
+                surface_candidate.controller_candidates = candidate.controller_candidates;
+                surface_candidate.surface_hint_candidates = candidate.surface_hint_candidates;
+                const std::string source_label =
+                    "surface-owner-scan:" + pointer_hex(reinterpret_cast<uintptr_t>(object)) +
+                    ":" + surface_class_name +
+                    ":" + surface_object_name;
+                if (brick_action_owner_from_surface_object(
+                        object,
+                        surface_candidate,
+                        source_label))
+                {
+                    candidate = surface_candidate;
+                    found = true;
+                    return LoopAction::Break;
+                }
+                brick_action_owner_copy_probe_details(candidate, surface_candidate);
+                candidate.detail = source_label + ": " + surface_candidate.detail;
+            }
+
+            uintptr_t hinted_surface = 0;
+            uintptr_t hinted_owner = 0;
+            uint8_t hinted_busy = 0xff;
+            uint32_t hinted_queue_count = 0;
+            const bool likely_tool_or_controller = brick_action_source_likely_tool_or_controller(object);
+            const bool surface_hint =
+                brick_action_source_surface_hint(
+                    object,
+                    hinted_surface,
+                    hinted_owner,
+                    hinted_busy,
+                    hinted_queue_count);
+            if (surface_hint)
+            {
+                ++candidate.surface_hint_candidates;
+            }
+            if (!likely_tool_or_controller &&
+                !(surface_hint && brick_action_owner_surface_hint_fallback_enabled()))
+            {
+                return LoopAction::Continue;
+            }
+
+            ++candidate.controller_candidates;
+            BrickActionOwnerCandidate probed;
+            probed.scanned_objects = candidate.scanned_objects;
+            probed.controller_candidates = candidate.controller_candidates;
+            probed.surface_hint_candidates = candidate.surface_hint_candidates;
+            std::string source_label = brick_action_source_scan_label(object);
+            if (surface_hint)
+            {
+                source_label +=
+                    ":surface-hint:" + pointer_hex(hinted_surface) +
+                    ":owner:" + pointer_hex(hinted_owner) +
+                    ":busy:" + std::to_string(static_cast<unsigned int>(hinted_busy)) +
+                    ":queue:" + std::to_string(hinted_queue_count);
+            }
+            if (brick_action_owner_from_source(module_base, object, probed, source_label))
+            {
+                candidate = probed;
+                found = true;
+                return LoopAction::Break;
+            }
+            brick_action_owner_copy_probe_details(candidate, probed);
+            candidate.detail = source_label + ": " + probed.detail;
+            return LoopAction::Continue;
+        });
+
+        if (found)
+        {
+            brick_action_owner_cache_store(candidate);
+            return true;
+        }
+
+        g_brick_action_owner_scan_failures.fetch_add(1);
+        if (candidate.detail.empty())
+        {
+            candidate.detail = "no live tool/controller yielded a Brickadia action owner";
+        }
+        {
+            std::lock_guard lock(g_brick_physical_mutex);
+            g_brick_action_owner_last_error = candidate.detail;
+        }
+        return false;
+    }
+
+    bool brick_action_owner_resolve(uintptr_t module_base,
+                                    uintptr_t explicit_action_source,
+                                    BrickActionOwnerCandidate& candidate)
+    {
+        std::string explicit_failure;
+        if (explicit_action_source != 0)
+        {
+            BrickActionOwnerCandidate explicit_candidate;
+            if (brick_action_owner_from_related_source(
+                    module_base,
+                    reinterpret_cast<Unreal::UObject*>(explicit_action_source),
+                    explicit_candidate,
+                    "explicit:" + pointer_hex(explicit_action_source)))
+            {
+                brick_action_owner_cache_store(explicit_candidate);
+                candidate = explicit_candidate;
+                return true;
+            }
+            explicit_failure = "explicit action source " + pointer_hex(explicit_action_source) +
+                " failed: " + explicit_candidate.detail;
+            brick_action_owner_copy_probe_details(candidate, explicit_candidate);
+        }
+
+        if (brick_action_owner_cached_is_usable(candidate))
+        {
+            return true;
+        }
+        if (brick_action_owner_scan(module_base, candidate))
+        {
+            return true;
+        }
+        if (!explicit_failure.empty())
+        {
+            candidate.detail = explicit_failure +
+                (candidate.detail.empty() ? "" : "; fallback scan: " + candidate.detail);
+        }
+        return false;
+    }
+
+    bool brick_action_owner_cache_from_treecut_source(uintptr_t module_base,
+                                                      void* context,
+                                                      std::string_view source_label)
+    {
+        const uintptr_t source_address = reinterpret_cast<uintptr_t>(context);
+        if (module_base == 0 || source_address == 0)
+        {
+            return false;
+        }
+
+        BrickActionOwnerCandidate candidate;
+        const std::string label = std::string(source_label.empty() ? "treecut-context" : source_label) +
+            ":" + pointer_hex(source_address);
+        if (brick_action_owner_from_related_source(
+                module_base,
+                reinterpret_cast<Unreal::UObject*>(context),
+                candidate,
+                label))
+        {
+            brick_action_owner_cache_store(candidate);
+            g_treecut_action_owner_cache_hits.fetch_add(1);
+            g_treecut_last_action_source.store(source_address);
+            g_treecut_last_action_owner.store(candidate.owner);
+            g_treecut_last_action_owner_surface.store(candidate.owner_surface);
+            {
+                std::lock_guard lock(g_treecut_mutex);
+                g_treecut_last_action_owner_source = candidate.source_label;
+                g_treecut_last_action_owner_detail = candidate.detail;
+            }
+            return true;
+        }
+
+        g_treecut_action_owner_cache_failures.fetch_add(1);
+        g_treecut_last_action_source.store(source_address);
+        {
+            std::lock_guard lock(g_treecut_mutex);
+            g_treecut_last_action_owner_source = label;
+            g_treecut_last_action_owner_detail = candidate.detail;
+        }
+        return false;
+    }
+
+    uintptr_t brick_action_allocate_chunk(BrickActionChunkAllocFn allocate_chunk)
+    {
+        uintptr_t block = 0;
+        __try
+        {
+            block = allocate_chunk(kBrickActionChunkAllocSize);
+            if (block != 0 && is_accessible_memory(block, kBrickActionChunkAllocSize))
+            {
+                std::memset(reinterpret_cast<void*>(block), 0, kBrickActionChunkAllocSize);
+                *reinterpret_cast<uint16_t*>(block + 0x10) = kBrickActionChunkCapacity;
+            }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return 0;
+        }
+        return block;
+    }
+
+    bool brick_action_list_append_entry(uintptr_t action_list,
+                                        BrickActionChunkAllocFn allocate_chunk,
+                                        uintptr_t method_block,
+                                        uint32_t brick_runtime_id,
+                                        uint8_t value,
+                                        std::string& detail)
+    {
+        if (action_list == 0 || method_block == 0 || !is_accessible_memory(action_list, 0x68))
+        {
+            detail = "action list or method block was not readable";
+            return false;
+        }
+        if (*reinterpret_cast<uint8_t*>(action_list + 0x5A) == 1)
+        {
+            detail = "action list was already sealed";
+            return false;
+        }
+
+        __try
+        {
+            uintptr_t tail = *reinterpret_cast<uintptr_t*>(action_list + 0x48);
+            if (tail == 0)
+            {
+                tail = brick_action_allocate_chunk(allocate_chunk);
+                if (tail == 0)
+                {
+                    detail = "Brickadia action chunk allocation failed";
+                    return false;
+                }
+                *reinterpret_cast<uintptr_t*>(action_list + 0x40) = tail;
+                *reinterpret_cast<uintptr_t*>(action_list + 0x48) = tail;
+                *reinterpret_cast<int32_t*>(action_list + 0x5C) += 1;
+            }
+
+            auto append_to_tail = [&](uintptr_t block, uintptr_t& entry_out) -> bool {
+                if (!is_accessible_memory(block, kBrickActionChunkAllocSize))
+                {
+                    return false;
+                }
+                const uint16_t capacity = *reinterpret_cast<uint16_t*>(block + 0x10);
+                const uint16_t cursor = *reinterpret_cast<uint16_t*>(block + 0x12);
+                const uint16_t count = *reinterpret_cast<uint16_t*>(block + 0x14);
+                uintptr_t entry = (block + 0x10 + cursor + 0x0F) & ~static_cast<uintptr_t>(0x07);
+                const uintptr_t data_base = block + 0x18;
+                if (entry < data_base || entry > block + kBrickActionChunkAllocSize)
+                {
+                    return false;
+                }
+                const uintptr_t offset = entry - data_base;
+                if (capacity != kBrickActionChunkCapacity ||
+                    offset > 0x7FFF ||
+                    static_cast<uintptr_t>(capacity) - static_cast<uintptr_t>(count) * 2 <
+                        offset + kBrickPhysicalActionEntrySize + 2)
+                {
+                    return false;
+                }
+                if (!is_accessible_memory(entry, kBrickPhysicalActionEntrySize))
+                {
+                    return false;
+                }
+                const uint16_t next_count = static_cast<uint16_t>(count + 1);
+                *reinterpret_cast<uint16_t*>(block + 0x14) = next_count;
+                *reinterpret_cast<int16_t*>(block + 0x18 + (capacity - next_count * 2)) =
+                    static_cast<int16_t>(offset);
+                *reinterpret_cast<uint16_t*>(block + 0x12) =
+                    static_cast<uint16_t>(offset + kBrickPhysicalActionEntrySize);
+                entry_out = entry;
+                return true;
+            };
+
+            uintptr_t entry = 0;
+            if (!append_to_tail(tail, entry))
+            {
+                const uintptr_t previous_tail = tail;
+                tail = brick_action_allocate_chunk(allocate_chunk);
+                if (tail == 0)
+                {
+                    detail = "Brickadia action chunk rollover allocation failed";
+                    return false;
+                }
+                if (previous_tail != 0 && is_accessible_memory(previous_tail, sizeof(uintptr_t)))
+                {
+                    *reinterpret_cast<uintptr_t*>(previous_tail) = tail;
+                    *reinterpret_cast<uintptr_t*>(tail + 8) = previous_tail;
+                }
+                *reinterpret_cast<uintptr_t*>(action_list + 0x48) = tail;
+                *reinterpret_cast<int32_t*>(action_list + 0x5C) += 1;
+                if (!append_to_tail(tail, entry))
+                {
+                    detail = "Brickadia action chunk had no room for a physical-state entry";
+                    return false;
+                }
+            }
+
+            *reinterpret_cast<uintptr_t*>(entry + 0x00) = method_block;
+            *reinterpret_cast<uint8_t*>(entry + 0x08) = 0;
+            *reinterpret_cast<uint32_t*>(entry + 0x10) = brick_runtime_id;
+            *reinterpret_cast<uint8_t*>(entry + 0x18) = value;
+            *reinterpret_cast<int32_t*>(action_list + 0x60) += 1;
+            return true;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            detail = "Brickadia action-list append raised a structured exception";
+            return false;
+        }
+    }
+
+    bool brick_action_construct_list(uintptr_t module_base,
+                                     uintptr_t owner,
+                                     uintptr_t& action_list,
+                                     std::string& detail)
+    {
+        const uintptr_t class_address = module_base + kBrickActionListClassOffset;
+        const uintptr_t init_address = module_base + kBrickActionListConstructParamsInitOffset;
+        const uintptr_t construct_address = module_base + kBrickActionListConstructObjectOffset;
+        const uintptr_t guard_address = module_base + kBrickActionNewObjectGuardOffset;
+        if (!is_executable_memory(class_address) ||
+            !is_executable_memory(init_address) ||
+            !is_executable_memory(construct_address) ||
+            !is_executable_memory(guard_address))
+        {
+            detail = "Brickadia action-list construction functions were not executable";
+            return false;
+        }
+
+        alignas(16) uint8_t params[0x100]{};
+        __try
+        {
+            auto action_list_class = reinterpret_cast<BrickActionListClassFn>(class_address);
+            auto init_params = reinterpret_cast<BrickActionListConstructParamsInitFn>(init_address);
+            auto construct_object = reinterpret_cast<BrickActionListConstructObjectFn>(construct_address);
+            auto new_object_guard = reinterpret_cast<BrickActionNewObjectGuardFn>(guard_address);
+            new_object_guard(
+                owner,
+                L"NewObject with empty name can't be used to create default subobjects (inside of UObject derived class constructor) as it produces inconsistent object names. Use ObjectInitializer.CreateDefaultSubobject<> instead.");
+            const uintptr_t action_class = action_list_class();
+            if (action_class == 0)
+            {
+                detail = "Brickadia action-list class resolver returned null";
+                return false;
+            }
+            init_params(params, action_class);
+            *reinterpret_cast<uintptr_t*>(params + 0x08) = owner;
+            action_list = construct_object(params);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            detail = "Brickadia action-list construction raised a structured exception";
+            return false;
+        }
+
+        if (action_list == 0 || !is_accessible_memory(action_list, 0x68))
+        {
+            detail = "constructed Brickadia action list was not readable";
+            return false;
+        }
+        __try
+        {
+            // The finalizer clones the optional display metadata at +0x28/+0x30.
+            // Leave it null unless a real Brickadia caller has initialized it.
+            *reinterpret_cast<uintptr_t*>(action_list + 0x28) = 0;
+            *reinterpret_cast<uint32_t*>(action_list + 0x30) = 0;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            detail = "constructed Brickadia action-list metadata was not writable";
+            return false;
+        }
+        return true;
+    }
+
+    struct BrickActionWideArg
+    {
+        const wchar_t* text{nullptr};
+        uint64_t length{0};
+        uint64_t reserved{0};
+    };
+
+    bool brick_action_populate_metadata(uintptr_t module_base,
+                                        uintptr_t action_list,
+                                        bool visibility_entry,
+                                        std::string& detail)
+    {
+        const uintptr_t token_init_address = module_base + kBrickActionTextTokenInitOffset;
+        const uintptr_t create_address = module_base + kBrickActionTextCreateOffset;
+        const uintptr_t assign_address = module_base + kBrickActionTextAssignOffset;
+        if (!is_executable_memory(token_init_address) ||
+            !is_executable_memory(create_address) ||
+            !is_executable_memory(assign_address))
+        {
+            detail = "Brickadia action-list metadata helpers were unavailable";
+            return false;
+        }
+
+        const wchar_t* action_name =
+            visibility_entry ? L"BrickVisibilitySet" : L"BrickCollisionSet";
+        const uint64_t action_name_length = visibility_entry ? 18 : 17;
+        const wchar_t* description =
+            visibility_entry ? L"Brick visibility changed." : L"Brick collision changed.";
+        BrickActionWideArg action_arg{action_name, action_name_length, 0};
+        BrickActionWideArg tool_arg{L"BRTool_Applicator", 17, 0};
+        alignas(8) uint8_t action_token[8]{};
+        alignas(8) uint8_t tool_token[8]{};
+        alignas(16) uint8_t text_payload[0x100]{};
+
+        __try
+        {
+            auto token_init = reinterpret_cast<BrickActionTextTokenInitFn>(token_init_address);
+            auto create_text = reinterpret_cast<BrickActionTextCreateFn>(create_address);
+            auto assign_text = reinterpret_cast<BrickActionTextAssignFn>(assign_address);
+            token_init(action_token, &action_arg);
+            token_init(tool_token, &tool_arg);
+            create_text(text_payload, tool_token, action_token, description);
+            assign_text(action_list + 0x28, text_payload);
+            return true;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            detail = "Brickadia action-list metadata construction raised a structured exception";
+            return false;
+        }
+    }
+
+    bool brick_action_finalize_raw(uintptr_t finalize_address,
+                                   uintptr_t owner,
+                                   uintptr_t action_list,
+                                   uint8_t* finalize_result,
+                                   DWORD* exception_code,
+                                   uintptr_t* exception_address)
+    {
+        if (finalize_result)
+        {
+            *finalize_result = 0;
+        }
+        if (exception_code)
+        {
+            *exception_code = 0;
+        }
+        if (exception_address)
+        {
+            *exception_address = 0;
+        }
+        DWORD caught_code = 0;
+        uintptr_t caught_address = 0;
+        __try
+        {
+            auto finalize = reinterpret_cast<BrickActionFinalizeFn>(finalize_address);
+            if (finalize_result)
+            {
+                *finalize_result = finalize(owner, action_list, 0, 0);
+            }
+            else
+            {
+                finalize(owner, action_list, 0, 0);
+            }
+            return true;
+        }
+        __except (capture_structured_exception(GetExceptionInformation(), caught_code, caught_address))
+        {
+            if (finalize_result)
+            {
+                *finalize_result = 0;
+            }
+            if (exception_code)
+            {
+                *exception_code = caught_code;
+            }
+            if (exception_address)
+            {
+                *exception_address = caught_address;
+            }
+            write_u8_at(owner + 0x120, 0);
+            return false;
+        }
+    }
+
+    bool brick_action_finalize_guarded(uintptr_t finalize_address,
+                                       uintptr_t owner,
+                                       uintptr_t action_list,
+                                       uint8_t& finalize_result,
+                                       uintptr_t& finalize_context,
+                                       DWORD& exception_code,
+                                       uintptr_t& exception_address,
+                                       std::string& detail)
+    {
+        finalize_result = 0;
+        finalize_context = 0;
+        exception_code = 0;
+        exception_address = 0;
+        uint64_t context = 0;
+        if (read_u64_at(owner + 0x138, context))
+        {
+            finalize_context = static_cast<uintptr_t>(context);
+        }
+        if (brick_action_finalize_raw(
+                finalize_address,
+                owner,
+                action_list,
+                &finalize_result,
+                &exception_code,
+                &exception_address))
+        {
+            return true;
+        }
+        detail = "Brickadia action finalizer raised a structured exception code=" +
+            hex_u64(static_cast<uint64_t>(exception_code)) +
+            " address=" + pointer_hex(exception_address);
+        return false;
+    }
+
+    bool brick_applicator_set_guarded(uintptr_t function_address,
+                                      uintptr_t action_source,
+                                      uint64_t packed_handle,
+                                      uint8_t value)
+    {
+        if (function_address == 0 || action_source == 0 || packed_handle == 0 ||
+            !is_executable_memory(function_address) ||
+            !is_accessible_memory(action_source, sizeof(uintptr_t)))
+        {
+            return false;
+        }
+
+        __try
+        {
+            auto set_physical = reinterpret_cast<BrickApplicatorSetPhysicalFn>(function_address);
+            set_physical(action_source, packed_handle, value);
+            return true;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+    }
+
+    bool brick_action_source_usable_for_applicator(const BrickActionOwnerCandidate& candidate)
+    {
+        if (candidate.source == 0 ||
+            !is_accessible_memory(candidate.source, sizeof(uintptr_t)))
+        {
+            return false;
+        }
+        if (candidate.source_label.rfind("direct-owner-scan:", 0) == 0 ||
+            candidate.source_label.rfind("brick-owner-fallback:", 0) == 0)
+        {
+            return false;
+        }
+        auto* source_object = reinterpret_cast<Unreal::UObject*>(candidate.source);
+        uintptr_t hinted_surface = 0;
+        uintptr_t hinted_owner = 0;
+        uint8_t hinted_busy = 0xff;
+        uint32_t hinted_queue_count = 0;
+        if (brick_action_source_surface_hint(
+                source_object,
+                hinted_surface,
+                hinted_owner,
+                hinted_busy,
+                hinted_queue_count))
+        {
+            const bool owner_matches =
+                candidate.owner == 0 || candidate.owner == hinted_owner;
+            const bool surface_matches =
+                candidate.owner_surface == 0 ||
+                candidate.owner_surface == hinted_surface;
+            return hinted_busy == 0 && owner_matches && surface_matches;
+        }
+        return is_live_uobject(source_object) &&
+               brick_action_source_likely_tool_or_controller(source_object);
+    }
+
+    BrickPhysicalActionSetResult brick_physical_apply_action_set(uintptr_t module_base,
+                                                                 uint32_t brick_action_key,
+                                                                 uint8_t before_visible,
+                                                                 uint8_t before_collision_channels,
+                                                                 bool visibility_requested,
+                                                                 uint8_t target_visible,
+                                                                 bool collision_requested,
+                                                                 uint8_t target_collision_channels,
+                                                                 const BrickPhysicalOriginal& original,
+                                                                 uintptr_t explicit_action_source)
+    {
+        BrickPhysicalActionSetResult result;
+        result.code = "BRICK_ACTION_SET_FAILED";
+        g_brick_action_set_attempts.fetch_add(1);
+
+        BrickActionOwnerCandidate owner_candidate;
+        if (explicit_action_source == 0)
+        {
+            result.detail =
+                "runtime physical-state mutation requires an explicit live tool/controller action source; pass actionsource=<address>";
+            result.code = "BRICK_ACTION_SOURCE_REQUIRED";
+            g_brick_action_set_failures.fetch_add(1);
+            return result;
+        }
+        if (!brick_action_owner_resolve(module_base, explicit_action_source, owner_candidate))
+        {
+            result.detail = owner_candidate.detail;
+            result.owner_scan_objects = owner_candidate.scanned_objects;
+            result.owner_scan_controller_candidates = owner_candidate.controller_candidates;
+            result.owner_scan_surface_hint_candidates = owner_candidate.surface_hint_candidates;
+            result.owner_probe_details = owner_candidate.probe_details;
+            result.code = "BRICK_ACTION_OWNER_UNAVAILABLE";
+            g_brick_action_set_failures.fetch_add(1);
+            return result;
+        }
+
+        result.action_owner = owner_candidate.owner;
+        result.action_owner_surface = owner_candidate.owner_surface;
+        result.action_owner_source = owner_candidate.source;
+        result.action_owner_source_label = owner_candidate.source_label;
+        result.owner_queue_count = owner_candidate.owner_queue_count;
+        result.owner_busy_before = owner_candidate.owner_busy;
+        result.owner_scan_objects = owner_candidate.scanned_objects;
+        result.owner_scan_controller_candidates = owner_candidate.controller_candidates;
+        result.owner_scan_surface_hint_candidates = owner_candidate.surface_hint_candidates;
+        result.owner_probe_details = owner_candidate.probe_details;
+
+        if (owner_candidate.owner_busy != 0)
+        {
+            result.detail = "Brickadia action owner is busy";
+            result.code = "BRICK_ACTION_OWNER_BUSY";
+            g_brick_action_set_failures.fetch_add(1);
+            return result;
+        }
+        if (!brick_action_owner_candidate_is_accepted_for_replication(owner_candidate))
+        {
+            result.detail =
+                "Brickadia replicated physical-state actions require an owner surface resolved from a live tool/controller source";
+            result.code = "BRICK_ACTION_OWNER_SURFACE_REQUIRED";
+            g_brick_action_set_failures.fetch_add(1);
+            return result;
+        }
+
+        const uintptr_t method_visibility = module_base + kBrickVisibilityActionMethodBlockOffset;
+        const uintptr_t method_collision = module_base + kBrickCollisionActionMethodBlockOffset;
+        const uintptr_t alloc_address = module_base + kBrickActionChunkAllocOffset;
+        const uintptr_t finalize_address = module_base + kBrickActionFinalizeOffset;
+        if (!is_accessible_memory(method_visibility, sizeof(uintptr_t)) ||
+            !is_accessible_memory(method_collision, sizeof(uintptr_t)) ||
+            !is_executable_memory(alloc_address) ||
+            !is_executable_memory(finalize_address))
+        {
+            result.detail = "Brickadia action method blocks, allocator, or finalizer were unavailable";
+            result.code = "BRICK_ACTION_FUNCTION_UNAVAILABLE";
+            g_brick_action_set_failures.fetch_add(1);
+            return result;
+        }
+
+        uintptr_t action_list = 0;
+        if (!brick_action_construct_list(module_base, owner_candidate.owner, action_list, result.detail))
+        {
+            result.code = "BRICK_ACTION_LIST_CONSTRUCT_FAILED";
+            g_brick_action_set_failures.fetch_add(1);
+            return result;
+        }
+        result.action_list = action_list;
+
+        auto allocate_chunk = reinterpret_cast<BrickActionChunkAllocFn>(alloc_address);
+        const bool force_resync = brick_runtime_action_force_resync_enabled();
+
+        auto append_visibility = [&](uint8_t value, bool forced) -> bool {
+            if (!brick_action_list_append_entry(
+                    action_list, allocate_chunk, method_visibility, brick_action_key, value, result.detail))
+            {
+                return false;
+            }
+            ++result.entries;
+            ++result.visibility_entries;
+            if (forced)
+            {
+                ++result.forced_resync_entries;
+            }
+            return true;
+        };
+
+        auto append_collision = [&](uint8_t value, bool forced) -> bool {
+            if (!brick_action_list_append_entry(
+                    action_list, allocate_chunk, method_collision, brick_action_key, value, result.detail))
+            {
+                return false;
+            }
+            ++result.entries;
+            ++result.collision_entries;
+            if (forced)
+            {
+                ++result.forced_resync_entries;
+            }
+            return true;
+        };
+
+        if (visibility_requested)
+        {
+            if (force_resync && target_visible == before_visible)
+            {
+                if (!append_visibility(target_visible == 0 ? 1 : 0, true))
+                {
+                    result.code = "BRICK_VISIBILITY_ACTION_APPEND_FAILED";
+                    g_brick_action_set_failures.fetch_add(1);
+                    return result;
+                }
+            }
+            if (!append_visibility(target_visible, false))
+            {
+                result.code = "BRICK_VISIBILITY_ACTION_APPEND_FAILED";
+                g_brick_action_set_failures.fetch_add(1);
+                return result;
+            }
+        }
+
+        if (collision_requested)
+        {
+            if (force_resync && target_collision_channels == before_collision_channels)
+            {
+                uint8_t pulse = target_collision_channels == 0 ? kBrickDefaultCollisionChannels : 0;
+                if (original.captured && original.collision_channels != target_collision_channels)
+                {
+                    pulse = original.collision_channels;
+                }
+                if (!append_collision(pulse, true))
+                {
+                    result.code = "BRICK_COLLISION_ACTION_APPEND_FAILED";
+                    g_brick_action_set_failures.fetch_add(1);
+                    return result;
+                }
+            }
+            if (!append_collision(target_collision_channels, false))
+            {
+                result.code = "BRICK_COLLISION_ACTION_APPEND_FAILED";
+                g_brick_action_set_failures.fetch_add(1);
+                return result;
+            }
+        }
+
+        if (result.entries == 0)
+        {
+            result.ok = true;
+            result.code = "OK";
+            result.detail = "no physical-state action entries were required";
+            g_brick_action_set_successes.fetch_add(1);
+            return result;
+        }
+
+        result.action_metadata_enabled = brick_runtime_action_metadata_enabled();
+        if (result.action_metadata_enabled)
+        {
+            result.action_metadata_attempted = true;
+            if (!brick_action_populate_metadata(
+                    module_base,
+                    action_list,
+                    result.visibility_entries > 0,
+                    result.detail))
+            {
+                result.code = "BRICK_ACTION_METADATA_FAILED";
+                g_brick_action_set_failures.fetch_add(1);
+                return result;
+            }
+            result.action_metadata_ok = true;
+        }
+        else
+        {
+            result.action_metadata_ok = true;
+        }
+
+        if (!brick_action_finalize_guarded(
+                finalize_address,
+                owner_candidate.owner,
+                action_list,
+                result.finalize_result,
+                result.action_owner_finalize_context,
+                result.finalize_exception_code,
+                result.finalize_exception_address,
+                result.detail))
+        {
+            result.code = "BRICK_ACTION_FINALIZE_EXCEPTION";
+            g_brick_action_set_failures.fetch_add(1);
+            return result;
+        }
+
+        read_u8_at(owner_candidate.owner + 0x120, result.owner_busy_after);
+        result.finalized = result.finalize_result != 0;
+        result.ok = result.finalized;
+        result.code = result.ok ? "OK" : "BRICK_ACTION_FINALIZE_REJECTED";
+        result.detail = result.ok
+            ? "submitted Brickadia visibility/collision action list"
+            : "Brickadia action finalizer rejected the action list";
+        if (result.ok)
+        {
+            g_brick_action_set_successes.fetch_add(1);
+        }
+        else
+        {
+            g_brick_action_set_failures.fetch_add(1);
+        }
+        return result;
+    }
+
+    std::vector<uint32_t> parse_brick_id_csv(std::string_view raw)
+    {
+        std::vector<uint32_t> ids;
+        std::string token;
+        auto flush = [&]() {
+            const std::string value = trim_ascii(token);
+            token.clear();
+            if (value.empty())
+            {
+                return;
+            }
+            char* end = nullptr;
+            const unsigned long long parsed = std::strtoull(value.c_str(), &end, 0);
+            if (end == value.c_str() || (end && *end != '\0') ||
+                parsed == 0 || parsed > UINT32_MAX)
+            {
+                return;
+            }
+            const uint32_t id = static_cast<uint32_t>(parsed);
+            if (std::find(ids.begin(), ids.end(), id) == ids.end())
+            {
+                ids.push_back(id);
+            }
+        };
+
+        for (char ch : raw)
+        {
+            if (std::isspace(static_cast<unsigned char>(ch)) ||
+                ch == ',' || ch == ';' || ch == '|')
+            {
+                flush();
+            }
+            else
+            {
+                token.push_back(ch);
+            }
+        }
+        flush();
+        return ids;
+    }
+
+    void write_brick_physical_batch_items(std::ostringstream& out,
+                                          const std::vector<BrickPhysicalBatchItem>& items)
+    {
+        size_t index = 0;
+        for (const BrickPhysicalBatchItem& item : items)
+        {
+            ++index;
+            const std::string prefix = "item." + std::to_string(index);
+            out << prefix << ".brick_id=" << item.requested_id << "\n"
+                << prefix << ".lookup_ok=" << (item.lookup_ok ? "true" : "false") << "\n"
+                << prefix << ".ok=" << (item.ok ? "true" : "false") << "\n"
+                << prefix << ".code=" << item.code << "\n"
+                << prefix << ".detail=" << json_escape(item.detail) << "\n"
+                << prefix << ".brick_address=" << json_escape(pointer_hex(item.brick_address)) << "\n"
+                << prefix << ".owner_address=" << json_escape(pointer_hex(static_cast<uintptr_t>(item.owner_address))) << "\n"
+                << prefix << ".brick_cell_index=" << item.cell_index << "\n"
+                << prefix << ".brick_sub_index=" << item.sub_index << "\n"
+                << prefix << ".brick_action_key=" << item.action_key << "\n"
+                << prefix << ".packed_handle_ok=" << (item.packed_handle_ok ? "true" : "false") << "\n"
+                << prefix << ".packed_handle=" << json_escape(item.packed_handle == 0 ? "" : hex_u64(item.packed_handle)) << "\n"
+                << prefix << ".packed_handle_slot=" << item.packed_handle_slot << "\n"
+                << prefix << ".packed_handle_generation=" << item.packed_handle_generation << "\n"
+                << prefix << ".before_visible=" << static_cast<unsigned int>(item.before_visible) << "\n"
+                << prefix << ".before_public_visible=" << (brick_runtime_byte_is_public_visible(item.before_visible) ? "true" : "false") << "\n"
+                << prefix << ".before_collision_channels=" << static_cast<unsigned int>(item.before_collision_channels) << "\n"
+                << prefix << ".target_visible=" << static_cast<unsigned int>(item.target_visible) << "\n"
+                << prefix << ".target_public_visible=" << (brick_runtime_byte_is_public_visible(item.target_visible) ? "true" : "false") << "\n"
+                << prefix << ".target_collision_channels=" << static_cast<unsigned int>(item.target_collision_channels) << "\n"
+                << prefix << ".after_visible=" << static_cast<unsigned int>(item.after_visible) << "\n"
+                << prefix << ".after_public_visible=" << (brick_runtime_byte_is_public_visible(item.after_visible) ? "true" : "false") << "\n"
+                << prefix << ".after_collision_channels=" << static_cast<unsigned int>(item.after_collision_channels) << "\n"
+                << prefix << ".visibility_set_requested=" << (item.visibility_requested ? "true" : "false") << "\n"
+                << prefix << ".visibility_set_succeeded=" << (item.visibility_ok ? "true" : "false") << "\n"
+                << prefix << ".visibility_set_method=" << json_escape(item.visibility_method) << "\n"
+                << prefix << ".collision_set_requested=" << (item.collision_requested ? "true" : "false") << "\n"
+                << prefix << ".collision_set_succeeded=" << (item.collision_ok ? "true" : "false") << "\n"
+                << prefix << ".collision_set_method=" << json_escape(item.collision_method) << "\n"
+                << prefix << ".action_entries=" << item.action_entries << "\n"
+                << prefix << ".action_visibility_entries=" << item.visibility_entries << "\n"
+                << prefix << ".action_collision_entries=" << item.collision_entries << "\n"
+                << prefix << ".action_forced_resync_entries=" << item.forced_resync_entries << "\n"
+                << prefix << ".applicator_visibility_calls=" << item.applicator_visibility_calls << "\n"
+                << prefix << ".applicator_collision_calls=" << item.applicator_collision_calls << "\n";
+        }
+    }
+
+    std::string brick_physical_set_many_text(const std::vector<uint32_t>& brick_ids,
+                                             int64_t visible_arg,
+                                             int64_t collision_channels_arg,
+                                             uintptr_t explicit_grid_context,
+                                             uintptr_t explicit_action_source)
+    {
+        std::ostringstream out;
+        out << "Brick physical state\n"
+            << "source=BMFSocketBrickPhysical\n"
+            << "operation=set-many\n"
+            << "requested_count=" << brick_ids.size() << "\n"
+            << "requested_visible_arg=" << visible_arg << "\n"
+            << "requested_collision_channels=" << collision_channels_arg << "\n"
+            << "requested_grid_context_override=" << json_escape(pointer_hex(explicit_grid_context)) << "\n"
+            << "requested_action_source_override=" << json_escape(pointer_hex(explicit_action_source)) << "\n"
+            << "grid_context_ignored=true\n"
+            << "visibility_setter_enabled=" << (brick_visibility_setter_enabled() ? "true" : "false") << "\n"
+            << "collision_setter_enabled=" << (brick_collision_setter_enabled() ? "true" : "false") << "\n"
+            << "action_set_enabled=" << (brick_runtime_action_set_enabled() ? "true" : "false") << "\n"
+            << "action_force_resync_enabled=" << (brick_runtime_action_force_resync_enabled() ? "true" : "false") << "\n"
+            << "applicator_set_enabled=" << (brick_runtime_applicator_set_enabled() ? "true" : "false") << "\n"
+            << "batch_max_ids=" << brick_runtime_action_batch_max_ids() << "\n";
+
+        if (!brick_physical_set_enabled())
+        {
+            out << "ok=false\n"
+                << "code=BRICK_PHYSICAL_SET_DISABLED\n"
+                << "detail=set BMF_BRICK_RUNTIME_SET_ENABLED=1 to allow explicit brick visibility/collision mutation\n";
+            return out.str();
+        }
+        if (!brick_runtime_action_set_enabled())
+        {
+            out << "ok=false\n"
+                << "code=BRICK_ACTION_SET_DISABLED\n"
+                << "detail=set BMF_BRICK_RUNTIME_ACTION_SET_ENABLED=1 to submit replicated Brickadia action lists\n";
+            return out.str();
+        }
+        if (brick_ids.empty())
+        {
+            out << "ok=false\n"
+                << "code=BRICK_BATCH_IDS_REQUIRED\n"
+                << "detail=at least one runtime brick id is required\n";
+            return out.str();
+        }
+        const uint64_t max_ids = brick_runtime_action_batch_max_ids();
+        if (brick_ids.size() > max_ids)
+        {
+            out << "ok=false\n"
+                << "code=BRICK_BATCH_TOO_LARGE\n"
+                << "detail=requested runtime brick id count exceeded BMF_BRICK_RUNTIME_ACTION_BATCH_MAX_IDS\n";
+            return out.str();
+        }
+
+        if (collision_channels_arg < -2)
+        {
+            collision_channels_arg = -2;
+        }
+        if (collision_channels_arg > 255)
+        {
+            collision_channels_arg = 255;
+        }
+
+        const bool visibility_requested_arg = visible_arg >= 0 || visible_arg == -2;
+        const bool collision_requested_arg = collision_channels_arg >= 0 || collision_channels_arg == -1;
+        const bool brick_owner_fallback_enabled = brick_action_owner_brick_owner_fallback_enabled();
+        if (!visibility_requested_arg && !collision_requested_arg)
+        {
+            out << "ok=false\n"
+                << "code=BRICK_RUNTIME_STATE_NOOP\n"
+                << "detail=visible or collision must request a state change for set-many\n";
+            return out.str();
+        }
+
+        std::vector<BrickPhysicalBatchItem> items;
+        items.reserve(brick_ids.size());
+        uintptr_t module_base = 0;
+        uintptr_t registry_address = 0;
+        size_t accepted_count = 0;
+        size_t lookup_failed = 0;
+        for (uint32_t brick_id : brick_ids)
+        {
+            BrickPhysicalBatchItem item;
+            item.requested_id = brick_id;
+
+            uintptr_t item_module_base = 0;
+            uintptr_t item_registry_address = 0;
+            std::string lookup_code;
+            std::string lookup_detail;
+            const bool found = brick_physical_lookup(
+                brick_id,
+                item_module_base,
+                item_registry_address,
+                item.brick_address,
+                lookup_code,
+                lookup_detail);
+            if (!found)
+            {
+                item.lookup_ok = false;
+                item.ok = false;
+                item.code = lookup_code.empty() ? "BRICK_LOOKUP_FAILED" : lookup_code;
+                item.detail = lookup_detail;
+                ++lookup_failed;
+                items.push_back(item);
+                continue;
+            }
+            if (module_base == 0)
+            {
+                module_base = item_module_base;
+                registry_address = item_registry_address;
+            }
+            if (item_module_base != module_base)
+            {
+                item.lookup_ok = false;
+                item.ok = false;
+                item.code = "BRICK_MODULE_MISMATCH";
+                item.detail = "brick lookup returned a different module base inside one batch";
+                ++lookup_failed;
+                items.push_back(item);
+                continue;
+            }
+
+            item.lookup_ok = true;
+            item.code = "PENDING_ACTION";
+            read_u64_at(item.brick_address + kBrickOwnerOffset, item.owner_address);
+            read_u8_at(item.brick_address + kBrickVisibleOffset, item.before_visible);
+            read_u8_at(item.brick_address + kBrickCollisionChannelsOffset, item.before_collision_channels);
+            read_u32_at(item.brick_address, item.cell_index);
+            read_u32_at(item.brick_address + 0x04, item.sub_index);
+            read_u32_at(item.brick_address + kBrickRuntimeIdOffset, item.action_key);
+            BrickRuntimeHandleInfo handle_info;
+            item.packed_handle_ok =
+                brick_runtime_handle_for_address(module_base, item.brick_address, handle_info);
+            item.packed_handle = handle_info.packed_handle;
+            item.packed_handle_slot = handle_info.slot;
+            item.packed_handle_generation = handle_info.active_generation;
+
+            {
+                std::lock_guard lock(g_brick_physical_mutex);
+                auto& stored = g_brick_physical_originals[brick_id];
+                if (!stored.captured)
+                {
+                    stored.captured = true;
+                    stored.visible = item.before_visible;
+                    stored.collision_channels = item.before_collision_channels;
+                }
+                item.original = stored;
+            }
+
+            item.visibility_requested = visibility_requested_arg;
+            item.visibility_method = item.visibility_requested ? "brickadia-action-list" : "";
+            item.target_visible = item.before_visible;
+            if (visible_arg >= 0)
+            {
+                item.target_visible = brick_runtime_public_visible_to_byte(visible_arg);
+            }
+            else if (visible_arg == -2)
+            {
+                item.target_visible = item.original.visible;
+            }
+
+            item.collision_requested = collision_requested_arg;
+            item.collision_method = item.collision_requested ? "brickadia-action-list" : "";
+            item.target_collision_channels = item.before_collision_channels;
+            if (collision_channels_arg >= 0)
+            {
+                item.target_collision_channels =
+                    static_cast<uint8_t>(std::min<int64_t>(255, collision_channels_arg));
+            }
+            else if (collision_channels_arg == -1)
+            {
+                item.target_collision_channels = item.original.collision_channels;
+            }
+
+            ++accepted_count;
+            items.push_back(item);
+        }
+
+        out << "module_base=" << json_escape(pointer_hex(module_base)) << "\n"
+            << "registry_address=" << json_escape(pointer_hex(registry_address)) << "\n"
+            << "accepted_count=" << accepted_count << "\n"
+            << "lookup_failed=" << lookup_failed << "\n";
+        if (accepted_count == 0)
+        {
+            out << "ok=false\n"
+                << "code=BRICK_BATCH_LOOKUP_FAILED\n"
+                << "attempted=0\n"
+                << "succeeded=0\n"
+                << "failed=" << lookup_failed << "\n"
+                << "pending=0\n"
+                << "detail=no requested runtime brick ids resolved to live Brickadia bricks\n";
+            write_brick_physical_batch_items(out, items);
+            return out.str();
+        }
+
+        g_brick_action_set_attempts.fetch_add(1);
+        BrickPhysicalActionSetResult action_result;
+        action_result.code = "BRICK_ACTION_SET_FAILED";
+
+        BrickActionOwnerCandidate owner_candidate;
+        bool owner_resolved = false;
+        if (explicit_action_source == 0)
+        {
+            owner_candidate.detail =
+                "runtime physical-state mutation requires an explicit live tool/controller action source; pass actionsource=<address>";
+            action_result.detail = owner_candidate.detail;
+            action_result.code = "BRICK_ACTION_SOURCE_REQUIRED";
+            g_brick_action_set_failures.fetch_add(1);
+        }
+        else
+        {
+            owner_resolved = brick_action_owner_resolve(module_base, explicit_action_source, owner_candidate);
+        }
+        const std::string owner_resolve_failure = owner_candidate.detail;
+        if (!owner_resolved && explicit_action_source != 0 && brick_owner_fallback_enabled)
+        {
+            for (const BrickPhysicalBatchItem& item : items)
+            {
+                if (!item.lookup_ok || item.owner_address == 0)
+                {
+                    continue;
+                }
+                uint8_t busy = 0xff;
+                uint32_t queue_count = 0;
+                const uintptr_t brick_owner = static_cast<uintptr_t>(item.owner_address);
+                if (!brick_action_owner_is_plausible(brick_owner, &busy, &queue_count))
+                {
+                    continue;
+                }
+                owner_candidate = {};
+                owner_candidate.owner = brick_owner;
+                owner_candidate.owner_surface = 0;
+                owner_candidate.source = item.brick_address;
+                owner_candidate.source_label =
+                    "brick-owner-fallback:" + std::to_string(item.requested_id);
+                owner_candidate.detail =
+                    "using plausible brick owner as Brickadia action owner after resolver failed: " +
+                    owner_resolve_failure;
+                owner_candidate.owner_busy = busy;
+                owner_candidate.owner_queue_count = queue_count;
+                owner_resolved = true;
+                break;
+            }
+            if (!owner_resolved)
+            {
+                owner_candidate.detail =
+                    "normal action-owner resolve failed and brick-owner fallback was enabled, but no bound brick owner matched the action-owner queue shape: " +
+                    owner_resolve_failure;
+            }
+        }
+        if (!owner_resolved)
+        {
+            action_result.detail = owner_candidate.detail;
+            action_result.owner_scan_objects = owner_candidate.scanned_objects;
+            action_result.owner_scan_controller_candidates = owner_candidate.controller_candidates;
+            action_result.owner_scan_surface_hint_candidates = owner_candidate.surface_hint_candidates;
+            action_result.owner_probe_details = owner_candidate.probe_details;
+            action_result.code = "BRICK_ACTION_OWNER_UNAVAILABLE";
+            g_brick_action_set_failures.fetch_add(1);
+        }
+        else
+        {
+            action_result.action_owner = owner_candidate.owner;
+            action_result.action_owner_surface = owner_candidate.owner_surface;
+            action_result.action_owner_source = owner_candidate.source;
+            action_result.action_owner_source_label = owner_candidate.source_label;
+            action_result.owner_queue_count = owner_candidate.owner_queue_count;
+            action_result.owner_busy_before = owner_candidate.owner_busy;
+            action_result.owner_scan_objects = owner_candidate.scanned_objects;
+            action_result.owner_scan_controller_candidates = owner_candidate.controller_candidates;
+            action_result.owner_scan_surface_hint_candidates = owner_candidate.surface_hint_candidates;
+            action_result.owner_probe_details = owner_candidate.probe_details;
+
+            if (owner_candidate.owner_busy != 0)
+            {
+                action_result.detail = "Brickadia action owner is busy";
+                action_result.code = "BRICK_ACTION_OWNER_BUSY";
+                g_brick_action_set_failures.fetch_add(1);
+            }
+            else if (!brick_action_owner_candidate_is_accepted_for_replication(owner_candidate))
+            {
+                action_result.detail =
+                    "Brickadia replicated physical-state actions require an owner surface resolved from a live tool/controller source";
+                action_result.code = "BRICK_ACTION_OWNER_SURFACE_REQUIRED";
+                g_brick_action_set_failures.fetch_add(1);
+            }
+            else
+            {
+                if (brick_runtime_applicator_set_enabled())
+                {
+                    action_result.applicator_attempted = true;
+                    const uintptr_t set_visibility_address =
+                        module_base + kBrickApplicatorSetVisibilityOffset;
+                    const uintptr_t set_collision_address =
+                        module_base + kBrickApplicatorSetCollisionChannelsOffset;
+                    const bool applicator_visibility_available =
+                        is_executable_memory(set_visibility_address);
+                    const bool applicator_collision_available =
+                        is_executable_memory(set_collision_address);
+                    const bool source_usable =
+                        brick_action_source_usable_for_applicator(owner_candidate);
+                    const bool force_resync = brick_runtime_action_force_resync_enabled();
+
+                    if (!source_usable)
+                    {
+                        action_result.detail =
+                            "Brickadia applicator setter requires a live tool/controller source, not " +
+                            owner_candidate.source_label;
+                        action_result.code = "BRICK_APPLICATOR_SOURCE_UNAVAILABLE";
+                    }
+                    else if (accepted_count > brick_runtime_applicator_batch_max_ids())
+                    {
+                        action_result.detail =
+                            "requested runtime brick id count exceeded BMF_BRICK_RUNTIME_APPLICATOR_BATCH_MAX_IDS";
+                        action_result.code = "BRICK_APPLICATOR_BATCH_TOO_LARGE";
+                    }
+                    else if ((visibility_requested_arg && !applicator_visibility_available) ||
+                             (collision_requested_arg && !applicator_collision_available))
+                    {
+                        action_result.detail =
+                            "Brickadia applicator visibility/collision functions were unavailable";
+                        action_result.code = "BRICK_APPLICATOR_FUNCTION_UNAVAILABLE";
+                    }
+                    else
+                    {
+                        bool applicator_failed = false;
+                        for (BrickPhysicalBatchItem& item : items)
+                        {
+                            if (!item.lookup_ok)
+                            {
+                                continue;
+                            }
+                            if (!item.packed_handle_ok || item.packed_handle == 0)
+                            {
+                                item.code = "BRICK_PACKED_HANDLE_UNAVAILABLE";
+                                item.detail =
+                                    "runtime brick packed handle could not be computed for Brickadia applicator setters";
+                                applicator_failed = true;
+                                continue;
+                            }
+
+                            if (item.visibility_requested)
+                            {
+                                item.visibility_method = "brickadia-applicator";
+                                if (force_resync && item.target_visible == item.before_visible)
+                                {
+                                    const uint8_t pulse = item.target_visible == 0 ? 1 : 0;
+                                    ++item.applicator_visibility_calls;
+                                    ++action_result.applicator_visibility_calls;
+                                    if (!brick_applicator_set_guarded(
+                                            set_visibility_address,
+                                            owner_candidate.source,
+                                            item.packed_handle,
+                                            pulse))
+                                    {
+                                        ++action_result.applicator_exceptions;
+                                        applicator_failed = true;
+                                    }
+                                }
+                                ++item.applicator_visibility_calls;
+                                ++action_result.applicator_visibility_calls;
+                                if (!brick_applicator_set_guarded(
+                                        set_visibility_address,
+                                        owner_candidate.source,
+                                        item.packed_handle,
+                                        item.target_visible))
+                                {
+                                    ++action_result.applicator_exceptions;
+                                    applicator_failed = true;
+                                }
+                            }
+
+                            if (item.collision_requested)
+                            {
+                                item.collision_method = "brickadia-applicator";
+                                if (force_resync &&
+                                    item.target_collision_channels == item.before_collision_channels)
+                                {
+                                    uint8_t pulse =
+                                        item.target_collision_channels == 0
+                                            ? kBrickDefaultCollisionChannels
+                                            : 0;
+                                    if (item.original.captured &&
+                                        item.original.collision_channels != item.target_collision_channels)
+                                    {
+                                        pulse = item.original.collision_channels;
+                                    }
+                                    ++item.applicator_collision_calls;
+                                    ++action_result.applicator_collision_calls;
+                                    if (!brick_applicator_set_guarded(
+                                            set_collision_address,
+                                            owner_candidate.source,
+                                            item.packed_handle,
+                                            pulse))
+                                    {
+                                        ++action_result.applicator_exceptions;
+                                        applicator_failed = true;
+                                    }
+                                }
+                                ++item.applicator_collision_calls;
+                                ++action_result.applicator_collision_calls;
+                                if (!brick_applicator_set_guarded(
+                                        set_collision_address,
+                                        owner_candidate.source,
+                                        item.packed_handle,
+                                        item.target_collision_channels))
+                                {
+                                    ++action_result.applicator_exceptions;
+                                    applicator_failed = true;
+                                }
+                            }
+
+                            read_u8_at(item.brick_address + kBrickVisibleOffset, item.after_visible);
+                            read_u8_at(item.brick_address + kBrickCollisionChannelsOffset, item.after_collision_channels);
+                            item.visibility_ok =
+                                !item.visibility_requested ||
+                                item.after_visible == item.target_visible;
+                            item.collision_ok =
+                                !item.collision_requested ||
+                                item.after_collision_channels == item.target_collision_channels;
+                            if (!item.visibility_ok || !item.collision_ok)
+                            {
+                                applicator_failed = true;
+                            }
+                        }
+
+                        bool all_applicator_items_ok = !applicator_failed;
+                        for (const BrickPhysicalBatchItem& item : items)
+                        {
+                            if (!item.lookup_ok)
+                            {
+                                continue;
+                            }
+                            if ((item.visibility_requested &&
+                                 item.after_visible != item.target_visible) ||
+                                (item.collision_requested &&
+                                 item.after_collision_channels != item.target_collision_channels))
+                            {
+                                all_applicator_items_ok = false;
+                                break;
+                            }
+                        }
+
+                        action_result.entries =
+                            action_result.applicator_visibility_calls +
+                            action_result.applicator_collision_calls;
+                        action_result.visibility_entries =
+                            action_result.applicator_visibility_calls;
+                        action_result.collision_entries =
+                            action_result.applicator_collision_calls;
+                        action_result.applicator_ok = all_applicator_items_ok;
+                        action_result.ok = all_applicator_items_ok;
+                        action_result.finalized = all_applicator_items_ok;
+                        action_result.finalize_result = all_applicator_items_ok ? 1 : 0;
+                        action_result.code =
+                            all_applicator_items_ok ? "OK" : "BRICK_APPLICATOR_SET_FAILED";
+                        action_result.detail = all_applicator_items_ok
+                            ? "submitted Brickadia visibility/collision through Applicator setters"
+                            : "Brickadia Applicator setter path ran but did not reach all requested runtime states";
+                        if (all_applicator_items_ok)
+                        {
+                            g_brick_action_set_successes.fetch_add(1);
+                        }
+                        else
+                        {
+                            g_brick_action_set_failures.fetch_add(1);
+                        }
+                    }
+                }
+
+                if (!action_result.ok)
+                {
+                    if (action_result.applicator_attempted && !action_result.applicator_ok)
+                    {
+                        for (BrickPhysicalBatchItem& item : items)
+                        {
+                            if (!item.lookup_ok)
+                            {
+                                continue;
+                            }
+                            if (item.visibility_requested)
+                            {
+                                item.visibility_method = "brickadia-action-list";
+                            }
+                            if (item.collision_requested)
+                            {
+                                item.collision_method = "brickadia-action-list";
+                            }
+                        }
+                    }
+                    if (action_result.applicator_attempted &&
+                        !action_result.applicator_ok &&
+                        !brick_runtime_action_list_after_applicator_failure_enabled())
+                    {
+                        action_result.detail +=
+                            "; skipped Brickadia action-list fallback after Applicator failure";
+                    }
+                    else
+                    {
+                const uintptr_t method_visibility = module_base + kBrickVisibilityActionMethodBlockOffset;
+                const uintptr_t method_collision = module_base + kBrickCollisionActionMethodBlockOffset;
+                const uintptr_t alloc_address = module_base + kBrickActionChunkAllocOffset;
+                const uintptr_t finalize_address = module_base + kBrickActionFinalizeOffset;
+                if (!is_accessible_memory(method_visibility, sizeof(uintptr_t)) ||
+                    !is_accessible_memory(method_collision, sizeof(uintptr_t)) ||
+                    !is_executable_memory(alloc_address) ||
+                    !is_executable_memory(finalize_address))
+                {
+                    action_result.detail = "Brickadia action method blocks, allocator, or finalizer were unavailable";
+                    action_result.code = "BRICK_ACTION_FUNCTION_UNAVAILABLE";
+                    g_brick_action_set_failures.fetch_add(1);
+                }
+                else if (!brick_action_construct_list(module_base, owner_candidate.owner, action_result.action_list, action_result.detail))
+                {
+                    action_result.code = "BRICK_ACTION_LIST_CONSTRUCT_FAILED";
+                    g_brick_action_set_failures.fetch_add(1);
+                }
+                else
+                {
+                    auto allocate_chunk = reinterpret_cast<BrickActionChunkAllocFn>(alloc_address);
+                    const bool force_resync = brick_runtime_action_force_resync_enabled();
+                    bool append_failed = false;
+                    std::string append_code;
+
+                    auto append_for_item = [&](BrickPhysicalBatchItem& item,
+                                               uintptr_t method_block,
+                                               uint8_t value,
+                                               bool forced,
+                                               bool visibility_entry) -> bool {
+                        if (!brick_action_list_append_entry(
+                                action_result.action_list,
+                                allocate_chunk,
+                                method_block,
+                                item.action_key,
+                                value,
+                                action_result.detail))
+                        {
+                            return false;
+                        }
+                        ++action_result.entries;
+                        ++item.action_entries;
+                        if (visibility_entry)
+                        {
+                            ++action_result.visibility_entries;
+                            ++item.visibility_entries;
+                        }
+                        else
+                        {
+                            ++action_result.collision_entries;
+                            ++item.collision_entries;
+                        }
+                        if (forced)
+                        {
+                            ++action_result.forced_resync_entries;
+                            ++item.forced_resync_entries;
+                        }
+                        return true;
+                    };
+
+                    for (BrickPhysicalBatchItem& item : items)
+                    {
+                        if (!item.lookup_ok)
+                        {
+                            continue;
+                        }
+                        if (item.visibility_requested)
+                        {
+                            if (force_resync && item.target_visible == item.before_visible)
+                            {
+                                if (!append_for_item(
+                                        item,
+                                        method_visibility,
+                                        item.target_visible == 0 ? 1 : 0,
+                                        true,
+                                        true))
+                                {
+                                    append_failed = true;
+                                    append_code = "BRICK_VISIBILITY_ACTION_APPEND_FAILED";
+                                    break;
+                                }
+                            }
+                            if (!append_for_item(item, method_visibility, item.target_visible, false, true))
+                            {
+                                append_failed = true;
+                                append_code = "BRICK_VISIBILITY_ACTION_APPEND_FAILED";
+                                break;
+                            }
+                        }
+                        if (item.collision_requested)
+                        {
+                            if (force_resync && item.target_collision_channels == item.before_collision_channels)
+                            {
+                                uint8_t pulse = item.target_collision_channels == 0 ? kBrickDefaultCollisionChannels : 0;
+                                if (item.original.captured &&
+                                    item.original.collision_channels != item.target_collision_channels)
+                                {
+                                    pulse = item.original.collision_channels;
+                                }
+                                if (!append_for_item(item, method_collision, pulse, true, false))
+                                {
+                                    append_failed = true;
+                                    append_code = "BRICK_COLLISION_ACTION_APPEND_FAILED";
+                                    break;
+                                }
+                            }
+                            if (!append_for_item(item, method_collision, item.target_collision_channels, false, false))
+                            {
+                                append_failed = true;
+                                append_code = "BRICK_COLLISION_ACTION_APPEND_FAILED";
+                                break;
+                            }
+                        }
+                    }
+
+                    if (append_failed)
+                    {
+                        action_result.code = append_code.empty() ? "BRICK_ACTION_APPEND_FAILED" : append_code;
+                        g_brick_action_set_failures.fetch_add(1);
+                    }
+                    else if (action_result.entries == 0)
+                    {
+                        action_result.ok = true;
+                        action_result.code = "OK";
+                        action_result.detail = "no physical-state action entries were required";
+                        g_brick_action_set_successes.fetch_add(1);
+                    }
+                    else
+                    {
+                        action_result.action_metadata_enabled =
+                            brick_runtime_action_metadata_enabled();
+                        bool metadata_ok = true;
+                        if (action_result.action_metadata_enabled)
+                        {
+                            action_result.action_metadata_attempted = true;
+                            metadata_ok = brick_action_populate_metadata(
+                                module_base,
+                                action_result.action_list,
+                                action_result.visibility_entries > 0,
+                                action_result.detail);
+                            action_result.action_metadata_ok = metadata_ok;
+                        }
+                        else
+                        {
+                            action_result.action_metadata_ok = true;
+                        }
+
+                        if (!metadata_ok)
+                        {
+                            action_result.code = "BRICK_ACTION_METADATA_FAILED";
+                            g_brick_action_set_failures.fetch_add(1);
+                        }
+                        else if (!brick_action_finalize_guarded(
+                                     finalize_address,
+                                     owner_candidate.owner,
+                                     action_result.action_list,
+                                     action_result.finalize_result,
+                                     action_result.action_owner_finalize_context,
+                                     action_result.finalize_exception_code,
+                                     action_result.finalize_exception_address,
+                                     action_result.detail))
+                        {
+                            action_result.code = "BRICK_ACTION_FINALIZE_EXCEPTION";
+                            g_brick_action_set_failures.fetch_add(1);
+                        }
+                        else
+                        {
+                            read_u8_at(owner_candidate.owner + 0x120, action_result.owner_busy_after);
+                            action_result.finalized = action_result.finalize_result != 0;
+                            action_result.ok = action_result.finalized;
+                            action_result.code = action_result.ok ? "OK" : "BRICK_ACTION_FINALIZE_REJECTED";
+                            action_result.detail = action_result.ok
+                                ? "submitted Brickadia visibility/collision batch action list"
+                                : "Brickadia action finalizer rejected the batch action list";
+                            if (action_result.ok)
+                            {
+                                g_brick_action_set_successes.fetch_add(1);
+                            }
+                            else
+                            {
+                                g_brick_action_set_failures.fetch_add(1);
+                            }
+                        }
+                    }
+                    }
+                }
+                }
+            }
+        }
+
+        bool setter_fallback_attempted = false;
+        bool setter_fallback_grid_context_available = false;
+        uintptr_t setter_fallback_grid_context = 0;
+        std::string setter_fallback_grid_context_source = "none";
+        std::string setter_fallback_detail;
+        bool setter_fallback_background_scan_started = false;
+        bool setter_fallback_background_scan_pending = false;
+        bool setter_fallback_background_scan_known_failed = false;
+        size_t setter_fallback_visibility_attempts = 0;
+        size_t setter_fallback_visibility_successes = 0;
+        size_t setter_fallback_collision_attempts = 0;
+        size_t setter_fallback_collision_successes = 0;
+
+        const bool brick_owner_fallback_action_ok =
+            action_result.action_owner_source_label.rfind("brick-owner-fallback:", 0) == 0;
+        const bool direct_owner_scan_action_ok =
+            action_result.action_owner_source_label.rfind("direct-owner-scan:", 0) == 0;
+        const bool applicator_action_ok =
+            action_result.applicator_ok && action_result.ok;
+        const bool replicated_action_ok =
+            brick_physical_action_result_is_replicated(action_result);
+        const bool setter_fallback_allowed =
+            replicated_action_ok ||
+            applicator_action_ok;
+
+        BrickPhysicalBatchItem* setter_context_item = nullptr;
+        for (BrickPhysicalBatchItem& item : items)
+        {
+            if (!item.lookup_ok)
+            {
+                continue;
+            }
+            read_u8_at(item.brick_address + kBrickVisibleOffset, item.after_visible);
+            read_u8_at(item.brick_address + kBrickCollisionChannelsOffset, item.after_collision_channels);
+            const bool visibility_mismatch =
+                item.visibility_requested && item.after_visible != item.target_visible;
+            const bool collision_mismatch =
+                item.collision_requested && item.after_collision_channels != item.target_collision_channels;
+            if (setter_fallback_allowed &&
+                ((visibility_mismatch && brick_visibility_setter_enabled()) ||
+                 (collision_mismatch && brick_collision_setter_enabled())))
+            {
+                if (setter_context_item == nullptr)
+                {
+                    setter_context_item = &item;
+                }
+            }
+        }
+
+        if (setter_context_item != nullptr)
+        {
+            if (replicated_action_ok || applicator_action_ok)
+            {
+                setter_fallback_detail = "Brickadia setter fallback is enabled after a replicated action path is available but runtime bytes still mismatch";
+            }
+            else
+            {
+                setter_fallback_detail = "Brickadia setter fallback is enabled only after a replicated Brickadia action path succeeds";
+            }
+        }
+
+        if (setter_context_item != nullptr)
+        {
+            if (explicit_grid_context != 0)
+            {
+                if (brick_grid_context_is_plausible(
+                        explicit_grid_context,
+                        setter_context_item->cell_index,
+                        setter_context_item->sub_index))
+                {
+                    setter_fallback_grid_context = explicit_grid_context;
+                    setter_fallback_grid_context_source = "explicit-override";
+                    setter_fallback_grid_context_available = true;
+                    brick_grid_context_cache_store(
+                        explicit_grid_context,
+                        setter_fallback_grid_context_source.c_str());
+                }
+                else
+                {
+                    setter_fallback_detail = "explicit diagnostic grid context did not match the batch context brick";
+                }
+            }
+
+            if (!setter_fallback_grid_context_available &&
+                brick_grid_context_cached_is_usable(
+                    setter_context_item->cell_index,
+                    setter_context_item->sub_index))
+            {
+                setter_fallback_grid_context = g_brick_grid_context_cached.load();
+                setter_fallback_grid_context_source = "cached-action-context";
+                setter_fallback_grid_context_available = true;
+            }
+
+            if (!setter_fallback_grid_context_available &&
+                setter_context_item->owner_address != 0 &&
+                is_accessible_memory(static_cast<uintptr_t>(setter_context_item->owner_address), 0x18))
+            {
+                uint64_t owner_context = 0;
+                if (read_u64_at(static_cast<uintptr_t>(setter_context_item->owner_address) + 0x10, owner_context) &&
+                    owner_context != 0)
+                {
+                    setter_fallback_grid_context = static_cast<uintptr_t>(owner_context);
+                    setter_fallback_grid_context_source = "owner.qword+0x10";
+                    setter_fallback_grid_context_available =
+                        brick_grid_context_is_plausible(
+                            setter_fallback_grid_context,
+                            setter_context_item->cell_index,
+                            setter_context_item->sub_index);
+                }
+            }
+
+            if (!setter_fallback_grid_context_available &&
+                brick_owner_context_scan_for_set_enabled() &&
+                setter_context_item->owner_address != 0)
+            {
+                const BrickOwnerContextScanResult scan = brick_owner_context_scan(
+                    static_cast<uintptr_t>(setter_context_item->owner_address),
+                    setter_context_item->cell_index,
+                    setter_context_item->sub_index);
+                if (scan.found)
+                {
+                    setter_fallback_grid_context = scan.address;
+                    setter_fallback_grid_context_source = scan.source.empty() ? "owner-scan" : scan.source;
+                    setter_fallback_grid_context_available = true;
+                }
+            }
+
+            if (!setter_fallback_grid_context_available &&
+                env_flag_enabled("BMF_BRICK_CONTEXT_SCAN_ENABLED"))
+            {
+                const BrickGridContextScanResult scan = brick_grid_context_scan(
+                    setter_context_item->cell_index,
+                    setter_context_item->sub_index);
+                if (scan.found)
+                {
+                    setter_fallback_grid_context = scan.address;
+                    setter_fallback_grid_context_source = "scan";
+                    setter_fallback_grid_context_available = true;
+                }
+            }
+
+            if (!setter_fallback_grid_context_available)
+            {
+                setter_fallback_background_scan_known_failed =
+                    brick_grid_context_background_scan_failed_for(
+                        setter_context_item->cell_index,
+                        setter_context_item->sub_index);
+                setter_fallback_background_scan_started =
+                    !setter_fallback_background_scan_known_failed &&
+                    brick_grid_context_background_scan_start(
+                        setter_context_item->cell_index,
+                        setter_context_item->sub_index,
+                        setter_fallback_grid_context);
+                setter_fallback_background_scan_pending =
+                    !setter_fallback_background_scan_known_failed &&
+                    (setter_fallback_background_scan_started ||
+                     g_brick_grid_context_background_scan_running.load());
+
+                if (setter_fallback_background_scan_pending)
+                {
+                    out << "ok=false\n"
+                        << "code=BRICK_GRID_CONTEXT_SCAN_PENDING\n"
+                        << "attempted=" << accepted_count << "\n"
+                        << "succeeded=0\n"
+                        << "failed=0\n"
+                        << "pending=" << accepted_count << "\n"
+                        << "visibility_set_method=" << (visibility_requested_arg ? "brickadia-action-list+setter" : "") << "\n"
+                        << "collision_set_method=" << (collision_requested_arg ? "brickadia-action-list+setter" : "") << "\n"
+                        << "action_set_succeeded=" << (action_result.ok ? "true" : "false") << "\n"
+                        << "action_set_detail=" << json_escape(action_result.detail) << "\n"
+                        << "action_list_address=" << json_escape(pointer_hex(action_result.action_list)) << "\n"
+                        << "action_owner_address=" << json_escape(pointer_hex(action_result.action_owner)) << "\n"
+                        << "action_owner_surface_address=" << json_escape(pointer_hex(action_result.action_owner_surface)) << "\n"
+                        << "action_owner_finalize_context_address=" << json_escape(pointer_hex(action_result.action_owner_finalize_context)) << "\n"
+                        << "action_owner_source_address=" << json_escape(pointer_hex(action_result.action_owner_source)) << "\n"
+                        << "action_owner_source=" << json_escape(action_result.action_owner_source_label) << "\n"
+                        << "action_owner_queue_count=" << action_result.owner_queue_count << "\n"
+                        << "action_owner_busy_before=" << static_cast<unsigned int>(action_result.owner_busy_before) << "\n"
+                        << "action_owner_busy_after=" << static_cast<unsigned int>(action_result.owner_busy_after) << "\n"
+                        << "action_owner_scan_objects=" << action_result.owner_scan_objects << "\n"
+                        << "action_owner_scan_controller_candidates=" << action_result.owner_scan_controller_candidates << "\n"
+                        << "action_owner_scan_surface_hint_candidates=" << action_result.owner_scan_surface_hint_candidates << "\n"
+                        << "action_finalize_called=" << (action_result.entries > 0 ? "true" : "false") << "\n"
+                        << "action_finalize_result=" << static_cast<unsigned int>(action_result.finalize_result) << "\n"
+                        << "action_finalized=" << (action_result.finalized ? "true" : "false") << "\n"
+                        << "action_finalize_exception_code=" << json_escape(hex_u64(action_result.finalize_exception_code)) << "\n"
+                        << "action_finalize_exception_address=" << json_escape(pointer_hex(action_result.finalize_exception_address)) << "\n"
+                        << "action_metadata_enabled=" << (action_result.action_metadata_enabled ? "true" : "false") << "\n"
+                        << "action_metadata_attempted=" << (action_result.action_metadata_attempted ? "true" : "false") << "\n"
+                        << "action_metadata_succeeded=" << (action_result.action_metadata_ok ? "true" : "false") << "\n"
+                        << "action_entries=" << action_result.entries << "\n"
+                        << "action_visibility_entries=" << action_result.visibility_entries << "\n"
+                        << "action_collision_entries=" << action_result.collision_entries << "\n"
+                        << "action_forced_resync_entries=" << action_result.forced_resync_entries << "\n"
+                        << "setter_fallback_attempted=true\n"
+                        << "setter_fallback_grid_context_available=false\n"
+                        << "setter_fallback_grid_context_address=" << json_escape(pointer_hex(setter_fallback_grid_context)) << "\n"
+                        << "setter_fallback_grid_context_source=" << json_escape(setter_fallback_grid_context_source) << "\n"
+                        << "setter_fallback_background_scan_started=" << (setter_fallback_background_scan_started ? "true" : "false") << "\n"
+                        << "setter_fallback_background_scan_known_failed=" << (setter_fallback_background_scan_known_failed ? "true" : "false") << "\n";
+                    append_brick_background_context_scan_status(out);
+                    write_brick_action_owner_probe_lines(out, action_result);
+                    out << "detail=deferred Brickadia batch setter fallback while searching for a sparse-grid context\n";
+                    write_brick_physical_batch_items(out, items);
+                    return out.str();
+                }
+
+                if (setter_fallback_detail.empty())
+                {
+                    setter_fallback_detail =
+                        setter_fallback_background_scan_known_failed
+                            ? "background sparse-grid context scan did not find a usable context"
+                            : "no usable grid context was available for Brickadia batch setter fallback";
+                }
+            }
+
+            if (setter_fallback_grid_context_available)
+            {
+                const uintptr_t set_visibility_address = module_base + kBrickSetVisibilityOffset;
+                const uintptr_t set_collision_address = module_base + kBrickSetCollisionChannelsOffset;
+                const bool visibility_setter_available =
+                    brick_visibility_setter_enabled() &&
+                    is_executable_memory(set_visibility_address);
+                const bool collision_setter_available =
+                    brick_collision_setter_enabled() &&
+                    is_executable_memory(set_collision_address);
+
+                for (BrickPhysicalBatchItem& item : items)
+                {
+                    if (!item.lookup_ok)
+                    {
+                        continue;
+                    }
+                    if (item.visibility_requested && item.after_visible != item.target_visible)
+                    {
+                        setter_fallback_attempted = true;
+                        ++setter_fallback_visibility_attempts;
+                        item.visibility_method = "brickadia-action-list+setter";
+                        if (visibility_setter_available)
+                        {
+                            bool setter_ok = brick_physical_apply_visibility(
+                                set_visibility_address,
+                                item.brick_address,
+                                setter_fallback_grid_context,
+                                item.target_visible);
+                            read_u8_at(item.brick_address + kBrickVisibleOffset, item.after_visible);
+                            if (item.after_visible == item.target_visible)
+                            {
+                                setter_ok = true;
+                            }
+                            if (setter_ok)
+                            {
+                                ++setter_fallback_visibility_successes;
+                            }
+                        }
+                    }
+                    if (item.collision_requested && item.after_collision_channels != item.target_collision_channels)
+                    {
+                        setter_fallback_attempted = true;
+                        ++setter_fallback_collision_attempts;
+                        item.collision_method = "brickadia-action-list+setter";
+                        if (collision_setter_available)
+                        {
+                            bool setter_ok = brick_physical_apply_collision(
+                                set_collision_address,
+                                item.brick_address,
+                                setter_fallback_grid_context,
+                                item.target_collision_channels);
+                            read_u8_at(item.brick_address + kBrickCollisionChannelsOffset, item.after_collision_channels);
+                            if (item.after_collision_channels == item.target_collision_channels)
+                            {
+                                setter_ok = true;
+                            }
+                            if (setter_ok)
+                            {
+                                ++setter_fallback_collision_successes;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        const std::string physical_method = setter_fallback_attempted
+            ? "brickadia-action-list+setter"
+            : (applicator_action_ok ? "brickadia-applicator" : "brickadia-action-list");
+        size_t succeeded = 0;
+        size_t failed = lookup_failed;
+        for (BrickPhysicalBatchItem& item : items)
+        {
+            if (!item.lookup_ok)
+            {
+                continue;
+            }
+            read_u8_at(item.brick_address + kBrickVisibleOffset, item.after_visible);
+            read_u8_at(item.brick_address + kBrickCollisionChannelsOffset, item.after_collision_channels);
+            item.visibility_ok =
+                !item.visibility_requested || item.after_visible == item.target_visible;
+            item.collision_ok =
+                !item.collision_requested || item.after_collision_channels == item.target_collision_channels;
+            const bool setter_fallback_local_ok = setter_fallback_attempted &&
+                item.visibility_ok &&
+                item.collision_ok;
+            item.ok = replicated_action_ok &&
+                item.visibility_ok &&
+                item.collision_ok;
+            if (item.ok)
+            {
+                item.code = "OK";
+                item.detail = applicator_action_ok
+                    ? "runtime brick reached requested physical state through Brickadia Applicator setters"
+                    : "runtime brick reached requested physical state through Brickadia action list";
+                ++succeeded;
+            }
+            else
+            {
+                item.code = replicated_action_ok
+                    ? "BRICK_BATCH_ITEM_STATE_MISMATCH"
+                    : (setter_fallback_attempted
+                           ? "BRICK_BATCH_REPLICATED_ACTION_REQUIRED"
+                           : action_result.code);
+                item.detail = replicated_action_ok
+                    ? (applicator_action_ok
+                           ? "Brickadia Applicator setters ran but this runtime brick did not reach the requested state"
+                           : "Brickadia action list ran but this runtime brick did not reach the requested state")
+                    : (setter_fallback_attempted
+                           ? (setter_fallback_local_ok
+                                  ? "Brickadia setter fallback reached local runtime bytes, but the replicated action list did not finalize; client-visible state is not proven"
+                                  : "Brickadia setter fallback did not run because no replicated action path succeeded")
+                           : action_result.detail);
+                ++failed;
+            }
+        }
+
+        const bool ok = failed == 0 && accepted_count > 0;
+        const std::string code = ok
+            ? "OK"
+            : (!replicated_action_ok && !setter_fallback_attempted
+                   ? action_result.code
+                   : (succeeded > 0 ? "BRICK_BATCH_SET_PARTIAL" : "BRICK_BATCH_REPLICATED_ACTION_REQUIRED"));
+        out << "ok=" << (ok ? "true" : "false") << "\n"
+            << "code=" << code << "\n"
+            << "attempted=" << accepted_count << "\n"
+            << "succeeded=" << succeeded << "\n"
+            << "failed=" << failed << "\n"
+            << "pending=0\n"
+            << "visibility_set_method=" << (visibility_requested_arg ? physical_method : "") << "\n"
+            << "collision_set_method=" << (collision_requested_arg ? physical_method : "") << "\n"
+            << "action_set_succeeded=" << (action_result.ok ? "true" : "false") << "\n"
+            << "replicated_action_succeeded=" << (replicated_action_ok ? "true" : "false") << "\n"
+            << "applicator_action_succeeded=" << (applicator_action_ok ? "true" : "false") << "\n"
+            << "applicator_set_attempted=" << (action_result.applicator_attempted ? "true" : "false") << "\n"
+            << "applicator_set_succeeded=" << (action_result.applicator_ok ? "true" : "false") << "\n"
+            << "action_list_after_applicator_failure_enabled=" << (brick_runtime_action_list_after_applicator_failure_enabled() ? "true" : "false") << "\n"
+            << "applicator_visibility_calls=" << action_result.applicator_visibility_calls << "\n"
+            << "applicator_collision_calls=" << action_result.applicator_collision_calls << "\n"
+            << "applicator_exceptions=" << action_result.applicator_exceptions << "\n"
+            << "brick_owner_fallback_action_succeeded=" << (brick_owner_fallback_action_ok ? "true" : "false") << "\n"
+            << "direct_owner_scan_action_succeeded=" << (direct_owner_scan_action_ok ? "true" : "false") << "\n"
+            << "replicated_action_required=" << (!replicated_action_ok ? "true" : "false") << "\n"
+            << "action_set_detail=" << json_escape(action_result.detail) << "\n"
+            << "setter_fallback_attempted=" << (setter_fallback_attempted ? "true" : "false") << "\n"
+            << "setter_fallback_grid_context_available=" << (setter_fallback_grid_context_available ? "true" : "false") << "\n"
+            << "setter_fallback_grid_context_address=" << json_escape(pointer_hex(setter_fallback_grid_context)) << "\n"
+            << "setter_fallback_grid_context_source=" << json_escape(setter_fallback_grid_context_source) << "\n"
+            << "setter_fallback_detail=" << json_escape(setter_fallback_detail) << "\n"
+            << "setter_fallback_visibility_attempts=" << setter_fallback_visibility_attempts << "\n"
+            << "setter_fallback_visibility_successes=" << setter_fallback_visibility_successes << "\n"
+            << "setter_fallback_collision_attempts=" << setter_fallback_collision_attempts << "\n"
+            << "setter_fallback_collision_successes=" << setter_fallback_collision_successes << "\n"
+            << "setter_fallback_background_scan_started=" << (setter_fallback_background_scan_started ? "true" : "false") << "\n"
+            << "setter_fallback_background_scan_known_failed=" << (setter_fallback_background_scan_known_failed ? "true" : "false") << "\n"
+            << "action_list_address=" << json_escape(pointer_hex(action_result.action_list)) << "\n"
+            << "action_owner_address=" << json_escape(pointer_hex(action_result.action_owner)) << "\n"
+            << "action_owner_surface_address=" << json_escape(pointer_hex(action_result.action_owner_surface)) << "\n"
+            << "action_owner_finalize_context_address=" << json_escape(pointer_hex(action_result.action_owner_finalize_context)) << "\n"
+            << "action_owner_source_address=" << json_escape(pointer_hex(action_result.action_owner_source)) << "\n"
+            << "action_owner_source=" << json_escape(action_result.action_owner_source_label) << "\n"
+            << "action_owner_queue_count=" << action_result.owner_queue_count << "\n"
+            << "action_owner_busy_before=" << static_cast<unsigned int>(action_result.owner_busy_before) << "\n"
+            << "action_owner_busy_after=" << static_cast<unsigned int>(action_result.owner_busy_after) << "\n"
+            << "action_owner_scan_objects=" << action_result.owner_scan_objects << "\n"
+            << "action_owner_scan_controller_candidates=" << action_result.owner_scan_controller_candidates << "\n"
+            << "action_owner_scan_surface_hint_candidates=" << action_result.owner_scan_surface_hint_candidates << "\n"
+            << "action_owner_brick_owner_fallback_enabled=" << (brick_owner_fallback_enabled ? "true" : "false") << "\n"
+            << "action_finalize_called=" << (action_result.entries > 0 ? "true" : "false") << "\n"
+            << "action_finalize_result=" << static_cast<unsigned int>(action_result.finalize_result) << "\n"
+            << "action_finalized=" << (action_result.finalized ? "true" : "false") << "\n"
+            << "action_finalize_exception_code=" << json_escape(hex_u64(action_result.finalize_exception_code)) << "\n"
+            << "action_finalize_exception_address=" << json_escape(pointer_hex(action_result.finalize_exception_address)) << "\n"
+            << "action_metadata_enabled=" << (action_result.action_metadata_enabled ? "true" : "false") << "\n"
+            << "action_metadata_attempted=" << (action_result.action_metadata_attempted ? "true" : "false") << "\n"
+            << "action_metadata_succeeded=" << (action_result.action_metadata_ok ? "true" : "false") << "\n"
+            << "action_entries=" << action_result.entries << "\n"
+            << "action_visibility_entries=" << action_result.visibility_entries << "\n"
+            << "action_collision_entries=" << action_result.collision_entries << "\n"
+            << "action_forced_resync_entries=" << action_result.forced_resync_entries << "\n"
+            << "action_set_attempts=" << g_brick_action_set_attempts.load() << "\n"
+            << "action_set_successes=" << g_brick_action_set_successes.load() << "\n"
+            << "action_set_failures=" << g_brick_action_set_failures.load() << "\n";
+        write_brick_action_owner_probe_lines(out, action_result);
+        out << "detail=" << json_escape(ok
+                   ? (replicated_action_ok
+                          ? (applicator_action_ok
+                                 ? "all runtime bricks reached requested physical state through Brickadia Applicator setters"
+                                 : "all runtime bricks reached requested physical state through one Brickadia action list")
+                           : "all runtime bricks reached requested physical state through a replicated Brickadia action path")
+                    : (setter_fallback_attempted && !replicated_action_ok
+                           ? "local setter fallback reached runtime bytes, but no replicated Brickadia action list succeeded"
+                          : "one or more runtime bricks did not reach requested physical state")) << "\n";
+        write_brick_physical_batch_items(out, items);
+        return out.str();
+    }
+
     std::string brick_physical_set_text(uint32_t brick_id,
                                         int64_t visible_arg,
                                         int64_t collision_channels_arg,
-                                        uintptr_t explicit_grid_context)
+                                        uintptr_t explicit_grid_context,
+                                        uintptr_t explicit_action_source)
     {
         std::ostringstream out;
         out << "Brick physical state\n"
@@ -7000,7 +13311,13 @@ namespace
             << "brick_id=" << brick_id << "\n"
             << "requested_visible_arg=" << visible_arg << "\n"
             << "requested_collision_channels=" << collision_channels_arg << "\n"
-            << "requested_grid_context_override=" << json_escape(pointer_hex(explicit_grid_context)) << "\n";
+            << "requested_grid_context_override=" << json_escape(pointer_hex(explicit_grid_context)) << "\n"
+            << "requested_action_source_override=" << json_escape(pointer_hex(explicit_action_source)) << "\n"
+            << "visibility_setter_enabled=" << (brick_visibility_setter_enabled() ? "true" : "false") << "\n"
+            << "collision_setter_enabled=" << (brick_collision_setter_enabled() ? "true" : "false") << "\n"
+            << "direct_byte_write_confirmed=" << (brick_direct_byte_write_confirmed() ? "true" : "false") << "\n"
+            << "visibility_direct_write_enabled=" << (brick_visibility_direct_write_enabled() ? "true" : "false") << "\n"
+            << "collision_direct_write_enabled=" << (brick_collision_direct_write_enabled() ? "true" : "false") << "\n";
 
         if (!brick_physical_set_enabled())
         {
@@ -7035,6 +13352,7 @@ namespace
         uint8_t before_collision_channels = 0;
         uint32_t brick_cell_index = 0;
         uint32_t brick_sub_index = 0;
+        uint32_t brick_action_key = brick_id;
         read_u64_at(brick_address + kBrickOwnerOffset, owner_address);
         if (owner_address != 0 && is_accessible_memory(static_cast<uintptr_t>(owner_address), 0x18))
         {
@@ -7048,6 +13366,7 @@ namespace
         read_u8_at(brick_address + kBrickCollisionChannelsOffset, before_collision_channels);
         read_u32_at(brick_address, brick_cell_index);
         read_u32_at(brick_address + 0x04, brick_sub_index);
+        read_u32_at(brick_address + kBrickRuntimeIdOffset, brick_action_key);
 
         const bool context_hook_install_attempted = brick_runtime_context_hooks_enabled();
         const bool context_hook_install_ok = context_hook_install_attempted
@@ -7134,7 +13453,7 @@ namespace
         if (visible_arg >= 0)
         {
             visibility_requested = true;
-            target_visible = visible_arg != 0 ? 1 : 0;
+            target_visible = brick_runtime_public_visible_to_byte(visible_arg);
             visible_source = "argument";
         }
         else if (visible_arg == -2)
@@ -7164,6 +13483,316 @@ namespace
             visibility_requested && target_visible != before_visible;
         const bool collision_change_requested =
             collision_requested && next_collision_channels != before_collision_channels;
+
+        if (brick_runtime_action_set_enabled() && (visibility_requested || collision_requested))
+        {
+            const BrickPhysicalActionSetResult action_result =
+                brick_physical_apply_action_set(
+                    module_base,
+                    brick_action_key,
+                    before_visible,
+                    before_collision_channels,
+                    visibility_requested,
+                    target_visible,
+                    collision_requested,
+                    next_collision_channels,
+                    original,
+                    explicit_action_source);
+
+            uint8_t after_visible = 0;
+            uint8_t after_collision_channels = 0;
+            read_u8_at(brick_address + kBrickVisibleOffset, after_visible);
+            read_u8_at(brick_address + kBrickCollisionChannelsOffset, after_collision_channels);
+
+            const bool brick_owner_fallback_action_ok =
+                action_result.action_owner_source_label.rfind("brick-owner-fallback:", 0) == 0;
+            const bool direct_owner_scan_action_ok =
+                action_result.action_owner_source_label.rfind("direct-owner-scan:", 0) == 0;
+            const bool replicated_action_ok =
+                brick_physical_action_result_is_replicated(action_result);
+
+            bool action_assisted_setter_attempted = false;
+            bool action_assisted_grid_context_available = false;
+            uintptr_t action_assisted_grid_context = 0;
+            bool visibility_action_assisted_setter_attempted = false;
+            bool visibility_action_assisted_setter_succeeded = false;
+            bool collision_action_assisted_setter_attempted = false;
+            bool collision_action_assisted_setter_succeeded = false;
+            std::string action_assisted_setter_detail;
+            const bool applicator_action_ok =
+                action_result.applicator_ok && action_result.ok;
+            const bool action_assisted_setter_allowed =
+                replicated_action_ok || applicator_action_ok;
+            if (action_assisted_setter_allowed &&
+                ((visibility_requested && after_visible != target_visible) ||
+                 (collision_requested && after_collision_channels != next_collision_channels)))
+            {
+                action_assisted_setter_attempted = true;
+                if (grid_context_available)
+                {
+                    action_assisted_grid_context = static_cast<uintptr_t>(grid_context_address);
+                    action_assisted_grid_context_available = true;
+                }
+                else
+                {
+                    action_assisted_grid_context = g_brick_grid_context_cached.load();
+                    action_assisted_grid_context_available =
+                        brick_grid_context_cached_is_usable(brick_cell_index, brick_sub_index);
+                }
+                if (action_assisted_grid_context_available)
+                {
+                    const uintptr_t set_visibility_address = module_base + kBrickSetVisibilityOffset;
+                    const uintptr_t set_collision_address = module_base + kBrickSetCollisionChannelsOffset;
+                    if (visibility_requested && after_visible != target_visible)
+                    {
+                        visibility_action_assisted_setter_attempted = true;
+                        if (brick_visibility_setter_enabled() &&
+                            is_executable_memory(set_visibility_address))
+                        {
+                            visibility_action_assisted_setter_succeeded =
+                                brick_physical_apply_visibility(
+                                    set_visibility_address,
+                                    brick_address,
+                                    action_assisted_grid_context,
+                                    target_visible);
+                            read_u8_at(brick_address + kBrickVisibleOffset, after_visible);
+                            if (after_visible == target_visible)
+                            {
+                                visibility_action_assisted_setter_succeeded = true;
+                            }
+                        }
+                    }
+                    if (collision_requested && after_collision_channels != next_collision_channels)
+                    {
+                        collision_action_assisted_setter_attempted = true;
+                        if (brick_collision_setter_enabled() &&
+                            is_executable_memory(set_collision_address))
+                        {
+                            collision_action_assisted_setter_succeeded =
+                                brick_physical_apply_collision(
+                                    set_collision_address,
+                                    brick_address,
+                                    action_assisted_grid_context,
+                                    next_collision_channels);
+                            read_u8_at(brick_address + kBrickCollisionChannelsOffset, after_collision_channels);
+                            if (after_collision_channels == next_collision_channels)
+                            {
+                                collision_action_assisted_setter_succeeded = true;
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    action_assisted_setter_detail = "action path failed or did not apply and no usable grid context was available for Brickadia setter fallback";
+                }
+            }
+
+            const bool visibility_final_ok =
+                !visibility_requested || after_visible == target_visible;
+            const bool collision_final_ok =
+                !collision_requested || after_collision_channels == next_collision_channels;
+            const bool local_physical_ok =
+                visibility_final_ok && collision_final_ok;
+            const bool physical_ok =
+                local_physical_ok && replicated_action_ok;
+            const std::string physical_code = physical_ok
+                ? "OK"
+                : (!replicated_action_ok && local_physical_ok
+                       ? "BRICK_REPLICATED_ACTION_REQUIRED"
+                       : (action_assisted_setter_attempted
+                              ? "BRICK_ACTION_ASSISTED_SETTER_FAILED"
+                              : action_result.code));
+            const std::string physical_detail = physical_ok
+                ? action_result.detail
+                : (!replicated_action_ok && local_physical_ok
+                       ? "local runtime bytes reached the requested state, but no replicated Brickadia action finalized; client-visible state is not proven"
+                       : (!action_result.ok
+                              ? action_result.detail
+                       : (!action_assisted_setter_detail.empty()
+                              ? action_assisted_setter_detail
+                              : "Brickadia action list finalized but live brick state did not reach the requested visibility/collision values")));
+
+            const bool action_assisted_missing_grid_context =
+                !local_physical_ok &&
+                action_assisted_setter_attempted &&
+                !action_assisted_grid_context_available;
+            if (action_assisted_missing_grid_context)
+            {
+                const bool background_context_scan_known_failed =
+                    brick_grid_context_background_scan_failed_for(
+                        brick_cell_index,
+                        brick_sub_index);
+                const bool background_context_scan_started =
+                    !background_context_scan_known_failed &&
+                    brick_grid_context_background_scan_start(
+                        brick_cell_index,
+                        brick_sub_index,
+                        static_cast<uintptr_t>(grid_context_address));
+                const bool background_context_scan_pending =
+                    !background_context_scan_known_failed &&
+                    (background_context_scan_started ||
+                     g_brick_grid_context_background_scan_running.load());
+                if (background_context_scan_pending)
+                {
+                    out << "ok=false\n"
+                        << "code=BRICK_GRID_CONTEXT_SCAN_PENDING\n"
+                        << "owner_address=" << json_escape(pointer_hex(static_cast<uintptr_t>(owner_address))) << "\n"
+                        << "grid_context_address=" << json_escape(pointer_hex(static_cast<uintptr_t>(grid_context_address))) << "\n"
+                        << "grid_context_source=" << json_escape(grid_context_source) << "\n"
+                        << "grid_context_available=false\n"
+                        << "action_set_enabled=true\n"
+                        << "action_set_attempted=true\n"
+                        << "action_set_succeeded=" << (action_result.ok ? "true" : "false") << "\n"
+                        << "replicated_action_succeeded=" << (replicated_action_ok ? "true" : "false") << "\n"
+                        << "action_set_detail=" << json_escape(action_result.detail) << "\n"
+                        << "action_list_address=" << json_escape(pointer_hex(action_result.action_list)) << "\n"
+                        << "action_owner_address=" << json_escape(pointer_hex(action_result.action_owner)) << "\n"
+                        << "action_owner_surface_address=" << json_escape(pointer_hex(action_result.action_owner_surface)) << "\n"
+                        << "action_owner_finalize_context_address=" << json_escape(pointer_hex(action_result.action_owner_finalize_context)) << "\n"
+                        << "action_owner_source_address=" << json_escape(pointer_hex(action_result.action_owner_source)) << "\n"
+                        << "action_owner_source=" << json_escape(action_result.action_owner_source_label) << "\n"
+                        << "action_owner_queue_count=" << action_result.owner_queue_count << "\n"
+                        << "action_owner_busy_before=" << static_cast<unsigned int>(action_result.owner_busy_before) << "\n"
+                        << "action_owner_busy_after=" << static_cast<unsigned int>(action_result.owner_busy_after) << "\n"
+                        << "action_owner_scan_objects=" << action_result.owner_scan_objects << "\n"
+                        << "action_owner_scan_controller_candidates=" << action_result.owner_scan_controller_candidates << "\n"
+                        << "action_owner_scan_surface_hint_candidates=" << action_result.owner_scan_surface_hint_candidates << "\n"
+                        << "action_entries=" << action_result.entries << "\n"
+                        << "action_visibility_entries=" << action_result.visibility_entries << "\n"
+                        << "action_collision_entries=" << action_result.collision_entries << "\n"
+                        << "action_force_resync_enabled=" << (brick_runtime_action_force_resync_enabled() ? "true" : "false") << "\n"
+                        << "action_assisted_setter_attempted=true\n"
+                        << "action_assisted_grid_context_available=false\n"
+                        << "background_context_scan_started=" << (background_context_scan_started ? "true" : "false") << "\n";
+                    write_brick_action_owner_probe_lines(out, action_result);
+                    append_brick_background_context_scan_status(out);
+                    out << "brick_cell_index=" << brick_cell_index << "\n"
+                        << "brick_sub_index=" << brick_sub_index << "\n"
+                        << "before_visible=" << static_cast<unsigned int>(before_visible) << "\n"
+                        << "before_public_visible=" << (brick_runtime_byte_is_public_visible(before_visible) ? "true" : "false") << "\n"
+                        << "before_collision_channels=" << static_cast<unsigned int>(before_collision_channels) << "\n"
+                        << "target_visible=" << static_cast<unsigned int>(target_visible) << "\n"
+                        << "target_public_visible=" << (brick_runtime_byte_is_public_visible(target_visible) ? "true" : "false") << "\n"
+                        << "target_collision_channels=" << static_cast<unsigned int>(next_collision_channels) << "\n"
+                        << "after_visible=" << static_cast<unsigned int>(after_visible) << "\n"
+                        << "after_public_visible=" << (brick_runtime_byte_is_public_visible(after_visible) ? "true" : "false") << "\n"
+                        << "after_collision_channels=" << static_cast<unsigned int>(after_collision_channels) << "\n"
+                        << "detail=deferred Brickadia setter fallback while searching for a sparse-grid context\n";
+                    return out.str();
+                }
+            }
+
+            if (!action_assisted_missing_grid_context)
+            {
+                out << "ok=" << (physical_ok ? "true" : "false") << "\n"
+                    << "code=" << physical_code << "\n"
+                    << "owner_address=" << json_escape(pointer_hex(static_cast<uintptr_t>(owner_address))) << "\n"
+                    << "grid_context_address=" << json_escape(pointer_hex(static_cast<uintptr_t>(grid_context_address))) << "\n"
+                    << "grid_context_source=" << json_escape(grid_context_source) << "\n"
+                    << "grid_context_available=" << (grid_context_available ? "true" : "false") << "\n"
+                    << "action_set_enabled=true\n"
+                    << "action_set_attempted=true\n"
+                    << "action_set_succeeded=" << (action_result.ok ? "true" : "false") << "\n"
+                    << "replicated_action_succeeded=" << (replicated_action_ok ? "true" : "false") << "\n"
+                    << "direct_owner_scan_action_succeeded=" << (direct_owner_scan_action_ok ? "true" : "false") << "\n"
+                    << "brick_owner_fallback_action_succeeded=" << (brick_owner_fallback_action_ok ? "true" : "false") << "\n"
+                    << "action_set_detail=" << json_escape(action_result.detail) << "\n"
+                    << "action_list_address=" << json_escape(pointer_hex(action_result.action_list)) << "\n"
+                    << "action_owner_address=" << json_escape(pointer_hex(action_result.action_owner)) << "\n"
+                    << "action_owner_surface_address=" << json_escape(pointer_hex(action_result.action_owner_surface)) << "\n"
+                    << "action_owner_finalize_context_address=" << json_escape(pointer_hex(action_result.action_owner_finalize_context)) << "\n"
+                    << "action_owner_source_address=" << json_escape(pointer_hex(action_result.action_owner_source)) << "\n"
+                    << "action_owner_source=" << json_escape(action_result.action_owner_source_label) << "\n"
+                    << "action_owner_queue_count=" << action_result.owner_queue_count << "\n"
+                    << "action_owner_busy_before=" << static_cast<unsigned int>(action_result.owner_busy_before) << "\n"
+                    << "action_owner_busy_after=" << static_cast<unsigned int>(action_result.owner_busy_after) << "\n"
+                    << "action_owner_scan_objects=" << action_result.owner_scan_objects << "\n"
+                    << "action_owner_scan_controller_candidates=" << action_result.owner_scan_controller_candidates << "\n"
+                    << "action_owner_scan_surface_hint_candidates=" << action_result.owner_scan_surface_hint_candidates << "\n"
+                        << "action_finalize_called=" << (action_result.entries > 0 ? "true" : "false") << "\n"
+                        << "action_finalize_result=" << static_cast<unsigned int>(action_result.finalize_result) << "\n"
+                        << "action_finalized=" << (action_result.finalized ? "true" : "false") << "\n"
+                        << "action_finalize_exception_code=" << json_escape(hex_u64(action_result.finalize_exception_code)) << "\n"
+                        << "action_finalize_exception_address=" << json_escape(pointer_hex(action_result.finalize_exception_address)) << "\n"
+                        << "action_metadata_enabled=" << (action_result.action_metadata_enabled ? "true" : "false") << "\n"
+                        << "action_metadata_attempted=" << (action_result.action_metadata_attempted ? "true" : "false") << "\n"
+                        << "action_metadata_succeeded=" << (action_result.action_metadata_ok ? "true" : "false") << "\n"
+                        << "action_entries=" << action_result.entries << "\n"
+                        << "action_visibility_entries=" << action_result.visibility_entries << "\n"
+                        << "action_collision_entries=" << action_result.collision_entries << "\n"
+                    << "action_forced_resync_entries=" << action_result.forced_resync_entries << "\n"
+                    << "action_set_attempts=" << g_brick_action_set_attempts.load() << "\n"
+                    << "action_set_successes=" << g_brick_action_set_successes.load() << "\n"
+                    << "action_set_failures=" << g_brick_action_set_failures.load() << "\n"
+                    << "action_owner_scan_requests=" << g_brick_action_owner_scan_requests.load() << "\n"
+                    << "action_owner_scan_failures=" << g_brick_action_owner_scan_failures.load() << "\n"
+                    << "action_owner_cached_address=" << json_escape(pointer_hex(g_brick_action_owner_cached.load())) << "\n"
+                    << "action_owner_cached_surface=" << json_escape(pointer_hex(g_brick_action_owner_surface_cached.load())) << "\n"
+                    << "action_owner_cache_ttl_ms=" << brick_action_owner_cache_ttl_ms() << "\n";
+                write_brick_action_owner_probe_lines(out, action_result);
+                out << "action_force_resync_enabled=" << (brick_runtime_action_force_resync_enabled() ? "true" : "false") << "\n"
+                    << "context_hook_enabled=" << (brick_runtime_context_hooks_enabled() ? "true" : "false") << "\n"
+                    << "context_hook_install_attempted=" << (context_hook_install_attempted ? "true" : "false") << "\n"
+                    << "context_hook_install_ok=" << (context_hook_install_ok ? "true" : "false") << "\n"
+                    << "context_hooks_installed=" << (g_brick_runtime_context_hooks_installed.load() ? "true" : "false") << "\n"
+                    << "cached_grid_context_address=" << json_escape(pointer_hex(cached_grid_context)) << "\n"
+                    << "cached_grid_context_age_ms=" << (cached_grid_context_age_ms == UINT64_MAX ? 0 : cached_grid_context_age_ms) << "\n"
+                    << "cached_grid_context_ttl_ms=" << cached_grid_context_ttl_ms << "\n"
+                    << "cached_grid_context_fresh=" << (cached_grid_context_fresh ? "true" : "false") << "\n"
+                    << "context_capture_hits=" << g_brick_context_capture_hits.load() << "\n"
+                    << "context_capture_rejects=" << g_brick_context_capture_rejects.load() << "\n"
+                    << "place_action_apply_hits=" << g_brick_place_action_apply_hits.load() << "\n"
+                    << "visibility_action_apply_hits=" << g_brick_visibility_action_apply_hits.load() << "\n"
+                    << "collision_action_apply_hits=" << g_brick_collision_action_apply_hits.load() << "\n"
+                    << "low_setter_hook_enabled=" << (brick_runtime_low_setter_context_hook_enabled() ? "true" : "false") << "\n"
+                    << "visibility_low_setter_hook_installed=" << (g_brick_visibility_low_setter_hook.installed.load() ? "true" : "false") << "\n"
+                    << "collision_low_setter_hook_installed=" << (g_brick_collision_low_setter_hook.installed.load() ? "true" : "false") << "\n"
+                    << "visibility_low_setter_hits=" << g_brick_visibility_low_setter_hits.load() << "\n"
+                    << "collision_low_setter_hits=" << g_brick_collision_low_setter_hits.load() << "\n"
+                    << "action_assisted_setter_attempted=" << (action_assisted_setter_attempted ? "true" : "false") << "\n"
+                    << "action_assisted_grid_context=" << json_escape(pointer_hex(action_assisted_grid_context)) << "\n"
+                    << "action_assisted_grid_context_available=" << (action_assisted_grid_context_available ? "true" : "false") << "\n"
+                    << "visibility_action_assisted_setter_attempted=" << (visibility_action_assisted_setter_attempted ? "true" : "false") << "\n"
+                    << "visibility_action_assisted_setter_succeeded=" << (visibility_action_assisted_setter_succeeded ? "true" : "false") << "\n"
+                    << "collision_action_assisted_setter_attempted=" << (collision_action_assisted_setter_attempted ? "true" : "false") << "\n"
+                    << "collision_action_assisted_setter_succeeded=" << (collision_action_assisted_setter_succeeded ? "true" : "false") << "\n";
+                append_brick_background_context_scan_status(out);
+                out << "brick_cell_index=" << brick_cell_index << "\n"
+                    << "brick_sub_index=" << brick_sub_index << "\n"
+                    << "brick_action_key=" << brick_action_key << "\n"
+                    << "before_visible=" << static_cast<unsigned int>(before_visible) << "\n"
+                    << "before_public_visible=" << (brick_runtime_byte_is_public_visible(before_visible) ? "true" : "false") << "\n"
+                    << "before_collision_channels=" << static_cast<unsigned int>(before_collision_channels) << "\n"
+                    << "target_visible=" << static_cast<unsigned int>(target_visible) << "\n"
+                    << "target_public_visible=" << (brick_runtime_byte_is_public_visible(target_visible) ? "true" : "false") << "\n"
+                    << "target_collision_channels=" << static_cast<unsigned int>(next_collision_channels) << "\n"
+                    << "after_visible=" << static_cast<unsigned int>(after_visible) << "\n"
+                    << "after_public_visible=" << (brick_runtime_byte_is_public_visible(after_visible) ? "true" : "false") << "\n"
+                    << "after_collision_channels=" << static_cast<unsigned int>(after_collision_channels) << "\n"
+                    << "visibility_set_requested=" << (visibility_requested ? "true" : "false") << "\n"
+                    << "visibility_set_attempted=" << (visibility_requested ? "true" : "false") << "\n"
+                    << "visibility_set_succeeded=" << (visibility_requested && visibility_final_ok ? "true" : "false") << "\n"
+                    << "visibility_set_skipped=false\n"
+                    << "visibility_set_skip_reason=\n"
+                    << "visibility_set_method=" << (visibility_action_assisted_setter_attempted ? "brickadia-action-list+setter" : "brickadia-action-list") << "\n"
+                    << "visible_source=" << visible_source << "\n"
+                    << "visibility_change_requested=" << (visibility_change_requested ? "true" : "false") << "\n"
+                    << "collision_set_requested=" << (collision_requested ? "true" : "false") << "\n"
+                    << "collision_set_attempted=" << (collision_requested ? "true" : "false") << "\n"
+                    << "collision_set_succeeded=" << (collision_requested && collision_final_ok ? "true" : "false") << "\n"
+                    << "collision_set_skipped=false\n"
+                    << "collision_set_method=" << (collision_action_assisted_setter_attempted ? "brickadia-action-list+setter" : "brickadia-action-list") << "\n"
+                    << "collision_set_skip_reason=\n"
+                    << "collision_channels_source=" << collision_source << "\n"
+                    << "collision_change_requested=" << (collision_change_requested ? "true" : "false") << "\n"
+                    << "original_visible=" << static_cast<unsigned int>(original.visible) << "\n"
+                    << "original_collision_channels=" << static_cast<unsigned int>(original.collision_channels) << "\n"
+                    << "detail=" << json_escape(physical_detail) << "\n";
+                return out.str();
+            }
+        }
+
         const bool setter_scan_before_direct =
             brick_runtime_scan_before_direct_write_enabled() &&
             !grid_context_available &&
@@ -7240,6 +13869,9 @@ namespace
                     << "owner_address=" << json_escape(pointer_hex(static_cast<uintptr_t>(owner_address))) << "\n"
                     << "grid_context_address=" << json_escape(pointer_hex(static_cast<uintptr_t>(grid_context_address))) << "\n"
                     << "grid_context_source=" << json_escape(grid_context_source) << "\n"
+                    << "action_set_enabled=" << (brick_runtime_action_set_enabled() ? "true" : "false") << "\n"
+                    << "action_force_resync_enabled=" << (brick_runtime_action_force_resync_enabled() ? "true" : "false") << "\n"
+                    << "action_owner_scan_enabled=" << (brick_action_owner_scan_enabled() ? "true" : "false") << "\n"
                     << "background_context_scan_known_failed=" << (background_context_scan_known_failed ? "true" : "false") << "\n"
                     << "background_context_scan_started=" << (background_context_scan_started ? "true" : "false") << "\n"
                     << "low_setter_hook_enabled=" << (brick_runtime_low_setter_context_hook_enabled() ? "true" : "false") << "\n"
@@ -7419,6 +14051,9 @@ namespace
             << "grid_context_address=" << json_escape(pointer_hex(static_cast<uintptr_t>(grid_context_address))) << "\n"
             << "grid_context_source=" << json_escape(grid_context_source) << "\n"
             << "grid_context_available=" << (grid_context_available ? "true" : "false") << "\n"
+            << "action_set_enabled=" << (brick_runtime_action_set_enabled() ? "true" : "false") << "\n"
+            << "action_force_resync_enabled=" << (brick_runtime_action_force_resync_enabled() ? "true" : "false") << "\n"
+            << "action_owner_scan_enabled=" << (brick_action_owner_scan_enabled() ? "true" : "false") << "\n"
             << "context_hook_enabled=" << (brick_runtime_context_hooks_enabled() ? "true" : "false") << "\n"
             << "context_hook_install_attempted=" << (context_hook_install_attempted ? "true" : "false") << "\n"
             << "context_hook_install_ok=" << (context_hook_install_ok ? "true" : "false") << "\n"
@@ -7441,10 +14076,13 @@ namespace
         out << "brick_cell_index=" << brick_cell_index << "\n"
             << "brick_sub_index=" << brick_sub_index << "\n"
             << "before_visible=" << static_cast<unsigned int>(before_visible) << "\n"
+            << "before_public_visible=" << (brick_runtime_byte_is_public_visible(before_visible) ? "true" : "false") << "\n"
             << "before_collision_channels=" << static_cast<unsigned int>(before_collision_channels) << "\n"
             << "target_visible=" << static_cast<unsigned int>(target_visible) << "\n"
+            << "target_public_visible=" << (brick_runtime_byte_is_public_visible(target_visible) ? "true" : "false") << "\n"
             << "target_collision_channels=" << static_cast<unsigned int>(next_collision_channels) << "\n"
             << "after_visible=" << static_cast<unsigned int>(after_visible) << "\n"
+            << "after_public_visible=" << (brick_runtime_byte_is_public_visible(after_visible) ? "true" : "false") << "\n"
             << "after_collision_channels=" << static_cast<unsigned int>(after_collision_channels) << "\n"
             << "visibility_set_requested=" << (visibility_requested ? "true" : "false") << "\n"
             << "visibility_set_attempted=" << (visibility_attempted ? "true" : "false") << "\n"
@@ -7462,6 +14100,7 @@ namespace
             << "collision_set_skip_reason=" << json_escape(collision_skip_reason) << "\n"
             << "collision_channels_source=" << collision_source << "\n"
             << "original_visible=" << static_cast<unsigned int>(original.visible) << "\n"
+            << "original_public_visible=" << (brick_runtime_byte_is_public_visible(original.visible) ? "true" : "false") << "\n"
             << "original_collision_channels=" << static_cast<unsigned int>(original.collision_channels) << "\n";
         return out.str();
     }
@@ -7538,6 +14177,12 @@ namespace
         g_treecut_slot.store(slot_address);
         g_treecut_original.store(reinterpret_cast<uintptr_t>(previous));
         g_treecut_installed.store(true);
+        if (treecut_damage_target_hook_enabled())
+        {
+            treecut_probe_install_slot(kTreeCutProcessImpactProbeIndex);
+            treecut_probe_install_slot(kTreeCutApplyDamageProbeIndex);
+            treecut_probe_install_slot(kTreeCutReceiveHitProbeIndex);
+        }
         treecut_set_error("");
         return true;
     }
@@ -7562,16 +14207,36 @@ namespace
     {
         TreeCutResolvedTarget target;
         TreeCutConsoleTagInfo console_tag_info;
-        if (treecut_event_local_tag_scan_enabled())
+        g_treecut_target_resolve_attempts.fetch_add(1);
+        target = treecut_resolve_target_from_locals(locals, values);
+        if (!target.found)
         {
             target = treecut_resolve_target_actor(values);
-            treecut_collect_console_tags_from_locals(locals, console_tag_info);
-            treecut_merge_target_console_tag(console_tag_info, target);
         }
+        if (treecut_event_local_tag_scan_enabled())
+        {
+            treecut_collect_console_tags_from_locals(locals, console_tag_info);
+        }
+        treecut_merge_target_console_tag(console_tag_info, target);
         treecut_record_console_tag_info(console_tag_info);
 
         const char* item_type = treecut_resource_tool_item_type(tool);
         const bool is_pickaxe = tool == TreeCutResourceTool::Pickaxe;
+        const uintptr_t action_source = g_treecut_last_action_source.load();
+        const uintptr_t action_owner = g_treecut_last_action_owner.load();
+        const uintptr_t action_owner_surface = g_treecut_last_action_owner_surface.load();
+        std::string action_owner_source;
+        std::string action_owner_detail;
+        {
+            std::lock_guard lock(g_treecut_mutex);
+            action_owner_source = g_treecut_last_action_owner_source;
+            action_owner_detail = g_treecut_last_action_owner_detail;
+        }
+        const bool action_owner_current =
+            action_source != 0 &&
+            action_source == reinterpret_cast<uintptr_t>(context) &&
+            action_owner != 0 &&
+            action_owner_surface != 0;
 
         std::ostringstream out;
         out << std::setprecision(17)
@@ -7586,6 +14251,12 @@ namespace
             << "\"itemVerified\":true,"
             << "\"contextAddress\":\"" << json_escape(pointer_hex(reinterpret_cast<uintptr_t>(context))) << "\","
             << "\"contextClassAddress\":\"" << json_escape(pointer_hex(g_treecut_last_context_class.load())) << "\","
+            << "\"actionSourceAddress\":\"" << json_escape(pointer_hex(action_source)) << "\","
+            << "\"actionOwnerAddress\":\"" << json_escape(pointer_hex(action_owner)) << "\","
+            << "\"actionOwnerSurfaceAddress\":\"" << json_escape(pointer_hex(action_owner_surface)) << "\","
+            << "\"actionOwnerSource\":\"" << json_escape(action_owner_source) << "\","
+            << "\"actionOwnerDetail\":\"" << json_escape(action_owner_detail) << "\","
+            << "\"actionOwnerCached\":" << (action_owner_current ? "true" : "false") << ","
             << "\"handaxeClassAddress\":\"" << json_escape(pointer_hex(g_treecut_handaxe_class.load())) << "\","
             << "\"pickaxeClassAddress\":\"" << json_escape(pointer_hex(g_treecut_pickaxe_class.load())) << "\","
             << "\"localsAddress\":\"" << json_escape(pointer_hex(locals)) << "\","
@@ -7594,6 +14265,7 @@ namespace
             << "\"raw0\":" << values[0];
         write_treecut_console_tags_json(out, console_tag_info);
         write_treecut_target_json(out, target);
+        write_treecut_damage_target_json(out, !target.found);
         out << "}";
         return out.str();
     }
@@ -7634,6 +14306,19 @@ namespace
             {
                 g_treecut_verified_handaxe_hits.fetch_add(1);
             }
+            if (brick_runtime_action_set_enabled())
+            {
+                const uintptr_t module_base = brickadia_module_base();
+                if (module_base != 0)
+                {
+                    brick_action_owner_cache_from_treecut_source(
+                        module_base,
+                        context,
+                        tool == TreeCutResourceTool::Pickaxe
+                            ? "resource-hit-pickaxe-context"
+                            : "resource-hit-handaxe-context");
+                }
+            }
             const uint64_t sequence = g_treecut_events.fetch_add(1) + 1;
             try
             {
@@ -7670,6 +14355,12 @@ namespace
     std::string treecut_native_status_text()
     {
         std::lock_guard lock(g_treecut_mutex);
+        const uint64_t damage_target_tick_ms = g_treecut_last_damage_target_tick_ms.load();
+        const uint64_t now_ms = GetTickCount64();
+        const uint64_t damage_target_age_ms =
+            damage_target_tick_ms == 0 || now_ms < damage_target_tick_ms
+                ? 0
+                : now_ms - damage_target_tick_ms;
         std::ostringstream out;
         out << "Resource native status\n"
             << "source=BMFSocketResourceNative\n"
@@ -7688,6 +14379,29 @@ namespace
             << "queued=" << g_treecut_queue.size() << "\n"
             << "queue_drops=" << g_treecut_queue_drops.load() << "\n"
             << "param_failures=" << g_treecut_param_failures.load() << "\n"
+            << "damage_target_hook_enabled=" << (treecut_damage_target_hook_enabled() ? "true" : "false") << "\n"
+            << "damage_target_metadata_enabled=" << (treecut_damage_target_metadata_enabled() ? "true" : "false") << "\n"
+            << "damage_target_hook_installed="
+            << ((g_treecut_probe_slots[kTreeCutProcessImpactProbeIndex].installed.load() ||
+                 g_treecut_probe_slots[kTreeCutApplyDamageProbeIndex].installed.load() ||
+                 g_treecut_probe_slots[kTreeCutReceiveHitProbeIndex].installed.load()) ? "true" : "false") << "\n"
+            << "damage_target_process_impact_hook_installed="
+            << (g_treecut_probe_slots[kTreeCutProcessImpactProbeIndex].installed.load() ? "true" : "false") << "\n"
+            << "damage_target_apply_damage_hook_installed="
+            << (g_treecut_probe_slots[kTreeCutApplyDamageProbeIndex].installed.load() ? "true" : "false") << "\n"
+            << "damage_target_receive_hit_hook_installed="
+            << (g_treecut_probe_slots[kTreeCutReceiveHitProbeIndex].installed.load() ? "true" : "false") << "\n"
+            << "damage_target_hits=" << g_treecut_damage_target_hits.load() << "\n"
+            << "damage_target_misses=" << g_treecut_damage_target_misses.load() << "\n"
+            << "last_damage_target=" << json_escape(pointer_hex(g_treecut_last_damage_target.load())) << "\n"
+            << "last_damage_target_context=" << json_escape(pointer_hex(g_treecut_last_damage_target_context.load())) << "\n"
+            << "last_damage_target_locals=" << json_escape(pointer_hex(g_treecut_last_damage_target_locals.load())) << "\n"
+            << "last_damage_target_source="
+            << json_escape(g_treecut_last_damage_target_source.empty()
+                   ? treecut_damage_target_offset_label(g_treecut_last_damage_target_offset.load())
+                   : g_treecut_last_damage_target_source) << "\n"
+            << "last_damage_target_tick_ms=" << damage_target_tick_ms << "\n"
+            << "last_damage_target_age_ms=" << damage_target_age_ms << "\n"
             << "target_resolve_radius=" << kTreeCutTargetResolveRadius << "\n"
             << "target_cache_candidates=" << g_treecut_target_cache.size() << "\n"
             << "target_cache_refreshes=" << g_treecut_target_cache_refreshes.load() << "\n"
@@ -7717,6 +14431,13 @@ namespace
             << "pickaxe_class_detail=" << json_escape(g_treecut_pickaxe_class_detail) << "\n"
             << "last_context=" << json_escape(pointer_hex(g_treecut_last_context.load())) << "\n"
             << "last_context_class=" << json_escape(pointer_hex(g_treecut_last_context_class.load())) << "\n"
+            << "action_owner_cache_hits=" << g_treecut_action_owner_cache_hits.load() << "\n"
+            << "action_owner_cache_failures=" << g_treecut_action_owner_cache_failures.load() << "\n"
+            << "last_action_source=" << json_escape(pointer_hex(g_treecut_last_action_source.load())) << "\n"
+            << "last_action_owner=" << json_escape(pointer_hex(g_treecut_last_action_owner.load())) << "\n"
+            << "last_action_owner_surface=" << json_escape(pointer_hex(g_treecut_last_action_owner_surface.load())) << "\n"
+            << "last_action_owner_source=" << json_escape(g_treecut_last_action_owner_source) << "\n"
+            << "last_action_owner_detail=" << json_escape(g_treecut_last_action_owner_detail) << "\n"
             << "last_item_type=" << json_escape(g_treecut_last_item_type) << "\n"
             << "last_reject_reason=" << json_escape(g_treecut_last_reject_reason) << "\n"
             << "last_error=" << json_escape(g_treecut_last_error) << "\n";
@@ -7727,6 +14448,147 @@ namespace
     {
         resolve_treecut_handaxe_class();
         return treecut_native_status_text();
+    }
+
+    bool treecut_probe_target_text_likely_resource(Unreal::UObject* object)
+    {
+        if (!is_live_uobject(object))
+        {
+            return false;
+        }
+
+        const std::string text = ascii_lower(
+            object_name(object) + " " +
+            object_full_name(object) + " " +
+            object_class_name(object) + " " +
+            object_class_full_name(object));
+
+        if (text.find("weapon") != std::string::npos ||
+            text.find("handaxe") != std::string::npos ||
+            text.find("pickaxe") != std::string::npos ||
+            text.find("controller") != std::string::npos ||
+            text.find("playerstate") != std::string::npos ||
+            text.find("character") != std::string::npos ||
+            text.find("pawn") != std::string::npos)
+        {
+            return false;
+        }
+
+        return text.find("tree") != std::string::npos ||
+               text.find("brick") != std::string::npos ||
+               text.find("interact") != std::string::npos ||
+               text.find("component") != std::string::npos ||
+               text.find("damageable") != std::string::npos;
+    }
+
+    bool treecut_record_resource_target_from_object(Unreal::UObject* object,
+                                                    void* context,
+                                                    uintptr_t locals,
+                                                    uintptr_t source_offset,
+                                                    std::string source_label)
+    {
+        if (!is_live_uobject(object))
+        {
+            return false;
+        }
+
+        TreeCutConsoleTagInfo tag_info;
+        treecut_collect_console_tags_from_object(tag_info, object, source_label, 1);
+        const bool has_tree_tag = !treecut_first_tree_id_console_tag(tag_info.tags).empty();
+        if (!has_tree_tag && !treecut_probe_target_text_likely_resource(object))
+        {
+            return false;
+        }
+
+        g_treecut_damage_target_hits.fetch_add(1);
+        g_treecut_last_damage_target.store(reinterpret_cast<uintptr_t>(object));
+        g_treecut_last_damage_target_context.store(reinterpret_cast<uintptr_t>(context));
+        g_treecut_last_damage_target_locals.store(locals);
+        g_treecut_last_damage_target_offset.store(source_offset);
+        g_treecut_last_damage_target_tick_ms.store(GetTickCount64());
+        {
+            std::lock_guard lock(g_treecut_mutex);
+            if (has_tree_tag)
+            {
+                const std::string tag = treecut_first_tree_id_console_tag(tag_info.tags);
+                g_treecut_last_console_tag = tag;
+                g_treecut_last_console_tag_source = tag_info.source.empty()
+                    ? source_label
+                    : tag_info.source;
+            }
+            g_treecut_last_damage_target_source = std::move(source_label);
+        }
+        return true;
+    }
+
+    bool treecut_record_process_impact_target(void* context, uintptr_t locals)
+    {
+        constexpr uintptr_t offsets[] = {0xB0, 0xB8, 0xD8};
+        for (uintptr_t offset : offsets)
+        {
+            Unreal::UObject* object = read_uobject_at(locals + offset);
+            if (!is_live_uobject(object))
+            {
+                continue;
+            }
+
+            std::ostringstream label;
+            label << "ProcessImpactDamageableObject.locals+0x"
+                  << std::uppercase << std::hex << offset;
+            if (treecut_record_resource_target_from_object(object, context, locals, offset, label.str()))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool treecut_record_receive_hit_target(void* context, uintptr_t locals)
+    {
+        struct OffsetCandidate
+        {
+            uintptr_t offset;
+            const char* label;
+        };
+
+        const OffsetCandidate offsets[] = {
+            {0x0, "ReceiveHit.MyComponent"},
+            {0x8, "ReceiveHit.OtherActor"},
+            {0x10, "ReceiveHit.OtherComponent"},
+            {0x68 + 0xB0, "ReceiveHit.Hit.object_b0"},
+            {0x68 + 0xB8, "ReceiveHit.Hit.object_b8"},
+            {0x68 + 0xD8, "ReceiveHit.Hit.object_d8"},
+        };
+
+        for (const OffsetCandidate& candidate : offsets)
+        {
+            Unreal::UObject* object = read_uobject_at(locals + candidate.offset);
+            if (!is_live_uobject(object))
+            {
+                continue;
+            }
+
+            std::ostringstream label;
+            label << candidate.label << "+0x"
+                  << std::uppercase << std::hex << candidate.offset;
+            if (treecut_record_resource_target_from_object(
+                    object,
+                    context,
+                    locals,
+                    candidate.offset,
+                    label.str()))
+            {
+                return true;
+            }
+        }
+
+        auto* context_object = reinterpret_cast<Unreal::UObject*>(context);
+        return treecut_record_resource_target_from_object(
+            context_object,
+            context,
+            locals,
+            0,
+            "ReceiveHit.context");
     }
 
     bool is_object_property(Unreal::FProperty* property)
@@ -7788,12 +14650,18 @@ namespace
     struct NativePlayerLocation
     {
         std::string source_kind;
+        uintptr_t source_address{0};
         std::string source_name;
         std::string source_full_name;
+        uintptr_t controller_address{0};
         std::string controller_name;
         std::string controller_full_name;
+        uintptr_t pawn_address{0};
         std::string pawn_name;
         std::string pawn_full_name;
+        uintptr_t root_component_address{0};
+        std::string root_component_name;
+        std::string root_component_full_name;
         double x = 0.0;
         double y = 0.0;
         double z = 0.0;
@@ -7863,11 +14731,15 @@ namespace
 
             Unreal::FVector vector;
             std::string source_kind_suffix;
-            if (try_actor_k2_location(pawn, vector))
+            Unreal::UObject* root_component = nullptr;
+            if (try_actor_root_component_location(pawn, vector, source_kind_suffix, &root_component))
+            {
+            }
+            else if (try_actor_k2_location(pawn, vector))
             {
                 source_kind_suffix = ".K2_GetActorLocation";
             }
-            else if (!try_actor_root_component_location(pawn, vector, source_kind_suffix))
+            else
             {
                 return false;
             }
@@ -7882,19 +14754,80 @@ namespace
 
             NativePlayerLocation location;
             location.source_kind = std::string(source_kind) + source_kind_suffix;
+            location.source_address = reinterpret_cast<uintptr_t>(source);
             location.source_name = narrow_string(source->GetName());
             location.source_full_name = narrow_string(source->GetFullName());
             if (is_live_uobject(controller))
             {
+                location.controller_address = reinterpret_cast<uintptr_t>(controller);
                 location.controller_name = narrow_string(controller->GetName());
                 location.controller_full_name = narrow_string(controller->GetFullName());
             }
+            location.pawn_address = reinterpret_cast<uintptr_t>(pawn);
             location.pawn_name = narrow_string(pawn->GetName());
             location.pawn_full_name = narrow_string(pawn->GetFullName());
+            if (is_live_uobject(root_component))
+            {
+                location.root_component_address = reinterpret_cast<uintptr_t>(root_component);
+                location.root_component_name = narrow_string(root_component->GetName());
+                location.root_component_full_name = narrow_string(root_component->GetFullName());
+            }
             location.x = x;
             location.y = y;
             location.z = z;
             seen_sources.push_back(source);
+            results.push_back(std::move(location));
+            return true;
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
+    bool try_push_component_location(std::vector<NativePlayerLocation>& results,
+                                     std::vector<Unreal::UObject*>& seen_sources,
+                                     Unreal::UObject* component,
+                                     std::string_view source_kind)
+    {
+        if (!is_live_uobject(component))
+        {
+            return false;
+        }
+        if (std::find(seen_sources.begin(), seen_sources.end(), component) != seen_sources.end())
+        {
+            return false;
+        }
+
+        try
+        {
+            Unreal::FVector vector;
+            std::string method;
+            if (!try_component_relative_location(component, vector, method))
+            {
+                return false;
+            }
+
+            const double x = vector.X();
+            const double y = vector.Y();
+            const double z = vector.Z();
+            if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
+            {
+                return false;
+            }
+
+            NativePlayerLocation location;
+            location.source_kind = std::string(source_kind) + "." + method;
+            location.source_address = reinterpret_cast<uintptr_t>(component);
+            location.source_name = narrow_string(component->GetName());
+            location.source_full_name = narrow_string(component->GetFullName());
+            location.root_component_address = reinterpret_cast<uintptr_t>(component);
+            location.root_component_name = location.source_name;
+            location.root_component_full_name = location.source_full_name;
+            location.x = x;
+            location.y = y;
+            location.z = z;
+            seen_sources.push_back(component);
             results.push_back(std::move(location));
             return true;
         }
@@ -8080,12 +15013,18 @@ namespace
     {
         out << "match=single-live-pawn\n"
             << "source_kind=" << json_escape(location.source_kind) << "\n"
+            << "source_address=" << json_escape(pointer_hex(location.source_address)) << "\n"
             << "source_object=" << json_escape(location.source_name) << "\n"
             << "source_full_name=" << json_escape(location.source_full_name) << "\n"
+            << "controller_address=" << json_escape(pointer_hex(location.controller_address)) << "\n"
             << "controller=" << json_escape(location.controller_name) << "\n"
             << "controller_full_name=" << json_escape(location.controller_full_name) << "\n"
+            << "pawn_address=" << json_escape(pointer_hex(location.pawn_address)) << "\n"
             << "pawn=" << json_escape(location.pawn_name) << "\n"
             << "pawn_full_name=" << json_escape(location.pawn_full_name) << "\n"
+            << "root_component_address=" << json_escape(pointer_hex(location.root_component_address)) << "\n"
+            << "root_component=" << json_escape(location.root_component_name) << "\n"
+            << "root_component_full_name=" << json_escape(location.root_component_full_name) << "\n"
             << std::fixed << std::setprecision(3)
             << "x=" << location.x << "\n"
             << "y=" << location.y << "\n"
@@ -8103,12 +15042,18 @@ namespace
                 << "|y=" << location.y
                 << "|z=" << location.z
                 << "|source_kind=" << json_escape(location.source_kind)
+                << "|source_address=" << json_escape(pointer_hex(location.source_address))
                 << "|source_object=" << json_escape(location.source_name)
                 << "|source_full_name=" << json_escape(location.source_full_name)
+                << "|controller_address=" << json_escape(pointer_hex(location.controller_address))
                 << "|controller=" << json_escape(location.controller_name)
                 << "|controller_full_name=" << json_escape(location.controller_full_name)
+                << "|pawn_address=" << json_escape(pointer_hex(location.pawn_address))
                 << "|pawn=" << json_escape(location.pawn_name)
                 << "|pawn_full_name=" << json_escape(location.pawn_full_name)
+                << "|root_component_address=" << json_escape(pointer_hex(location.root_component_address))
+                << "|root_component=" << json_escape(location.root_component_name)
+                << "|root_component_full_name=" << json_escape(location.root_component_full_name)
                 << "\n";
         }
     }
@@ -8117,6 +15062,11 @@ namespace
     {
         std::vector<NativePlayerLocation> locations;
         std::vector<Unreal::UObject*> seen_sources;
+        const std::string source_address_text = ascii_lower(trim_ascii(source_address));
+        const bool requested_component_source =
+            source_address_text.rfind("component:", 0) == 0 ||
+            source_address_text.rfind("root_component:", 0) == 0;
+        const bool requested_pawn_source = source_address_text.rfind("pawn:", 0) == 0;
 
         std::ostringstream out;
         out << "Native player location\n"
@@ -8183,7 +15133,19 @@ namespace
             return out.str();
         }
 
-        bool resolved = try_push_controller_location(locations, seen_sources, source);
+        bool resolved = false;
+        if (requested_component_source)
+        {
+            resolved = try_push_component_location(locations, seen_sources, source, "component");
+        }
+        if (!resolved && requested_pawn_source)
+        {
+            resolved = try_push_pawn_location(locations, seen_sources, source, nullptr, source, "pawn");
+        }
+        if (!resolved)
+        {
+            resolved = try_push_controller_location(locations, seen_sources, source);
+        }
         if (!resolved)
         {
             resolved = try_push_player_state_location(locations, seen_sources, source);
@@ -8665,6 +15627,118 @@ namespace
         return 1;
     }
 
+    int64_t lua_parse_optional_bool_arg(lua_State* state, int index)
+    {
+        if (lua_isboolean(state, index))
+        {
+            return lua_toboolean(state, index) ? 1 : 0;
+        }
+        if (lua_isnumber(state, index))
+        {
+            return lua_tointeger(state, index) != 0 ? 1 : 0;
+        }
+        if (lua_isstring(state, index))
+        {
+            size_t length = 0;
+            const char* raw = lua_tolstring(state, index, &length);
+            const std::string value = ascii_lower(trim_ascii(
+                raw ? std::string_view(raw, length) : std::string_view()));
+            if (value.empty() || value == "unchanged" || value == "skip" || value == "same")
+            {
+                return -1;
+            }
+            if (value == "1" || value == "true" || value == "yes" || value == "on" ||
+                value == "visible" || value == "enabled" || value == "enable" ||
+                value == "collision" || value == "queryandphysics")
+            {
+                return 1;
+            }
+            return 0;
+        }
+        return -1;
+    }
+
+    int lua_socket_uobject_physical_set(const LuaMadeSimple::Lua& lua)
+    {
+        lua_State* state = lua.get_lua_state();
+        size_t address_length = 0;
+        const char* address = lua_isstring(state, 1) ? lua_tolstring(state, 1, &address_length) : "";
+        const int64_t visible = lua_parse_optional_bool_arg(state, 2);
+        const int64_t collision = lua_parse_optional_bool_arg(state, 3);
+        lua.set_string(uobject_physical_set_text(
+            address ? std::string_view(address, address_length) : std::string_view(),
+            visible,
+            collision));
+        return 1;
+    }
+
+    int lua_socket_uobject_find_near(const LuaMadeSimple::Lua& lua)
+    {
+        lua_State* state = lua.get_lua_state();
+        auto number_arg = [&](int index, double fallback) -> double {
+            if (lua_isnumber(state, index))
+            {
+                return static_cast<double>(lua_tonumber(state, index));
+            }
+            if (lua_isstring(state, index))
+            {
+                size_t length = 0;
+                const char* raw = lua_tolstring(state, index, &length);
+                const std::string value = trim_ascii(raw ? std::string_view(raw, length) : std::string_view());
+                if (!value.empty())
+                {
+                    char* end = nullptr;
+                    const double parsed = std::strtod(value.c_str(), &end);
+                    if (end != value.c_str())
+                    {
+                        return parsed;
+                    }
+                }
+            }
+            return fallback;
+        };
+        auto u64_arg = [&](int index, uint64_t fallback) -> uint64_t {
+            if (lua_isnumber(state, index))
+            {
+                const lua_Integer raw = lua_tointeger(state, index);
+                return raw > 0 ? static_cast<uint64_t>(raw) : fallback;
+            }
+            if (lua_isstring(state, index))
+            {
+                size_t length = 0;
+                const char* raw = lua_tolstring(state, index, &length);
+                const std::string value = trim_ascii(raw ? std::string_view(raw, length) : std::string_view());
+                if (!value.empty())
+                {
+                    char* end = nullptr;
+                    const unsigned long long parsed = std::strtoull(value.c_str(), &end, 0);
+                    if (end != value.c_str() && parsed > 0)
+                    {
+                        return static_cast<uint64_t>(parsed);
+                    }
+                }
+            }
+            return fallback;
+        };
+
+        const double x = number_arg(1, std::numeric_limits<double>::quiet_NaN());
+        const double y = number_arg(2, std::numeric_limits<double>::quiet_NaN());
+        const double z = number_arg(3, std::numeric_limits<double>::quiet_NaN());
+        const double radius = number_arg(4, 750.0);
+        const uint64_t max_results = u64_arg(5, 8);
+        const uint64_t max_scan = u64_arg(6, 150000);
+        const uint64_t max_ms = u64_arg(7, 750);
+        lua.set_string(native_uobject_find_near_text(
+            x,
+            y,
+            z,
+            radius,
+            static_cast<size_t>(max_results),
+            max_scan,
+            max_ms));
+        return 1;
+    }
+
     int lua_socket_treecut_start(const LuaMadeSimple::Lua& lua)
     {
         const bool installed = treecut_native_install();
@@ -8833,6 +15907,76 @@ namespace
         return 1;
     }
 
+    int lua_socket_brick_physical_scan_region(const LuaMadeSimple::Lua& lua)
+    {
+        lua_State* state = lua.get_lua_state();
+        int64_t center_x = 0;
+        int64_t center_y = 0;
+        int64_t center_z = 0;
+        int64_t extent_x = 0;
+        int64_t extent_y = 0;
+        int64_t extent_z = 0;
+        uint32_t max_scan = kBrickRuntimeRegionScanDefaultMaxScan;
+        uint32_t limit = kBrickRuntimeRegionScanDefaultLimit;
+        uint64_t max_ms = 0;
+
+        if (lua_isnumber(state, 1))
+        {
+            center_x = static_cast<int64_t>(lua_tointeger(state, 1));
+        }
+        if (lua_isnumber(state, 2))
+        {
+            center_y = static_cast<int64_t>(lua_tointeger(state, 2));
+        }
+        if (lua_isnumber(state, 3))
+        {
+            center_z = static_cast<int64_t>(lua_tointeger(state, 3));
+        }
+        if (lua_isnumber(state, 4))
+        {
+            extent_x = static_cast<int64_t>(lua_tointeger(state, 4));
+        }
+        if (lua_isnumber(state, 5))
+        {
+            extent_y = static_cast<int64_t>(lua_tointeger(state, 5));
+        }
+        if (lua_isnumber(state, 6))
+        {
+            extent_z = static_cast<int64_t>(lua_tointeger(state, 6));
+        }
+        if (lua_isnumber(state, 7))
+        {
+            const int64_t raw_max_scan = static_cast<int64_t>(lua_tointeger(state, 7));
+            max_scan = raw_max_scan <= 0
+                ? kBrickRuntimeRegionScanDefaultMaxScan
+                : static_cast<uint32_t>(std::min<int64_t>(raw_max_scan, kBrickRuntimeResolveMaxScanLimit));
+        }
+        if (lua_isnumber(state, 8))
+        {
+            const int64_t raw_limit = static_cast<int64_t>(lua_tointeger(state, 8));
+            limit = raw_limit <= 0
+                ? kBrickRuntimeRegionScanDefaultLimit
+                : static_cast<uint32_t>(std::min<int64_t>(raw_limit, kBrickRuntimeRegionScanMaxLimit));
+        }
+        if (lua_isnumber(state, 9))
+        {
+            const int64_t raw_max_ms = static_cast<int64_t>(lua_tointeger(state, 9));
+            max_ms = raw_max_ms <= 0 ? 0 : static_cast<uint64_t>(raw_max_ms);
+        }
+
+        lua.set_string(brick_physical_scan_region_text(
+            center_x,
+            center_y,
+            center_z,
+            extent_x,
+            extent_y,
+            extent_z,
+            max_scan,
+            limit,
+            max_ms));
+        return 1;
+    }
+
     int lua_socket_brick_physical_set(const LuaMadeSimple::Lua& lua)
     {
         lua_State* state = lua.get_lua_state();
@@ -8907,32 +16051,145 @@ namespace
             collision_channels = 255;
         }
 
-        uintptr_t explicit_grid_context = 0;
-        if (lua_isnumber(state, 4))
-        {
-            const lua_Integer raw_context = lua_tointeger(state, 4);
-            if (raw_context > 0)
+        auto lua_pointer_arg = [&](int index) -> uintptr_t {
+            if (lua_isnumber(state, index))
             {
-                explicit_grid_context = static_cast<uintptr_t>(raw_context);
+                const lua_Integer raw = lua_tointeger(state, index);
+                return raw > 0 ? static_cast<uintptr_t>(raw) : 0;
             }
-        }
-        else if (lua_isstring(state, 4))
-        {
-            size_t length = 0;
-            const char* raw = lua_tolstring(state, 4, &length);
-            const std::string value = trim_ascii(raw ? std::string_view(raw, length) : std::string_view());
-            if (!value.empty())
+            if (lua_isstring(state, index))
             {
-                explicit_grid_context = static_cast<uintptr_t>(
-                    std::strtoull(value.c_str(), nullptr, 0));
+                size_t length = 0;
+                const char* raw = lua_tolstring(state, index, &length);
+                const std::string value = trim_ascii(raw ? std::string_view(raw, length) : std::string_view());
+                if (!value.empty())
+                {
+                    return static_cast<uintptr_t>(std::strtoull(value.c_str(), nullptr, 0));
+                }
             }
-        }
+            return 0;
+        };
+
+        uintptr_t explicit_grid_context = lua_pointer_arg(4);
+        uintptr_t explicit_action_source = lua_pointer_arg(5);
 
         lua.set_string(brick_physical_set_text(
             static_cast<uint32_t>(brick_id),
             visible,
             collision_channels,
-            explicit_grid_context));
+            explicit_grid_context,
+            explicit_action_source));
+        return 1;
+    }
+
+    int lua_socket_brick_physical_set_many(const LuaMadeSimple::Lua& lua)
+    {
+        lua_State* state = lua.get_lua_state();
+        std::vector<uint32_t> brick_ids;
+        if (lua_isnumber(state, 1))
+        {
+            const lua_Integer raw = lua_tointeger(state, 1);
+            if (raw > 0 && static_cast<unsigned long long>(raw) <= UINT32_MAX)
+            {
+                brick_ids.push_back(static_cast<uint32_t>(raw));
+            }
+        }
+        else if (lua_isstring(state, 1))
+        {
+            size_t length = 0;
+            const char* raw = lua_tolstring(state, 1, &length);
+            brick_ids = parse_brick_id_csv(raw ? std::string_view(raw, length) : std::string_view());
+        }
+
+        int64_t visible = -1;
+        if (lua_isboolean(state, 2))
+        {
+            visible = lua_toboolean(state, 2) != 0 ? 1 : 0;
+        }
+        else if (lua_isnumber(state, 2))
+        {
+            const int64_t raw_visible = static_cast<int64_t>(lua_tointeger(state, 2));
+            visible = raw_visible < -1 ? -2 : raw_visible < 0 ? -1 : raw_visible != 0 ? 1 : 0;
+        }
+        else if (lua_isstring(state, 2))
+        {
+            size_t length = 0;
+            const char* raw = lua_tolstring(state, 2, &length);
+            const std::string value = ascii_lower(trim_ascii(raw ? std::string_view(raw, length) : std::string_view()));
+            if (value == "restore" || value == "captured")
+            {
+                visible = -2;
+            }
+            else if (value == "unchanged" || value == "skip" || value == "same" || value == "")
+            {
+                visible = -1;
+            }
+            else
+            {
+                visible = value == "1" || value == "true" || value == "yes" || value == "on" || value == "visible" ? 1 : 0;
+            }
+        }
+
+        int64_t collision_channels = -1;
+        if (lua_isnumber(state, 3))
+        {
+            collision_channels = static_cast<int64_t>(lua_tointeger(state, 3));
+        }
+        else if (lua_isstring(state, 3))
+        {
+            size_t length = 0;
+            const char* raw = lua_tolstring(state, 3, &length);
+            const std::string value = ascii_lower(trim_ascii(raw ? std::string_view(raw, length) : std::string_view()));
+            if (value == "unchanged" || value == "skip" || value == "same")
+            {
+                collision_channels = -2;
+            }
+            else if (value == "restore" || value == "captured" || value == "")
+            {
+                collision_channels = -1;
+            }
+            else
+            {
+                collision_channels = std::strtoll(value.c_str(), nullptr, 10);
+            }
+        }
+        if (collision_channels < -2)
+        {
+            collision_channels = -2;
+        }
+        if (collision_channels > 255)
+        {
+            collision_channels = 255;
+        }
+
+        auto lua_pointer_arg = [&](int index) -> uintptr_t {
+            if (lua_isnumber(state, index))
+            {
+                const lua_Integer raw = lua_tointeger(state, index);
+                return raw > 0 ? static_cast<uintptr_t>(raw) : 0;
+            }
+            if (lua_isstring(state, index))
+            {
+                size_t length = 0;
+                const char* raw = lua_tolstring(state, index, &length);
+                const std::string value = trim_ascii(raw ? std::string_view(raw, length) : std::string_view());
+                if (!value.empty())
+                {
+                    return static_cast<uintptr_t>(std::strtoull(value.c_str(), nullptr, 0));
+                }
+            }
+            return 0;
+        };
+
+        uintptr_t explicit_grid_context = lua_pointer_arg(4);
+        uintptr_t explicit_action_source = lua_pointer_arg(5);
+
+        lua.set_string(brick_physical_set_many_text(
+            brick_ids,
+            visible,
+            collision_channels,
+            explicit_grid_context,
+            explicit_action_source));
         return 1;
     }
 
@@ -9073,6 +16330,8 @@ namespace
             lua.register_function("BMFSocketStatus", lua_socket_status);
             lua.register_function("BMFSocketPlayerLocation", lua_socket_player_location);
             lua.register_function("BMFSocketDescribeUObject", lua_socket_describe_uobject);
+            lua.register_function("BMFSocketUObjectPhysicalSet", lua_socket_uobject_physical_set);
+            lua.register_function("BMFSocketUObjectFindNear", lua_socket_uobject_find_near);
             lua.register_function("BMFSocketTreeCutStart", lua_socket_treecut_start);
             lua.register_function("BMFSocketTreeCutStop", lua_socket_treecut_stop);
             lua.register_function("BMFSocketTreeCutStatus", lua_socket_treecut_status);
@@ -9083,7 +16342,9 @@ namespace
             lua.register_function("BMFSocketResourceNativeFindTag", lua_socket_treecut_find_tag);
             lua.register_function("BMFSocketBrickPhysicalInspect", lua_socket_brick_physical_inspect);
             lua.register_function("BMFSocketBrickPhysicalResolveNear", lua_socket_brick_physical_resolve_near);
+            lua.register_function("BMFSocketBrickPhysicalScanRegion", lua_socket_brick_physical_scan_region);
             lua.register_function("BMFSocketBrickPhysicalSet", lua_socket_brick_physical_set);
+            lua.register_function("BMFSocketBrickPhysicalSetMany", lua_socket_brick_physical_set_many);
             lua.register_function("BMFSocketTreeCutRefreshTargets", lua_socket_treecut_refresh_targets);
             lua.register_function("BMFSocketTreeCutResolveHandaxe", lua_socket_treecut_resolve_handaxe);
             lua.register_function("BMFSocketTreeCutSetHandaxeClass", lua_socket_treecut_set_handaxe_class);

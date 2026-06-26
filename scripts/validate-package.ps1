@@ -403,7 +403,7 @@ if (Test-Path -LiteralPath $standaloneDoc) {
 $omeggaRuntimeDoc = Join-Path $Root 'docs/architecture/omegga-supported-runtime.md'
 if (Test-Path -LiteralPath $omeggaRuntimeDoc) {
   $source = Get-Content -Raw -LiteralPath $omeggaRuntimeDoc
-  foreach ($needle in @('BMF-compatible Omegga runtime', 'Current Contract', 'Omegga.Bridge.BMF', 'OmeggaCallFunctionByNameWithArguments')) {
+  foreach ($needle in @('BMF-compatible Omegga runtime', 'Current Contract', 'BMF Bridge socket', 'OmeggaCallFunctionByNameWithArguments')) {
     if ($source -notmatch [regex]::Escape($needle)) {
       $errors.Add("omegga-supported-runtime.md does not contain expected marker: $needle")
     }

@@ -59,7 +59,12 @@ win:
     - target: msi
       arch:
         - x64
+    - target: portable
+      arch:
+        - x64
 msi:
   oneClick: false
   perMachine: true
   shortcutName: BMF Desktop
+portable:
+  artifactName: BMF-Desktop-${version}-portable-${arch}.${ext}

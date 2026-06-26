@@ -109,7 +109,7 @@ try {
         $errors.Add("Observability manifest is missing label: $label")
       }
     }
-    foreach ($metric in @('bmf_runtime_status_up', 'bmf_frame_time_seconds_bucket', 'bmf_command_total', 'bmf_event_total')) {
+    foreach ($metric in @('bmf_runtime_status_up', 'brickadia_frame_fps', 'brickadia_frame_delta_milliseconds', 'brickadia_frame_slow_total', 'bmf_command_total', 'bmf_event_total')) {
       if ($metric -notin @($manifest.metrics)) {
         $errors.Add("Observability manifest is missing metric: $metric")
       }
@@ -133,7 +133,7 @@ try {
       }
     }
     $expressions = (Get-PanelExpressions $dashboard.panels) -join "`n"
-    foreach ($metric in @('bmf_runtime_status_up', 'up{job="bmf-omegga"', 'bmf_socket_connected', 'bmf_frame_time_seconds_bucket', 'bmf_frame_time_slow_total', 'bmf_command_total', 'bmf_event_total')) {
+    foreach ($metric in @('bmf_runtime_status_up', 'up{job="bmf-omegga"', 'bmf_socket_connected', 'brickadia_frame_fps', 'brickadia_frame_delta_milliseconds', 'brickadia_frame_slow_total', 'bmf_command_total', 'bmf_event_total')) {
       if ($expressions -notmatch [regex]::Escape($metric)) {
         $errors.Add("Dashboard queries do not contain expected metric: $metric")
       }

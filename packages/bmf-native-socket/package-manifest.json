@@ -24,12 +24,11 @@
   ],
   "runtimeOutputs": [
     "Mods/BMF/runtime/socket.json",
-    "Mods/BMF/runtime/events.jsonl",
-    "Mods/BMF/runtime/commands"
+    "Mods/BMF/runtime/bmf-bridge-status.json"
   ],
   "guardrails": [
-    "optional-native-transport",
-    "file-bridge-fallback-required",
+    "required-live-transport",
+    "report-socket-unavailable-instead-of-file-fallback",
     "bounded-traffic-buffering",
     "validate-before-release"
   ]

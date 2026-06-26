@@ -1,12 +1,14 @@
 param(
   [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path,
   [string]$MsiPath = '',
+  [string]$PortablePath = '',
   [string]$Version = '',
   [string]$OutDir = '',
   [string]$OutJson = '',
   [string]$ReleaseChannel = 'dev',
   [string]$DownloadBaseUrl = '',
   [switch]$BuildMsi,
+  [switch]$BuildPortable,
   [string]$NodeExe = $env:BMF_DESKTOP_NODE_EXE,
   [switch]$Force
 )
@@ -76,13 +78,49 @@ function Test-IsSupportedDesktopNodeVersion([string]$VersionText) {
   return $version.Major -ge 26
 }
 
+function Format-ProcessArgument([string]$Argument) {
+  if ($null -eq $Argument) {
+    return '""'
+  }
+  if ($Argument -notmatch '[\s"]') {
+    return $Argument
+  }
+  return '"' + ($Argument -replace '"', '\"') + '"'
+}
+
 function Invoke-DesktopBuildCommand([string]$Node, [string]$Script, [string[]]$Arguments, [string]$WorkingDirectory, [string]$Label) {
-  Push-Location $WorkingDirectory
-  try {
-    $output = & $Node $Script @Arguments 2>&1
-    $exitCode = $LASTEXITCODE
-  } finally {
-    Pop-Location
+  $processInfo = [System.Diagnostics.ProcessStartInfo]::new()
+  $processInfo.FileName = $Node
+  $processInfo.WorkingDirectory = $WorkingDirectory
+  $processInfo.UseShellExecute = $false
+  $processInfo.RedirectStandardOutput = $true
+  $processInfo.RedirectStandardError = $true
+
+  $nodeDirectory = Split-Path -Parent $Node
+  $environmentVariables = $processInfo.EnvironmentVariables
+  if ($nodeDirectory -and $environmentVariables) {
+    $pathKey = if ($environmentVariables.ContainsKey('PATH')) { 'PATH' } else { 'Path' }
+    $environmentVariables[$pathKey] = "$nodeDirectory;$($environmentVariables[$pathKey])"
+  }
+
+  $processInfo.Arguments = (@($Script) + @($Arguments) | ForEach-Object { Format-ProcessArgument $_ }) -join ' '
+
+  $process = [System.Diagnostics.Process]::new()
+  $process.StartInfo = $processInfo
+  [void]$process.Start()
+  $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+  $stderrTask = $process.StandardError.ReadToEndAsync()
+  $process.WaitForExit()
+  $stdout = $stdoutTask.GetAwaiter().GetResult()
+  $stderr = $stderrTask.GetAwaiter().GetResult()
+  $exitCode = $process.ExitCode
+  $process.Dispose()
+  $output = @()
+  if ($stdout) {
+    $output += @($stdout -split "\r?\n")
+  }
+  if ($stderr) {
+    $output += @($stderr -split "\r?\n")
   }
   if ($exitCode -ne 0) {
     $tail = @($output | Select-Object -Last 30) -join [Environment]::NewLine
@@ -137,7 +175,7 @@ function Test-DesktopBundledAssets([string]$DesktopRoot) {
   }
 }
 
-function Test-DesktopBmfctlShim([string]$DesktopRoot) {
+function Test-DesktopBmfctlShim([string]$DesktopRoot, [string]$ExpectedVersion) {
   $shimPath = Join-Path $DesktopRoot 'dist/release/win-unpacked/resources/bmf/bin/bmfctl.cmd'
   if (!(Test-Path -LiteralPath $shimPath)) {
     throw "Installed bmfctl shim is missing from the unpacked app: $shimPath"
@@ -149,7 +187,8 @@ function Test-DesktopBmfctlShim([string]$DesktopRoot) {
     throw "Installed bmfctl shim failed with exit code $exitCode.$([Environment]::NewLine)$tail"
   }
   $lines = @($output | ForEach-Object { [string]$_ })
-  if (!($lines | Where-Object { $_ -match '^bmfctl\s+\d+\.\d+\.\d+' })) {
+  $expectedVersionOutput = "bmfctl $ExpectedVersion"
+  if (!($lines | Where-Object { $_ -eq $expectedVersionOutput })) {
     throw "Installed bmfctl shim did not report a bmfctl version. Output: $($lines -join ' | ')"
   }
   return [ordered]@{
@@ -243,17 +282,24 @@ $compatibilityPath = Join-Path $rootFull 'manifests/compatibility.json'
 $unifiedRuntimePath = Join-Path $rootFull 'manifests/unified-runtime.json'
 $observabilityManifestPath = Join-Path $rootFull 'observability/observability-manifest.json'
 $primaryArtifactPath = $null
+$portableArtifactPath = $null
 $checksumPath = $null
+$portableChecksumPath = $null
 $releaseManifestPath = $null
 $releaseCatalogPath = $null
 $releaseNotesPath = $null
 $installerSha256 = $null
 $installerBytes = $null
+$portableSha256 = $null
+$portableBytes = $null
 $desktopBuild = [ordered]@{
-  requested = [bool]$BuildMsi
+  requested = [bool]($BuildMsi -or $BuildPortable)
+  buildMsi = [bool]$BuildMsi
+  buildPortable = [bool]$BuildPortable
 }
 
 try {
+  $portablePathProvided = ![string]::IsNullOrWhiteSpace($PortablePath)
   $desktopPackage = Read-JsonFile $desktopPackagePath
   if (!$desktopPackage) {
     throw "BMF Desktop package manifest is missing: $desktopPackagePath"
@@ -267,8 +313,12 @@ try {
   if (!$MsiPath) {
     $MsiPath = Join-Path $rootFull ("apps/bmf-desktop/dist/release/BMF-Desktop-{0}-x64.msi" -f $Version)
   }
+  if (!$PortablePath) {
+    $PortablePath = Join-Path $rootFull ("apps/bmf-desktop/dist/release/BMF-Desktop-{0}-portable-x64.exe" -f $Version)
+  }
   $msiFull = Get-FullPath $MsiPath
-  if ($BuildMsi) {
+  $portableFull = Get-FullPath $PortablePath
+  if ($BuildMsi -or $BuildPortable) {
     $desktopRoot = Join-Path $rootFull 'apps/bmf-desktop'
     $ngScript = Join-Path $desktopRoot 'node_modules/@angular/cli/bin/ng.js'
     $builderScript = Join-Path $desktopRoot 'node_modules/electron-builder/cli.js'
@@ -291,14 +341,22 @@ try {
       -Arguments @('build', '--configuration', 'production') `
       -WorkingDirectory $desktopRoot `
       -Label 'BMF Desktop Angular renderer build'
+    $builderTargets = New-Object System.Collections.Generic.List[string]
+    if ($BuildMsi) {
+      $builderTargets.Add('msi')
+    }
+    if ($BuildPortable) {
+      $builderTargets.Add('portable')
+    }
+    $builderArguments = @('--win') + $builderTargets.ToArray() + @('--x64')
     $installerOutput = Invoke-DesktopBuildCommand `
       -Node $resolvedNode `
       -Script $builderScript `
-      -Arguments @('--win', 'msi', '--x64') `
+      -Arguments $builderArguments `
       -WorkingDirectory $desktopRoot `
-      -Label 'BMF Desktop MSI build'
+      -Label 'BMF Desktop Windows artifact build'
     $bundledAssets = Test-DesktopBundledAssets $desktopRoot
-    $bmfctlShim = Test-DesktopBmfctlShim $desktopRoot
+    $bmfctlShim = Test-DesktopBmfctlShim $desktopRoot $Version
     $desktopBuild['rendererOutputTail'] = @($rendererOutput | Select-Object -Last 8)
     $desktopBuild['installerOutputTail'] = @($installerOutput | Select-Object -Last 12)
     $desktopBuild['bundledAssets'] = $bundledAssets
@@ -306,6 +364,10 @@ try {
   }
   if (!(Test-Path -LiteralPath $msiFull)) {
     throw "MSI artifact does not exist. Build it with npm --prefix apps/bmf-desktop run dist:msi, pass -BuildMsi, or pass -MsiPath: $msiFull"
+  }
+  $portableRequired = [bool]$BuildPortable -or $portablePathProvided
+  if ($portableRequired -and !(Test-Path -LiteralPath $portableFull)) {
+    throw "Portable artifact does not exist. Build it with npm --prefix apps/bmf-desktop run dist:portable, pass -BuildPortable, or pass -PortablePath: $portableFull"
   }
 
   $packageManifest = Read-JsonFile $packageManifestPath
@@ -340,13 +402,21 @@ try {
 
   New-Item -ItemType Directory -Force -Path $outDirFull | Out-Null
   $artifactName = "BMF-Desktop-$Version-x64.msi"
+  $portableArtifactName = "BMF-Desktop-$Version-portable-x64.exe"
   $primaryArtifactPath = Join-Path $outDirFull $artifactName
+  $portableArtifactPath = Join-Path $outDirFull $portableArtifactName
   $checksumPath = "$primaryArtifactPath.sha256"
+  $portableChecksumPath = "$portableArtifactPath.sha256"
   $releaseManifestPath = Join-Path $outDirFull 'release-manifest.json'
   $releaseCatalogPath = Join-Path $outDirFull 'release-catalog.json'
   $releaseNotesPath = Join-Path $outDirFull 'RELEASE_NOTES.md'
 
-  foreach ($path in @($primaryArtifactPath, $checksumPath, $releaseManifestPath, $releaseCatalogPath, $releaseNotesPath)) {
+  $portableAvailable = Test-Path -LiteralPath $portableFull
+  $releaseOutputPaths = @($primaryArtifactPath, $checksumPath, $releaseManifestPath, $releaseCatalogPath, $releaseNotesPath)
+  if ($portableAvailable) {
+    $releaseOutputPaths += @($portableArtifactPath, $portableChecksumPath)
+  }
+  foreach ($path in $releaseOutputPaths) {
     if ((Test-Path -LiteralPath $path) -and !$Force) {
       throw "Release artifact already exists. Pass -Force to overwrite: $path"
     }
@@ -354,6 +424,9 @@ try {
 
   if ($msiFull -ne (Get-FullPath $primaryArtifactPath)) {
     Copy-Item -LiteralPath $msiFull -Destination $primaryArtifactPath -Force
+  }
+  if ($portableAvailable -and $portableFull -ne (Get-FullPath $portableArtifactPath)) {
+    Copy-Item -LiteralPath $portableFull -Destination $portableArtifactPath -Force
   }
 
   $installerRecord = New-FileRecord $primaryArtifactPath 'installer'
@@ -365,6 +438,23 @@ try {
   $installerBytes = [int64]$installerRecord.bytes
   Set-Content -LiteralPath $checksumPath -Encoding UTF8 -Value ("{0}  {1}" -f $installerSha256, $artifactName)
   $checksumRecord = New-FileRecord $checksumPath 'checksum'
+  $portableRecord = $null
+  $portableChecksumRecord = $null
+  $optionalReleaseRecords = @()
+  $optionalRequiredArtifacts = @()
+  if ($portableAvailable) {
+    $portableRecord = New-FileRecord $portableArtifactPath 'portable'
+    $portableUrl = Join-ReleaseUrl $DownloadBaseUrl $portableArtifactName
+    if ($portableUrl) {
+      $portableRecord['url'] = $portableUrl
+    }
+    $portableSha256 = [string]$portableRecord.sha256
+    $portableBytes = [int64]$portableRecord.bytes
+    Set-Content -LiteralPath $portableChecksumPath -Encoding UTF8 -Value ("{0}  {1}" -f $portableSha256, $portableArtifactName)
+    $portableChecksumRecord = New-FileRecord $portableChecksumPath 'portable-checksum'
+    $optionalReleaseRecords = @($portableRecord, $portableChecksumRecord)
+    $optionalRequiredArtifacts = @($portableArtifactName, "$portableArtifactName.sha256")
+  }
 
   $nativeHelperHashes = [ordered]@{
     BMFSocket = @(
@@ -379,7 +469,8 @@ try {
     )
   }
 
-  $releaseNotes = @(
+  $releaseNotes = New-Object System.Collections.Generic.List[string]
+  foreach ($line in @(
     "# BMF Desktop $Version",
     '',
     "- Release channel: $ReleaseChannel",
@@ -403,13 +494,23 @@ try {
     '',
     '- Dev artifacts are not code-signed until a signing certificate is configured.',
     '- BMF Desktop updates and managed server component updates are intentionally separate actions.'
-  )
+  )) {
+    $releaseNotes.Add($line)
+  }
+  if ($portableRecord) {
+    $releaseNotes.Insert(5, "- Portable artifact: $portableArtifactName")
+    $releaseNotes.Insert(6, "- Portable SHA256: $portableSha256")
+    $verificationIndex = $releaseNotes.IndexOf("Verify the MSI with `$artifactName.sha256` before installing it.")
+    if ($verificationIndex -ge 0) {
+      $releaseNotes.Insert($verificationIndex + 1, "Verify the portable exe with `$portableArtifactName.sha256` before running it.")
+    }
+  }
   Set-Content -LiteralPath $releaseNotesPath -Encoding UTF8 -Value $releaseNotes
   $releaseNotesRecord = New-FileRecord $releaseNotesPath 'release-notes'
 
   $releaseManifest = [ordered]@{
     schemaVersion = 1
-    releaseKind = 'bmf-desktop-msi'
+    releaseKind = 'bmf-desktop-release'
     generatedAt = (Get-Date).ToUniversalTime().ToString('o')
     releaseChannel = $ReleaseChannel
     bmfDesktopVersion = $Version
@@ -422,10 +523,12 @@ try {
     dashboardVersion = $dashboardVersion
     minimumWindowsVersion = 'Windows 10 x64 or Windows Server 2019 x64'
     installerSha256 = $installerSha256
+    portableSha256 = $portableSha256
     primaryArtifact = $installerRecord
+    portableArtifact = $portableRecord
     releaseCatalog = 'release-catalog.json'
-    requiredArtifacts = @($artifactName, "$artifactName.sha256", 'release-manifest.json', 'release-catalog.json', 'RELEASE_NOTES.md')
-    files = @($installerRecord, $checksumRecord, $releaseNotesRecord)
+    requiredArtifacts = @($artifactName, "$artifactName.sha256") + $optionalRequiredArtifacts + @('release-manifest.json', 'release-catalog.json', 'RELEASE_NOTES.md')
+    files = @($installerRecord, $checksumRecord) + $optionalReleaseRecords + @($releaseNotesRecord)
   }
   $releaseManifest | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $releaseManifestPath -Encoding UTF8
   $releaseManifestRecord = New-FileRecord $releaseManifestPath 'release-manifest'
@@ -435,7 +538,9 @@ try {
     channel = $ReleaseChannel
     publishedAt = $releaseManifest['generatedAt']
     artifact = $installerRecord
+    portableArtifact = $portableRecord
     checksum = $checksumRecord
+    portableChecksum = $portableChecksumRecord
     manifest = $releaseManifestRecord
     releaseNotes = $releaseNotesRecord
     supportedBrickadiaBuild = $supportedBuild
@@ -463,6 +568,8 @@ try {
 
   Add-Evidence $evidence 'msi' $primaryArtifactPath 'BMF Desktop MSI release artifact'
   Add-Evidence $evidence 'checksum' $checksumPath 'BMF Desktop MSI SHA256 checksum'
+  Add-Evidence $evidence 'exe' $portableArtifactPath 'BMF Desktop portable release artifact'
+  Add-Evidence $evidence 'checksum' $portableChecksumPath 'BMF Desktop portable SHA256 checksum'
   Add-Evidence $evidence 'json' $releaseManifestPath 'BMF Desktop release manifest'
   Add-Evidence $evidence 'json' $releaseCatalogPath 'BMF Desktop release catalog'
   Add-Evidence $evidence 'markdown' $releaseNotesPath 'BMF Desktop release notes'
@@ -487,8 +594,12 @@ $result = [ordered]@{
     releaseManifestPath = if ($releaseManifestPath) { Get-FullPath $releaseManifestPath } else { $null }
     releaseCatalogPath = if ($releaseCatalogPath) { Get-FullPath $releaseCatalogPath } else { $null }
     releaseNotesPath = if ($releaseNotesPath) { Get-FullPath $releaseNotesPath } else { $null }
+    portableArtifactPath = if ($portableArtifactPath -and (Test-Path -LiteralPath $portableArtifactPath)) { Get-FullPath $portableArtifactPath } else { $null }
+    portableChecksumPath = if ($portableChecksumPath -and (Test-Path -LiteralPath $portableChecksumPath)) { Get-FullPath $portableChecksumPath } else { $null }
     installerSha256 = $installerSha256
     installerBytes = $installerBytes
+    portableSha256 = $portableSha256
+    portableBytes = $portableBytes
     desktopBuild = $desktopBuild
   }
   evidence = $evidence.ToArray()

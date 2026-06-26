@@ -22,8 +22,13 @@ The supported Windows runtime is:
 Brickadia dedicated server + UE4SS + BMF + BMF-supported Omegga Windows fork
 ```
 
+Current target: Brickadia EA2 PC-Shipping-CL13530.
+
 Stock upstream Omegga and the global npm package are not the current supported
 BMF runtime.
+
+Linux and WSL are not supported for the UE4SS/BMF dedicated-server runtime. Use
+Windows for the dedicated server process and UE4SS mod loading.
 
 ## Runtime Matrix
 
@@ -31,11 +36,11 @@ BMF runtime.
 | --- | --- | --- | --- |
 | Server launch/restart | Supported owner | Not owned by BMF core | Future BMF supervisor |
 | UE4SS/BMF staging | Supported owner | Manual install possible | Installer work continues |
-| `bmf.*` bridge commands | Supported through Omegga bridge and socket/file transports | BMF command worker can exist, but needs an injector/supervisor | Future BMF supervisor transport |
+| `bmf.*` bridge commands | Supported through BMF Bridge and BMFSocket transport | Requires an explicit external transport; legacy file worker is disabled by default | Future BMF supervisor transport |
 | Lua plugin loading | Supported | Supported after UE4SS loads BMF | N/A |
 | Plugin storage/config | Supported | Supported | N/A |
 | Event bus inside Lua | Supported | Supported | N/A |
-| Events to Omegga plugins | Supported through BMFSocket or JSONL fallback | Not available without external consumer | Socket protocol remains experimental |
+| Events to Omegga plugins | Supported through BMFSocket | Not available without external consumer | Socket protocol remains experimental |
 | Player identity | Omegga adapter plus Brickadia saved/log fallback | Saved/log fallback only | Native identity mapping still research |
 | Chat broadcast/whisper | Supported through safe live controller helper path | Possible only if helper path is available | Live targeting still needs more validation |
 | World save/load wrappers | Supported | Possible when console/helper route exists | Some paths remain experimental |

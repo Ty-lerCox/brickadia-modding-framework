@@ -1,16 +1,19 @@
 # Release Artifacts
 
-BMF Desktop should be distributed as a normal Windows desktop application. The
-primary user-facing artifact is an MSI installer.
+BMF Desktop should be distributed as a normal Windows desktop application and
+as a portable first-run tool. The portable exe is the fastest path for a server
+operator to target an existing Brickadia Dedicated Server folder; the MSI is
+the normal installed-app path.
 
 ## Goal
 
 A server operator should be able to:
 
-1. Download the latest BMF Desktop MSI.
-2. Run the installer on Windows.
-3. Open BMF Desktop from the Start menu.
-4. Use the app to install or update the BMF/Omegga/UE4SS/Grafana Alloy stack.
+1. Download the latest BMF Desktop portable exe or MSI.
+2. Run the portable exe or install the MSI on Windows.
+3. Open BMF Desktop.
+4. Select a Brickadia Dedicated Server folder.
+5. Use the app to install or update the BMF/Omegga/UE4SS/Grafana Alloy stack.
 
 The user should not need to clone the repository, install Node, build native
 modules, or run PowerShell scripts manually for the normal path.
@@ -21,16 +24,15 @@ modules, or run PowerShell scripts manually for the normal path.
 | --- | --- |
 | `BMF-Desktop-<version>-x64.msi` | Main installer for Windows users. |
 | `BMF-Desktop-<version>-x64.msi.sha256` | Checksum for verification. |
+| `BMF-Desktop-<version>-portable-x64.exe` | Portable app for handing to a Windows server operator. |
+| `BMF-Desktop-<version>-portable-x64.exe.sha256` | Portable checksum for verification. |
 | `release-manifest.json` | Machine-readable version, component, checksum, and compatibility metadata. |
 | `release-catalog.json` | Machine-readable latest-release index for desktop and CLI update checks. |
 | `RELEASE_NOTES.md` | Human-readable supported build, changes, and known issues. |
 
-Optional developer artifacts can include portable zips or unpacked builds, but
-they should not replace the MSI as the main release path.
-
 `.github/workflows/unified-runtime.yml` includes a manual/tagged
-`desktop-msi` job that runs `npm run release:desktop` and uploads the generated
-MSI, checksum, release manifest, release catalog, and release notes from
+`desktop-release` job that runs `npm run release:desktop` and uploads the generated
+MSI, portable exe, checksums, release manifest, release catalog, and release notes from
 `artifacts/local/bmf-desktop-release`.
 
 ## Current Seed
@@ -40,25 +42,25 @@ The repo now distinguishes two release lanes:
 | Lane | Script | Output |
 | --- | --- | --- |
 | Source package | `scripts/build-release-package.ps1` | `bmf-<version>.zip` for maintainers and validation. |
-| Desktop installer release | `scripts/build-bmf-desktop-release.ps1 -BuildMsi` | Real MSI build, MSI copy, `.sha256`, `release-manifest.json`, `release-catalog.json`, and `RELEASE_NOTES.md`. |
+| Desktop app release | `scripts/build-bmf-desktop-release.ps1 -BuildMsi -BuildPortable` | MSI, portable exe, checksums, `release-manifest.json`, `release-catalog.json`, and `RELEASE_NOTES.md`. |
 
 For the normal release path, install desktop dependencies with
 `npm --prefix apps/bmf-desktop ci`, then run
-`scripts/build-bmf-desktop-release.ps1 -BuildMsi -Force`. The script validates
-the selected Node executable, builds the Angular renderer, invokes
-electron-builder's MSI target, and then emits the release metadata. It requires
-Node `22.22.3+`, `24.15.0+`, or `26+`; pass `-NodeExe` or set
+`scripts/build-bmf-desktop-release.ps1 -BuildMsi -BuildPortable -Force`. The
+script validates the selected Node executable, builds the Angular renderer,
+invokes electron-builder's MSI and portable targets, and then emits the release
+metadata. It requires Node `22.22.3+`, `24.15.0+`, or `26+`; pass `-NodeExe` or set
 `BMF_DESKTOP_NODE_EXE` when the default `node` on `PATH` is older.
 
-The script can still accept an existing MSI through `-MsiPath` when packaging
-metadata for an externally produced installer. The validator
-`scripts/validate-bmf-desktop-release.ps1` uses a small fixture MSI so package
-validation can prove the manifest and checksum contract without rebuilding the
-desktop installer.
+The script can still accept an existing MSI through `-MsiPath` and an existing
+portable exe through `-PortablePath` when packaging metadata for externally
+produced artifacts. The validator `scripts/validate-bmf-desktop-release.ps1`
+uses small fixture files so package validation can prove the manifest and
+checksum contract without rebuilding desktop artifacts.
 
 Pass `-DownloadBaseUrl` to `scripts/build-bmf-desktop-release.ps1` when
 publishing artifacts so `release-catalog.json` can point BMF Desktop and
-`bmfctl` at the MSI for the download-only update and verified installer
+`bmfctl` at release artifacts for the download-only update and verified installer
 handoff flow.
 
 ## MSI Responsibilities
@@ -105,6 +107,7 @@ The release manifest should include:
 - standard dashboard version;
 - minimum Windows version;
 - installer hash;
+- portable exe hash;
 - release catalog path;
 - release channel.
 

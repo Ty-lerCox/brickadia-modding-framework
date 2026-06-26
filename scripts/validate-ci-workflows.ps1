@@ -75,7 +75,7 @@ try {
       'python -m mkdocs build --strict',
       'npm run release:desktop',
       'actions/upload-artifact@v4',
-      'bmf-desktop-msi-release',
+      'bmf-desktop-release',
       'artifacts/local/bmf-desktop-release/**'
     )) {
       if ($workflowText -notmatch [regex]::Escape($needle)) {
@@ -107,7 +107,7 @@ try {
       'native-helpers:',
       'packaging:',
       'docs:',
-      'desktop-msi:'
+      'desktop-release:'
     )) {
       if ($workflowText -notmatch "(?m)^  $([regex]::Escape($jobName))") {
         $errors.Add("unified-runtime.yml is missing job: $jobName")

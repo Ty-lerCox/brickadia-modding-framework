@@ -37,7 +37,7 @@ Brickadia's console command.
 Server-console route:
 
 ```text
-Omegga.Bridge.BMF bmf.minigames.list
+bmf.minigames.list
 ```
 
 ## Presets
@@ -50,8 +50,8 @@ BMF.minigames.savePreset(0, "Arena")
 Server-console routes:
 
 ```text
-Omegga.Bridge.BMF bmf.minigames.loadpreset name=Arena
-Omegga.Bridge.BMF bmf.minigames.savepreset index=0 name=Arena
+bmf.minigames.loadpreset name=Arena
+bmf.minigames.savepreset index=0 name=Arena
 ```
 
 List saved preset files from disk:
@@ -73,9 +73,9 @@ BMF.minigames.delete(0)
 Server-console routes:
 
 ```text
-Omegga.Bridge.BMF bmf.minigames.nextround index=0
-Omegga.Bridge.BMF bmf.minigames.reset index=0
-Omegga.Bridge.BMF bmf.minigames.delete index=0
+bmf.minigames.nextround index=0
+bmf.minigames.reset index=0
+bmf.minigames.delete index=0
 ```
 
 These would wrap, when explicitly enabled:
@@ -96,8 +96,8 @@ enumeration is high risk on the current dedicated-server runtime.
 Server-console routes:
 
 ```text
-Omegga.Bridge.BMF bmf.minigames.objects.snapshot limit=64
-Omegga.Bridge.BMF bmf.minigames.objects.snapshot limit=64 includeProperties=true
+bmf.minigames.objects.snapshot limit=64
+bmf.minigames.objects.snapshot limit=64 includeProperties=true
 ```
 
 By default the command returns `UNSAFE_MINIGAME_OBJECT_SNAPSHOT_DISABLED` with

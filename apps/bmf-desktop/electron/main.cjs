@@ -4,12 +4,36 @@ const { app, BrowserWindow, dialog, ipcMain, shell } = require('electron');
 
 const SOURCE_REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
 const DESKTOP_APP_NAME = 'BMF Desktop';
+const BRICKADIA_SERVER_EXE = 'BrickadiaServer-Win64-Shipping.exe';
+const BRICKADIA_INSTALL_SEARCH_MAX_DEPTH = 6;
+const BRICKADIA_INSTALL_SEARCH_MAX_DIRECTORIES = 1500;
+const BRICKADIA_INSTALL_SEARCH_IGNORED_DIRS = new Set([
+  '.git',
+  '.hg',
+  '.svn',
+  'Config',
+  'Content',
+  'DerivedDataCache',
+  'Intermediate',
+  'Logs',
+  'node_modules',
+  'Saved',
+]);
 const LEGACY_USER_DATA_DIRS = [
   path.join(app.getPath('appData'), '@bmf', 'desktop'),
 ];
 
 app.setName(DESKTOP_APP_NAME);
-app.setPath('userData', path.join(app.getPath('appData'), DESKTOP_APP_NAME));
+app.setPath('userData', resolveDesktopUserDataPath());
+
+function resolveDesktopUserDataPath() {
+  const explicit = process.env.BMF_DESKTOP_USER_DATA_DIR || process.env.BMF_DESKTOP_PORTABLE_DATA_DIR;
+  if (explicit) return path.resolve(explicit);
+  if (app.isPackaged && process.env.PORTABLE_EXECUTABLE_DIR) {
+    return path.join(process.env.PORTABLE_EXECUTABLE_DIR, `${DESKTOP_APP_NAME} Data`);
+  }
+  return path.join(app.getPath('appData'), DESKTOP_APP_NAME);
+}
 
 function loadOrchestrator() {
   try {
@@ -49,7 +73,10 @@ function bundledBmfRoot() {
 }
 
 function desktopRoot(input = {}) {
-  const candidate = input.root || input.profile?.root || input.profile?.paths?.bmfRoot || bundledBmfRoot();
+  const candidate = input.root
+    || (app.isPackaged ? null : input.profile?.root)
+    || (app.isPackaged ? null : input.profile?.paths?.bmfRoot)
+    || bundledBmfRoot();
   return path.resolve(candidate);
 }
 
@@ -180,10 +207,11 @@ function registerIpcHandlers() {
   });
 
   ipcMain.handle('bmf:profiles-list', (_event, input = {}) => {
-    return orchestrator.loadProfileRegistry({
+    const registry = orchestrator.loadProfileRegistry({
       root: desktopRoot(input),
       profileStorePath: profileStorePath(input),
     });
+    return normalizeDesktopProfileRegistry(registry, input);
   });
 
   ipcMain.handle('bmf:profile-save', (_event, input = {}) => {
@@ -191,18 +219,20 @@ function registerIpcHandlers() {
       root: desktopRoot(input),
       ...desktopProfileInput(input),
     });
-    return orchestrator.upsertStoredProfile(profile, {
+    const registry = orchestrator.upsertStoredProfile(profile, {
       root: desktopRoot(input),
       profileStorePath: profileStorePath(input),
       select: input.select !== false,
     });
+    return normalizeDesktopProfileRegistry(registry, input);
   });
 
   ipcMain.handle('bmf:profile-select', (_event, profileId, input = {}) => {
-    return orchestrator.selectStoredProfile(profileId, {
+    const registry = orchestrator.selectStoredProfile(profileId, {
       root: desktopRoot(input),
       profileStorePath: profileStorePath(input),
     });
+    return normalizeDesktopProfileRegistry(registry, input);
   });
 
   ipcMain.handle('bmf:choose-path', async (event, input = {}) => {
@@ -232,6 +262,73 @@ function registerIpcHandlers() {
       field,
       canceled: Boolean(result.canceled),
       path: result.canceled ? null : selectedPath || null,
+    };
+  });
+
+  ipcMain.handle('bmf:profile-from-brickadia-install', async (event, input = {}) => {
+    const window = BrowserWindow.fromWebContents(event.sender);
+    const picker = await dialog.showOpenDialog(window, {
+      title: 'Select Brickadia Dedicated Server install folder',
+      defaultPath: input.currentPath || input.defaultPath || input.profile?.paths?.brickadiaWin64 || undefined,
+      properties: ['openDirectory'],
+    });
+    const selectedPath = picker.filePaths?.[0] || null;
+    if (picker.canceled || !selectedPath) {
+      return emptyBrickadiaInstallSetupResult('canceled', selectedPath, { canceled: true });
+    }
+
+    const search = findBrickadiaWin64Path(selectedPath);
+    if (!search.brickadiaWin64) {
+      return {
+        canceled: false,
+        status: 'not-found',
+        selectedPath,
+        brickadiaWin64: null,
+        profile: null,
+        registry: null,
+        warnings: [
+          `Could not find ${BRICKADIA_SERVER_EXE} under ${selectedPath}.`,
+          ...search.warnings,
+        ],
+        search: publicBrickadiaInstallSearch(search),
+      };
+    }
+
+    const root = desktopRoot(input);
+    const storePath = profileStorePath(input);
+    const baseProfile = desktopProfileInput(input);
+    const profile = orchestrator.createServerProfile({
+      root,
+      ...baseProfile,
+      paths: {
+        ...(baseProfile.paths || {}),
+        brickadiaWin64: search.brickadiaWin64,
+        bmfRoot: baseProfile.paths?.bmfRoot || root,
+      },
+    });
+    const existingProfile = typeof orchestrator.getStoredProfile === 'function'
+      ? orchestrator.getStoredProfile(profile.id, {
+        root,
+        profileStorePath: storePath,
+      })
+      : null;
+    const registry = orchestrator.upsertStoredProfile(profile, {
+      root,
+      profileStorePath: storePath,
+      select: true,
+    });
+    const normalizedRegistry = normalizeDesktopProfileRegistry(registry, input);
+    const selectedProfile = normalizedRegistry.profiles.find(entry => entry.id === normalizedRegistry.selectedProfileId) || profile;
+
+    return {
+      canceled: false,
+      status: existingProfile ? 'updated' : 'created',
+      selectedPath,
+      brickadiaWin64: search.brickadiaWin64,
+      profile: selectedProfile,
+      registry: normalizedRegistry,
+      warnings: search.warnings,
+      search: publicBrickadiaInstallSearch(search),
     };
   });
 
@@ -613,9 +710,178 @@ function desktopProfileInput(input = {}) {
     root: base.root || root,
     paths: {
       ...(base.paths || {}),
-      bmfRoot: base.paths?.bmfRoot || root,
+      bmfRoot: desktopProfileBmfRoot(base.paths?.bmfRoot, root),
     },
   };
+}
+
+function desktopProfileBmfRoot(profileBmfRoot, root) {
+  if (app.isPackaged) return root;
+  return profileBmfRoot || root;
+}
+
+function normalizeDesktopProfileRegistry(registry, input = {}) {
+  const root = desktopRoot(input);
+  return {
+    ...registry,
+    profiles: (registry.profiles || []).map(profile => normalizeDesktopProfile(profile, root)),
+  };
+}
+
+function normalizeDesktopProfile(profile, root) {
+  return {
+    ...profile,
+    root: app.isPackaged ? root : profile.root,
+    paths: {
+      ...(profile.paths || {}),
+      bmfRoot: desktopProfileBmfRoot(profile.paths?.bmfRoot, root),
+    },
+  };
+}
+
+function emptyBrickadiaInstallSetupResult(status, selectedPath = null, options = {}) {
+  return {
+    canceled: Boolean(options.canceled),
+    status,
+    selectedPath,
+    brickadiaWin64: null,
+    profile: null,
+    registry: null,
+    warnings: [],
+    search: {
+      executable: BRICKADIA_SERVER_EXE,
+      visitedDirectories: 0,
+      maxDirectories: BRICKADIA_INSTALL_SEARCH_MAX_DIRECTORIES,
+      maxDepth: BRICKADIA_INSTALL_SEARCH_MAX_DEPTH,
+      truncated: false,
+      evidence: [],
+    },
+  };
+}
+
+function findBrickadiaWin64Path(selectedPath) {
+  const root = path.resolve(selectedPath);
+  const evidence = [];
+  const warnings = [];
+  const directCandidates = uniquePaths([
+    root,
+    path.join(root, 'Binaries', 'Win64'),
+    path.join(root, 'Brickadia', 'Binaries', 'Win64'),
+    path.join(root, 'WindowsServer', 'Brickadia', 'Binaries', 'Win64'),
+    path.join(root, 'steamapps', 'common', 'Brickadia Dedicated Server', 'Brickadia', 'Binaries', 'Win64'),
+  ]);
+
+  for (const candidate of directCandidates) {
+    const found = brickadiaExecutableDirectory(candidate);
+    evidence.push(candidate);
+    if (found) {
+      return brickadiaInstallSearchResult(found, {
+        evidence,
+        warnings,
+        visitedDirectories: evidence.length,
+        truncated: false,
+      });
+    }
+  }
+
+  const queue = [{ directory: root, depth: 0 }];
+  const visited = new Set();
+  let visitedDirectories = 0;
+  let truncated = false;
+
+  while (queue.length > 0) {
+    const { directory, depth } = queue.shift();
+    const resolved = path.resolve(directory);
+    const key = resolved.toLowerCase();
+    if (visited.has(key)) continue;
+    visited.add(key);
+    visitedDirectories += 1;
+    if (evidence.length < 40) evidence.push(resolved);
+
+    const found = brickadiaExecutableDirectory(resolved);
+    if (found) {
+      return brickadiaInstallSearchResult(found, {
+        evidence,
+        warnings,
+        visitedDirectories,
+        truncated,
+      });
+    }
+
+    if (visitedDirectories >= BRICKADIA_INSTALL_SEARCH_MAX_DIRECTORIES) {
+      truncated = true;
+      break;
+    }
+    if (depth >= BRICKADIA_INSTALL_SEARCH_MAX_DEPTH) continue;
+
+    let entries;
+    try {
+      entries = fs.readdirSync(resolved, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      if (BRICKADIA_INSTALL_SEARCH_IGNORED_DIRS.has(entry.name)) continue;
+      queue.push({
+        directory: path.join(resolved, entry.name),
+        depth: depth + 1,
+      });
+    }
+  }
+
+  if (truncated) {
+    warnings.push(`Search stopped after ${BRICKADIA_INSTALL_SEARCH_MAX_DIRECTORIES} directories.`);
+  }
+  return brickadiaInstallSearchResult(null, {
+    evidence,
+    warnings,
+    visitedDirectories,
+    truncated,
+  });
+}
+
+function brickadiaExecutableDirectory(directory) {
+  if (!directory) return null;
+  try {
+    const candidate = path.join(directory, BRICKADIA_SERVER_EXE);
+    return fs.existsSync(candidate) ? path.resolve(directory) : null;
+  } catch {
+    return null;
+  }
+}
+
+function brickadiaInstallSearchResult(brickadiaWin64, options = {}) {
+  return {
+    brickadiaWin64,
+    warnings: options.warnings || [],
+    evidence: options.evidence || [],
+    visitedDirectories: options.visitedDirectories || 0,
+    truncated: Boolean(options.truncated),
+  };
+}
+
+function publicBrickadiaInstallSearch(search) {
+  return {
+    executable: BRICKADIA_SERVER_EXE,
+    visitedDirectories: search.visitedDirectories,
+    maxDirectories: BRICKADIA_INSTALL_SEARCH_MAX_DIRECTORIES,
+    maxDepth: BRICKADIA_INSTALL_SEARCH_MAX_DEPTH,
+    truncated: search.truncated,
+    evidence: search.evidence.slice(0, 40),
+  };
+}
+
+function uniquePaths(values) {
+  const seen = new Set();
+  return values.filter(value => {
+    const resolved = path.resolve(value);
+    const key = resolved.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function dashboardImportOutputPath(profile, input = {}) {

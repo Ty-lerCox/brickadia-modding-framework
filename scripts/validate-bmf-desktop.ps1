@@ -79,10 +79,10 @@ try {
       $errors.Add('BMF Desktop must pin Electron 42.4.1 until the desktop build is locked.')
     }
     if ([string]$packageJson.devDependencies.'electron-builder' -ne '26.15.3') {
-      $errors.Add('BMF Desktop must pin electron-builder 26.15.3 until MSI packaging is locked.')
+      $errors.Add('BMF Desktop must pin electron-builder 26.15.3 until MSI/portable packaging is locked.')
     }
     if ([string]$packageJson.scripts.'release:local' -notmatch [regex]::Escape('scripts\build-bmf-desktop-release.ps1')) {
-      $errors.Add('BMF Desktop must expose release:local for the top-level MSI release builder.')
+      $errors.Add('BMF Desktop must expose release:local for the top-level desktop release builder.')
     }
   }
 
@@ -192,7 +192,7 @@ try {
     @{ Path = (Join-Path $appRoot 'electron/main.cjs'); Needle = 'serviceRoot' },
     @{ Path = (Join-Path $appRoot 'electron/main.cjs'); Needle = 'updateDownloadDir' },
     @{ Path = (Join-Path $appRoot 'electron/main.cjs'); Needle = 'desktopRoot(input)' },
-    @{ Path = (Join-Path $appRoot 'electron/main.cjs'); Needle = 'bmfRoot: base.paths?.bmfRoot || root' },
+    @{ Path = (Join-Path $appRoot 'electron/main.cjs'); Needle = 'desktopProfileBmfRoot(base.paths?.bmfRoot, root)' },
     @{ Path = (Join-Path $appRoot 'electron/main.cjs'); Needle = 'createPrerequisiteAudit' },
     @{ Path = (Join-Path $appRoot 'electron/main.cjs'); Needle = 'bmf:traffic-snapshot' },
     @{ Path = (Join-Path $appRoot 'electron/main.cjs'); Needle = 'bmf:traffic-export' },

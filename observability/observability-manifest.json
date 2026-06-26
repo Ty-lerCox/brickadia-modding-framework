@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.0-dev",
+  "version": "0.1.0-ea2.cl13530",
   "owner": "BMF",
   "alloy": {
     "template": "observability/alloy/bmf.alloy.template",
@@ -18,7 +18,7 @@
     "dashboard": "observability/grafana/bmf-dashboard.json",
     "import": "observability/grafana/dashboard-import.json",
     "dashboardUid": "bmf-standard",
-    "dashboardVersion": "0.1.0-dev"
+    "dashboardVersion": "0.1.0-ea2.cl13530"
   },
   "labels": [
     "environment",
@@ -29,8 +29,9 @@
   "metrics": [
     "up",
     "bmf_runtime_status_up",
-    "bmf_frame_time_seconds_bucket",
-    "bmf_frame_time_slow_total",
+    "brickadia_frame_fps",
+    "brickadia_frame_delta_milliseconds",
+    "brickadia_frame_slow_total",
     "bmf_command_total",
     "bmf_socket_connected",
     "bmf_event_total"

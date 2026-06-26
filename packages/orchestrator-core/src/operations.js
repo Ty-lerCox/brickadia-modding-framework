@@ -219,18 +219,13 @@ const OPERATION_DEFINITIONS = {
   },
   'inspect-event-traffic': {
     title: 'Inspect BMF/Omegga event traffic',
-    description: 'Observe existing socket, JSONL, command, response, and bridge diagnostic records without probing the game server.',
+    description: 'Observe the live BMFSocket event stream and bridge diagnostic records without probing the game server.',
     mutates: false,
     guardrails: OBSERVE_ONLY_GUARDRAILS,
     actions: [
       action('connect-bmf-socket-readonly', 'Connect to BMFSocket event stream in read-only mode', 'bmf-native-socket', 'socket-read', {
         mutates: false,
         healthCheck: 'bmf-socket-connected',
-        guardrails: OBSERVE_ONLY_GUARDRAILS,
-      }),
-      action('tail-events-jsonl-fallback', 'Tail BMF events JSONL fallback', 'bmf-runtime', 'log-tail', {
-        mutates: false,
-        inputs: ['Mods/BMF/runtime/events.jsonl'],
         guardrails: OBSERVE_ONLY_GUARDRAILS,
       }),
       action('normalize-event-envelopes', 'Normalize event and command envelopes', 'orchestrator-core', 'transform', {

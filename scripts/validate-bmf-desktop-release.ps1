@@ -85,6 +85,7 @@ $releaseDir = Join-Path $caseRoot 'release'
 $buildJsonPath = Join-Path $caseRoot 'desktop-release-build.json'
 $builderPath = Join-Path $Root 'scripts/build-bmf-desktop-release.ps1'
 $unifiedRuntimePath = Join-Path $Root 'manifests/unified-runtime.json'
+$fixtureVersion = '0.1.0-ea2.cl13530'
 $build = $null
 $manifest = $null
 $catalog = $null
@@ -96,6 +97,8 @@ try {
   $builderText = Get-Content -Raw -LiteralPath $builderPath
   foreach ($marker in @(
     '[switch]$BuildMsi',
+    '[switch]$BuildPortable',
+    '[string]$PortablePath',
     '[string]$NodeExe = $env:BMF_DESKTOP_NODE_EXE',
     'Resolve-NodeExecutable',
     'Test-IsSupportedDesktopNodeVersion',
@@ -105,7 +108,7 @@ try {
     '24.15.0',
     'node_modules/@angular/cli/bin/ng.js',
     'node_modules/electron-builder/cli.js',
-    "'--win', 'msi', '--x64'",
+    'portable',
     'dist/release/win-unpacked/resources/bmf',
     'bin/bmfctl.cmd',
     'apps/bmf-desktop/package.json',
@@ -119,10 +122,12 @@ try {
     'observability/grafana/bmf-dashboard.json',
     'sourceCommit',
     'bmfctlShim',
+    'portableArtifact',
+    'portableSha256',
     'desktopBuild'
   )) {
     if ($builderText -notmatch [regex]::Escape($marker)) {
-      $errors.Add("Desktop release builder is missing real MSI build marker: $marker")
+      $errors.Add("Desktop release builder is missing real artifact build marker: $marker")
     }
   }
   if (!(Test-IsChildPath $artifactsRoot $caseRoot)) {
@@ -136,11 +141,15 @@ try {
   $fixtureMsiPath = Join-Path $fixtureDir 'fixture.msi'
   [System.IO.File]::WriteAllBytes($fixtureMsiPath, [byte[]](0x4D, 0x53, 0x49, 0x0D, 0x0A, 0x42, 0x4D, 0x46))
   Add-Evidence 'msi' $fixtureMsiPath 'Tiny MSI-shaped fixture used for release metadata validation'
+  $fixturePortablePath = Join-Path $fixtureDir 'fixture-portable.exe'
+  [System.IO.File]::WriteAllBytes($fixturePortablePath, [byte[]](0x4D, 0x5A, 0x42, 0x4D, 0x46))
+  Add-Evidence 'exe' $fixturePortablePath 'Tiny EXE-shaped fixture used for portable release metadata validation'
 
   $buildOutput = & $builderPath `
     -Root $Root `
     -MsiPath $fixtureMsiPath `
-    -Version '0.1.0-dev' `
+    -PortablePath $fixturePortablePath `
+    -Version $fixtureVersion `
     -OutDir $releaseDir `
     -OutJson $buildJsonPath `
     -ReleaseChannel 'dev' `
@@ -155,19 +164,24 @@ try {
     }
   }
 
-  $expectedArtifactName = 'BMF-Desktop-0.1.0-dev-x64.msi'
+  $expectedArtifactName = "BMF-Desktop-$fixtureVersion-x64.msi"
+  $expectedPortableName = "BMF-Desktop-$fixtureVersion-portable-x64.exe"
   $primaryArtifactPath = Join-Path $releaseDir $expectedArtifactName
+  $portableArtifactPath = Join-Path $releaseDir $expectedPortableName
   $checksumPath = "$primaryArtifactPath.sha256"
+  $portableChecksumPath = "$portableArtifactPath.sha256"
   $releaseManifestPath = Join-Path $releaseDir 'release-manifest.json'
   $releaseCatalogPath = Join-Path $releaseDir 'release-catalog.json'
   $releaseNotesPath = Join-Path $releaseDir 'RELEASE_NOTES.md'
-  foreach ($required in @($primaryArtifactPath, $checksumPath, $releaseManifestPath, $releaseCatalogPath, $releaseNotesPath)) {
+  foreach ($required in @($primaryArtifactPath, $checksumPath, $portableArtifactPath, $portableChecksumPath, $releaseManifestPath, $releaseCatalogPath, $releaseNotesPath)) {
     if (!(Test-Path -LiteralPath $required)) {
       $errors.Add("Desktop release output is missing: $required")
     }
   }
   Add-Evidence 'msi' $primaryArtifactPath 'Generated primary MSI artifact'
   Add-Evidence 'checksum' $checksumPath 'Generated primary MSI checksum'
+  Add-Evidence 'exe' $portableArtifactPath 'Generated portable artifact'
+  Add-Evidence 'checksum' $portableChecksumPath 'Generated portable checksum'
   Add-Evidence 'json' $releaseManifestPath 'Generated BMF Desktop release manifest'
   Add-Evidence 'json' $releaseCatalogPath 'Generated BMF Desktop release catalog'
   Add-Evidence 'markdown' $releaseNotesPath 'Generated BMF Desktop release notes'
@@ -187,6 +201,21 @@ try {
       }
     }
   }
+  if (Test-Path -LiteralPath $portableArtifactPath) {
+    $expectedPortableHash = Get-Sha256Hex $portableArtifactPath
+    if ($build -and [string]$build.data.portableSha256 -ne $expectedPortableHash) {
+      $errors.Add('Build output portableSha256 does not match the generated portable hash.')
+    }
+    if (Test-Path -LiteralPath $portableChecksumPath) {
+      $portableChecksumText = (Get-Content -Raw -LiteralPath $portableChecksumPath).Trim()
+      if (!$portableChecksumText.StartsWith($expectedPortableHash, [System.StringComparison]::OrdinalIgnoreCase)) {
+        $errors.Add('Portable checksum file does not start with the portable SHA256 hash.')
+      }
+      if ($portableChecksumText -notmatch [regex]::Escape($expectedPortableName)) {
+        $errors.Add('Portable checksum file does not include the portable artifact name.')
+      }
+    }
+  }
 
   if (Test-Path -LiteralPath $releaseManifestPath) {
     $manifest = Get-Content -Raw -LiteralPath $releaseManifestPath | ConvertFrom-Json
@@ -198,7 +227,7 @@ try {
         $errors.Add("Desktop release manifest field is empty: $field")
       }
     }
-    if ([string]$manifest.bmfDesktopVersion -ne '0.1.0-dev') {
+    if ([string]$manifest.bmfDesktopVersion -ne $fixtureVersion) {
       $errors.Add("Unexpected BMF Desktop version in release manifest: $($manifest.bmfDesktopVersion)")
     }
     if ([string]$manifest.omeggaRuntimeVersionOrCommit -notmatch '^[a-f0-9]{40}$') {
@@ -207,11 +236,20 @@ try {
     if ([string]$manifest.primaryArtifact.fileName -ne $expectedArtifactName) {
       $errors.Add("Unexpected primary artifact in release manifest: $($manifest.primaryArtifact.fileName)")
     }
+    if ([string]$manifest.portableArtifact.fileName -ne $expectedPortableName) {
+      $errors.Add("Unexpected portable artifact in release manifest: $($manifest.portableArtifact.fileName)")
+    }
     if (@($manifest.requiredArtifacts) -notcontains $expectedArtifactName) {
       $errors.Add('Release manifest requiredArtifacts does not include the MSI.')
     }
     if (@($manifest.requiredArtifacts) -notcontains "$expectedArtifactName.sha256") {
       $errors.Add('Release manifest requiredArtifacts does not include the MSI checksum.')
+    }
+    if (@($manifest.requiredArtifacts) -notcontains $expectedPortableName) {
+      $errors.Add('Release manifest requiredArtifacts does not include the portable exe.')
+    }
+    if (@($manifest.requiredArtifacts) -notcontains "$expectedPortableName.sha256") {
+      $errors.Add('Release manifest requiredArtifacts does not include the portable checksum.')
     }
     if (@($manifest.requiredArtifacts) -notcontains 'release-catalog.json') {
       $errors.Add('Release manifest requiredArtifacts does not include the release catalog.')
@@ -219,7 +257,7 @@ try {
     if ([string]$manifest.releaseCatalog -ne 'release-catalog.json') {
       $errors.Add("Release manifest does not point at release-catalog.json: $($manifest.releaseCatalog)")
     }
-    if (@($manifest.files).Count -lt 3) {
+    if (@($manifest.files).Count -lt 5) {
       $errors.Add('Release manifest does not include artifact file records.')
     }
   }
@@ -235,17 +273,26 @@ try {
     if ([string]$catalog.releaseChannel -ne 'dev') {
       $errors.Add("Unexpected release catalog channel: $($catalog.releaseChannel)")
     }
-    if ([string]$catalog.latest.version -ne '0.1.0-dev') {
+    if ([string]$catalog.latest.version -ne $fixtureVersion) {
       $errors.Add("Unexpected latest release version in catalog: $($catalog.latest.version)")
     }
     if ([string]$catalog.latest.artifact.fileName -ne $expectedArtifactName) {
       $errors.Add("Release catalog latest artifact does not point at the MSI: $($catalog.latest.artifact.fileName)")
     }
+    if ([string]$catalog.latest.portableArtifact.fileName -ne $expectedPortableName) {
+      $errors.Add("Release catalog latest portable artifact is unexpected: $($catalog.latest.portableArtifact.fileName)")
+    }
     if ([string]$catalog.latest.artifact.url -ne "https://downloads.example/bmf/$expectedArtifactName") {
       $errors.Add("Release catalog latest artifact URL is unexpected: $($catalog.latest.artifact.url)")
     }
+    if ([string]$catalog.latest.portableArtifact.url -ne "https://downloads.example/bmf/$expectedPortableName") {
+      $errors.Add("Release catalog latest portable URL is unexpected: $($catalog.latest.portableArtifact.url)")
+    }
     if ([string]$catalog.latest.artifact.sha256 -ne [string]$build.data.installerSha256) {
       $errors.Add('Release catalog latest artifact hash does not match build output.')
+    }
+    if ([string]$catalog.latest.portableArtifact.sha256 -ne [string]$build.data.portableSha256) {
+      $errors.Add('Release catalog latest portable hash does not match build output.')
     }
     if ([string]$catalog.latest.manifest.fileName -ne 'release-manifest.json') {
       $errors.Add("Release catalog latest manifest is unexpected: $($catalog.latest.manifest.fileName)")
@@ -270,7 +317,9 @@ try {
     $build.data.checksumPath,
     $build.data.releaseManifestPath,
     $build.data.releaseCatalogPath,
-    $build.data.releaseNotesPath
+    $build.data.releaseNotesPath,
+    $build.data.portableArtifactPath,
+    $build.data.portableChecksumPath
   )) {
     if ($generatedPath -and !(Test-IsChildPath $releaseDir $generatedPath)) {
       $errors.Add("Generated path is outside the release artifact directory: $generatedPath")

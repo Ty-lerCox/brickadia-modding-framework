@@ -42,7 +42,7 @@ with `allowPluginServerShutdown: true`; otherwise scoped plugin calls return
 The `bmf.server.shutdown` command exposes the same guarded path:
 
 ```text
-Omegga.Bridge.BMF bmf.server.shutdown confirm=BMF_SHUTDOWN delayms=1500 reason=maintenance
+bmf.server.shutdown confirm=BMF_SHUTDOWN delayms=1500 reason=maintenance
 ```
 
 Actual stop/restart is not claimed yet. A true stop/restart still requires an

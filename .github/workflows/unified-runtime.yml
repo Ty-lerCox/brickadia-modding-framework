@@ -169,8 +169,8 @@ jobs:
       - name: Build documentation
         run: python -m mkdocs build --strict
 
-  desktop-msi:
-    name: BMF Desktop MSI artifact
+  desktop-release:
+    name: BMF Desktop release artifacts
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
     runs-on: windows-latest
     steps:
@@ -185,12 +185,12 @@ jobs:
       - name: Install Desktop dependencies
         run: npm run install:desktop
 
-      - name: Build MSI release artifacts
+      - name: Build Desktop release artifacts
         run: npm run release:desktop
 
-      - name: Upload MSI release bundle
+      - name: Upload Desktop release bundle
         uses: actions/upload-artifact@v4
         with:
-          name: bmf-desktop-msi-release
+          name: bmf-desktop-release
           path: artifacts/local/bmf-desktop-release/**
           if-no-files-found: error

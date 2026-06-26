@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedFor": "BMF 0.1.0-dev",
+  "generatedFor": "BMF 0.1.0-ea2.cl13530",
   "dependencies": [
     {
       "id": "bmf-compatible-omegga-runtime",
@@ -22,7 +22,7 @@
         "brickadia-server-supervisor",
         "managed-ue4ss-install",
         "brickadia-ue4ss-compatibility-bundle",
-        "omegga-bridge-bmf-command-worker-route",
+        "bmf-bridge-socket-route",
         "ue4ss-console-execution-helpers",
         "ue4ss-call-function-by-name-helper",
         "player-identity-sync-adapter",
@@ -30,7 +30,7 @@
         "headless-canary-transport"
       ],
       "requiredSurfaces": [
-        "Omegga.Bridge.BMF",
+        "BMF Bridge socket",
         "OmeggaExecuteConsoleManagerInput",
         "OmeggaExecuteKismetConsoleCommand",
         "OmeggaExecuteCachedConsoleExec",

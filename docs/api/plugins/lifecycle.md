@@ -23,8 +23,8 @@ ordering or lifecycle hook data.
 `main.lua` returns a plugin table. The loader supports:
 
 - `onLoad(BMF, data)`: called after the plugin script loads.
-- `onServerReady(BMF, data)`: called after BMF starts its command worker and
-  emits `serverReady`. Plugins loaded by `bmf.reload` after the server is ready
+- `onServerReady(BMF, data)`: called after BMF starts and emits
+  `serverReady`. Plugins loaded by `bmf.reload` after the server is ready
   receive this hook during reload.
 - `onTick(BMF, data)`: called by a lazy recurring lifecycle timer while at
   least one loaded plugin defines `onTick`.
@@ -62,8 +62,8 @@ and event handlers. `bmf.load` loads plugin directories from disk again without
 restarting the Brickadia server:
 
 ```text
-Omegga.Bridge.BMF bmf.unload
-Omegga.Bridge.BMF bmf.load
+bmf.unload
+bmf.load
 ```
 
 The console-command canary proves a temporary plugin command works before

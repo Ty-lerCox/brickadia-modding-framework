@@ -35,7 +35,7 @@ When a plugin is isolated:
 Server-console watchdog route:
 
 ```text
-Omegga.Bridge.BMF bmf.plugins.watchdog
+bmf.plugins.watchdog
 ```
 
 `bmf.reload` resets watchdog state so a fixed plugin can load cleanly.

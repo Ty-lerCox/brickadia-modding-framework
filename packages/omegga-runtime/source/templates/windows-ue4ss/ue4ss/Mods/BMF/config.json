@@ -1,11 +1,11 @@
-﻿{
-    "allowPluginServerExec":  false,
-    "allowPluginServerShutdown":  false,
-    "jsonlLogs":  true,
-    "pluginWatchdogEnabled":  true,
-    "pluginWatchdogMaxErrors":  3,
-    "allowPluginUnsafeGlobals":  false,
-    "allowUnsafeApplicatorLuaHook":  false,
-    "brickadiaSavedDir":  "C:/Users/tycox/OneDrive/Documents/GitHub/Brickadia/omegga-master/omegga-master/data/Saved",
-    "allowUnsafeMinigameObjectSnapshot":  false
+{
+  "allowPluginServerExec": false,
+  "allowPluginServerShutdown": false,
+  "jsonlLogs": false,
+  "pluginWatchdogEnabled": true,
+  "pluginWatchdogMaxErrors": 3,
+  "allowPluginUnsafeGlobals": false,
+  "allowUnsafeApplicatorLuaHook": false,
+  "allowUnsafeMinigameObjectSnapshot": false,
+  "brickadiaSavedDir": ""
 }

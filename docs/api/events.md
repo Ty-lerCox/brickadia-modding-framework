@@ -41,12 +41,11 @@ Unregisters a handler id. Returns `true` when a handler was removed.
 Emits an event and returns the standard BMF result shape. Plugins can emit
 custom events for their own coordination.
 
-Each emitted event is also appended to `runtime/events.jsonl` with
-`source: "event"`, the event name, payload, handler count, and any handler
-errors. When the socket bridge is active, BMF also sends an event envelope to
-the Omegga socket broker so external integrations can subscribe without waiting
-for file polling. Integrations should use the socket path for latency-sensitive
-gameplay and keep the JSONL stream as a durable fallback and audit trail.
+Each emitted event is appended to `runtime/events.jsonl` as diagnostic evidence
+with `source: "event"`, the event name, payload, handler count, and any handler
+errors. BMF also sends an event envelope to the Omegga socket broker so external
+integrations can subscribe without waiting for file polling. Integrations should
+use the socket path for live gameplay traffic.
 
 ## `BMF.events.listenerCount(name)`
 
@@ -54,7 +53,7 @@ Returns the number of currently registered handlers for an event.
 
 ## Framework Events
 
-- `serverReady`: emitted after plugins load and the BMF command worker starts.
+- `serverReady`: emitted after plugins load and the BMF runtime starts.
 - `pluginLoaded`: emitted after a plugin `onLoad` succeeds.
 - `pluginUnloaded`: emitted after a plugin unload succeeds.
 - `worldLoaded`: emitted after `BMF.world.loadAdditive` succeeds.
@@ -69,16 +68,16 @@ Returns the number of currently registered handlers for an event.
 
 ## External Relays
 
-The socket event stream is the preferred live bridge for integrations that need
-BMF events outside UE4SS Lua. The JSONL event stream remains the fallback and
-audit trail.
+The socket event stream is the live bridge for integrations that need BMF events
+outside UE4SS Lua. JSONL remains diagnostic evidence and should not be treated
+as the normal live event transport.
 
 Current CityRPG pattern:
 
 - BMF emits namespaced event records such as `minigames.joinminigame`,
   `minigames.kill`, and `minigames.death`.
-- CityRPG consumes socket events first and tails `runtime/events.jsonl` only
-  when the socket is unavailable.
+- CityRPG consumes socket events and treats socket disconnects as unhealthy
+  integration state.
 - External relays map BMF event names back to CityRPG's legacy application
   event names at the boundary.
 - The packaged Omegga adapter lives at

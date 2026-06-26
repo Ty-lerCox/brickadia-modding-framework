@@ -810,6 +810,7 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
 
     process.on('uncaughtException', async err => {
       Logger.verbose('Uncaught exception', err);
+      Logger.error(err instanceof Error && err.stack ? err.stack : err);
       this.emit('error', err);
 
       // publish stop to database

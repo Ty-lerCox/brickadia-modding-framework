@@ -15,11 +15,11 @@ Canonical package path:
 packages/omegga-plugins/bmf-player-sync
 ```
 
-Configure `commandDir` to the active `Mods/BMF/runtime/commands` directory, or
-set `OMEGGA_BMF_COMMAND_DIR`. The plugin writes `bmf.players.sync` request files
-when Omegga's player list changes and also runs a periodic fallback sync
-(`syncIntervalMs`, default `5000`) so BMF recovers if an Omegga join/leave event
-is missed during startup or reload.
+Configure `runtimeDir` or set `OMEGGA_BMF_RUNTIME_DIR` when direct cache output
+should write to a specific BMF runtime. When command bridge mode is enabled, the
+plugin sends `bmf.players.sync` through the loaded `BMF Bridge` plugin, which in
+turn uses the authenticated loopback socket. It does not write command request
+files.
 
 On the current Windows UE4SS runtime, Omegga's built-in player list may stay
 empty when the `BRPlayerState`/`PlayerController` join matcher cannot complete.
@@ -38,8 +38,8 @@ BMF normalizes those records into `BMF.players.list()`,
 live `PlayerState` properties through UE4SS Lua.
 
 The adapter can also forward Omegga `interact` events into BMF as
-`bmf.interact.console` command requests. Forwarded messages are percent-encoded
-so Interactable Print-to-Console tags with spaces remain one command token. The
+`bmf.interact.console` socket commands through BMF Bridge. Forwarded messages
+are percent-encoded so Interactable Print-to-Console tags with spaces remain one command token. The
 `examples/InteractConsolePrefixGuard` plugin consumes those events to audit and
 message players when non-admin roles use a prefix outside the configured
 whitelist.

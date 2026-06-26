@@ -23,10 +23,10 @@ local summary = BMF.apis.summary()
 Server-console route:
 
 ```text
-Omegga.Bridge.BMF bmf.apis
-Omegga.Bridge.BMF bmf.apis name=BMF.chat.whisper
-Omegga.Bridge.BMF bmf.apis risk=live-player
-Omegga.Bridge.BMF bmf.apis stability=experimental
+bmf.apis
+bmf.apis name=BMF.chat.whisper
+bmf.apis risk=live-player
+bmf.apis stability=experimental
 ```
 
 Each API record includes:

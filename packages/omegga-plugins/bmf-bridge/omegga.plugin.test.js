@@ -41,82 +41,52 @@ test('normalizes event records and redacts retained payload secrets', () => {
       source: 'native.BMFSocketResourceNative',
     },
   }), {
-    transport: 'events-jsonl',
+    transport: 'socket',
     redactPrivateIps: true,
   });
 
   assert.strictEqual(envelope.id, '42');
   assert.strictEqual(envelope.type, 'event');
   assert.strictEqual(envelope.event, 'resource.hit');
-  assert.strictEqual(envelope.transport, 'events-jsonl');
+  assert.strictEqual(envelope.transport, 'socket');
   assert.strictEqual(envelope.source, 'native.BMFSocketResourceNative');
   assert.strictEqual(envelope.payload.player.token, '[redacted]');
   assert.strictEqual(envelope.payload.endpoint, 'http://[private-ip]:3000');
   assert.ok(envelope.redactions >= 2);
 });
 
-test('tails event log fallback, applies bounded retention, and delivers subscribers', async t => {
-  const root = tempRoot(t);
-  const eventLogPath = path.join(root, 'events.jsonl');
-  const bridge = new BmfBridge(
-    {},
-    {
-      runtimeDir: root,
-      eventLogPath,
-      maxRecords: 2,
-      readExistingEventLog: true,
-      tailEvents: false,
-    }
-  );
-  const delivered = [];
-  bridge.subscribe('*', record => delivered.push(record));
+test('status snapshot exposes bounded retained socket records', () => {
+  const bridge = new BmfBridge({}, {
+    maxRecords: 4,
+    statusRecordLimit: 2,
+    redactPrivateIpsOnExport: true,
+  });
 
-  for (const event of ['one', 'two', 'three']) {
-    fs.appendFileSync(eventLogPath, `${JSON.stringify(eventRecord(event, { token: `${event}-token` }))}\n`, 'utf8');
-    bridge.pollEventLog();
-  }
+  bridge.recordEnvelope(eventRecord('status.one', { token: 'one-secret' }), { transport: 'socket' });
+  bridge.recordEnvelope(eventRecord('status.two', { token: 'two-secret' }), { transport: 'socket' });
+  bridge.recordEnvelope(eventRecord('status.three', {
+    token: 'three-secret',
+    endpoint: 'http://192.168.1.25:3000',
+  }), { transport: 'socket' });
 
-  assert.deepStrictEqual(delivered.map(record => record.event), ['one', 'two', 'three']);
-  assert.deepStrictEqual(bridge.recentRecords().map(record => record.event), ['two', 'three']);
-  assert.strictEqual(bridge.counters.dropped, 1);
-  assert.strictEqual(bridge.recentRecords()[0].payload.token, '[redacted]');
+  const status = bridge.statusSnapshot();
+  assert.strictEqual(status.records.retained, 3);
+  assert.strictEqual(status.records.statusLimit, 2);
+  assert.deepStrictEqual(status.recentRecords.map(record => record.event), ['status.two', 'status.three']);
+  assert.strictEqual(status.recentRecords[0].payload.token, '[redacted]');
+  assert.strictEqual(status.recentRecords[1].payload.endpoint, 'http://[private-ip]:3000');
 });
 
-test('file fallback command writes request and records response envelope', async t => {
-  const root = tempRoot(t);
-  const commandDir = path.join(root, 'commands');
-  const bridge = new BmfBridge(
-    {},
-    {
-      runtimeDir: root,
-      commandDir,
-      tailEvents: false,
-      commandTimeoutMs: 1000,
-    }
+test('default command path requires a connected socket instead of file fallback', async () => {
+  const bridge = new BmfBridge({}, { socketReconnectMs: 0 });
+  await assert.rejects(
+    () => bridge.invokeCommand('bmf.status'),
+    /BMF socket is not connected/,
   );
-
-  const responsePromise = bridge.invokeCommand('bmf.status token=secret', { transport: 'file-command' });
-  while (!fs.existsSync(commandDir) || fs.readdirSync(commandDir).filter(file => file.endsWith('.request.txt')).length === 0) {
-    await new Promise(resolve => setTimeout(resolve, 10));
-  }
-  const requestFile = fs.readdirSync(commandDir).find(file => file.endsWith('.request.txt'));
-  const requestId = path.basename(requestFile, '.request.txt');
-  assert.strictEqual(fs.readFileSync(path.join(commandDir, requestFile), 'utf8'), 'bmf.status token=secret');
-  fs.writeFileSync(
-    path.join(commandDir, `${requestId}.response.txt`),
-    ['ok=true', 'detail=healthy', 'command=bmf.status', 'BMF bmf.status OK', ''].join('\n'),
-    'utf8'
+  await assert.rejects(
+    () => bridge.invokeCommand('bmf.status', { transport: 'file-command' }),
+    /unsupported BMF transport: file-command/,
   );
-
-  const response = await responsePromise;
-  assert.strictEqual(response.ok, true);
-  assert.strictEqual(response.detail, 'healthy');
-  assert.strictEqual(response.transport, 'file-command');
-  const records = bridge.recentRecords();
-  assert.strictEqual(records[0].type, 'command');
-  assert.strictEqual(records[0].payload.command, 'bmf.status token=[redacted]');
-  assert.strictEqual(records[1].type, 'response');
-  assert.strictEqual(records[1].status, 'ok');
 });
 
 test('socket transport sends hello, subscribes, receives events, and resolves commands', async t => {
@@ -163,7 +133,6 @@ test('socket transport sends hello, subscribes, receives events, and resolves co
     {},
     {
       runtimeDir: root,
-      tailEvents: false,
       socketReconnectMs: 0,
       commandTimeoutMs: 1000,
     }
@@ -185,12 +154,12 @@ test('socket transport sends hello, subscribes, receives events, and resolves co
 });
 
 test('pause skips subscriber delivery without unbounded retention', () => {
-  const bridge = new BmfBridge({}, { maxRecords: 1, tailEvents: false });
+  const bridge = new BmfBridge({}, { maxRecords: 1 });
   const delivered = [];
   bridge.subscribe('*', record => delivered.push(record));
   bridge.setPaused(true);
-  bridge.recordEnvelope(eventRecord('paused.one'), { transport: 'events-jsonl' });
-  bridge.recordEnvelope(eventRecord('paused.two'), { transport: 'events-jsonl' });
+  bridge.recordEnvelope(eventRecord('paused.one'), { transport: 'socket' });
+  bridge.recordEnvelope(eventRecord('paused.two'), { transport: 'socket' });
 
   assert.deepStrictEqual(delivered, []);
   assert.strictEqual(bridge.recentRecords().length, 1);

@@ -67,7 +67,7 @@ Plugins must declare `server.save`; otherwise the scoped plugin call returns
 The `bmf.server.save` command exposes the same helper for unattended runs:
 
 ```text
-Omegga.Bridge.BMF bmf.server.save name=BMF_AdminSnapshot
+bmf.server.save name=BMF_AdminSnapshot
 ```
 
 ## Validation

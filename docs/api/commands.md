@@ -27,28 +27,14 @@ caller is already in-process.
 The current bridge route is:
 
 ```text
-Omegga.Bridge.BMF bmf.status
+BMF Bridge socket -> BMFSocket -> BMF.commands.dispatch
 ```
 
-The file-backed worker queues requests under `Mods/BMF/runtime/commands`,
-dispatches them in BMF, and writes matching `.response.txt` files.
-
-Latency-sensitive Omegga plugins should prefer the socket bridge when available;
-see the [Supported Runtime Matrix](../reference/supported-runtime.md) for the
-transport contract. The command result shape is the same; socket responses
+Omegga-facing adapters should call the loaded `BMF Bridge` plugin. The bridge
+sends command envelopes through the authenticated loopback socket and reports a
+disconnected socket as unhealthy instead of silently falling back to files. The
+command result shape remains console-like key/value text; socket responses
 include `bmf_command_transport=socket`.
-
-Current bounded worker defaults:
-
-```text
-BMF_COMMAND_WORKER_POLL_MS=250
-BMF_COMMAND_WORKER_FALLBACK_POLL_MS=1000
-BMF_COMMAND_WORKER_MAX_FILES_PER_POLL=1
-BMF_COMMAND_WORKER_ASYNC=1
-```
-
-For high-frequency traffic, prefer the socket bridge or an event-fed cache over
-repeated command-file requests.
 
 ## Examples
 
@@ -89,6 +75,8 @@ repeated command-file requests.
 | Runtime bricks | `bmf.bricks.runtime.set ...` | Mutates visibility/collision by UUID+purpose, lookup tag, GUID, or diagnostic explicit id. | [Runtime Brick State](runtime-bricks.md) |
 | Runtime bricks | `bmf.bricks.runtime.inspect ...` | Diagnostic inspection for one verified live runtime brick id. | [Runtime Brick State](runtime-bricks.md) |
 | Runtime bricks | `bmf.bricks.runtime.resolve ...` | Diagnostic runtime-id resolve near one world position under explicit gates. | [Runtime Brick State](runtime-bricks.md) |
+| Runtime bricks | `bmf.bricks.runtime.scan-region ...` | Diagnostic runtime-local active brick scan; not a ClearRegion safety proof. | [Runtime Brick State](runtime-bricks.md) |
+| Runtime bricks | `bmf.bricks.world.scan-region ...` | World-space `Bricks.SaveRegion` proof required before a caller may use `Bricks.ClearRegion`; fails closed unless the region contains exactly the expected tree key and no untagged bricks. | [Runtime Brick State](runtime-bricks.md) |
 | Runtime bricks | `bmf.tools.resource.native.*` | Starts, drains, and inspects native CityRPG resource hit capture. | [Runtime Brick State](runtime-bricks.md) |
 | Runtime bricks | `bmf.bricks.runtime.guid-status ...` | Prints opaque GUID binding state. | [Runtime Brick State](runtime-bricks.md) |
 | Runtime bricks | `bmf.bricks.runtime.status` | Prints the last queued runtime brick result. | [Runtime Brick State](runtime-bricks.md) |
@@ -123,11 +111,7 @@ return {
 
 The handler receives raw argument text when UE4SS provides it. Return the
 standard BMF result shape and include optional `data.lines` for console output.
-The worker writes those lines to the response file and to `runtime/bmf.log`.
-
-When writing request files directly from Windows PowerShell, use a no-BOM
-encoding. Omegga's bridge and bundled adapters already write no-BOM request
-files.
+BMF writes those lines to the command response envelope and to `runtime/bmf.log`.
 
 Commands registered through a plugin's scoped `BMF` facade are owned by that
 plugin and are automatically removed when the plugin unloads or reloads.

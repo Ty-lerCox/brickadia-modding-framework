@@ -264,9 +264,66 @@
       ]
     },
     {
+      "id": 8,
+      "type": "stat",
+      "title": "Frame FPS",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "fps",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 45
+              },
+              {
+                "color": "green",
+                "value": 58
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(brickadia_frame_fps{scope=\"window\",statistic=\"avg\",environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\",brickadia_build=~\"$brickadia_build\"})"
+        }
+      ]
+    },
+    {
       "id": 4,
       "type": "timeseries",
-      "title": "Frame Time p95",
+      "title": "Frame Time",
       "datasource": {
         "type": "prometheus",
         "uid": "$datasource"
@@ -303,8 +360,13 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum(rate(bmf_frame_time_seconds_bucket{environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\",brickadia_build=~\"$brickadia_build\"}[5m])) by (le)) * 1000",
-          "legendFormat": "p95 frame ms"
+          "expr": "max(brickadia_frame_delta_milliseconds{scope=\"window\",statistic=\"avg\",environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\",brickadia_build=~\"$brickadia_build\"})",
+          "legendFormat": "window avg"
+        },
+        {
+          "refId": "B",
+          "expr": "max(brickadia_frame_delta_milliseconds{scope=\"window\",statistic=\"max\",environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\",brickadia_build=~\"$brickadia_build\"})",
+          "legendFormat": "window max"
         }
       ]
     },
@@ -344,8 +406,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (threshold) (rate(bmf_frame_time_slow_total{environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\"}[5m]))",
-          "legendFormat": "{{threshold}}"
+          "expr": "sum by (threshold_ms) (rate(brickadia_frame_slow_total{environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\",brickadia_build=~\"$brickadia_build\"}[5m]))",
+          "legendFormat": "{{threshold_ms}} ms"
         }
       ]
     },

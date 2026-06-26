@@ -324,7 +324,7 @@ async function createHealthReport(options = {}) {
   }
   if (includePortDiagnostics) {
     probeOptions.portInspection = await inspectConfiguredPorts(profile, {
-      timeoutMs: numberOption(options.portProbeTimeoutMs || options.probeTimeoutMs, 1200),
+      timeoutMs: numberOption(options.portProbeTimeoutMs || options.probeTimeoutMs, 5000),
     });
   }
 

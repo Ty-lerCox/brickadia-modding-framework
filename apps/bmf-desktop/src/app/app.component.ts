@@ -3,6 +3,7 @@ import { Component, OnDestroy, OnInit, computed, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { MatBadgeModule } from '@angular/material/badge';
 import { MatButtonModule } from '@angular/material/button';
+import { MatButtonToggleModule } from '@angular/material/button-toggle';
 import { MatCardModule } from '@angular/material/card';
 import { MatChipsModule } from '@angular/material/chips';
 import { MatDividerModule } from '@angular/material/divider';
@@ -31,6 +32,7 @@ import {
   DesktopOperationTransaction,
   DesktopPrerequisiteCheck,
   DesktopProfilePathField,
+  DesktopProfileSetupResult,
   DesktopPortDiagnostic,
   DesktopPlan,
   DesktopProfileRegistry,
@@ -108,6 +110,112 @@ interface ProfileDraftInput {
   };
 }
 
+type AppMode = 'easy' | 'advanced';
+type HealthStatus = HealthCheck['status'];
+type EasyServiceVisibility = 'always' | 'managed-stack' | 'socket' | 'frame-telemetry' | 'telemetry' | 'dashboard';
+
+interface EasyServiceDefinition {
+  id: string;
+  name: string;
+  group: string;
+  icon: string;
+  fallbackSummary: string;
+  visibility?: EasyServiceVisibility;
+}
+
+interface EasyServiceRow {
+  id: string;
+  name: string;
+  group: string;
+  icon: string;
+  status: HealthStatus;
+  summary: string;
+  detail: string;
+  evidence: string[];
+  nextAction: string | null;
+  severity: string;
+  source: 'health' | 'port';
+}
+
+const EASY_HEALTH_RANK: Record<HealthStatus, number> = {
+  healthy: 0,
+  unknown: 1,
+  degraded: 2,
+  unhealthy: 3,
+};
+
+const EASY_SERVICE_DEFINITIONS: EasyServiceDefinition[] = [
+  {
+    id: 'brickadia-files',
+    name: 'Brickadia server files',
+    group: 'Core',
+    icon: 'dns',
+    fallbackSummary: 'Brickadia path has not been checked yet.',
+  },
+  {
+    id: 'omegga-running',
+    name: 'Omegga runtime',
+    group: 'Core',
+    icon: 'terminal',
+    fallbackSummary: 'Omegga runtime state has not been checked yet.',
+    visibility: 'managed-stack',
+  },
+  {
+    id: 'ue4ss-enabled',
+    name: 'UE4SS + OmeggaBridge',
+    group: 'Core',
+    icon: 'extension',
+    fallbackSummary: 'UE4SS and bridge files have not been checked yet.',
+  },
+  {
+    id: 'bmf-status-fresh',
+    name: 'BMF runtime',
+    group: 'Core',
+    icon: 'deployed_code',
+    fallbackSummary: 'BMF runtime status has not been checked yet.',
+  },
+  {
+    id: 'bmf-socket-connected',
+    name: 'BMFSocket transport',
+    group: 'Optional',
+    icon: 'settings_ethernet',
+    fallbackSummary: 'Socket transport has not been checked yet.',
+    visibility: 'socket',
+  },
+  {
+    id: 'frame-telemetry-fresh',
+    name: 'BMFFrameTelemetry',
+    group: 'Optional',
+    icon: 'speed',
+    fallbackSummary: 'Frame telemetry has not been checked yet.',
+    visibility: 'frame-telemetry',
+  },
+  {
+    id: 'metrics-endpoint',
+    name: 'Omegga metrics',
+    group: 'Telemetry',
+    icon: 'monitoring',
+    fallbackSummary: 'Metrics endpoint has not been checked yet.',
+    visibility: 'telemetry',
+  },
+  {
+    id: 'alloy-ready',
+    name: 'Grafana Alloy',
+    group: 'Telemetry',
+    icon: 'hub',
+    fallbackSummary: 'Alloy readiness has not been checked yet.',
+    visibility: 'telemetry',
+  },
+  {
+    id: 'dashboard-imported',
+    name: 'Grafana dashboard',
+    group: 'Telemetry',
+    icon: 'dashboard',
+    fallbackSummary: 'Dashboard setup has not been checked yet.',
+    visibility: 'dashboard',
+  },
+];
+
 @Component({
   selector: 'bmf-root',
   standalone: true,
@@ -116,6 +224,7 @@ interface ProfileDraftInput {
     FormsModule,
     MatBadgeModule,
     MatButtonModule,
+    MatButtonToggleModule,
     MatCardModule,
     MatChipsModule,
     MatDividerModule,
@@ -136,6 +245,7 @@ interface ProfileDraftInput {
   styleUrl: './app.component.scss',
 })
 export class AppComponent implements OnInit, OnDestroy {
+  readonly appMode = signal<AppMode>('easy');
   readonly activeProfileId = signal<string | null>(null);
   readonly profileName = signal('Local Server');
   readonly profileBackend = signal('local-process');
@@ -154,10 +264,16 @@ export class AppComponent implements OnInit, OnDestroy {
   readonly telemetryInstance = signal('local-server');
   readonly dashboardUrl = signal('');
   readonly frameTelemetryEnabled = signal(false);
-  readonly telemetryEnabled = signal(true);
+  readonly telemetryEnabled = signal(false);
   readonly profileFormDirty = signal(false);
   readonly selectedOperation = signal<OperationPlan | null>(null);
   readonly profileRegistry = signal<DesktopProfileRegistry | null>(null);
+  readonly brickadiaSetupResult = signal<DesktopProfileSetupResult | null>(null);
+  readonly brickadiaSetupInFlight = signal(false);
+  readonly easyHealthRefreshInFlight = signal(false);
+  readonly easyHealthRefreshError = signal('');
+  readonly easyActionInFlight = signal<string | null>(null);
+  readonly easyActionError = signal('');
   readonly bootstrapPlan = signal<DesktopPlan | null>(null);
   readonly operationTransaction = signal<DesktopOperationTransaction | null>(null);
   readonly operationRollback = signal<DesktopRollbackTransaction | null>(null);
@@ -234,6 +350,53 @@ export class AppComponent implements OnInit, OnDestroy {
   readonly storedProfiles = computed<DesktopServerProfile[]>(() => this.profileRegistry()?.profiles ?? []);
   readonly profileDraft = computed<ProfileDraftInput>(() => this.formProfileInput());
   readonly configuredPathCount = computed(() => Object.values(this.profileDraft().paths).filter(Boolean).length);
+  readonly easyProfileSetupNeeded = computed(() => !this.profileDraft().paths.brickadiaWin64);
+  readonly easyProfileSetupStatus = computed(() => {
+    const result = this.brickadiaSetupResult();
+    const brickadiaPath = this.profileDraft().paths.brickadiaWin64;
+    if (brickadiaPath) return brickadiaPath;
+    if (result?.status === 'not-found') return result.warnings[0] || 'Server executable was not found.';
+    if (result?.status === 'canceled') return 'Brickadia folder selection was canceled.';
+    return 'Select the Brickadia Dedicated Server install folder.';
+  });
+  readonly easyProfileSetupWarning = computed(() => {
+    const result = this.brickadiaSetupResult();
+    if (!result || result.status !== 'not-found') return null;
+    return result.warnings[1] || null;
+  });
+  readonly pendingEasyHealthChecks = computed<HealthCheck[]>(() => {
+    const brickadiaPath = this.profileDraft().paths.brickadiaWin64;
+    if (!brickadiaPath) return [];
+    return [
+      {
+        id: 'brickadia-files',
+        component: 'Brickadia',
+        severity: 'informational',
+        status: 'unknown',
+        summary: 'Health check pending for the selected Brickadia folder.',
+        evidence: [brickadiaPath],
+        nextAction: null,
+      },
+      {
+        id: 'ue4ss-enabled',
+        component: 'BMF',
+        severity: 'informational',
+        status: 'unknown',
+        summary: 'UE4SS and bridge files have not been checked yet.',
+        evidence: [],
+        nextAction: null,
+      },
+      {
+        id: 'bmf-status-fresh',
+        component: 'BMF',
+        severity: 'informational',
+        status: 'unknown',
+        summary: 'BMF runtime status has not been checked yet.',
+        evidence: [],
+        nextAction: null,
+      },
+    ];
+  });
 
   readonly displayedEventColumns = ['timestamp', 'type', 'event', 'transport', 'status', 'source', 'consumer'];
   readonly pageSize = 10;
@@ -303,6 +466,60 @@ export class AppComponent implements OnInit, OnDestroy {
     );
   });
   readonly healthStatus = computed(() => this.healthReport()?.health.status ?? 'unknown');
+  readonly easyHealthStatus = computed<HealthStatus>(() => {
+    const rows = this.easyServiceRows();
+    if (rows.length === 0) return 'unknown';
+    return rows.reduce<HealthStatus>((current, row) => {
+      return EASY_HEALTH_RANK[row.status] > EASY_HEALTH_RANK[current] ? row.status : current;
+    }, 'healthy');
+  });
+  readonly easyServiceRows = computed<EasyServiceRow[]>(() => {
+    if (this.easyProfileSetupNeeded()) return [];
+    const healthChecks = this.healthReport() ? this.healthChecks() : this.pendingEasyHealthChecks();
+    const checksById = new Map(healthChecks.map(check => [check.id, check]));
+    const rows = EASY_SERVICE_DEFINITIONS.filter(definition =>
+      this.easyServiceDefinitionVisible(definition, checksById.get(definition.id)),
+    ).map(definition => {
+      const check = checksById.get(definition.id);
+      return {
+        id: definition.id,
+        name: definition.name,
+        group: definition.group,
+        icon: definition.icon,
+        status: check?.status ?? 'unknown',
+        summary: check?.summary ?? definition.fallbackSummary,
+        detail: check?.evidence?.[0] || check?.nextAction || 'No evidence collected yet.',
+        evidence: check?.evidence ?? [],
+        nextAction: check?.nextAction ?? null,
+        severity: check?.severity ?? 'unknown',
+        source: 'health' as const,
+      };
+    });
+    const portRows = this.portDiagnostics().filter(port => this.easyPortVisible(port)).map(port => ({
+      id: `port-${port.id}`,
+      name: port.label,
+      group: 'Ports',
+      icon: this.portStatusIcon(port.status),
+      status: this.portStatusToHealth(port),
+      summary: port.summary,
+      detail: this.portDetail(port),
+      evidence: [this.portDetail(port)].filter(Boolean),
+      nextAction: port.startImpact === 'none' ? null : 'start-stack',
+      severity: port.startImpact === 'none' ? 'informational' : port.startImpact,
+      source: 'port' as const,
+    }));
+    return [...rows, ...portRows];
+  });
+  readonly easyServiceSummary = computed(() => {
+    return this.easyServiceRows().reduce(
+      (summary, row) => {
+        summary[row.status] += 1;
+        return summary;
+      },
+      { healthy: 0, degraded: 0, unhealthy: 0, unknown: 0 },
+    );
+  });
+  readonly easyLastChecked = computed(() => this.healthReport()?.collectedAt ?? 'pending');
   readonly serviceDiagnostics = computed(() => this.healthReport()?.serviceDiagnostics ?? null);
   readonly serviceCanStart = computed(() => this.canApplyServiceAction('start-stack'));
   readonly serviceCanStop = computed(() => this.canApplyServiceAction('stop-stack'));
@@ -396,10 +613,12 @@ export class AppComponent implements OnInit, OnDestroy {
   readonly trafficStatuses = computed(() => this.uniqueTrafficField('status'));
   readonly trafficSourceNames = computed(() => this.uniqueTrafficField('source'));
   readonly trafficSocketState = computed(() => {
+    const streamSource = this.trafficSources().find(source => source.id === 'socket-stream');
+    if (streamSource?.status) return streamSource.status;
     const socketRecord = this.eventRecords().find(record => record.transport === 'socket-metadata');
     const socketSource = this.trafficSources().find(source => source.id === 'socket-metadata');
     if (!socketSource && !socketRecord) return 'unknown';
-    if (!socketSource?.exists) return 'fallback';
+    if (!socketSource?.exists) return 'unavailable';
     return socketRecord?.status || 'observed';
   });
   readonly trafficExportStatus = computed(() => this.trafficTraceExport()?.status ?? 'not exported');
@@ -452,8 +671,12 @@ export class AppComponent implements OnInit, OnDestroy {
     selectedExists: false,
   });
 
+  private readonly modeStorageKey = 'bmf-desktop.mode';
   private readonly trafficRefreshIntervalMs = 3000;
+  private readonly easyTransactionActions = new Set(['install-stack', 'repair-stack', 'update-stack', 'configure-telemetry']);
+  private readonly easyServiceActions = new Set(['start-stack', 'stop-stack', 'restart-stack', 'start-alloy', 'stop-alloy', 'restart-alloy']);
   private trafficRefreshTimer: ReturnType<typeof setInterval> | null = null;
+  private advancedInitialized = false;
 
   constructor() {
     this.trafficRefreshTimer = setInterval(() => {
@@ -462,6 +685,7 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   ngOnInit(): void {
+    this.loadStoredMode();
     void this.initializeDesktop();
   }
 
@@ -469,6 +693,46 @@ export class AppComponent implements OnInit, OnDestroy {
     if (this.trafficRefreshTimer) {
       clearInterval(this.trafficRefreshTimer);
       this.trafficRefreshTimer = null;
+    }
+  }
+
+  async refreshCurrentMode(): Promise<void> {
+    if (this.appMode() === 'advanced') {
+      await this.refreshPlan();
+      return;
+    }
+    await this.refreshEasyMode();
+  }
+
+  async setAppMode(mode: AppMode): Promise<void> {
+    if (this.appMode() === mode) return;
+    this.appMode.set(mode);
+    this.storeMode(mode);
+    if (mode === 'advanced') {
+      if (!this.advancedInitialized) await this.refreshPlan();
+      return;
+    }
+    await this.refreshEasyMode();
+    await this.promptForBrickadiaSetupIfNeeded();
+  }
+
+  async refreshEasyMode(): Promise<void> {
+    if (this.easyHealthRefreshInFlight()) return;
+    this.easyHealthRefreshInFlight.set(true);
+    this.easyHealthRefreshError.set('');
+    try {
+      await this.refreshProfiles();
+      if (this.easyProfileSetupNeeded()) {
+        this.healthReport.set(null);
+        this.healthChecks.set([]);
+        return;
+      }
+      await this.refreshHealth();
+    } catch (error) {
+      this.easyHealthRefreshError.set(this.errorMessage(error));
+      throw error;
+    } finally {
+      this.easyHealthRefreshInFlight.set(false);
     }
   }
 
@@ -499,6 +763,7 @@ export class AppComponent implements OnInit, OnDestroy {
     await this.refreshTraffic();
     await this.refreshLogs();
     await this.refreshTroubleshootingSnapshot();
+    this.advancedInitialized = true;
   }
 
   async refreshProfiles(): Promise<void> {
@@ -528,6 +793,114 @@ export class AppComponent implements OnInit, OnDestroy {
     this.profileRegistry.set(registry);
     this.applySelectedProfileIfClean(registry, true);
     this.appendLog(`Profile saved=${registry.selectedProfileId || this.profileName()}`);
+  }
+
+  async setupProfileFromBrickadiaInstall(): Promise<void> {
+    const api = (window as DesktopWindow).bmfDesktop;
+    if (!api) {
+      this.appendLog('Preload API unavailable; Brickadia setup was not opened');
+      return;
+    }
+    if (this.brickadiaSetupInFlight()) {
+      this.appendLog('Brickadia setup is already running');
+      return;
+    }
+
+    this.brickadiaSetupInFlight.set(true);
+    try {
+      const result = await api.setupProfileFromBrickadiaInstall({
+        currentPath: this.profileDraft().paths.brickadiaWin64,
+        profile: this.formProfileInput(),
+      });
+      this.brickadiaSetupResult.set(result);
+      if (result.canceled) {
+        this.appendLog('Brickadia setup canceled');
+        return;
+      }
+      if (!result.registry || !result.profile || !result.brickadiaWin64) {
+        this.appendLog(`Brickadia setup ${result.status}: ${result.warnings[0] || 'server executable not found'}`);
+        return;
+      }
+
+      this.profileRegistry.set(result.registry);
+      this.applyProfileToForm(result.profile, false);
+      this.resetHealthForSelectedPath();
+      this.appendLog(`Brickadia setup ${result.status}: ${result.brickadiaWin64}`);
+      try {
+        await this.refreshEasyMode();
+      } catch (error) {
+        this.appendLog(`Health refresh after setup failed: ${this.errorMessage(error)}`);
+      }
+    } catch (error) {
+      this.appendLog(`Brickadia setup failed: ${this.errorMessage(error)}`);
+    } finally {
+      this.brickadiaSetupInFlight.set(false);
+    }
+  }
+
+  async runEasyAction(actionId: string | null): Promise<void> {
+    if (!actionId || this.easyActionInFlight()) return;
+    this.easyActionInFlight.set(actionId);
+    this.easyActionError.set('');
+    try {
+      if (this.easyTransactionActions.has(actionId)) {
+        await this.applyEasyTransaction(actionId);
+      } else if (this.easyServiceActions.has(actionId)) {
+        await this.applyEasyServiceAction(actionId);
+      } else {
+        this.appendLog(`Easy action ${actionId} is available from Advanced mode`);
+        await this.setAppMode('advanced');
+      }
+      await this.refreshEasyMode();
+    } catch (error) {
+      const message = this.errorMessage(error);
+      this.easyActionError.set(message);
+      this.appendLog(`Easy action ${actionId} failed: ${message}`);
+    } finally {
+      this.easyActionInFlight.set(null);
+    }
+  }
+
+  easyActionLabel(actionId: string | null): string {
+    switch (actionId) {
+      case 'install-stack':
+        return 'Install';
+      case 'repair-stack':
+        return 'Repair';
+      case 'update-stack':
+        return 'Update';
+      case 'start-stack':
+      case 'start-alloy':
+        return 'Start';
+      case 'restart-stack':
+      case 'restart-alloy':
+        return 'Restart';
+      case 'configure-telemetry':
+        return 'Configure';
+      default:
+        return 'Open';
+    }
+  }
+
+  easyActionIcon(actionId: string | null): string {
+    switch (actionId) {
+      case 'install-stack':
+        return 'download';
+      case 'repair-stack':
+        return 'build';
+      case 'update-stack':
+        return 'system_update_alt';
+      case 'start-stack':
+      case 'start-alloy':
+        return 'play_arrow';
+      case 'restart-stack':
+      case 'restart-alloy':
+        return 'restart_alt';
+      case 'configure-telemetry':
+        return 'settings';
+      default:
+        return 'open_in_new';
+    }
   }
 
   async selectStoredProfile(profile: DesktopServerProfile): Promise<void> {
@@ -795,6 +1168,66 @@ export class AppComponent implements OnInit, OnDestroy {
     await this.applyServiceAction('restart-alloy', 'restart');
   }
 
+  private async applyEasyTransaction(operationId: string): Promise<void> {
+    const api = (window as DesktopWindow).bmfDesktop;
+    if (!api) {
+      this.appendLog(`Preload API unavailable; ${operationId} was not applied`);
+      return;
+    }
+
+    await this.ensureSelectedProfileLoaded();
+    const preview = await api.getOperationTransaction(operationId, {
+      profile: this.activeProfileInput(),
+    });
+    this.operationTransaction.set(preview);
+    this.operationRollback.set(null);
+    if (preview.summary.ready <= 0) {
+      this.appendLog(`Easy ${operationId}: no ready steps to apply; blocked=${preview.summary.blocked}`);
+      return;
+    }
+
+    const result = await api.applyOperationTransaction(operationId, {
+      profile: this.activeProfileInput(),
+      confirm: 'apply',
+    });
+    this.operationTransaction.set(result);
+    this.appendLog(
+      `Easy ${result.operationId} ${result.status}: applied=${result.applied?.filter(step => step.applied).length ?? 0} skipped=${result.applied?.filter(step => !step.applied).length ?? 0} failed=${result.errors?.length ?? 0} journal=${result.journalPath}`,
+    );
+    if (result.journalPath) {
+      await this.refreshRollbackTransaction(result.journalPath);
+    }
+    await this.refreshHealth();
+    await this.refreshLogs();
+  }
+
+  private async applyEasyServiceAction(actionId: string): Promise<void> {
+    const api = (window as DesktopWindow).bmfDesktop;
+    if (!api) {
+      this.appendLog(`Preload API unavailable; ${actionId} was not applied`);
+      return;
+    }
+
+    await this.ensureSelectedProfileLoaded();
+    const preview = await api.getServiceAction(actionId, {
+      profile: this.activeProfileInput(),
+    });
+    this.serviceAction.set(preview);
+    if (preview.summary.ready <= 0 || preview.summary.blocked > 0) {
+      this.appendLog(`Easy ${actionId}: service action is blocked; ready=${preview.summary.ready} blocked=${preview.summary.blocked}`);
+      return;
+    }
+
+    const result = await api.applyServiceAction(actionId, {
+      profile: this.activeProfileInput(),
+      confirm: this.serviceActionConfirm(actionId),
+    });
+    this.serviceAction.set(result);
+    this.appendLog(this.serviceActionResultLog(result));
+    await this.refreshHealth();
+    await this.refreshLogs();
+  }
+
   private async applyServiceAction(actionId: string, confirm: 'start' | 'stop' | 'restart'): Promise<void> {
     const api = (window as DesktopWindow).bmfDesktop;
     if (!api) {
@@ -821,6 +1254,12 @@ export class AppComponent implements OnInit, OnDestroy {
     this.appendLog(this.serviceActionResultLog(result));
     await this.refreshHealth();
     await this.refreshLogs();
+  }
+
+  private serviceActionConfirm(actionId: string): 'start' | 'stop' | 'restart' {
+    if (actionId.startsWith('stop-')) return 'stop';
+    if (actionId.startsWith('restart-')) return 'restart';
+    return 'start';
   }
 
   private serviceActionResultLog(result: DesktopServiceAction): string {
@@ -929,6 +1368,7 @@ export class AppComponent implements OnInit, OnDestroy {
 
   async refreshTraffic(options: { automated?: boolean } = {}): Promise<void> {
     if (options.automated && !this.desktopInitialized()) return;
+    if (options.automated && this.appMode() !== 'advanced') return;
     if (options.automated && !this.trafficLiveEnabled()) return;
     if (this.trafficPaused()) {
       if (!options.automated) this.appendLog('Traffic refresh paused');
@@ -1201,6 +1641,116 @@ export class AppComponent implements OnInit, OnDestroy {
     this.logLines.update(lines => [...lines.slice(-49), message]);
   }
 
+  serviceStatusIcon(status: HealthStatus): string {
+    switch (status) {
+      case 'healthy':
+        return 'check_circle';
+      case 'degraded':
+        return 'warning';
+      case 'unhealthy':
+        return 'error';
+      default:
+        return 'help';
+    }
+  }
+
+  private portStatusToHealth(port: DesktopPortDiagnostic): HealthStatus {
+    switch (port.status) {
+      case 'in-use':
+        return 'healthy';
+      case 'available':
+        return 'unknown';
+      case 'not-configured':
+        return 'degraded';
+      default:
+        return 'unknown';
+    }
+  }
+
+  private portStatusIcon(status: DesktopPortDiagnostic['status']): string {
+    switch (status) {
+      case 'in-use':
+        return 'radio_button_checked';
+      case 'available':
+        return 'radio_button_unchecked';
+      case 'not-configured':
+        return 'block';
+      default:
+        return 'help';
+    }
+  }
+
+  private portDetail(port: DesktopPortDiagnostic): string {
+    const endpoint = port.port ? `${port.protocol.toUpperCase()} ${port.port}` : `${port.protocol.toUpperCase()} not configured`;
+    return [endpoint, port.ownerSummary].filter(Boolean).join(' / ');
+  }
+
+  private easyServiceDefinitionVisible(definition: EasyServiceDefinition, check?: HealthCheck): boolean {
+    switch (definition.visibility || 'always') {
+      case 'always':
+        return true;
+      case 'managed-stack':
+        return this.easyManagedStackInScope(check);
+      case 'socket':
+        return this.easySocketInScope(check);
+      case 'frame-telemetry':
+        return this.easyFrameTelemetryInScope(check);
+      case 'telemetry':
+        return this.easyTelemetryInScope(check);
+      case 'dashboard':
+        return this.easyDashboardInScope(check);
+    }
+  }
+
+  private easyManagedStackInScope(check?: HealthCheck): boolean {
+    const paths = this.profileDraft().paths;
+    return Boolean(paths.omeggaRuntime || paths.omeggaStartScript || check?.status === 'healthy');
+  }
+
+  private easySocketInScope(check?: HealthCheck): boolean {
+    return this.numberValue(this.bmfSocketPort(), 0) > 0
+      || check?.status === 'healthy'
+      || Boolean(check?.evidence?.length);
+  }
+
+  private easyFrameTelemetryInScope(check?: HealthCheck): boolean {
+    return this.profileDraft().telemetry.frameTelemetryEnabled
+      || check?.status === 'healthy'
+      || Boolean(check?.evidence?.length);
+  }
+
+  private easyTelemetryInScope(check?: HealthCheck): boolean {
+    return this.profileDraft().telemetry.enabled
+      && (this.easyTelemetryConfigured() || check?.status === 'healthy');
+  }
+
+  private easyDashboardInScope(check?: HealthCheck): boolean {
+    return this.profileDraft().telemetry.enabled && (
+      Boolean(this.profileDraft().telemetry.dashboardUrl)
+      || check?.status === 'healthy'
+      || Boolean(this.dashboardImportUpload()?.response?.dashboardUrl)
+    );
+  }
+
+  private easyTelemetryConfigured(): boolean {
+    const profile = this.profileDraft();
+    return profile.telemetry.enabled && Boolean(
+      profile.paths.grafanaAlloyConfig
+      || profile.telemetry.dashboardUrl
+      || this.telemetryAlloyWrite()
+      || this.dashboardImportUpload(),
+    );
+  }
+
+  private easyPortVisible(port: DesktopPortDiagnostic): boolean {
+    if (port.status === 'not-configured') return false;
+    if (port.status === 'available') return false;
+    if (port.id === 'bmf-socket' && this.numberValue(this.bmfSocketPort(), 0) <= 0) return false;
+    if (port.id === 'alloy-ready' && !this.easyTelemetryConfigured()) return false;
+    if (port.id === 'omegga-web' && !this.easyManagedStackInScope()) return false;
+    return true;
+  }
+
   private toHealthCheck(check: DesktopHealthCheck): HealthCheck {
     return {
       id: check.id,
@@ -1303,10 +1853,12 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   private applyProfileToForm(profile: DesktopServerProfile, dirty: boolean): void {
+    const previousBrickadiaPath = this.brickadiaWin64Path();
+    const nextBrickadiaPath = profile.paths?.brickadiaWin64 || '';
     this.activeProfileId.set(profile.id || null);
     this.profileName.set(profile.name || profile.id);
     this.profileBackend.set('local-process');
-    this.brickadiaWin64Path.set(profile.paths?.brickadiaWin64 || '');
+    this.brickadiaWin64Path.set(nextBrickadiaPath);
     this.omeggaRuntimePath.set(profile.paths?.omeggaRuntime || '');
     this.omeggaStartScriptPath.set(profile.paths?.omeggaStartScript || '');
     this.bmfRootPath.set(profile.paths?.bmfRoot || '');
@@ -1323,15 +1875,65 @@ export class AppComponent implements OnInit, OnDestroy {
     this.telemetryInstance.set(profile.telemetry?.instance || profile.id);
     this.dashboardUrl.set(profile.telemetry?.dashboardUrl || '');
     this.profileFormDirty.set(dirty);
+    if (previousBrickadiaPath !== nextBrickadiaPath) this.resetHealthForSelectedPath();
+  }
+
+  private resetHealthForSelectedPath(): void {
+    this.healthReport.set(null);
+    this.healthChecks.set(this.pendingEasyHealthChecks());
   }
 
   private async initializeDesktop(): Promise<void> {
     try {
-      await this.refreshPlan();
+      await this.refreshCurrentMode();
     } catch (error) {
       this.appendLog(`Startup refresh failed: ${this.errorMessage(error)}`);
     } finally {
       this.desktopInitialized.set(true);
+    }
+    try {
+      await this.promptForBrickadiaSetupIfNeeded();
+    } catch (error) {
+      this.appendLog(`Brickadia setup prompt failed: ${this.errorMessage(error)}`);
+    }
+  }
+
+  private loadStoredMode(): void {
+    try {
+      const stored = localStorage.getItem(this.modeStorageKey);
+      if (stored === 'easy' || stored === 'advanced') {
+        this.appMode.set(stored);
+      }
+    } catch {
+    }
+  }
+
+  private storeMode(mode: AppMode): void {
+    try {
+      localStorage.setItem(this.modeStorageKey, mode);
+    } catch {
+    }
+  }
+
+  private async promptForBrickadiaSetupIfNeeded(): Promise<void> {
+    const api = (window as DesktopWindow).bmfDesktop;
+    if (!api || this.appMode() !== 'easy' || !this.easyProfileSetupNeeded() || this.brickadiaSetupPrompted()) return;
+    this.storeBrickadiaSetupPrompted();
+    await this.setupProfileFromBrickadiaInstall();
+  }
+
+  private brickadiaSetupPrompted(): boolean {
+    try {
+      return localStorage.getItem('bmf-desktop.brickadiaSetupPrompted') === 'true';
+    } catch {
+      return true;
+    }
+  }
+
+  private storeBrickadiaSetupPrompted(): void {
+    try {
+      localStorage.setItem('bmf-desktop.brickadiaSetupPrompted', 'true');
+    } catch {
     }
   }
 

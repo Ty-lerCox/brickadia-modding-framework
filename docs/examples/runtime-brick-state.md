@@ -108,24 +108,24 @@ BMF.bricks.setRuntimeState({
 After loading the example plugin, invoke these through the BMF command bridge:
 
 ```text
-Omegga.Bridge.BMF bmf.runtimebrick.example.hide-lookup tag=lookup:222fd538-01c1-457c-9f67-aaab9fe6bbfd:mine
-Omegga.Bridge.BMF bmf.runtimebrick.example.restore-lookup tag=lookup:222fd538-01c1-457c-9f67-aaab9fe6bbfd:mine
-Omegga.Bridge.BMF bmf.runtimebrick.example.hide-lookup uuid=222fd538-01c1-457c-9f67-aaab9fe6bbfd purpose=mine
-Omegga.Bridge.BMF bmf.runtimebrick.example.restore-lookup uuid=222fd538-01c1-457c-9f67-aaab9fe6bbfd purpose=mine
-Omegga.Bridge.BMF bmf.runtimebrick.example.hide-guid guid=lookup:222fd538-01c1-457c-9f67-aaab9fe6bbfd:mine
-Omegga.Bridge.BMF bmf.runtimebrick.example.restore-guid guid=lookup:222fd538-01c1-457c-9f67-aaab9fe6bbfd:mine
-Omegga.Bridge.BMF bmf.runtimebrick.example.status tag=lookup:222fd538-01c1-457c-9f67-aaab9fe6bbfd:mine
-Omegga.Bridge.BMF bmf.runtimebrick.example.status
+bmf.runtimebrick.example.hide-lookup tag=lookup:222fd538-01c1-457c-9f67-aaab9fe6bbfd:mine
+bmf.runtimebrick.example.restore-lookup tag=lookup:222fd538-01c1-457c-9f67-aaab9fe6bbfd:mine
+bmf.runtimebrick.example.hide-lookup uuid=222fd538-01c1-457c-9f67-aaab9fe6bbfd purpose=mine
+bmf.runtimebrick.example.restore-lookup uuid=222fd538-01c1-457c-9f67-aaab9fe6bbfd purpose=mine
+bmf.runtimebrick.example.hide-guid guid=lookup:222fd538-01c1-457c-9f67-aaab9fe6bbfd:mine
+bmf.runtimebrick.example.restore-guid guid=lookup:222fd538-01c1-457c-9f67-aaab9fe6bbfd:mine
+bmf.runtimebrick.example.status tag=lookup:222fd538-01c1-457c-9f67-aaab9fe6bbfd:mine
+bmf.runtimebrick.example.status
 ```
 
 Diagnostic commands that require a verified runtime id are still available:
 
 ```text
-Omegga.Bridge.BMF bmf.runtimebrick.example.visibility brickid=56357 visible=false
-Omegga.Bridge.BMF bmf.runtimebrick.example.collision brickid=56357 collision=0
-Omegga.Bridge.BMF bmf.runtimebrick.example.hide brickid=56357
-Omegga.Bridge.BMF bmf.runtimebrick.example.restore brickid=56357
-Omegga.Bridge.BMF bmf.runtimebrick.example.bind guid=lookup:222fd538-01c1-457c-9f67-aaab9fe6bbfd:mine brickids=56357,56358
+bmf.runtimebrick.example.visibility brickid=56357 visible=false
+bmf.runtimebrick.example.collision brickid=56357 collision=0
+bmf.runtimebrick.example.hide brickid=56357
+bmf.runtimebrick.example.restore brickid=56357
+bmf.runtimebrick.example.bind guid=lookup:222fd538-01c1-457c-9f67-aaab9fe6bbfd:mine brickids=56357,56358
 ```
 
 `setRuntimeState` queues game-thread work. Use `bmf.runtimebrick.example.status`

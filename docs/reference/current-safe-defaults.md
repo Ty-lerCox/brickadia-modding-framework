@@ -31,6 +31,7 @@ Default `Mods/BMF/config.json` values:
 
 | Environment variable | Safe value |
 | --- | --- |
+| `BMF_COMMAND_WORKER_ENABLED` | unset or `0`; use sockets for live Omegga/BMF command traffic |
 | `BMF_COMMAND_WORKER_POLL_MS` | `250` unless a canary proves otherwise |
 | `BMF_COMMAND_WORKER_FALLBACK_POLL_MS` | `1000` unless a canary proves otherwise |
 | `BMF_COMMAND_WORKER_MAX_FILES_PER_POLL` | `1` |
@@ -62,9 +63,9 @@ Keep these disabled unless a targeted runtime-brick validation is active:
 - `BMF_BRICK_RUNTIME_DIAGNOSTICS_ENABLED`
 - `BMF_BRICK_CONTEXT_BACKGROUND_SCAN_ENABLED`
 
-Use `BMF_BRICK_GRID_CONTEXT_CACHE_TTL_MS=5000` when runtime mutation is enabled.
-The setter should refresh stale sparse-grid context instead of trusting a
-pointer captured earlier in the server lifetime.
+Use `BMF_BRICK_GRID_CONTEXT_CACHE_TTL_MS=300000` when runtime mutation is
+enabled. The setter should refresh stale sparse-grid context instead of
+trusting a pointer captured earlier in the server lifetime.
 
 Keep `BMF_BRICK_OWNER_CONTEXT_SCAN_FOR_SET_ENABLED` unset or `0` outside
 diagnostic canaries. Gameplay setters should use cached/background-scanned
@@ -79,7 +80,7 @@ treated as a gameplay path.
 | --- | --- | --- |
 | `OMEGGA_BMF_FORWARD_INTERACT` | unset or `false` | Forward Interactable events only when a BMF Lua handler is expected. |
 | `allowUnsafeConsoleSnapshots` | `false` | Minigame adapters should prefer log/socket events over unsafe console snapshots. |
-| `OMEGGA_BMF_COMMAND_DIR` | active `Mods/BMF/runtime/commands` | Prefer `OMEGGA_BMF_RUNTIME_DIR` when wiring several paths from one runtime root. |
+| `OMEGGA_BMF_RUNTIME_DIR` | active `Mods/BMF/runtime` | Use this for adapter status and cache files; live BMF commands/events should go through BMF Bridge sockets. |
 
 ## Native Samplers And Hooks
 

@@ -10,7 +10,7 @@ BMF currently targets the BMF-supported Omegga Windows fork for Windows server
 operation, UE4SS setup, command transport, live helper calls, and validation.
 
 See the [Supported Runtime Matrix](reference/supported-runtime.md) for what the
-fork owns, what BMF can do without it, and which native paths are still
+fork owns, why Omegga is required for BMF, and which native paths are still
 experimental.
 
 BMF also writes runtime telemetry for health, command/event/plugin timings,
@@ -35,8 +35,8 @@ sections.
 
 ## Start Here
 
+- [First install with BMF Desktop](install/windows.md)
 - [First plugin](getting-started/first-plugin.md)
-- [Windows setup](install/windows.md)
 - [Common workflows](guides/common-workflows.md)
 - [Lua examples](examples/index.md)
 - [Supported runtime matrix](reference/supported-runtime.md)

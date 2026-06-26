@@ -43,7 +43,7 @@ nav:
   - Changelog: changelog.md
   - Getting Started:
       - First Plugin: getting-started/first-plugin.md
-      - Windows Install: install/windows.md
+      - First Install With Desktop: install/windows.md
   - Examples:
       - Catalog: examples/index.md
       - Plugin Basics:
@@ -77,12 +77,13 @@ nav:
       - Dangerous Surfaces: reference/dangerous-surfaces.md
       - Current Safe Defaults: reference/current-safe-defaults.md
       - CLI And Script Reference: reference/cli-and-script-reference.md
+      - Advanced Install Reference: install/advanced-reference.md
       - Runtime Files: reference/runtime-files.md
   - Architecture:
       - Architecture Patterns: architecture/architecture-patterns.md
       - Omegga-Supported Runtime: architecture/omegga-supported-runtime.md
       - Observability and Performance: architecture/observability-performance.md
-      - Standalone Runtime: architecture/standalone-runtime.md
+      - Omegga Requirement: architecture/standalone-runtime.md
   - API:
       - Overview: api/index.md
       - API Registry: api/apis.md

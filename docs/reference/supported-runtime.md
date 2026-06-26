@@ -1,7 +1,7 @@
 # Supported Runtime Matrix
 
-This page answers what works with the supported Omegga fork, what works in BMF
-alone, and what is still experimental.
+This page answers what works in the supported Omegga-backed BMF runtime and
+what is still experimental.
 
 For sequence diagrams, see [Architecture Patterns](../architecture/architecture-patterns.md).
 For the detailed fork contract, see
@@ -32,27 +32,27 @@ Windows for the dedicated server process and UE4SS mod loading.
 
 ## Runtime Matrix
 
-| Capability | Supported Omegga fork | BMF without Omegga | Experimental/native lane |
-| --- | --- | --- | --- |
-| Server launch/restart | Supported owner | Not owned by BMF core | Future BMF supervisor |
-| UE4SS/BMF staging | Supported owner | Manual install possible | Installer work continues |
-| `bmf.*` bridge commands | Supported through BMF Bridge and BMFSocket transport | Requires an explicit external transport; legacy file worker is disabled by default | Future BMF supervisor transport |
-| Lua plugin loading | Supported | Supported after UE4SS loads BMF | N/A |
-| Plugin storage/config | Supported | Supported | N/A |
-| Event bus inside Lua | Supported | Supported | N/A |
-| Events to Omegga plugins | Supported through BMFSocket | Not available without external consumer | Socket protocol remains experimental |
-| Player identity | Omegga adapter plus Brickadia saved/log fallback | Saved/log fallback only | Native identity mapping still research |
-| Chat broadcast/whisper | Supported through safe live controller helper path | Possible only if helper path is available | Live targeting still needs more validation |
-| World save/load wrappers | Supported | Possible when console/helper route exists | Some paths remain experimental |
-| Runtime brick state | Supported only behind explicit gates | Not a standalone default | `unsafe-native`, needs `L6 Frame Time` before gameplay promotion |
-| Native hook policies | Supported where hook sync scripts and adapters are deployed | Not standalone by default | Experimental, per-build pointer refresh required |
-| Metrics export | Omegga `/metrics` exports BMF telemetry | BMF writes runtime JSON files | Native frame telemetry optional |
+| Capability | Supported Omegga-backed runtime | Experimental/native constraints |
+| --- | --- | --- |
+| Server launch/restart | Omegga fork is the supported owner. | Future supervisor work must replace this before Omegga can be removed. |
+| UE4SS/BMF staging | Omegga fork installs the pinned UE4SS/BMF payload and launch environment. | Installer work continues behind the same Omegga requirement. |
+| `bmf.*` bridge commands | Supported through BMF Bridge and BMFSocket transport. | Any replacement transport must pass the same canaries first. |
+| Lua plugin loading | Supported after UE4SS loads BMF under the Omegga-managed launch. | N/A |
+| Plugin storage/config | Supported. | N/A |
+| Event bus inside Lua | Supported. | N/A |
+| Events to Omegga plugins | Supported through BMFSocket. | Socket protocol remains experimental. |
+| Player identity | Omegga adapter plus Brickadia saved/log fallback. | Native identity mapping remains research. |
+| Chat broadcast/whisper | Supported through safe live controller helper path. | Live targeting still needs more validation. |
+| World save/load wrappers | Supported through the Omegga/UE4SS helper route. | Some paths remain experimental. |
+| Runtime brick state | Supported only behind explicit gates. | `unsafe-native`, needs `L6 Frame Time` before gameplay promotion. |
+| Native hook policies | Supported where hook sync scripts and adapters are deployed. | Experimental, per-build pointer refresh required. |
+| Metrics export | Omegga `/metrics` exports BMF telemetry. | Native frame telemetry can be enabled separately. |
 
 ## Practical Rule
 
-Use the supported Omegga fork for normal Windows server operation today. Treat
-standalone BMF as a future independence track unless the target feature only
-needs in-process Lua, plugin loading, storage, or runtime files.
+Use the supported Omegga fork for normal Windows server operation. BMF releases
+and setup docs should present Omegga as a requirement until every Omegga-owned
+runtime responsibility has an accepted and validated replacement.
 
 !!! warning
     Do not replace the supported fork with arbitrary upstream Omegga until BMF

@@ -10,7 +10,6 @@ $requiredFiles = @(
   'package.json',
   '.github/workflows/unified-runtime.yml',
   'TODO.md',
-  'OVERNIGHT_STRATEGY.md',
   'manifests/bmf-package.json',
   'manifests/compatibility.json',
   'manifests/dependencies.json',
@@ -393,7 +392,7 @@ foreach ($jsonRelative in @(
 $standaloneDoc = Join-Path $Root 'docs/architecture/standalone-runtime.md'
 if (Test-Path -LiteralPath $standaloneDoc) {
   $source = Get-Content -Raw -LiteralPath $standaloneDoc
-  foreach ($needle in @('future independence track', 'BMF Supervisor', 'Omegga Replacement Map', 'first BMF package')) {
+  foreach ($needle in @('Omegga Requirement', 'BMF-supported Omegga Windows fork', 'Documentation Rule', 'Replacement Criteria')) {
     if ($source -notmatch [regex]::Escape($needle)) {
       $errors.Add("standalone-runtime.md does not contain expected marker: $needle")
     }

@@ -14,8 +14,9 @@ Use the published documentation for the readable version of the project:
 
 Key entry points:
 
-- [Windows Setup](docs/install/windows.md): portable Desktop setup for a
-  Windows Brickadia Dedicated Server.
+- [First Install With BMF Desktop](docs/install/windows.md): download the
+  portable app, target a Windows Brickadia Dedicated Server folder, then use
+  Easy mode to install, repair, start, and refresh BMF services.
 - [Supported Runtime Matrix](docs/reference/supported-runtime.md): what runtime
   BMF supports today and what is experimental.
 - [Architecture Patterns](docs/architecture/architecture-patterns.md):
@@ -38,9 +39,10 @@ operation. The supported fork owns launch coordination, player sync, minigame
 event feeding, live chat helper delivery, metrics export, and validation
 workflows.
 
-The framework can also run as a UE4SS Lua mod, but BMF/Omegga live integration
-uses the `BMFSocket` loopback transport. JSONL and audit files are retained as
-diagnostic evidence rather than the live command/event path.
+The supported BMF runtime uses UE4SS together with the BMF-supported Omegga
+Windows fork. Live integration uses the `BMFSocket` loopback transport. JSONL
+and audit files are retained as diagnostic evidence rather than the live
+command/event path.
 
 ## Build The Docs
 
@@ -67,9 +69,11 @@ npm run release:desktop
 Use Node `22.22.3+`, `24.15.0+`, or `26+` so the Angular Desktop build and the
 BMF-supported Omegga runtime agree on the same runtime floor.
 
-For an operator machine, `bmfctl prerequisites` reports the local setup state
-for BMF assets, Brickadia server files, the Omegga install target, Node/npm,
-PowerShell, and optional Grafana Alloy before mutating install/start actions.
+For an operator machine, start with BMF Desktop Easy mode. `bmfctl
+prerequisites` is the CLI equivalent for reporting local setup state for BMF
+assets, Brickadia server files, the Omegga install target, Node/npm,
+PowerShell, and Grafana Alloy when telemetry is enabled before mutating
+install/start actions.
 
 GitHub Actions workflow `.github/workflows/unified-runtime.yml` runs workspace
 validation, CLI/core tests, Desktop renderer build, Omegga runtime tests,
@@ -85,7 +89,7 @@ node .\cli\bin\bmfctl.js doctor
 .\scripts\validate-release-package.ps1
 ```
 
-Runtime validation evidence is written under `artifacts/overnight/`.
+Runtime validation evidence is written under `artifacts/validation/`.
 
 ## Repository Layout
 

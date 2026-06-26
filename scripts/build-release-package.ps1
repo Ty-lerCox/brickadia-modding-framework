@@ -126,7 +126,7 @@ try {
     Remove-Item -LiteralPath $zipPath -Force
   }
 
-  $topLevelFiles = @('README.md', 'package.json', 'TODO.md', 'OVERNIGHT_STRATEGY.md')
+  $topLevelFiles = @('README.md', 'package.json', 'TODO.md')
   $topLevelDirs = @('.github', 'apps', 'framework', 'installer', 'examples', 'docs', 'planning', 'manifests', 'compat', 'observability', 'packages', 'scripts', 'tests', 'integrations', 'native', 'cli')
 
   foreach ($relative in $topLevelFiles) {

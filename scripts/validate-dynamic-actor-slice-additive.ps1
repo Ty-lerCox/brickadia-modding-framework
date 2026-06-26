@@ -16,7 +16,7 @@ if (!$BrickadiaRoot) {
   $BrickadiaRoot = (Resolve-Path (Join-Path $Root '..\Brickadia')).Path
 }
 if (!$FixtureRoot) {
-  $FixtureRoot = Join-Path $Root 'artifacts/overnight/20260603-215931/fixtures'
+  $FixtureRoot = Join-Path $Root 'artifacts/validation/20260603-215931/fixtures'
 }
 if (!$OutJson) {
   $OutJson = Join-Path $Root 'artifacts/local/dynamic-actor-slice-additive-canary.json'

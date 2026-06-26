@@ -14,7 +14,7 @@
     "requiresOmegga": true,
     "requiresBmfCompatibleOmegga": true,
     "status": "omegga-supported-runtime",
-    "notes": "Current BMF Windows operation expects a BMF-compatible Omegga runtime for launch, UE4SS compatibility setup, command bridge transport, helper globals, player sync, logs, and canaries. Standalone BMF is a future replacement track, not the first-package requirement."
+    "notes": "Current BMF Windows operation requires a BMF-compatible Omegga runtime for launch, UE4SS compatibility setup, command bridge transport, helper globals, player sync, logs, and canaries. Omegga must be documented and validated as a BMF requirement until every Omegga-owned responsibility has an accepted replacement."
   },
   "features": {
     "installer.windows": {

@@ -21,9 +21,9 @@ A user should be able to open BMF Desktop and answer:
 - what BMF/Omegga event payloads are moving right now.
 
 The app should answer those questions and offer the repair/start/setup actions
-without requiring an LLM, repository checkout, or manual shell diagnosis. Any
-manual recovery used during development is product debt until it is represented
-as a Desktop/`bmfctl` operation with logs, guardrails, and rollback or snapshot
+without requiring a repository checkout or manual shell diagnosis. Any manual
+recovery used during development is product debt until it is represented as a
+Desktop/`bmfctl` operation with logs, guardrails, and rollback or snapshot
 evidence where appropriate.
 
 ## First-Run Flow

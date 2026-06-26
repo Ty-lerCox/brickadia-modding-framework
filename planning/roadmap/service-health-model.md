@@ -10,10 +10,10 @@ prints them. The desktop app renders them with health badges, actions, and
 logs.
 
 The product bar is that Desktop can move a supported local profile from
-unknown/unhealthy to healthy without an LLM or manual shell session. When an
-LLM or maintainer fixes a real local install by running commands, that command
-sequence should become either a guarded health/repair/service action or an
-explicit unsupported edge case.
+unknown/unhealthy to healthy through guided checks and repair actions. When a
+maintainer fixes a real local install by running commands during development,
+that command sequence should become either a guarded health/repair/service
+action or an explicit unsupported edge case.
 
 ## Services
 
@@ -58,8 +58,8 @@ Current seed: `packages/orchestrator-core/src/observations.js` collects the
 first shared local observation report for BMF Desktop and `bmfctl`. It reads
 configured Brickadia/Omegga paths, `runtime/status.json`, `socket.json`,
 `frame-telemetry.json`, `bmf-bridge-status.json`, and local log source paths.
-Omegga `/metrics` and Alloy readiness are represented as optional bounded
-loopback probes so the health view can stay observe-only by default.
+Omegga `/metrics` and Alloy readiness are represented as bounded loopback
+probes so the health view can stay observe-only by default.
 `packages/orchestrator-core/src/services.js` adds read-only service diagnostics
 for configured ports, start-readiness blockers, and owner PID/process details
 when Windows exposes them.
@@ -173,7 +173,7 @@ Log rendering should support copy, save snapshot, and filter by severity. It
 should avoid showing secrets.
 
 Current seed: the shared log snapshot reads existing BMF runtime logs,
-`events.jsonl`, `audit.jsonl`, status files, optional Omegga log candidates,
+`events.jsonl`, `audit.jsonl`, status files, configured Omegga log candidates,
 and recent operation transaction journals. It caps bytes, sources, and retained
 lines, and redacts secret-looking values before CLI or Desktop rendering.
 

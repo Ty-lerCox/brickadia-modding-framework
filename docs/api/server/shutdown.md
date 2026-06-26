@@ -19,8 +19,8 @@ automation, but the current CL13530 executor path reports
 
 !!! warning
     This is not a proven production restart primitive. Use it only for trusted
-    automation, and keep an external supervisor such as Omegga or a service
-    manager responsible for actual process lifecycle.
+    automation, and keep the supported Omegga fork responsible for actual
+    process lifecycle.
 
 ```lua
 BMF.server.shutdown({
@@ -45,9 +45,8 @@ The `bmf.server.shutdown` command exposes the same guarded path:
 bmf.server.shutdown confirm=BMF_SHUTDOWN delayms=1500 reason=maintenance
 ```
 
-Actual stop/restart is not claimed yet. A true stop/restart still requires an
-external supervisor such as Omegga, a service manager, or a future BMF companion
-process.
+Actual stop/restart is not claimed yet. A true stop/restart still requires the
+supported Omegga fork and its managed service action path.
 
 ## Validation
 

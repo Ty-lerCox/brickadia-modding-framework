@@ -14,33 +14,44 @@ message, command, or hook.
 Use this page when reviewing whether a capability should live in BMF, in the
 BMF-supported Omegga fork, in a Lua plugin, or in an external Omegga plugin.
 
-## 1. BMF On Its Own
+## 1. Required BMF Runtime Stack
 
-BMF can run inside a UE4SS-enabled Brickadia server without Omegga. In this
-mode, BMF owns Lua bootstrap, plugin loading, command registration, runtime
-files, and audit/telemetry output.
+BMF's supported Windows runtime requires the BMF-supported Omegga Windows fork.
+Omegga owns the server supervisor, UE4SS compatibility setup, command bridge,
+log context, player sync, and helper surfaces that BMF depends on for current
+canaries and live-player APIs. BMF owns the UE4SS Lua runtime, plugin loader,
+capability gates, runtime files, and BMF API contracts.
 
 ```mermaid
 sequenceDiagram
+    participant Admin as Admin or Desktop
+    participant Omegga as Omegga fork
     participant Server as Brickadia server
     participant UE4SS as UE4SS
     participant BMF as BMF Lua runtime
+    participant Bridge as BMF Bridge/BMFSocket
     participant Cmd as BMF command dispatcher
     participant Files as runtime files
 
+    Admin->>Omegga: Start or repair managed profile
+    Omegga->>Server: Launch dedicated server with UE4SS/BMF environment
     Server->>UE4SS: Load UE4SS mods
     UE4SS->>BMF: Run Mods/BMF/Scripts/main.lua
     BMF->>BMF: Load config and plugin manifests
     BMF->>Cmd: Register bmf.* console commands
     BMF->>Files: Write status.json and telemetry.json
-    Cmd->>BMF: Dispatch bmf.status / bmf.health through an enabled transport
+    Omegga->>Bridge: Send BMF-backed command request
+    Bridge->>Cmd: Dispatch bmf.status / bmf.health
+    Cmd->>BMF: Execute command in BMF runtime
     BMF-->>Cmd: Return ok/code/key-value response
+    Cmd-->>Bridge: Return BMF result
+    Bridge-->>Omegga: Return command response
     Cmd->>Files: Write audit records
 ```
 
 Review questions:
 
-- Which features still require Omegga when BMF runs standalone?
+- Which responsibilities are Omegga runtime requirements today?
 - Which runtime files are stable contracts versus diagnostics?
 - Which command handlers cross onto the game thread?
 

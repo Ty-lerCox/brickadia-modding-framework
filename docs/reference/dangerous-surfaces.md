@@ -14,7 +14,7 @@ new native hooks, raw console wrappers, and broad object scans listed here.
 | Surface | Default | Risk | Safer path |
 | --- | --- | --- | --- |
 | [Restricted server exec](../api/server/restricted-exec.md) | Disabled by `allowPluginServerExec=false` | Runs arbitrary server console commands. | Prefer typed BMF wrappers such as chat, world save, and world load. |
-| [Server shutdown](../api/server/shutdown.md) | Disabled by capability and config opt-in | Can stop validation servers when a future executor works. | Let Omegga or a service manager own process lifecycle. |
+| [Server shutdown](../api/server/shutdown.md) | Disabled by capability and config opt-in | Can stop validation servers when a future executor works. | Let the supported Omegga fork own process lifecycle. |
 | [Plugin unsafe globals](../api/plugins/sandbox.md) | Disabled by `allowPluginUnsafeGlobals=false` and missing `unsafe.globals` | Lets plugins call raw UE4SS/native helpers. | Use scoped BMF facades and capability gates. |
 | [Unsafe minigame commands](../api/minigames/unsafe-commands.md) | Disabled by unsafe opt-ins | Touches legacy Brickadia minigame console/object surfaces. | Use minigame events and data snapshots. |
 | [Runtime brick state](../api/runtime-bricks.md) | Disabled by environment gates | Mutates live brick visibility/collision by runtime id. | Prefer UUID/purpose lookup tags, bounded canaries, and `L6 Frame Time` evidence. |

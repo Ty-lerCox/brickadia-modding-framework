@@ -1,9 +1,7 @@
 # Omegga-Supported Runtime
 
-BMF currently supports a BMF-compatible Omegga runtime through the
-BMF-supported Omegga Windows fork for Windows
-
-Brickadia dedicated servers:
+BMF requires a BMF-compatible Omegga runtime through the
+BMF-supported Omegga Windows fork for Windows Brickadia dedicated servers:
 
 <https://github.com/Ty-lerCox/bmf-omegga-fork>
 
@@ -150,11 +148,12 @@ The selected route must retain Omegga's license notices.
 
 ## Validation
 
-Current BMF goal-mode validation may use Omegga when the target feature depends
-on server launch, command transport, logs, player identity sync, or live helper
-calls. A feature is not complete merely because Omegga accepted a command; the
-feature still needs the correct BMF result contract, docs, and evidence at the
-target validation level.
+Current BMF goal-mode validation must use the supported Omegga fork when the
+target feature depends on server launch, command transport, logs, player
+identity sync, or live helper calls. A feature is not complete merely because
+Omegga accepted a command; the feature still needs the correct BMF result
+contract, docs, and evidence at the target validation level.
 
-The standalone runtime page tracks the future replacement path if BMF later
-stops depending on Omegga.
+The [Omegga Requirement](standalone-runtime.md) page tracks the responsibilities
+that must be replaced before BMF documentation can stop presenting Omegga as a
+requirement.

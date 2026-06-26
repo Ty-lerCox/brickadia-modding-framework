@@ -21,7 +21,7 @@ Required fields:
 Recommended artifact path:
 
 ```text
-artifacts/overnight/<timestamp>/<feature>.json
+artifacts/validation/<timestamp>/<feature>.json
 ```
 
 Validation levels are defined in [Framework Status](../status.md) and

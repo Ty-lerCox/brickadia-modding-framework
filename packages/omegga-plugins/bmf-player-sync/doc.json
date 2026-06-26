@@ -24,7 +24,7 @@
       "type": "number"
     },
     "brickadiaLogPath": {
-      "description": "Optional explicit Brickadia.log path used when Omegga's live player list is empty.",
+      "description": "Configurable explicit Brickadia.log path used when Omegga's live player list is empty.",
       "default": "",
       "type": "string"
     },

@@ -18,7 +18,7 @@ if (!$BrickadiaRoot) {
   $BrickadiaRoot = (Resolve-Path (Join-Path $Root '..\Brickadia')).Path
 }
 if (!$SourceWorldBrdb) {
-  $SourceWorldBrdb = Join-Path $Root 'artifacts/overnight/20260603-215931/fixtures/threecars.brdb'
+  $SourceWorldBrdb = Join-Path $Root 'artifacts/validation/20260603-215931/fixtures/threecars.brdb'
 }
 if (!$OutJson) {
   $OutJson = Join-Path $Root 'artifacts/local/bmf-prefab-brdb-command-canary.json'

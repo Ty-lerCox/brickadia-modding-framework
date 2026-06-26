@@ -12,9 +12,8 @@ Omegga is not assumed sufficient unless it includes the BMF compatibility work.
 This file is intentionally broad. Each item should eventually become either a
 GitHub issue, a documentation page, a canary, or a tracked research note.
 
-For unattended work, especially overnight runs where no human player can stay
-connected, use `OVERNIGHT_STRATEGY.md` to choose headless-safe tasks and
-validation levels.
+Use the validation levels in `docs/status.md` and the canary contract when
+classifying proof for static, headless, live-player, and frame-time work.
 
 ## Priority Legend
 
@@ -460,7 +459,7 @@ deal with raw console commands, archive details, or unsafe native calls.
   - Status: `Proven` for command transport with `BR.World.LoadAdditive`.
   - Progress: BMF Lua wrapper, docs, and `LoadThreeCars` example exist.
     Headless command proof passed in
-    `artifacts/overnight/20260603-215931/threecars-additive-canary.json`.
+    `artifacts/validation/20260603-215931/threecars-additive-canary.json`.
     BMF runtime boot validation is still pending.
   - Options: bundle name, position, orientation, verification timeout.
   - Validation: `L2 Headless`; verify success log.
@@ -468,9 +467,9 @@ deal with raw console commands, archive details, or unsafe native calls.
   - Status: `Headless-proven`.
   - Progress: BMF Lua wrapper, docs, and `LoadThreeCars` example exist.
     SaveAs proof passed in
-    `artifacts/overnight/20260603-215931/threecars-additive-canary.json`.
+    `artifacts/validation/20260603-215931/threecars-additive-canary.json`.
     BMF runtime world-wrapper validation passed in
-    `artifacts/overnight/20260603-215931/bmf-world-runtime-timerhop-canary.json`.
+    `artifacts/validation/20260603-215931/bmf-world-runtime-timerhop-canary.json`.
   - Wrap `BR.World.SaveAs`.
   - Validation: `L2 Headless`; verify output `.brdb`.
 - [ ] `P1` Expose `BMF.archives.describe(path)`.
@@ -775,7 +774,7 @@ safe mutation points.
     component pointer, scans component data for the console tag, blocks denied
     tags before save, and allows whitelisted prefixes or Owner/Admin contexts.
   - Progress: live validation on June 5, 2026 proved Owner allow with
-    `teleport:codex-verify` (`reason=ContextAllowlisted`) and denied-role
+    `teleport:context-allow-verify` (`reason=ContextAllowlisted`) and denied-role
     simulation with `teleport:deny-sim` (`reason=prefix-denied`). BMF status
     reported `native_blocked=2`, `feedback_delivered=2`, and
     `feedback_missed=0` for the denied simulation.

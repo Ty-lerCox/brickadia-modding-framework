@@ -15,9 +15,9 @@ the server, verify health, configure Grafana telemetry, inspect BMF/Omegga
 event traffic, and keep the stack updated without manually assembling
 repositories, scripts, native mods, Omegga plugins, or Grafana assets.
 
-BMF Desktop should be able to get the user to that healthy state without an LLM,
-manual shell session, or repository-aware operator. Any recovery step that fixes
-an installed profile must become a deterministic Desktop or `bmfctl` action:
+BMF Desktop should be able to get the user to that healthy state without a
+manual shell session or separate repository checkout. Any recovery step that
+fixes an installed profile must become a deterministic Desktop or `bmfctl` action:
 profile discovery, profile-store migration, dependency install, asset staging,
 launch-script repair, port diagnostics, service start/restart, Alloy setup,
 dashboard payload generation, log capture, and troubleshooting snapshots.
@@ -365,7 +365,7 @@ This program is successful when a clean Windows machine can:
 - update or repair the stack through safe, logged operations;
 - produce a redacted troubleshooting snapshot.
 
-The same scenario must pass with no LLM intervention: after MSI install, the
+The same scenario must pass through the packaged app: after installation, the
 operator should stay inside BMF Desktop except for normal OS file pickers,
 Windows install prompts, Grafana Cloud credential entry, and opening Grafana for
 the actual telemetry dashboard.

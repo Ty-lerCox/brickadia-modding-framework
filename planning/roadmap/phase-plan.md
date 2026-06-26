@@ -58,8 +58,8 @@ Exit criteria:
 - `scripts/validate-workspace.ps1` validates root `package.json` scripts,
   workspace boundaries, and dependency-island lockfiles;
 - existing validation scripts can locate BMF runtime files;
-- Omegga packaging still includes BMF, OmeggaBridge, BMFSocket, and optional
-  frame telemetry files.
+- Omegga packaging still includes BMF, OmeggaBridge, BMFSocket, and frame
+  telemetry files where the target profile enables them.
 
 ## Phase 2: Extract Orchestration Core
 
@@ -71,13 +71,13 @@ manifest, profile, release-artifact, health-model, and dry-run
 operation-planning helpers. It also contains a local profile registry for
 Desktop and `bmfctl` selected-profile persistence, plus a local profile observation
 collector that reads existing runtime files, socket/bridge status, log sources,
-and optional bounded loopback health probes for Desktop and CLI health views.
+and bounded loopback health probes for Desktop and CLI health views.
 The core now also includes a local service diagnostics model for configured
 ports, start readiness, and owner details when the OS exposes them.
 It now includes an inspect-only prerequisite audit for BMF assets, Brickadia
-server files, Omegga install target, Node/npm, PowerShell, and optional
-Grafana Alloy so Desktop and `bmfctl prerequisites` can show setup blockers
-before install or start operations.
+server files, the required Omegga install target, Node/npm, PowerShell, and
+Grafana Alloy when telemetry is enabled so Desktop and `bmfctl prerequisites`
+can show setup blockers before install or start operations.
 It also includes the shared event-traffic snapshot that reads bounded,
 redacted runtime envelopes from existing event, audit, socket, bridge-status,
 and command files for Desktop and `bmfctl traffic`.
@@ -127,7 +127,7 @@ Exit criteria:
 - CLI and tests call orchestration core instead of duplicating file logic;
 - failed operations include actionable messages, relevant paths, and logs;
 - safe repairs still create backups before mutating installed files.
-- any manual LLM/operator repair needed to make a local profile healthy is
+- any manual repair needed to make a local profile healthy is
   converted into an orchestrator-core action or explicit documented non-goal.
 
 ## Phase 3: Build Service Health And Launch Control
@@ -307,8 +307,8 @@ Exit criteria:
 - unhealthy services show next actions and logs;
 - a healthy server can open the configured Grafana dashboard;
 - event traffic inspector displays live BMF/Omegga payloads.
-- no LLM or repository-aware shell session is required for the supported local
-  install/start/health path.
+- no repository checkout or manual shell session is required for the supported
+  local install/start/health path.
 
 ## Phase 7: Release, Validate, And Update
 

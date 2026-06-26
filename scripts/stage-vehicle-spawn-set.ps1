@@ -45,7 +45,7 @@ if ($ArtifactDir) {
 }
 New-Item -ItemType Directory -Force -Path $caseRoot | Out-Null
 
-$defaultSliceWorld = Join-Path $Root 'artifacts/overnight/20260603-215931/dynamic-actor-slice-additive/dynamic-actor-slices/threecars.entity20.slice.brdb'
+$defaultSliceWorld = Join-Path $Root 'artifacts/validation/20260603-215931/dynamic-actor-slice-additive/dynamic-actor-slices/threecars.entity20.slice.brdb'
 $sourceWorldPath = if ($SourceWorldBrdb) {
   [System.IO.Path]::GetFullPath($SourceWorldBrdb)
 } elseif (Test-Path -LiteralPath $defaultSliceWorld) {

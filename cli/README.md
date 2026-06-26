@@ -228,7 +228,7 @@ command does not send BMF commands or create server-side probes.
 
 `logs` renders the shared log snapshot used by BMF Desktop. It reads bounded
 tails from existing BMF runtime logs, JSONL event/audit files, status files,
-optional Omegga log candidates, and recent transaction journals. Log lines are
+configured Omegga log candidates, and recent transaction journals. Log lines are
 redacted before CLI output. The command does not start services, send BMF
 commands, or subscribe to live sockets.
 

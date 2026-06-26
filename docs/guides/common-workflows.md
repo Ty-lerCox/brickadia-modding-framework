@@ -9,6 +9,16 @@ Plugin authors should use it before starting a feature. Server operators should
 use it when validating installs or runtime health. Maintainers should use it as
 the workflow map when reviewing docs coverage.
 
+## Install BMF On A Windows Dedicated Server
+
+1. Start with [First Install With BMF Desktop](../install/windows.md).
+2. Download the portable BMF Desktop exe from the release.
+3. Open BMF Desktop in Easy mode and select the Brickadia Dedicated Server
+   folder.
+4. Use Easy-mode `Install`, `Repair`, `Start`, `Restart`, and `Refresh Health`
+   actions until the core rows are healthy.
+5. Keep script/manual install references for maintainer recovery only.
+
 ## Write A First Lua Plugin
 
 1. Start with [First Plugin](../getting-started/first-plugin.md).

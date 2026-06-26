@@ -22,6 +22,9 @@ Docs
 - Reworked the examples navigation into grouped sections.
 - Added a portable-first Windows setup flow and documented that Linux/WSL are
   not supported for the UE4SS/BMF dedicated-server runtime.
+- Refocused first-install documentation on BMF Desktop Easy mode: download the
+  portable exe, target the Brickadia Dedicated Server folder, then use
+  install/repair/start/restart health actions.
 
 ## BMF v0.1.0 - Foundation Update (June 13, 2026)
 
@@ -141,7 +144,7 @@ Documentation
 - Added Lua examples for chat, timers, commands, storage, server settings, world loading, prefabs, vehicles, minigames, permissions, events, audit, health, and rate limits.
 - Split large API pages into smaller pages for permissions, archives, minigames, plugins, players, and server APIs.
 - Renamed proposed architecture diagrams into Architecture Patterns.
-- Added architecture diagrams for BMF alone, Omegga alone, Lua plugins, event bus messaging, BMF plus Omegga, ConsoleTag lookup, Lua hook ingress, and tree cutting.
+- Added architecture diagrams for the required BMF/Omegga runtime stack, Omegga-owned supervision, Lua plugins, event bus messaging, ConsoleTag lookup, Lua hook ingress, and tree cutting.
 - Added common workflows, glossary, supported runtime, safe defaults, dangerous surfaces, runtime files, script reference, and maintainer notes.
 - Added documentation style checks and MkDocs strict build validation.
 

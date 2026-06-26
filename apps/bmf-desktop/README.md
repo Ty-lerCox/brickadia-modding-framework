@@ -26,7 +26,8 @@ Current scope:
 - Guarded bridge to `@bmf/orchestrator-core` dry-run plans and confirmed
   filesystem transactions.
 - Components tab setup readiness for BMF assets, Brickadia server files,
-  Omegga install target, Node/npm, PowerShell, and optional Grafana Alloy.
+  required Omegga install target, Node/npm, PowerShell, and Grafana Alloy when
+  telemetry is enabled.
 - Profile setup form with native path pickers for Brickadia/Omegga/BMF paths,
   the Omegga start script, telemetry labels, Alloy executable/config paths, and
   Grafana dashboard URL.

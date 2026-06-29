@@ -2509,6 +2509,7 @@ function writeMinimalTransactionSources(root) {
   writeFixtureFile(path.join(root, 'packages', 'omegga-runtime', 'source', 'tools', 'package-bmf-omegga.js'), 'console.log("package bmf omegga");\n');
   writeFixtureFile(path.join(root, 'framework', 'ue4ss', 'Mods', 'BMF', 'bmf.json'), '{"name":"BMF"}\n');
   writeFixtureFile(path.join(root, 'framework', 'ue4ss', 'Mods', 'BMF', 'Scripts', 'main.lua'), 'return nil\n');
+  writeFixtureFile(path.join(root, 'framework', 'ue4ss', 'Mods', 'BMF', 'Scripts', 'bmf', 'runtime.lua'), 'return nil\n');
   writeFixtureFile(path.join(root, 'framework', 'ue4ss', 'Mods', 'BMFSocket', 'README.md'), 'socket helper\n');
   writeFixtureFile(path.join(root, 'framework', 'ue4ss', 'Mods', 'BMFFrameTelemetry', 'README.md'), 'frame telemetry helper\n');
   for (const name of ['bmf-bridge', 'bmf-player-sync', 'bmf-minigame-events']) {

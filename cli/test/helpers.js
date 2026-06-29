@@ -71,6 +71,7 @@ function makeEnvironment() {
   write(path.join(bmfRoot, 'framework', 'ue4ss', 'Mods', 'BMF', 'bmf.json'), '{"name":"BMF"}\n');
   write(path.join(bmfRoot, 'framework', 'ue4ss', 'Mods', 'BMF', 'config.json'), '{}\n');
   write(path.join(bmfRoot, 'framework', 'ue4ss', 'Mods', 'BMF', 'Scripts', 'main.lua'), 'return nil\n');
+  write(path.join(bmfRoot, 'framework', 'ue4ss', 'Mods', 'BMF', 'Scripts', 'bmf', 'runtime.lua'), 'return nil\n');
 
   write(
     path.join(omeggaDir, 'package.json'),
@@ -82,6 +83,10 @@ function makeEnvironment() {
   );
   write(
     path.join(omeggaDir, 'templates', 'windows-ue4ss', 'ue4ss', 'Mods', 'BMF', 'Scripts', 'main.lua'),
+    'return nil\n',
+  );
+  write(
+    path.join(omeggaDir, 'templates', 'windows-ue4ss', 'ue4ss', 'Mods', 'BMF', 'Scripts', 'bmf', 'runtime.lua'),
     'return nil\n',
   );
   write(
@@ -118,6 +123,7 @@ function makeEnvironment() {
   );
   write(path.join(liveMods, 'BMF', 'bmf.json'), '{"name":"BMF"}\n');
   write(path.join(liveMods, 'BMF', 'Scripts', 'main.lua'), 'return nil\n');
+  write(path.join(liveMods, 'BMF', 'Scripts', 'bmf', 'runtime.lua'), 'return nil\n');
   write(path.join(liveMods, 'OmeggaBridge', 'Scripts', 'main.lua'), 'return nil\n');
 
   return {

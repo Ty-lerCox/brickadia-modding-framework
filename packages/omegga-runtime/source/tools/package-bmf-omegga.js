@@ -20,6 +20,7 @@ const gitCommand = process.platform === 'win32' ? 'git.exe' : 'git';
 const requiredLocalFiles = [
   'templates/windows-ue4ss/ue4ss/Mods/BMF/bmf.json',
   'templates/windows-ue4ss/ue4ss/Mods/BMF/Scripts/main.lua',
+  'templates/windows-ue4ss/ue4ss/Mods/BMF/Scripts/bmf/runtime.lua',
   'templates/windows-ue4ss/ue4ss/Mods/BMFSocket/README.md',
   'templates/windows-ue4ss/ue4ss/Mods/BMFSocket/dlls/.gitkeep',
   'templates/windows-ue4ss/ue4ss/Mods/BMFSocket/dlls/main.dll',

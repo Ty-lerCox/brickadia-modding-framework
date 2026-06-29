@@ -8,9 +8,10 @@ framework/ue4ss/Mods/BMF
 ```
 
 The package manifest intentionally records the current source root, entrypoint,
-required files, install root, and runtime outputs. `orchestrator-core` still
-stages the runtime from the existing `framework/ue4ss/Mods/BMF` path so current
-install scripts and live validation stay compatible while the monorepo package
-layout matures.
+required files, install root, and runtime outputs. `Scripts/main.lua` is the
+stable UE4SS entrypoint; the implementation lives in
+`Scripts/bmf/runtime.lua`. `orchestrator-core` still stages the runtime from the
+existing `framework/ue4ss/Mods/BMF` path so current install scripts and live
+validation stay compatible while the monorepo package layout matures.
 
 Validation: `scripts/validate-bmf-runtime-packages.ps1`.

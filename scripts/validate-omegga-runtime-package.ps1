@@ -188,7 +188,8 @@ try {
       'src/brickadia/ue4ssBridge.ts',
       'src/omegga/index.ts',
       'tools/package-bmf-omegga.js',
-      'templates/windows-ue4ss/ue4ss/Mods/BMF/Scripts/main.lua'
+      'templates/windows-ue4ss/ue4ss/Mods/BMF/Scripts/main.lua',
+      'templates/windows-ue4ss/ue4ss/Mods/BMF/Scripts/bmf/runtime.lua'
     )) {
       if (!(Test-Path -LiteralPath (Join-Path $sourceRoot $relative))) {
         $errors.Add("Synced Omegga source is missing required file: $relative")

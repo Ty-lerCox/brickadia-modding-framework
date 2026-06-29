@@ -18,7 +18,8 @@
     "framework/ue4ss/Mods/BMF/bmf.json",
     "framework/ue4ss/Mods/BMF/config.json",
     "framework/ue4ss/Mods/BMF/enabled.txt",
-    "framework/ue4ss/Mods/BMF/Scripts/main.lua"
+    "framework/ue4ss/Mods/BMF/Scripts/main.lua",
+    "framework/ue4ss/Mods/BMF/Scripts/bmf/runtime.lua"
   ],
   "runtimeOutputs": [
     "Mods/BMF/runtime/status.json",

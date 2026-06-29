@@ -83,6 +83,7 @@ function checkBmfRepo(ctx, findings) {
     'framework/ue4ss/Mods/BMF/bmf.json',
     'framework/ue4ss/Mods/BMF/config.json',
     'framework/ue4ss/Mods/BMF/Scripts/main.lua',
+    'framework/ue4ss/Mods/BMF/Scripts/bmf/runtime.lua',
   ]);
 
   if (missing.length > 0) {
@@ -129,6 +130,9 @@ function checkOmegga(ctx, findings) {
   }
   if (!exists(path.join(ctx.omeggaTemplateBmfDir, 'Scripts', 'main.lua'))) {
     missing.push(path.join(ctx.omeggaTemplateBmfDir, 'Scripts', 'main.lua'));
+  }
+  if (!exists(path.join(ctx.omeggaTemplateBmfDir, 'Scripts', 'bmf', 'runtime.lua'))) {
+    missing.push(path.join(ctx.omeggaTemplateBmfDir, 'Scripts', 'bmf', 'runtime.lua'));
   }
   if (!exists(path.join(ctx.omeggaTemplateBmfDir, 'bmf.json'))) {
     missing.push(path.join(ctx.omeggaTemplateBmfDir, 'bmf.json'));

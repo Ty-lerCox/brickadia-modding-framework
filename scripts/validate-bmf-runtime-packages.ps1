@@ -153,7 +153,12 @@ try {
 
   Test-TextMarkers `
     -Path (Join-Path $Root 'framework/ue4ss/Mods/BMF/Scripts/main.lua') `
-    -Name 'BMF runtime' `
+    -Name 'BMF runtime loader' `
+    -Markers @('runtime_candidates', 'Scripts/bmf/runtime.lua', 'loadfile')
+
+  Test-TextMarkers `
+    -Path (Join-Path $Root 'framework/ue4ss/Mods/BMF/Scripts/bmf/runtime.lua') `
+    -Name 'BMF runtime implementation' `
     -Markers @('local STATUS_PATH = RUNTIME_DIR .. "/status.json"', 'local EVENT_LOG_PATH = RUNTIME_DIR .. "/events.jsonl"', 'BMF_command_worker_enabled', 'BMF.commands.register')
 
   Test-TextMarkers `

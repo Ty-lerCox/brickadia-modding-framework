@@ -36,7 +36,8 @@ sequenceDiagram
     Admin->>Omegga: Start or repair managed profile
     Omegga->>Server: Launch dedicated server with UE4SS/BMF environment
     Server->>UE4SS: Load UE4SS mods
-    UE4SS->>BMF: Run Mods/BMF/Scripts/main.lua
+    UE4SS->>BMF: Run Mods/BMF/Scripts/main.lua loader
+    BMF->>BMF: Load Scripts/bmf/runtime.lua implementation
     BMF->>BMF: Load config and plugin manifests
     BMF->>Cmd: Register bmf.* console commands
     BMF->>Files: Write status.json and telemetry.json

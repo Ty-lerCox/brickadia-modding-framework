@@ -71,7 +71,7 @@ try {
   if ($install.status -ne 'passed') {
     $errors.Add('Installer did not pass.')
   }
-  foreach ($relative in @('bmf.json', 'enabled.txt', 'Scripts/main.lua', 'runtime/install-manifest.json')) {
+  foreach ($relative in @('bmf.json', 'enabled.txt', 'Scripts/main.lua', 'Scripts/bmf/runtime.lua', 'runtime/install-manifest.json')) {
     $path = Join-Path $existingBmfDir $relative
     if (!(Test-Path -LiteralPath $path)) {
       $errors.Add("Installed BMF is missing expected file: $relative")
@@ -100,6 +100,9 @@ try {
   }
   if (Test-Path -LiteralPath (Join-Path $existingBmfDir 'Scripts/main.lua')) {
     $errors.Add('Rollback left the newly installed BMF script in the restored old install.')
+  }
+  if (Test-Path -LiteralPath (Join-Path $existingBmfDir 'Scripts/bmf/runtime.lua')) {
+    $errors.Add('Rollback left the newly installed BMF runtime module in the restored old install.')
   }
 
   $finalInstallOutput = & $installScript `

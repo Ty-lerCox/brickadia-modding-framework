@@ -1,4 +1,4 @@
-import Logger from '@/logger';
+﻿import Logger from '@/logger';
 import OmeggaPlugin, { PluginStore } from '@/plugin';
 import type Omegga from '@omegga/server';
 import * as util from '@util';

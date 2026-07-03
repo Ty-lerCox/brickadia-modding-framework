@@ -6,7 +6,7 @@ written without every plugin author reverse-engineering the game.
 
 Current target: Brickadia EA2 `PC-Shipping-CL13530`.
 
-BMF currently targets the BMF-supported Omegga Windows fork for Windows server
+BMF currently targets the BMF-vendored Omegga Windows runtime for Windows server
 operation, UE4SS setup, command transport, live helper calls, and validation.
 
 See the [Supported Runtime Matrix](reference/supported-runtime.md) for what the

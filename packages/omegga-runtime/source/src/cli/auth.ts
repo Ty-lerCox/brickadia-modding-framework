@@ -1,7 +1,6 @@
 import soft from '@/softconfig';
 import { genAuthFiles, writeAuthFiles } from '@omegga/auth';
 import * as file from '@util/file';
-import { IS_WINDOWS } from '@util/platform';
 import 'colors';
 import fs, { existsSync } from 'node:fs';
 import path from 'node:path';
@@ -55,14 +54,6 @@ async function authFromPrompt({
 }) {
   let files: Record<string, Buffer>;
 
-  if (IS_WINDOWS && branch) {
-    console.error(
-      '!>'.red,
-      'Legacy launcher branches are not supported on Windows.',
-    );
-    return false;
-  }
-
   if (isSteam || !email || !password) {
     // Prompt user to pick to select username/password or Auth Token
     const { authType } = await prompts({
@@ -98,7 +89,6 @@ async function authFromPrompt({
       // Write to global token file
       try {
         console.log('>>'.green, 'Storing hosting token...');
-        file.mkdir(soft.CONFIG_HOME);
         fs.writeFileSync(soft.GLOBAL_TOKEN, token.trim());
       } catch (err) {
         console.error('!>'.red, 'Error writing hosting token to config\n', err);

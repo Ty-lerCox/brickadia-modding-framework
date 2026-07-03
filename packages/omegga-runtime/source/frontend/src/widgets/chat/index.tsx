@@ -1,20 +1,25 @@
 import { Button, Footer, Input, Scroll, UserName } from '@components';
-import type { IStoreChat } from '@omegga/webserver/backend/types';
+import type { IStoreChat } from '@backend/types';
+import { useHasScope } from '@hooks';
 import { IconSend } from '@tabler/icons-react';
 import Linkify from 'linkify-react';
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { ioEmit, rpcNotify, rpcReq, socket } from '../../socket';
+import { Permissions } from '../../permissions';
+import { handleGlobalError, trpc } from '../../trpc';
 
 type ChatEntry = IStoreChat & {
   _id: string;
-  createdAt?: Date;
-  updatedAt?: Date;
+  createdAt?: string;
+  updatedAt?: string;
 };
 
 export const ChatWidget = () => {
+  const canSend = useHasScope(Permissions.ChatSend);
   const [chats, setChats] = useState<ChatEntry[]>([]);
   const [message, setMessage] = useState('');
   const ref = useRef<HTMLDivElement | null>(null);
+
+  const sendMutation = trpc.chat.send.useMutation();
 
   const scrollToBottom = () => {
     if (ref.current) {
@@ -22,27 +27,29 @@ export const ChatWidget = () => {
     }
   };
 
+  const canRecent = useHasScope(Permissions.ChatRecent);
+  const { data: recentChats } = trpc.chat.recent.useQuery(undefined, {
+    enabled: canRecent,
+  });
+
   useEffect(() => {
-    const handleChat = (log: ChatEntry) => {
+    if (recentChats) {
+      setChats(recentChats.slice().reverse());
+    }
+  }, [recentChats]);
+
+  trpc.chat.onMessage.useSubscription(undefined, {
+    enabled: canRecent,
+    onError: handleGlobalError,
+    onData: (log: ChatEntry) => {
       setChats(prevChats => {
         const updatedChats = [...prevChats, log];
         return updatedChats.length > 50
           ? updatedChats.slice(updatedChats.length - 50)
           : updatedChats;
       });
-    };
-
-    socket.on('chat', handleChat);
-    ioEmit('subscribe', 'chat');
-    rpcReq('chat.recent').then((logs: ChatEntry[]) => {
-      setChats(logs.reverse());
-    });
-
-    return () => {
-      socket.off('chat', handleChat);
-      ioEmit('unsubscribe', 'chat');
-    };
-  }, []);
+    },
+  });
 
   useLayoutEffect(() => {
     scrollToBottom();
@@ -53,8 +60,7 @@ export const ChatWidget = () => {
 
     if (message.length > 140 || message.length === 0) return;
 
-    // Mock notification
-    rpcNotify('chat', message);
+    sendMutation.mutate(message);
     setMessage('');
   };
 
@@ -92,25 +98,27 @@ export const ChatWidget = () => {
           ))}
         </div>
       </Scroll>
-      <form onSubmit={sendMessage}>
-        <Footer>
-          <Input
-            roboto
-            type="text"
-            placeholder="Message"
-            value={message}
-            onChange={v => setMessage(v)}
-          />
-          <Button
-            normal
-            icon
-            style={{ marginLeft: '10px' }}
-            onClick={sendMessage}
-          >
-            <IconSend />
-          </Button>
-        </Footer>
-      </form>
+      {canSend && (
+        <form onSubmit={sendMessage}>
+          <Footer>
+            <Input
+              roboto
+              type="text"
+              placeholder="Message"
+              value={message}
+              onChange={v => setMessage(v)}
+            />
+            <Button
+              normal
+              icon
+              style={{ marginLeft: '10px' }}
+              onClick={sendMessage}
+            >
+              <IconSend />
+            </Button>
+          </Footer>
+        </form>
+      )}
     </div>
   );
 };

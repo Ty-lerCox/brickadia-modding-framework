@@ -1,4 +1,4 @@
-import { EnvironmentPreset } from '@brickadia/presets';
+﻿import { EnvironmentPreset } from '@brickadia/presets';
 import {
   BRBanList,
   BRPlayerNameCache,
@@ -519,6 +519,8 @@ export interface OmeggaLike
   savePath: string;
   /** path to worlds */
   worldPath: string;
+  /** path to prefabs */
+  prefabPath: string;
   /** path to presets */
   presetPath: string;
   /** path to containing dir */

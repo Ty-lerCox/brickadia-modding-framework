@@ -1,4 +1,4 @@
-import { OmeggaPlayer } from '@/plugin';
+﻿import { OmeggaPlayer } from '@/plugin';
 import { steamcmdDownloadGame } from '@/updater';
 import Omegga from '@omegga/server';
 import { IOmeggaOptions } from '@omegga/types';

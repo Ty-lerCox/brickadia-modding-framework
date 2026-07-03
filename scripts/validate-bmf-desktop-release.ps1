@@ -231,7 +231,7 @@ try {
       $errors.Add("Unexpected BMF Desktop version in release manifest: $($manifest.bmfDesktopVersion)")
     }
     if ([string]$manifest.omeggaRuntimeVersionOrCommit -notmatch '^[a-f0-9]{40}$') {
-      $errors.Add("Release manifest Omegga runtime value must be the synced fork commit: $($manifest.omeggaRuntimeVersionOrCommit)")
+      $errors.Add("Release manifest Omegga runtime value must be the vendored Omegga runtime commit: $($manifest.omeggaRuntimeVersionOrCommit)")
     }
     if ([string]$manifest.primaryArtifact.fileName -ne $expectedArtifactName) {
       $errors.Add("Unexpected primary artifact in release manifest: $($manifest.primaryArtifact.fileName)")

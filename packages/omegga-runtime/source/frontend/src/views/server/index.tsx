@@ -1,3 +1,4 @@
+import type { IStoreAutoRestartConfig } from '@backend/types';
 import {
   Button,
   Input,
@@ -8,20 +9,25 @@ import {
   Toggle,
   useConfirm,
 } from '@components';
-import { SavedSpan, SavedStatus, useSaved } from '@hooks';
+import {
+  SavedSpan,
+  SavedStatus,
+  useHasScope,
+  useRequireScope,
+  useSaved,
+} from '@hooks';
 import { useStore } from '@nanostores/react';
-import type { IStoreAutoRestartConfig } from '@omegga/webserver/backend/types';
 import {
   IconCloudDownload,
   IconCloudSearch,
   IconDeviceFloppy,
   IconDownload,
+  IconLoader2,
   IconPlayerPlay,
   IconPlayerStop,
   IconRefresh,
 } from '@tabler/icons-react';
 import { useCallback, useEffect, useState } from 'react';
-import { rpcNotify, rpcReq } from '../../socket';
 import {
   restartServer,
   startServer,
@@ -29,9 +35,21 @@ import {
   updateServer,
   useServerLiveness,
 } from '../../stores/liveness';
+import { Permissions } from '../../permissions';
 import { $omeggaData } from '../../stores/user';
+import { trpc } from '../../trpc';
+
+function formatTimeAgo(timestamp: number): string {
+  const seconds = Math.floor((Date.now() - timestamp) / 1000);
+  if (seconds < 60) return 'just now';
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ago`;
+}
 
 export const ServerView = () => {
+  const canAccess = useRequireScope(Permissions.ServerStatus);
   const {
     started,
     stopping,
@@ -39,6 +57,15 @@ export const ServerView = () => {
     loading: statusLoading,
   } = useServerLiveness();
   const confirm = useConfirm();
+
+  const canStart = useHasScope(Permissions.ServerStart);
+  const canStop = useHasScope(Permissions.ServerStop);
+  const canRestart = useHasScope(Permissions.ServerRestart);
+  const canUpdate = useHasScope(Permissions.ServerUpdateRun);
+  const canViewAutoRestart = useHasScope(Permissions.ServerAutorestartGet);
+  const canUpdateCheck = useHasScope(Permissions.ServerUpdateCheck);
+  const canAutoRestart = useHasScope(Permissions.ServerAutorestartSet);
+  const canSaveWorld = useHasScope(Permissions.WorldSave);
 
   const [config, setConfig] = useState<IStoreAutoRestartConfig | null>(null);
   const omeggaData = useStore($omeggaData);
@@ -49,22 +76,38 @@ export const ServerView = () => {
     setHasUpdate(omeggaData?.update?.lastCheck ?? null);
   }, [omeggaData?.update?.lastCheck]);
   const [checkingForUpdate, setCheckingForUpdate] = useState(false);
+  const [lastCheckedAt, setLastCheckedAt] = useState<number | null>(null);
 
   const [savingWorld, setSavingWorld] = useState(false);
 
-  useEffect(() => {
-    rpcReq('server.autorestart.get').then(setConfig);
-  }, []);
+  const { data: autoRestartData } = trpc.server.autoRestart.get.useQuery(
+    undefined,
+    { enabled: canViewAutoRestart },
+  );
 
-  const canUpdateCheck = omeggaData?.update?.canCheck ?? false;
+  useEffect(() => {
+    if (autoRestartData) {
+      setConfig(autoRestartData);
+    }
+  }, [autoRestartData]);
+
+  const hasSteam = omeggaData?.update?.canCheck ?? false;
+
+  const updateCheckQuery = trpc.server.update.check.useQuery(undefined, {
+    enabled: false,
+  });
+
   const checkForUpdate = useCallback(() => {
-    if (!canUpdateCheck) return;
+    if (!hasSteam || !canUpdateCheck) return;
     setCheckingForUpdate(true);
-    rpcReq('server.updatecheck').then(res => {
-      setHasUpdate(res);
+    updateCheckQuery.refetch().then(({ data }) => {
+      setHasUpdate(data ?? null);
+      setLastCheckedAt(Date.now());
       setCheckingForUpdate(false);
     });
-  }, [canUpdateCheck]);
+  }, [hasSteam, canUpdateCheck, updateCheckQuery]);
+
+  const autoRestartSetMutation = trpc.server.autoRestart.set.useMutation();
 
   const saveConfig = useCallback(async () => {
     if (!config) return;
@@ -84,13 +127,16 @@ export const ServerView = () => {
       autoUpdateIntervalMins: Math.round(
         Math.max(10, Math.min(config.autoUpdateIntervalMins ?? 60, Infinity)),
       ),
+      crashRestartEnabled: config.crashRestartEnabled ?? true,
     } satisfies IStoreAutoRestartConfig;
-    rpcNotify('server.autorestart.set', blob);
-  }, [config]);
+    autoRestartSetMutation.mutate(blob);
+  }, [config, autoRestartSetMutation]);
+
+  const worldSaveMutation = trpc.world.save.useMutation();
 
   const saveWorld = async () => {
     setSavingWorld(true);
-    await rpcReq('world.save');
+    await worldSaveMutation.mutateAsync({});
     setSavingWorld(false);
   };
 
@@ -107,10 +153,12 @@ export const ServerView = () => {
     };
   };
 
+  if (!canAccess) return null;
+
   return (
     <>
       <NavHeader title="Server">
-        {omeggaData?.isSteam && canUpdateCheck !== null && (
+        {hasSteam && canUpdateCheck && (
           <Button
             main={Boolean(hasUpdate)}
             normal={!hasUpdate}
@@ -118,7 +166,12 @@ export const ServerView = () => {
             disabled={checkingForUpdate}
             onClick={checkForUpdate}
           >
-            {hasUpdate === true ? (
+            {checkingForUpdate ? (
+              <>
+                <IconLoader2 className="spinning" />
+                Checking...
+              </>
+            ) : hasUpdate === true ? (
               <>
                 <IconDownload />
                 Update Available
@@ -135,64 +188,83 @@ export const ServerView = () => {
       <PageContent>
         <SideNav />
         <div className="generic-container server-container">
-          <NavBar>
-            Server Status:{' '}
-            {starting
-              ? 'starting'
-              : stopping
-                ? 'stopping'
-                : started
-                  ? 'started'
-                  : 'stopped'}
+          <NavBar className="server-status">
+            <span className="status-label">Server Status: </span>
+            <span className="status-value">
+              {starting
+                ? 'starting'
+                : stopping
+                  ? 'stopping'
+                  : started
+                    ? 'started'
+                    : 'stopped'}
+            </span>
+            {hasSteam && canUpdateCheck && hasUpdate !== null && (
+              <span className="status-update">
+                {hasUpdate
+                  ? 'Update available'
+                  : `Up to date${lastCheckedAt ? ` (checked ${formatTimeAgo(lastCheckedAt)})` : ''}`}
+              </span>
+            )}
           </NavBar>
           <div className="buttons">
-            <Button
-              main
-              data-tooltip="Start the server"
-              disabled={starting || stopping || statusLoading || started}
-              onClick={() =>
-                confirm
-                  .prompt('start the server')
-                  .then(ok => ok && startServer())
-              }
-            >
-              <IconPlayerPlay />
-              Start
-            </Button>
-            <Button
-              error
-              data-tooltip="Stop the server"
-              disabled={starting || stopping || statusLoading || !started}
-              onClick={() =>
-                confirm.prompt('stop the server').then(ok => ok && stopServer())
-              }
-            >
-              <IconPlayerStop />
-              Stop
-            </Button>
-            <Button
-              warn
-              data-tooltip="Reloads the server's world. Saves minigames/environment/bricks if 'Save World' is enabled below."
-              disabled={starting || stopping || statusLoading}
-              onClick={() =>
-                confirm
-                  .prompt('restart the server')
-                  .then(ok => ok && restartServer())
-              }
-            >
-              <IconRefresh />
-              Restart
-            </Button>
-            <Button
-              info
-              data-tooltip="Save the current world."
-              disabled={starting || stopping || statusLoading || savingWorld}
-              onClick={saveWorld}
-            >
-              <IconDeviceFloppy />
-              Save World
-            </Button>
-            {omeggaData?.isSteam && (
+            {canStart && (
+              <Button
+                main
+                data-tooltip="Start the server"
+                disabled={starting || stopping || statusLoading || started}
+                onClick={() =>
+                  confirm
+                    .prompt('start the server')
+                    .then(ok => ok && startServer())
+                }
+              >
+                <IconPlayerPlay />
+                Start
+              </Button>
+            )}
+            {canStop && (
+              <Button
+                error
+                data-tooltip="Stop the server"
+                disabled={starting || stopping || statusLoading || !started}
+                onClick={() =>
+                  confirm
+                    .prompt('stop the server')
+                    .then(ok => ok && stopServer())
+                }
+              >
+                <IconPlayerStop />
+                Stop
+              </Button>
+            )}
+            {canRestart && (
+              <Button
+                warn
+                data-tooltip="Reloads the server's world. Saves minigames/environment/bricks if 'Save World' is enabled below."
+                disabled={starting || stopping || statusLoading}
+                onClick={() =>
+                  confirm
+                    .prompt('restart the server')
+                    .then(ok => ok && restartServer())
+                }
+              >
+                <IconRefresh />
+                Restart
+              </Button>
+            )}
+            {canSaveWorld && (
+              <Button
+                info
+                data-tooltip="Save the current world."
+                disabled={starting || stopping || statusLoading || savingWorld}
+                onClick={saveWorld}
+              >
+                <IconDeviceFloppy />
+                Save World
+              </Button>
+            )}
+            {canUpdate && omeggaData?.isSteam && (
               <Button
                 normal={!hasUpdate}
                 main={hasUpdate === true}
@@ -211,27 +283,45 @@ export const ServerView = () => {
               </Button>
             )}
           </div>
-          <NavBar attached style={{ marginTop: 8 }}>
-            Auto Restart
-            <SavedSpan show={saved.status === SavedStatus.Waiting} />
-          </NavBar>
-          {config && (
+          {canViewAutoRestart && (
+            <NavBar attached style={{ marginTop: 8 }}>
+              Auto Restart
+              <SavedSpan show={saved.status === SavedStatus.Waiting} />
+            </NavBar>
+          )}
+          {canViewAutoRestart && config && (
             <div className="inputs-list">
+              <div
+                className="inputs-item"
+                data-tooltip="When enabled, automatically restarts the server if the game engine crashes"
+              >
+                <label>Restart on Crash</label>
+                <div className="inputs">
+                  <Toggle
+                    disabled={!canAutoRestart}
+                    tooltip="Enabled"
+                    value={config.crashRestartEnabled ?? true}
+                    onChange={changeConfig('crashRestartEnabled')}
+                  />
+                </div>
+              </div>
               <div
                 className="inputs-item"
                 data-tooltip="When enabled on servers setup with SteamCMD, automatically updates the server when a new version is available"
               >
                 <label>
                   Auto Update
-                  {canUpdateCheck ? '' : ' (Feature requires SteamCMD)'}
+                  {hasSteam ? '' : ' (SteamCMD Only)'}
                 </label>
                 <div className="inputs">
                   <Toggle
+                    disabled={!canAutoRestart}
                     tooltip="Enabled"
                     value={config.autoUpdateEnabled}
                     onChange={changeConfig('autoUpdateEnabled')}
                   />
                   <Input
+                    disabled={!canAutoRestart}
                     type="number"
                     placeholder="Minutes"
                     tooltip="Interval in minutes to check for updates (min 10)"
@@ -247,11 +337,13 @@ export const ServerView = () => {
                 <label>Max Server Uptime (Hours)</label>
                 <div className="inputs">
                   <Toggle
+                    disabled={!canAutoRestart}
                     tooltip="Enabled"
                     value={config.maxUptimeEnabled}
                     onChange={changeConfig('maxUptimeEnabled')}
                   />
                   <Input
+                    disabled={!canAutoRestart}
                     type="number"
                     placeholder="Hours"
                     tooltip="Uptime Hours"
@@ -267,11 +359,13 @@ export const ServerView = () => {
                 <label>Empty Server Lifetime (Hours)</label>
                 <div className="inputs">
                   <Toggle
+                    disabled={!canAutoRestart}
                     tooltip="Enabled"
                     value={config.emptyUptimeEnabled}
                     onChange={changeConfig('emptyUptimeEnabled')}
                   />
                   <Input
+                    disabled={!canAutoRestart}
                     type="number"
                     placeholder="Hours"
                     tooltip="Uptime Hours"
@@ -287,11 +381,13 @@ export const ServerView = () => {
                 <label>Daily at a Specific Hour</label>
                 <div className="inputs">
                   <Toggle
+                    disabled={!canAutoRestart}
                     tooltip="Enabled"
                     value={config.dailyHourEnabled}
                     onChange={changeConfig('dailyHourEnabled')}
                   />
                   <Input
+                    disabled={!canAutoRestart}
                     type="number"
                     placeholder="Hour"
                     tooltip="Hour (0 = 12am, 13 = 1pm)"
@@ -307,6 +403,7 @@ export const ServerView = () => {
                 <label>Restart Announcement</label>
                 <div className="inputs">
                   <Toggle
+                    disabled={!canAutoRestart}
                     tooltip="Enabled"
                     value={config.announcementEnabled}
                     onChange={changeConfig('announcementEnabled')}
@@ -320,6 +417,7 @@ export const ServerView = () => {
                 <label>Reload Players</label>
                 <div className="inputs">
                   <Toggle
+                    disabled={!canAutoRestart}
                     tooltip="Enabled"
                     value={config.playersEnabled}
                     onChange={changeConfig('playersEnabled')}
@@ -333,6 +431,7 @@ export const ServerView = () => {
                 <label>Save World</label>
                 <div className="inputs">
                   <Toggle
+                    disabled={!canAutoRestart}
                     tooltip="Enabled"
                     value={config.saveWorld ?? true}
                     onChange={changeConfig('saveWorld')}

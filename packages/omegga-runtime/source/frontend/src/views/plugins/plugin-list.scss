@@ -89,3 +89,29 @@
   border-bottom-left-radius: theme.$br-radius-md;
   border-bottom-right-radius: theme.$br-radius-md;
 }
+
+@media screen and (max-width: 1200px) {
+  .plugins-container {
+    flex-direction: column;
+  }
+
+  .plugins-list-container {
+    margin-right: 0;
+    margin-bottom: 16px;
+  }
+}
+
+@media screen and (max-width: 600px) {
+  // full-width search bar on mobile
+  .plugins-list-container {
+    .input {
+      max-width: none;
+      margin-right: 8px;
+    }
+
+    // drop the flex spacer (inline style) so the input fills the row
+    .navbar > span {
+      flex: 0 0 auto !important;
+    }
+  }
+}

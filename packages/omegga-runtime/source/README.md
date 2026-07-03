@@ -4,38 +4,6 @@ Read the README first before asking questions! [Join the discord](https://discor
 
 Omegga wraps [Brickadia](https://brickadia.com/)'s server console to provide interactivity and utility via plugins along with a web interface for managing your server.
 
-## BMF Windows Runtime Notice
-
-For BMF Windows server automation, **Omegga means the forked runtime at
-<https://github.com/Ty-lerCox/bmf-omegga-fork>**. Stock upstream Omegga and the
-global npm package are Linux/WSL-oriented and are not the supported Windows
-runtime for the BMF/UE4SS bridge path.
-
-This fork intentionally trails the latest upstream Omegga builds. Keep that
-version skew: the Windows bridge templates, `OmeggaBridge`, BMF staging, and
-UE4SS compatibility work are validated against this fork rather than the newest
-upstream release.
-
-For low-latency BMF minigame and command traffic, this fork starts a loopback
-BMF socket broker for UE4SS launches and passes the generated host, port, and
-token through `OMEGGA_BMF_SOCKET_*`. The `BMFSocket` UE4SS C++ mod is copied
-and enabled when `Mods/BMFSocket/dlls/main.dll` exists. Live
-CityRPG validation used this path to assign a minigame team over the socket in
-about 51ms, replacing the earlier multi-second file-polling workflow for that
-gameplay path.
-
-Environment preset reloads are also part of the supported Windows runtime
-contract. `loadEnvironment(...)` and `loadEnvironmentData(...)` are asynchronous
-in this fork. On UE4SS-backed Windows launches, direct
-`Server.Environment.LoadPreset ...` and `Server.Environment.Reset` commands are
-routed through `Omegga.Bridge.ForceConsoleExecutor consolemanager ...` because
-the normal console-exec completion path can stall for environment reloads.
-
-The generic install instructions below are upstream Omegga documentation. Use
-them for non-Windows or generic plugin development. For BMF Windows runtime
-work, clone and run the forked repository instead of installing `omegga` from
-npm.
-
 Omegga can do things like:
 
 - Automatically update/restart your server
@@ -69,9 +37,7 @@ Omegga plugins can do things like:
 
 ## Install
 
-For upstream/generic Omegga, you can run omegga in the
-[Windows Subsystem for Linux](#wsl) (I recommend Ubuntu) or on an actual linux
-install. For BMF Windows runtime work, use the fork linked in the notice above.
+You can run omegga in the [Windows Subsystem for Linux](#wsl) (I recommend Ubuntu) or on an actual linux install.
 
 <font size="5" color="red">Do not install omegga or run brickadia/omegga as root/superuser</font>:
 
@@ -86,10 +52,6 @@ If any of the above are true, [create a new user](#creating-a-new-user) and cont
 If you need to run omegga as root, make sure your branch is `main-server` or `unstable-server`, as `main` will not work as root.
 
 ### Quick Setup
-
-This quick setup is for upstream/generic Omegga on Linux or WSL. For BMF
-Windows runtime work, use the forked repository from the notice above instead
-of `npm i -g omegga`.
 
 1. Install linux if you haven't already ([Windows Install](#wsl) is not that bad)
 
@@ -169,17 +131,15 @@ Omegga depends on:
   - `tar` (most linuxes come with this, though you can `sudo apt install tar`)
   - [Brickadia linux launcher](https://brickadia.com/download)
 
-Upstream/generic Omegga is installed as a global npm package. Do not use this
-install path for the BMF Windows runtime.
+Omegga is installed as a global npm package
 
     npm i -g omegga
 
-Alternatively, you can use a development/local omegga. For BMF Windows runtime
-work, clone the supported fork instead of upstream:
+Alternatively, you can use a development/local omegga.
 
 ```sh
 # clone omegga
-git clone https://github.com/Ty-lerCox/bmf-omegga-fork.git && cd bmf-omegga-fork/omegga-master/omegga-master
+git clone https://github.com/brickadia-community/omegga.git && cd omegga
 
 # install dependencies
 npm i
@@ -258,14 +218,9 @@ Omegga will prompt for credentials as necessary and only stores the auth tokens 
 
 ## Updating
 
-Upstream/generic Omegga will tell you when it's out of date. You can update it
-with this command:
+Omegga will tell you when it's out of date. You can update with this command:
 
     npm i -g omegga
-
-For the BMF Windows runtime, update the cloned fork intentionally and keep it on
-the supported fork revision. Do not replace it with the newest upstream npm
-package unless the BMF/UE4SS bridge has been validated against that version.
 
 If don't have automatic update enabled, you can start update the Brickadia server by starting omegga with the `--update` flag:
 
@@ -298,6 +253,15 @@ server:
   # Specifying a branch will use the old launcher instead of SteamCMD
   # This does not have full auto-updater support yet, though the game will update every time it is restarted
   # branch: release:release-server
+terminal:
+  # prepend timestamps to terminal output using dateformat syntax
+  # see https://www.npmjs.com/package/dateformat for format options
+  # timestamp: "HH:MM:ss"             # 14:05:30
+  # timestamp: "yyyy-mm-dd"           # 2026-03-10
+  # timestamp: "yyyy-mm-dd HH:MM:ss"  # 2026-03-10 14:05:30
+  # timestamp: "HH:MM"                # 14:05
+  # timestamp: "hh:MM:ss TT"          # 02:05:30 PM
+  # timestamp: "[HH:MM:ss]"           # [14:05:30]
 ```
 
 Note: `BRANCH-server` branches download only server data
@@ -409,9 +373,9 @@ All plugins are located in a `plugins` directory where you are running Omegga:
 
 - `plugins/myPlugin` - plugin folder (required)
 - `plugins/myPlugin/doc.json` - plugin information (required)
-- `plugins/myPlugin/plugin.json` - plugin version information, validated with `omegga check` when present
-- `plugins/myPlugin/setup.sh` - plugin setup script, run after installed by `omegga install` when present
-- `plugins/myPlugin/disable.omegga` - empty file only present if the plugin should be disabled
+- `plugins/myPlugin/plugin.json` - plugin version information, validated with `omegga check` (optional, for now)
+- `plugins/myPlugin/setup.sh` - plugin setup script, run after installed by `omegga install` (optional)
+- `plugins/myPlugin/disable.omegga` - empty file only present if the plugin should be disabled (optional)
 
 Every plugin requires a `doc.json` file to document which briefly describes the plugin and its commands.
 
@@ -776,6 +740,8 @@ Cleanup is important as code can still be running after the plugin is unloaded r
 
 Register custom `/commands` by returning `{registeredCommands: ['foo', 'bar']}` (registers command `/foo` and `/bar`) in the `async init()` method.
 
+By defining an `async pluginEvent(event, from, ...args)` method in your plugin class, you can respond to events from other plugins, where `from` is the name of the other plugin, `event` is the name of the custom event, and `args` is an array of any passed arguments.
+
 ### Globals
 
 - `OMEGGA_UTIL` - access to the `src/util/index.js` module
@@ -814,6 +780,13 @@ class PluginName {
     this.omegga
       .removeAllListeners('chatcmd:ping')
       .removeAllListeners('chatcmd:pos');
+  }
+
+  // optional: respond to events from other plugins
+  async pluginEvent(event, from, ...args) {
+    if (event === 'greeting') {
+      return `Hello from ${from}!`;
+    }
   }
 }
 
@@ -1087,8 +1060,8 @@ These can be set in your shell or in a `.env` file the same directory as a `omeg
 - `BRICKADIA_DIR` - Override the need to use steamcmd and point to a Brickadia install directory (eg. `/home/<USER>/.config/omegga/steam_installs/main/Brickadia`)
 - `STEAM_INSTALLS_DIR` - Set where omegga installs brickadia via steamcmd (default `~/.config/omegga/steam_installs`)
 - `STEAM_APP_ID` - Set the Steam App ID for Brickadia (default `3017590`)
-- `STEAM_USERNAME` - Set the Steam username for downloading Brickadia via steamcmd
-- `STEAM_PASSWORD` - Set the Steam password for downloading Brickadia via steamcmd
+- `STEAM_USERNAME` - Set the Steam username for downloading Brickadia via steamcmd. Run `omegga steamlogin` to authenticate with Steam Guard
+- `STEAM_PASSWORD` - (Optional) Steam password; if not set, you will be prompted interactively
 - `VERBOSE` - Set to `true` to enable verbose logging (default `false`)
 - `PACKAGE_NOTIFIER` - When set to `false`, disables the npm update notifier
 - `STEAM_NOTIFIER` - When set to `false`, disables the SteamCMD update notifier
@@ -1112,4 +1085,7 @@ server:
   # When branch is present, steamcmd is not used
   #branch: release:release-server # branch alias:branch name
   steambeta: public # try `unstable`
+terminal:
+  # prepend timestamps to terminal output (see https://www.npmjs.com/package/dateformat)
+  #timestamp: "HH:MM:ss" # e.g. 14:05:30, "[HH:MM:ss]" for [14:05:30]
 ```

@@ -12,8 +12,8 @@ Your plugin will be installed via omegga install gh:{{author}}/{{name}}
 # {{name}}
 
 A typed safe plugin for [omegga](https://github.com/brickadia-community/omegga).
-For BMF Windows runtime testing, use the supported fork at
-<https://github.com/Ty-lerCox/bmf-omegga-fork> instead of stock upstream
+For BMF Windows runtime testing, use the supported BMF-vendored runtime at
+<https://github.com/Ty-lerCox/brickadia-modding-framework/tree/main/packages/omegga-runtime> instead of stock upstream
 Omegga.
 
 This is an auto-generated README file. Please change it before publishing your plugin!

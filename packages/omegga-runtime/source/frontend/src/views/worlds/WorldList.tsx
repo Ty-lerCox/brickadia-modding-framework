@@ -1,4 +1,5 @@
 import {
+  AnimatedDropdown,
   Button,
   Dropdown,
   Input,
@@ -10,6 +11,7 @@ import {
   SideNav,
   useConfirm,
 } from '@components';
+import { useHasScope, useMobileInspector, useRequireScope } from '@hooks';
 import { useStore } from '@nanostores/react';
 import {
   IconCaretDown,
@@ -27,14 +29,16 @@ import {
 } from '@tabler/icons-react';
 import { useEffect, useState } from 'react';
 import { Link, useRoute } from 'wouter';
-import { rpcReq } from '../../socket';
+import { Permissions } from '../../permissions';
 import { useServerLiveness } from '../../stores/liveness';
 import { $activeWorld, $nextWorld } from '../../stores/worlds';
+import { trpc } from '../../trpc';
 import { WorldInspector } from './WorldInspector';
 
 const MAP_OPTIONS = ['Plate', 'Space', 'Studio', 'Peaks'];
 
 export const WorldList = () => {
+  const canAccess = useRequireScope(Permissions.WorldList);
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
   const [worlds, setWorlds] = useState<string[]>([]);
@@ -43,17 +47,32 @@ export const WorldList = () => {
   const activeWorld = useStore($activeWorld);
   const [showWidgets, setShowWidgets] = useState(false);
 
+  const canSave = useHasScope(Permissions.WorldSave);
+  const canCreate = useHasScope(Permissions.WorldCreate);
+  const canUse = useHasScope(Permissions.WorldUse);
+  const canActive = useHasScope(Permissions.WorldActive);
+  const canNext = useHasScope(Permissions.WorldNext);
+
   const liveness = useServerLiveness();
 
   const [_location, params] = useRoute('/worlds/*?');
   const selectedWorld = params?.['*'];
+  const { onBack, swipeHandlers, inspectorOpen } = useMobileInspector(
+    !!selectedWorld,
+    '/worlds',
+  );
+
+  const utils = trpc.useUtils();
+  const useMut = trpc.world.use.useMutation();
+  const saveMut = trpc.world.save.useMutation();
+  const createMut = trpc.world.create.useMutation();
 
   const getWorlds = async () => {
     setLoading(true);
     const [worlds, active, next] = await Promise.all([
-      rpcReq('world.list'),
-      rpcReq('world.active'),
-      rpcReq('world.next'),
+      utils.world.list.fetch(),
+      canActive ? utils.world.active.fetch() : null,
+      canNext ? utils.world.next.fetch() : null,
     ]);
     setWorlds(worlds);
     $activeWorld.set(active);
@@ -66,31 +85,33 @@ export const WorldList = () => {
 
   const clearActiveWorld = async () => {
     setWaiting(true);
-    const ok = await rpcReq('world.use', null);
+    const ok = await useMut.mutateAsync({});
     if (ok) {
       $activeWorld.set(null);
-      const next = await rpcReq('world.next');
-      $nextWorld.set(next);
+      if (canNext) {
+        const next = await utils.world.next.fetch();
+        $nextWorld.set(next);
+      }
     }
     setWaiting(false);
   };
 
   const saveWorld = async () => {
     setWaiting(true);
-    await rpcReq('world.save');
+    await saveMut.mutateAsync({});
     setWaiting(false);
   };
 
   const saveWorldAs = async (name: string) => {
     setWaiting(true);
-    await rpcReq('world.save', name);
+    await saveMut.mutateAsync({ name });
     setWaiting(false);
     getWorlds();
   };
 
   const createWorld = async (name: string, map: string) => {
     setWaiting(true);
-    await rpcReq('world.create', name, map);
+    await createMut.mutateAsync({ name, level: map as any });
     setWaiting(false);
     getWorlds();
   };
@@ -166,87 +187,99 @@ export const WorldList = () => {
     ),
   });
 
+  if (!canAccess) return null;
+
   return (
     <>
-      <NavHeader title="Worlds">
-        <div className="widgets-container worlds">
-          <Button
-            normal
-            boxy
-            data-tooltip="Show more world actions"
-            onClick={() => setShowWidgets(!showWidgets)}
-          >
-            {showWidgets ? <IconCaretUp /> : <IconCaretDown />}
-            Actions
-          </Button>
-          <div
-            className="widgets-list"
-            style={{ display: showWidgets ? 'block' : 'none' }}
-          >
-            <Button
-              info
-              disabled={waiting || !liveness.started}
-              data-tooltip="Save the currently loaded world"
-              onClick={() => {
-                setShowWidgets(false);
-                saveWorld();
-              }}
-            >
-              <IconDeviceFloppy />
-              Save World
-            </Button>
+      <NavHeader title="Worlds" onBack={onBack}>
+        {(canSave || canCreate || canUse) && (
+          <div className="widgets-container worlds">
             <Button
               normal
-              disabled={waiting || !liveness.started}
-              data-tooltip="Save a copy of the currently loaded world"
-              onClick={() => {
-                setShowWidgets(false);
-                setWorldName(null);
-                saveAsConfirm.prompt().then(name => {
-                  name && saveWorldAs(name);
-                });
-              }}
+              boxy
+              data-tooltip="Show more world actions"
+              onClick={() => setShowWidgets(!showWidgets)}
             >
-              <IconClipboardPlus />
-              Save As
+              {showWidgets ? <IconCaretUp /> : <IconCaretDown />}
+              Actions
             </Button>
-            <Button
-              main
-              disabled={waiting || !liveness.started}
-              data-tooltip="Create a new world"
-              onClick={() => {
-                setShowWidgets(false);
-                setWorldName(null);
-                setNewMap('Plate');
-                newMapConfirm.prompt().then(data => {
-                  if (data) {
-                    createWorld(data.name, data.map);
-                  }
-                });
-              }}
-            >
-              <IconWorldPlus />
-              New World
-            </Button>
-            <Button
-              normal={activeWorld === null}
-              warn={activeWorld !== null}
-              disabled={waiting || !activeWorld}
-              data-tooltip="Remove the default world for the server (on startup)"
-              onClick={() => {
-                setShowWidgets(false);
-                clearActiveWorld();
-              }}
-            >
-              <IconStarOff />
-              Clear Default
-            </Button>
+            <AnimatedDropdown visible={showWidgets}>
+              {canSave && (
+                <Button
+                  info
+                  disabled={waiting || !liveness.started}
+                  data-tooltip="Save the currently loaded world"
+                  onClick={() => {
+                    setShowWidgets(false);
+                    saveWorld();
+                  }}
+                >
+                  <IconDeviceFloppy />
+                  Save World
+                </Button>
+              )}
+              {canSave && (
+                <Button
+                  normal
+                  disabled={waiting || !liveness.started}
+                  data-tooltip="Save a copy of the currently loaded world"
+                  onClick={() => {
+                    setShowWidgets(false);
+                    setWorldName(null);
+                    saveAsConfirm.prompt().then(name => {
+                      name && saveWorldAs(name);
+                    });
+                  }}
+                >
+                  <IconClipboardPlus />
+                  Save As
+                </Button>
+              )}
+              {canCreate && (
+                <Button
+                  main
+                  disabled={waiting || !liveness.started}
+                  data-tooltip="Create a new world"
+                  onClick={() => {
+                    setShowWidgets(false);
+                    setWorldName(null);
+                    setNewMap('Plate');
+                    newMapConfirm.prompt().then(data => {
+                      if (data) {
+                        createWorld(data.name, data.map);
+                      }
+                    });
+                  }}
+                >
+                  <IconWorldPlus />
+                  New World
+                </Button>
+              )}
+              {canUse && (
+                <Button
+                  normal={activeWorld === null}
+                  warn={activeWorld !== null}
+                  disabled={waiting || !activeWorld}
+                  data-tooltip="Remove the default world for the server (on startup)"
+                  onClick={() => {
+                    setShowWidgets(false);
+                    clearActiveWorld();
+                  }}
+                >
+                  <IconStarOff />
+                  Clear Default
+                </Button>
+              )}
+            </AnimatedDropdown>
           </div>
-        </div>
+        )}
       </NavHeader>
       <PageContent>
         <SideNav />
-        <div className="generic-container worlds-container">
+        <div
+          className={`generic-container worlds-container ${inspectorOpen ? 'inspector-open' : ''}`}
+          {...swipeHandlers}
+        >
           <div className="worlds-list-container">
             <NavBar>
               <Input

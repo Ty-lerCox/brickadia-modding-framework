@@ -2,12 +2,7 @@ import Logger from '@/logger';
 import soft from '@/softconfig';
 import * as config from '@config';
 import { PluginLoader } from '@omegga/plugin';
-import {
-  exec as execNonPromise,
-  execFile as execFileNonPromise,
-} from 'node:child_process';
-import { getProcessInvocation } from '@util/process';
-import { IS_WINDOWS, resolveExistingPath } from '@util/platform';
+import { exec as execNonPromise } from 'node:child_process';
 import 'colors';
 import fs from 'node:fs';
 import hasbin from 'hasbin';
@@ -19,7 +14,6 @@ import { promisify } from 'node:util';
 import { VERSION } from '@/version';
 
 const exec = promisify(execNonPromise);
-const execFile = promisify(execFileNonPromise);
 
 const MAIN_BRANCHES = ['master', 'main'];
 
@@ -208,53 +202,6 @@ function checkPlugin(omeggaPath: string, plugin: IPlugin | IInstalledPlugin) {
   return true;
 }
 
-function getPostInstallScript(pluginPath: string) {
-  return resolveExistingPath(pluginPath, soft.PLUGIN_POSTINSTALL_CANDIDATES);
-}
-
-async function runPostInstallScript(
-  plugin: IPlugin | IInstalledPlugin,
-  pluginPath: string,
-) {
-  const postInstallPath = getPostInstallScript(pluginPath);
-  if (!postInstallPath) return;
-
-  if (
-    IS_WINDOWS &&
-    path.basename(postInstallPath).toLowerCase() === 'setup.sh'
-  ) {
-    plgWarn(
-      plugin,
-      'Skipping setup.sh on Windows. Add setup.ps1, setup.cmd, or setup.bat for Windows support.',
-    );
-    return;
-  }
-
-  plgLog(plugin, 'Running post install script...');
-  try {
-    fs.chmodSync(postInstallPath, '0755');
-  } catch {
-    // chmod is best-effort for Windows and should not block install
-  }
-
-  try {
-    const invocation = getProcessInvocation(postInstallPath);
-    const { stdout, stderr } = await execFile(
-      invocation.command,
-      invocation.args,
-      {
-        cwd: pluginPath,
-        ...invocation.options,
-      },
-    );
-
-    if (stderr.length) plgErr(plugin, stderr);
-    verboseLog(stdout);
-  } catch (e) {
-    plgErr(plugin, 'Error running post install script:', e);
-  }
-}
-
 // install plugins from a list of plugins
 export async function install(plugins: string[], _options: unknown) {
   const omeggaPath = getWorkDir();
@@ -328,7 +275,25 @@ export async function install(plugins: string[], _options: unknown) {
     // TODO: if force is passed in, ignore the plugin check
     if (!checkPlugin(omeggaPath, plugin)) continue;
 
-    await runPostInstallScript(plugin, pluginPath);
+    const postInstallPath = path.join(pluginPath, soft.PLUGIN_POSTINSTALL);
+    if (fs.existsSync(postInstallPath)) {
+      plgLog(plugin, 'Running post install script...');
+      try {
+        verboseLog('Changing permission of', postInstallPath);
+        fs.chmodSync(postInstallPath, '0755');
+        verboseLog('Executing bash file');
+        let { stdout, stderr } = await exec(postInstallPath, {
+          cwd: pluginPath,
+          shell: 'bash',
+        });
+
+        if (stderr.length) plgErr(plugin, stderr);
+
+        verboseLog(stdout);
+      } catch (e) {
+        plgErr(plugin, 'Error running post install script:', e);
+      }
+    }
   }
 }
 export async function update(pluginsNames: string[], _options: unknown) {
@@ -508,7 +473,23 @@ export async function update(pluginsNames: string[], _options: unknown) {
         throw 'Incompatible';
       }
 
-      await runPostInstallScript(plugin, plugin.path);
+      const postInstallPath = path.join(plugin.path, soft.PLUGIN_POSTINSTALL);
+      if (fs.existsSync(postInstallPath)) {
+        plgLog(plugin, 'Running post install script...');
+        try {
+          fs.chmodSync(postInstallPath, '0755');
+          let { stdout, stderr } = await exec(postInstallPath, {
+            cwd: plugin.path,
+            shell: 'bash',
+          });
+
+          if (stderr.length) plgErr(plugin, stderr);
+
+          verboseLog(stdout);
+        } catch (e) {
+          plgErr(plugin, 'Error running post install script:', e);
+        }
+      }
 
       plgLog(plugin, 'Updated!'.green);
       updates++;
@@ -611,7 +592,7 @@ export async function check(pluginNames: string[], _options: unknown) {
   console.log();
 }
 
-const EXECUTABLES = soft.TEMPLATE_PLUGIN_EXECUTABLES;
+const EXECUTABLES = ['setup.sh', 'omegga_plugin'];
 
 async function init() {
   const { author, ...response } = await prompts([

@@ -147,7 +147,6 @@ try {
     'packages/omegga-runtime/source/src/omegga/index.ts',
     'packages/omegga-runtime/source/tools/package-bmf-omegga.js',
     'packages/omegga-runtime/source/templates/windows-ue4ss/ue4ss/Mods/BMF/Scripts/main.lua',
-    'packages/omegga-runtime/source/templates/windows-ue4ss/ue4ss/Mods/BMF/Scripts/bmf/runtime.lua',
     'packages/omegga-plugins/bmf-bridge/plugin.json',
     'packages/omegga-plugins/bmf-bridge/doc.json',
     'packages/omegga-plugins/bmf-bridge/access.json',

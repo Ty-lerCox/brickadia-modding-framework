@@ -1,4 +1,4 @@
-import { IConfig } from '@config/types';
+﻿import { IConfig } from '@config/types';
 import fs from 'node:fs';
 import path from 'node:path';
 import { getServerConfigDirectory } from '@util/platform';

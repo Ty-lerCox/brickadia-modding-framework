@@ -1,4 +1,4 @@
-import soft, {
+﻿import soft, {
   getOverrideGameBinary,
   getSteamGameDir,
   getSteamInstallDir,

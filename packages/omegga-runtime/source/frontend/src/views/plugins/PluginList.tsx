@@ -8,7 +8,7 @@ import {
   Scroll,
   SideNav,
 } from '@components';
-import type { GetPluginsRes } from '@omegga/webserver/backend/api';
+import { useHasScope, useMobileInspector, useRequireScope } from '@hooks';
 import {
   IconAlertCircle,
   IconBug,
@@ -19,11 +19,20 @@ import {
 } from '@tabler/icons-react';
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useRoute } from 'wouter';
-import { ioEmit, rpcReq, socket } from '../../socket';
+import { Permissions } from '../../permissions';
+import { handleGlobalError, trpc } from '../../trpc';
 import { PluginInspector } from './PluginInspector';
 
+type PluginListItem = {
+  name: string;
+  documentation: any;
+  path: string;
+  isLoaded: boolean;
+  isEnabled: boolean;
+};
+
 export type PluginInfo = Pick<
-  GetPluginsRes[number],
+  PluginListItem,
   'name' | 'isLoaded' | 'isEnabled'
 >;
 
@@ -42,14 +51,19 @@ const pluginStateFromInfo = (info: PluginInfo) => {
 type PluginRenderInfo = ReturnType<typeof pluginStateFromInfo>;
 
 export const PluginList = () => {
+  const canAccess = useRequireScope(Permissions.PluginList);
+  const canGet = useHasScope(Permissions.PluginGet);
   const [search, setSearch] = useState('');
-  const [loading, setLoading] = useState(true);
   const [reloading, setReloading] = useState(false);
-  const [plugins, setPlugins] = useState<
-    (GetPluginsRes[number] & PluginRenderInfo)[]
-  >([]);
+  const [plugins, setPlugins] = useState<any[]>([]);
+
+  const canReloadAll = useHasScope(Permissions.PluginReloadAll);
 
   const [_location, params] = useRoute('/plugins/:id?');
+  const { onBack, swipeHandlers, inspectorOpen } = useMobileInspector(
+    !!params?.id,
+    '/plugins',
+  );
   const selectedPluginName = useMemo(
     () =>
       plugins.find(plugin => plugin.path === params?.id)?.name ??
@@ -57,59 +71,66 @@ export const PluginList = () => {
     [plugins, params?.id],
   );
 
-  const getPlugins = async () => {
-    setLoading(true);
-    const plugins = await rpcReq('plugins.list');
-    setPlugins(plugins.map(pluginStateFromInfo));
-    setLoading(false);
+  const listQuery = trpc.plugin.list.useQuery();
+
+  useEffect(() => {
+    if (listQuery.data) {
+      setPlugins(listQuery.data.map(pluginStateFromInfo));
+    }
+  }, [listQuery.data]);
+  const loading = listQuery.isLoading;
+
+  const reloadAllMutation = trpc.plugin.reloadAll.useMutation();
+
+  const getPlugins = () => {
+    listQuery.refetch();
   };
 
   const reloadPlugins = async () => {
     setReloading(true);
-    await rpcReq('plugins.reload');
+    await reloadAllMutation.mutateAsync();
     setReloading(false);
+    getPlugins();
   };
 
   const matches = (plugin: PluginRenderInfo) =>
     plugin.name.toLowerCase().includes(search.toLowerCase());
 
-  useEffect(() => {
-    const handlePluginUpdate = ([shortPath, info]: [
-      shortPath: string,
-      info: PluginInfo,
-    ]) => {
-      const plugin = pluginStateFromInfo(info);
-      // Update an individual plugin
+  trpc.plugin.onStatus.useSubscription(undefined, {
+    enabled: canAccess,
+    onError: handleGlobalError,
+    onData(data) {
+      const plugin = pluginStateFromInfo(data);
       setPlugins(prev =>
-        prev.map(p => (p.path === shortPath ? { ...p, ...plugin } : p)),
+        prev.map(p => (p.path === data.shortPath ? { ...p, ...plugin } : p)),
       );
-    };
-    socket.on('plugin', handlePluginUpdate);
-    ioEmit('subscribe', 'plugins');
-    getPlugins();
-    return () => {
-      socket.off('plugin', handlePluginUpdate);
-      ioEmit('unsubscribe', 'plugins');
-    };
-  }, []);
+    },
+  });
+
+  if (!canAccess) return null;
 
   return (
     <>
-      <NavHeader title="Plugins">
+      <NavHeader title="Plugins" onBack={onBack}>
         <span style={{ flex: 1 }} />
-        <Button
-          warn
-          disabled={reloading}
-          onClick={reloadPlugins}
-          data-tooltip="Reload all plugins, this may clear current plugin progress"
-        >
-          <IconRefreshAlert />
-          Reload Plugins
-        </Button>
+        {canReloadAll && (
+          <Button
+            warn
+            disabled={reloading}
+            onClick={reloadPlugins}
+            data-tooltip="Reload all plugins, this may clear current plugin progress"
+          >
+            <IconRefreshAlert />
+            Reload Plugins
+          </Button>
+        )}
       </NavHeader>
       <PageContent>
         <SideNav />
-        <div className="generic-container plugins-container">
+        <div
+          className={`generic-container plugins-container ${inspectorOpen ? 'inspector-open' : ''}`}
+          {...swipeHandlers}
+        >
           <div className="plugins-list-container">
             <NavBar>
               <Input

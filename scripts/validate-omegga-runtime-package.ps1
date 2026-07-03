@@ -79,8 +79,8 @@ try {
     if ([string]$packageManifest.owner -ne 'packages/omegga-runtime') {
       $errors.Add('Omegga runtime package owner must be packages/omegga-runtime.')
     }
-    if ([string]$packageManifest.sourceRepository -ne 'https://github.com/Ty-lerCox/bmf-omegga-fork') {
-      $errors.Add('Omegga runtime package sourceRepository must be the BMF-supported fork URL.')
+    if ([string]$packageManifest.sourceRepository -ne 'https://github.com/Ty-lerCox/brickadia-modding-framework') {
+      $errors.Add('Omegga runtime package sourceRepository must be the BMF repository URL.')
     }
     if ([string]$packageManifest.upstreamRepository -ne 'https://github.com/brickadia-community/omegga') {
       $errors.Add('Omegga runtime package upstreamRepository must be upstream Omegga.')
@@ -88,11 +88,17 @@ try {
     if ([string]$packageManifest.status -ne 'synced-source') {
       $errors.Add('Omegga runtime package status must be synced-source.')
     }
-    if ([string]$packageManifest.importMode -ne 'local-fork-source-sync') {
-      $errors.Add('Omegga runtime package importMode must be local-fork-source-sync.')
+    if ([string]$packageManifest.importMode -ne 'vendored-source') {
+      $errors.Add('Omegga runtime package importMode must be vendored-source.')
     }
     if (![string]::IsNullOrWhiteSpace([string]$packageManifest.sourceCommit) -and [string]$packageManifest.sourceCommit -notmatch '^[a-f0-9]{40}$') {
       $errors.Add('Omegga runtime package sourceCommit must be a git SHA when present.')
+    }
+    if ([string]$packageManifest.upstreamCommit -notmatch '^[a-f0-9]{40}$') {
+      $errors.Add('Omegga runtime package upstreamCommit must be a git SHA.')
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$packageManifest.upstreamVersion)) {
+      $errors.Add('Omegga runtime package upstreamVersion must be recorded.')
     }
     Test-Contains @($packageManifest.sourceRoots) 'packages/omegga-runtime/source' 'Omegga runtime package sourceRoots must include packages/omegga-runtime/source.'
     if ([string]$packageManifest.syncMetadata -ne 'packages/omegga-runtime/sync-metadata.json') {
@@ -106,7 +112,7 @@ try {
     )) {
       Test-Contains @($packageManifest.requiredSurfaces) $surface "Omegga runtime package requiredSurfaces are missing: $surface"
     }
-    foreach ($guardrail in @('do-not-vendor-node-modules', 'record-fork-commit-before-release', 'preserve-upstream-license-notice', 'keep-server-data-out-of-source')) {
+    foreach ($guardrail in @('do-not-vendor-node-modules', 'record-supported-upstream-commit-before-release', 'preserve-upstream-license-notice', 'keep-server-data-out-of-source')) {
       Test-Contains @($packageManifest.guardrails) $guardrail "Omegga runtime package guardrails are missing: $guardrail"
     }
   }
@@ -158,13 +164,22 @@ try {
   }
 
   if ($syncMetadata) {
-    if ([string]$syncMetadata.sourceRepository -notmatch 'Ty-lerCox/bmf-omegga-fork') {
-      $errors.Add('Omegga sync metadata must record the BMF-supported fork repository.')
+    if ([string]$syncMetadata.sourceRepository -ne 'https://github.com/Ty-lerCox/brickadia-modding-framework') {
+      $errors.Add('Omegga sync metadata must record the BMF repository.')
+    }
+    if ([string]$syncMetadata.upstreamRepository -ne 'https://github.com/brickadia-community/omegga') {
+      $errors.Add('Omegga sync metadata must record upstream Omegga.')
     }
     if ([string]$syncMetadata.sourceCommit -notmatch '^[a-f0-9]{40}$') {
       $errors.Add('Omegga sync metadata must record a sourceCommit git SHA.')
     }
-    foreach ($copied in @('package.json', 'package-lock.json', 'src', 'templates', 'tools', 'frontend', 'bin')) {
+    if ([string]$syncMetadata.upstreamCommit -notmatch '^[a-f0-9]{40}$') {
+      $errors.Add('Omegga sync metadata must record an upstreamCommit git SHA.')
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$syncMetadata.upstreamVersion)) {
+      $errors.Add('Omegga sync metadata must record upstreamVersion.')
+    }
+    foreach ($copied in @('CHANGELOG.md', 'drizzle.config.ts', 'drizzle.plugin.config.ts', 'package.json', 'package-lock.json', 'src', 'templates', 'tools', 'frontend', 'bin')) {
       Test-Contains @($syncMetadata.copiedItems) $copied "Omegga sync metadata copiedItems are missing: $copied"
     }
     foreach ($excluded in @('node_modules', 'data', 'logs', 'artifacts', 'dist', 'plugins', 'plugins-disabled')) {
@@ -188,8 +203,7 @@ try {
       'src/brickadia/ue4ssBridge.ts',
       'src/omegga/index.ts',
       'tools/package-bmf-omegga.js',
-      'templates/windows-ue4ss/ue4ss/Mods/BMF/Scripts/main.lua',
-      'templates/windows-ue4ss/ue4ss/Mods/BMF/Scripts/bmf/runtime.lua'
+      'templates/windows-ue4ss/ue4ss/Mods/BMF/Scripts/main.lua'
     )) {
       if (!(Test-Path -LiteralPath (Join-Path $sourceRoot $relative))) {
         $errors.Add("Synced Omegga source is missing required file: $relative")
@@ -219,7 +233,7 @@ try {
 
   if (Test-Path -LiteralPath $readmePath) {
     $readme = Get-Content -Raw -LiteralPath $readmePath
-    foreach ($needle in @('BMF-compatible Omegga runtime', 'https://github.com/Ty-lerCox/bmf-omegga-fork', 'packages/omegga-runtime', 'sync-metadata.json', 'sync-omegga-runtime.ps1')) {
+    foreach ($needle in @('BMF-compatible Omegga runtime', 'https://github.com/Ty-lerCox/brickadia-modding-framework', 'https://github.com/brickadia-community/omegga', 'packages/omegga-runtime', 'sync-metadata.json', 'sync-omegga-runtime.ps1')) {
       if ($readme -notmatch [regex]::Escape($needle)) {
         $errors.Add("Omegga runtime README does not contain expected marker: $needle")
       }
@@ -237,7 +251,7 @@ $result = [ordered]@{
   finishedAt = (Get-Date).ToUniversalTime().ToString('o')
   data = [ordered]@{
     packageRoot = [System.IO.Path]::GetFullPath((Join-Path $Root 'packages/omegga-runtime'))
-    sourceRepository = 'https://github.com/Ty-lerCox/bmf-omegga-fork'
+    sourceRepository = 'https://github.com/Ty-lerCox/brickadia-modding-framework'
     upstreamRepository = 'https://github.com/brickadia-community/omegga'
   }
   evidence = $evidence.ToArray()

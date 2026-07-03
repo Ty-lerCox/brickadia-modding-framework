@@ -12,11 +12,11 @@ authors and Omegga integrators should use it to understand which side owns a
 message, command, or hook.
 
 Use this page when reviewing whether a capability should live in BMF, in the
-BMF-supported Omegga fork, in a Lua plugin, or in an external Omegga plugin.
+BMF-vendored Omegga runtime, in a Lua plugin, or in an external Omegga plugin.
 
 ## 1. Required BMF Runtime Stack
 
-BMF's supported Windows runtime requires the BMF-supported Omegga Windows fork.
+BMF's supported Windows runtime requires the BMF-vendored Omegga Windows runtime.
 Omegga owns the server supervisor, UE4SS compatibility setup, command bridge,
 log context, player sync, and helper surfaces that BMF depends on for current
 canaries and live-player APIs. BMF owns the UE4SS Lua runtime, plugin loader,
@@ -58,7 +58,7 @@ Review questions:
 
 ## 2. Omegga Fork On Its Own
 
-The BMF-supported Omegga fork is still an Omegga server supervisor. Without BMF
+The BMF-vendored Omegga runtime is still an Omegga server supervisor. Without BMF
 participating, it starts Brickadia, reads logs, manages plugins, exposes web/UI
 surfaces, and sends supported console/helper commands.
 
@@ -185,7 +185,7 @@ Review questions:
 ## 6. BMF And Omegga Event Bus Messaging
 
 For low-latency messaging between in-process BMF and external Omegga plugins,
-the supported fork starts an authenticated loopback socket broker. The JSONL
+the supported BMF-vendored runtime starts an authenticated loopback socket broker. The JSONL
 event file remains durable diagnostic and audit evidence.
 
 ```mermaid

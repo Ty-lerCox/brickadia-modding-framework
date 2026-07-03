@@ -1,7 +1,7 @@
 # Observability and Performance
 
 BMF exposes performance telemetry through runtime JSON files that the
-BMF-supported Omegga fork exports as Prometheus metrics. Grafana Alloy can then
+BMF-vendored Omegga runtime exports as Prometheus metrics. Grafana Alloy can then
 scrape Omegga locally and remote-write the data to Grafana Cloud.
 
 ## Who Should Read This?
@@ -39,7 +39,7 @@ sample counts, slow-frame counters, and recent spikes.
 
 ## Omegga and Grafana Cloud Path
 
-The BMF-supported Omegga Windows fork reads the runtime JSON files and exposes
+The BMF-vendored Omegga Windows runtime reads the runtime JSON files and exposes
 them at:
 
 ```text

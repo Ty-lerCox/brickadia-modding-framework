@@ -1,9 +1,11 @@
-import type { HistoryRes } from '@omegga/webserver/backend/api';
-import type { IChatUser } from '@omegga/webserver/backend/types';
+import type { IChatUser } from '@backend/types';
 import { IconLink } from '@tabler/icons-react';
 import Linkify from 'linkify-react';
 import { Link, useRoute } from 'wouter';
+import type { RouterOutputs } from '../../trpc';
 import { ChatTime } from '../chat-time';
+
+type ChatLogEntry = RouterOutputs['chat']['history'][number];
 
 export const UserName = ({
   color,
@@ -30,14 +32,14 @@ export const UserName = ({
   if (link && user?.id)
     return (
       <Link href={`/players/${user.id}`} {...props}>
-        {user?.displayName ?? user?.name}
+        {user?.displayName || user?.name}
       </Link>
     );
 
-  return <span {...props}>{user?.displayName ?? user?.name}</span>;
+  return <span {...props}>{user?.displayName || user?.name}</span>;
 };
 
-export const ChatEntry = ({ log }: { log: HistoryRes[number] }) => {
+export const ChatEntry = ({ log }: { log: ChatLogEntry }) => {
   const [_match, params] = useRoute('/history/:time?');
   const isFocused = params?.time === log.created + '';
 

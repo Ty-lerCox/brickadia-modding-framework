@@ -50,9 +50,10 @@ const chat: MatchGenerator<{
         name = sanitizeName(name);
         message = sanitizeMsg(message);
 
-        // Keep emitting chat even if join bookkeeping missed the player. This is
-        // important on Windows/UE4SS runs where command handling can still work
-        // from chat logs before PlayerState resolution has completed.
+        // no player has this name. probably a bug
+        if (!exists(name, id)) return;
+
+        // return the player with the corresponding controller
         return { type: 'chat', id, name, message };
       } else if (kickMatch) {
         let { name, kicker, reason } = kickMatch.groups;
@@ -71,7 +72,7 @@ const chat: MatchGenerator<{
         const player = omegga.players.find(p => p.id === id);
         // Use the player's non-display-name if available
         if (player) name = player.name;
-        omegga.emit('chat', name, message, id);
+        omegga.emit('chat', name, message);
 
         // chat command parsing, emit `chatcmd:test` when `!test` is sent in chat
         if (message.startsWith('!')) {

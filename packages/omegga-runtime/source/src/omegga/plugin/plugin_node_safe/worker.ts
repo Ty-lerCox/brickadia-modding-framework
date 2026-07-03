@@ -1,4 +1,4 @@
-// The safe node plugin is run inside of a worker
+﻿// The safe node plugin is run inside of a worker
 // so if the plugin inevitably crashes, only the worker dies
 // this also lets plugins get terminated easier by killing the worker
 // rather than unloading and reloading code

@@ -5,11 +5,13 @@
   "name": "BMF-compatible Omegga Runtime",
   "status": "synced-source",
   "owner": "packages/omegga-runtime",
-  "sourceRepository": "https://github.com/Ty-lerCox/bmf-omegga-fork",
+  "sourceRepository": "https://github.com/Ty-lerCox/brickadia-modding-framework",
   "upstreamRepository": "https://github.com/brickadia-community/omegga",
   "dependencyManifest": "manifests/dependencies.json",
-  "importMode": "local-fork-source-sync",
-  "sourceCommit": "f8757adc38557c5f9ae55f551b8f3434e9a60506",
+  "importMode": "vendored-source",
+  "sourceCommit": "b62cc3fe318b9ac3ff4fc6bee2fd08efffe85adc",
+  "upstreamCommit": "b62cc3fe318b9ac3ff4fc6bee2fd08efffe85adc",
+  "upstreamVersion": "1.8.1",
   "syncMetadata": "packages/omegga-runtime/sync-metadata.json",
   "sourceRoots": [
     "packages/omegga-runtime/source"
@@ -42,7 +44,7 @@
   },
   "guardrails": [
     "do-not-vendor-node-modules",
-    "record-fork-commit-before-release",
+    "record-supported-upstream-commit-before-release",
     "preserve-upstream-license-notice",
     "validate-bmf-required-surfaces",
     "keep-server-data-out-of-source"

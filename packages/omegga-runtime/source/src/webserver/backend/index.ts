@@ -1,22 +1,32 @@
 import Logger from '@/logger';
 import soft from '@/softconfig';
+import { openDb } from '@/db/connection';
+import { runMigrations } from '@/db/migrate';
+import { importNedbIfNeeded } from '@/db/nedbImport';
 import { IServerConfig } from '@config/types';
 import type Omegga from '@omegga/server';
 import { IServerStatus } from '@omegga/types';
+import { createExpressMiddleware } from '@trpc/server/adapters/express';
 import bodyParser from 'body-parser';
+import { drizzle } from 'drizzle-orm/better-sqlite3';
 import express from 'express';
 import expressSession from 'express-session';
 import hasbin from 'hasbin';
 import http from 'http';
 import https from 'https';
-import NedbStore from 'nedb-promises-session-store';
+import BetterSqlite3SessionStore from 'better-sqlite3-session-store';
 import path from 'path';
-import { Server as SocketIo } from 'socket.io';
-import setupApi from './api';
+import bcrypt from 'bcryptjs';
+import {
+  generateAuthenticationOptions,
+  verifyAuthenticationResponse,
+} from '@simplewebauthn/server';
 import Database from './database';
+import { verifyToken as verifyTOTP } from './totp';
 import setupMetrics from './metrics';
-import setupPrometheusExporter from './prometheus';
-import { IStoreUser, OmeggaSocketIo } from './types';
+import { appRouter } from './router';
+import { setWebserver } from './router/server';
+import { createContext, setContextDeps } from './trpc';
 import * as util from './util';
 
 // path to vite-built data
@@ -26,17 +36,7 @@ const ASSETS_PATH = path.join(__dirname, '../../../public/assets');
 const log = (...args: any[]) => Logger.log(...args);
 const error = (...args: any[]) => Logger.error(...args);
 
-export type OmeggaServerStatusPollMetrics = {
-  count: number;
-  ok: number;
-  error: number;
-  durationMsSum: number;
-  durationMsMax: number;
-  lastMs: number;
-  lastAtMs: number;
-};
-
-// the webserver servers an authenticated
+// the webserver serves an authenticated web UI
 export default class Webserver {
   database: Database;
   port: number;
@@ -44,7 +44,6 @@ export default class Webserver {
 
   app: express.Express;
   server: http.Server | https.Server;
-  io: OmeggaSocketIo;
 
   options: IServerConfig;
   https: boolean;
@@ -52,13 +51,7 @@ export default class Webserver {
   created: Promise<boolean>;
 
   serverStatusInterval: ReturnType<typeof setInterval>;
-  lastReportedStatus: IServerStatus | null;
-  lastReportedStatusAt: number;
-  lastServerStatusPollDurationMs: number;
-  serverStatusPollEnabled: boolean;
-  serverStatusPollMetrics: OmeggaServerStatusPollMetrics;
-
-  rooms: string[];
+  lastReportedStatus: IServerStatus | null = null;
 
   dataPath: string;
 
@@ -71,27 +64,19 @@ export default class Webserver {
     this.omegga = omegga;
     this.dataPath = path.join(omegga.path, soft.DATA_PATH);
 
+    const mainSqlite = openDb(path.join(this.dataPath, soft.MAIN_DB));
+    const mainDb = drizzle(mainSqlite);
+
+    runMigrations(mainDb);
+
     // the database provides omegga with metrics, chat logs, and more
     // to help administrators keep track of their users and server
-    this.database = new Database(options, omegga);
+    this.database = new Database(options, omegga, mainSqlite, mainDb);
 
     // https status of the server
     this.https = false;
     // started status of the server
     this.started = false;
-    this.lastReportedStatus = null;
-    this.lastReportedStatusAt = 0;
-    this.lastServerStatusPollDurationMs = 0;
-    this.serverStatusPollEnabled = true;
-    this.serverStatusPollMetrics = {
-      count: 0,
-      ok: 0,
-      error: 0,
-      durationMsSum: 0,
-      durationMsMax: 0,
-      lastMs: 0,
-      lastAtMs: 0,
-    };
     this.created = this.createServer();
   }
 
@@ -99,8 +84,11 @@ export default class Webserver {
   async createServer() {
     const hasOpenSSL = hasbin.sync('openssl');
 
-    // let the database do migrations
-    await this.database.doMigrations();
+    await importNedbIfNeeded(
+      this.dataPath,
+      this.database.sqlite,
+      this.database.db,
+    );
 
     // create express app
     this.app = express();
@@ -147,6 +135,10 @@ export default class Webserver {
     this.server = await pickProtocol();
 
     this.app.set('trust proxy', 1);
+    const SqliteStore = (
+      BetterSqlite3SessionStore['default'] ?? BetterSqlite3SessionStore
+    )(expressSession);
+    const sessionSqlite = openDb(path.join(this.dataPath, soft.SESSIONS_DB));
     const session = expressSession({
       secret: util.getSessionSecret(this.dataPath),
       resave: false,
@@ -156,66 +148,248 @@ export default class Webserver {
         secure: this.https,
         maxAge: 365 * 24 * 60 * 60 * 1000, // 1 year
       },
-      // use a nedb database for session store
-      // For some reason vite is not importing the default export properly without this...
-      store: (NedbStore['default'] as typeof NedbStore)({
-        filename: path.join(this.dataPath, soft.SESSION_STORE),
-        connect: expressSession,
+      store: new SqliteStore({
+        client: sessionSqlite,
+        expired: { clear: true, intervalMs: 900000 },
       }),
     });
     this.app.use(session);
 
     // setup routes and webserver
-    await this.initWebUI(session);
+    await this.initWebUI();
     return true;
   }
 
   // setup the web ui routes
-  async initWebUI(session: ReturnType<typeof expressSession>) {
-    this.io = new SocketIo(this.server);
-
+  async initWebUI() {
     await this.database.getInstanceId();
 
-    // use the session middleware
-    this.io.use((socket, next) => {
-      const req = socket.request as express.Request;
-      const res = (req.res || {}) as express.Response<any, { userId: string }>;
-
-      session(req, res, async () => {
-        // check if user is authenticated
-        const user = await this.database.findUserById(
-          req.session.userId as string,
-        );
-        if (user && !user.isBanned) {
-          socket.data.user = user;
-          await this.database.stores.users.update<IStoreUser>(
-            { _id: user._id },
-            { $set: { lastOnline: Date.now() } },
-          );
-          next();
-        } else {
-          next(new Error('unauthorized'));
-        }
-      });
+    // Initialize tRPC context deps
+    setContextDeps({
+      database: this.database,
+      omegga: this.omegga,
     });
+    setWebserver(this);
 
     // provide assets in the /public path
     this.app.use('/assets', express.static(ASSETS_PATH));
     this.app.use(bodyParser.json());
 
-    this.rooms = ['chat', 'status', 'plugins', 'server'];
+    // --- Auth routes (outside tRPC) ---
+    const openApi = express.Router();
+    const api = express.Router();
 
-    // setup the api
-    setupApi(this, this.io);
+    // check if this is the first user in the database
+    openApi.get('/first', async (req, res) =>
+      res.json(await this.database.isFirstUser()),
+    );
 
-    // optional diagnostics scrape target
-    setupPrometheusExporter(this);
+    // login / create admin user route
+    openApi.post('/auth', async (req, res) => {
+      if (
+        typeof req.body !== 'object' ||
+        typeof req.body.username !== 'string' ||
+        typeof req.body.password !== 'string'
+      ) {
+        return res.status(422).json({ message: 'invalid body' });
+      }
+      const { username, password } = req.body;
+
+      if (!username.match(/^\w{0,32}$/)) {
+        return res.status(422).json({ message: 'invalid body' });
+      }
+
+      const isFirst = await this.database.isFirstUser();
+      let user;
+      if (isFirst) {
+        user = await this.database.createAdminUser(
+          username,
+          username === '' ? '' : password,
+        );
+      } else {
+        user = await this.database.authUser(username, password);
+      }
+
+      if (user) {
+        req.session.userId = user._id;
+        if (user.totpEnabled) {
+          req.session.mfaPending = true;
+          req.session.save();
+          res.status(200).json({ mfaRequired: true });
+        } else {
+          req.session.save();
+          res.status(200).json({});
+        }
+      } else {
+        res.status(404).json({ message: 'no user found' });
+      }
+    });
+
+    // rate limiting for MFA verification (per session)
+    const mfaAttempts = new Map<
+      string,
+      { count: number; lockedUntil: number }
+    >();
+
+    // TOTP verification during MFA challenge
+    openApi.post('/auth/mfa/totp', async (req, res) => {
+      if (!req.session.mfaPending || !req.session.userId) {
+        return res.status(400).json({ message: 'no pending MFA challenge' });
+      }
+
+      // rate limit: 5 attempts, then 60s lockout
+      const sid = req.sessionID;
+      const attempt = mfaAttempts.get(sid) ?? { count: 0, lockedUntil: 0 };
+      if (Date.now() < attempt.lockedUntil) {
+        return res
+          .status(429)
+          .json({ message: 'too many attempts, try again later' });
+      }
+
+      const { code } = req.body ?? {};
+      if (typeof code !== 'string') {
+        return res.status(422).json({ message: 'code required' });
+      }
+      const user = await this.database.findUserById(req.session.userId);
+      if (!user || !user.totpSecret) {
+        return res.status(400).json({ message: 'MFA not configured' });
+      }
+
+      let verified = false;
+
+      if (verifyTOTP(code, user.totpSecret)) {
+        verified = true;
+      }
+
+      // try recovery codes
+      if (!verified && user.recoveryCodes?.length) {
+        for (const hashedCode of user.recoveryCodes) {
+          if (await bcrypt.compare(code, hashedCode)) {
+            await this.database.removeRecoveryCode(user.username, hashedCode);
+            verified = true;
+            break;
+          }
+        }
+      }
+
+      if (verified) {
+        mfaAttempts.delete(sid);
+        delete req.session.mfaPending;
+        req.session.save();
+        return res.status(200).json({});
+      }
+
+      attempt.count++;
+      if (attempt.count >= 5) {
+        attempt.lockedUntil = Date.now() + 60_000;
+        attempt.count = 0;
+      }
+      mfaAttempts.set(sid, attempt);
+      res.status(401).json({ message: 'invalid code' });
+    });
+
+    const getRpID = (req: express.Request) => {
+      const origin = req.headers.origin;
+      if (origin) {
+        try {
+          return new URL(origin as string).hostname;
+        } catch {}
+      }
+      return req.hostname;
+    };
+
+    // WebAuthn authentication options (passwordless login)
+    openApi.get('/auth/webauthn/options', async (req, res) => {
+      const rpID = getRpID(req);
+      const options = await generateAuthenticationOptions({ rpID });
+      req.session.mfaChallenge = options.challenge;
+      req.session.save();
+      res.json(options);
+    });
+
+    // WebAuthn authentication verification
+    openApi.post('/auth/webauthn/verify', async (req, res) => {
+      const challenge = req.session.mfaChallenge;
+      if (!challenge) {
+        return res.status(400).json({ message: 'no pending challenge' });
+      }
+      // clear challenge immediately to prevent replay
+      delete req.session.mfaChallenge;
+      req.session.save();
+      try {
+        const { credential } = req.body;
+        const user = await this.database.findUserByPasskeyId(credential?.id);
+        if (!user || user.isBanned) {
+          return res.status(401).json({ message: 'unknown credential' });
+        }
+        const passkey = user.passkeys!.find(p => p.id === credential.id)!;
+        const verification = await verifyAuthenticationResponse({
+          response: credential,
+          expectedChallenge: challenge,
+          expectedOrigin:
+            req.headers.origin ?? `${req.protocol}://${req.get('host')}`,
+          expectedRPID: getRpID(req),
+          credential: {
+            id: passkey.id,
+            publicKey: Buffer.from(passkey.publicKey, 'base64url'),
+            counter: passkey.counter,
+            transports: passkey.transports as any,
+          },
+        });
+        if (!verification.verified) {
+          return res.status(401).json({ message: 'verification failed' });
+        }
+        await this.database.updatePasskeyCounter(
+          user.username,
+          passkey.id,
+          verification.authenticationInfo.newCounter,
+        );
+        req.session.userId = (user as any)._id;
+        delete req.session.mfaPending;
+        req.session.save();
+        res.status(200).json({});
+      } catch (e) {
+        res.status(400).json({ message: 'verification error' });
+      }
+    });
+
+    // authentication middleware for protected api routes
+    api.all('*', (req, _res, next) => {
+      (async () => {
+        if (req.session.mfaPending) return next(new Error('unauthorized'));
+        const user = await this.database.findUserById(req.session.userId);
+        if (!user || user.isBanned) return next(new Error('unauthorized'));
+        next();
+      })();
+    });
+
+    // kill a session
+    api.get('/logout', (req, res) => {
+      req.session.destroy(e => {
+        res.status(e ? 500 : 200).json({});
+      });
+    });
+
+    this.app.use('/api/v1', openApi);
+    this.app.use('/api/v1', api);
+
+    // --- tRPC ---
+    this.app.use(
+      '/trpc',
+      createExpressMiddleware({
+        router: appRouter,
+        createContext,
+      }),
+    );
 
     // setup metrics and tracking
-    setupMetrics(this, this.io);
+    setupMetrics(this);
 
     // every request goes through the index file (frontend handles 404s)
     this.app.use(async (req, res) => {
+      if (req.session.mfaPending) {
+        return res.sendFile(path.join(PUBLIC_PATH, 'auth.html'));
+      }
       const user = await this.database.findUserById(req.session.userId);
       const isAuth = user && !user.isBanned;
       if (isAuth) {

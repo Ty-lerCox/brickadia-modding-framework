@@ -30,7 +30,7 @@ Docs
 
 Project Direction
 - BMF is being built as a safer server-side Lua framework for Brickadia dedicated servers.
-- The BMF-supported Omegga Windows fork is the main supported runtime for launching, bridging, validation, player sync, events, and metrics.
+- The BMF-vendored Omegga Windows runtime is the main supported runtime for launching, bridging, validation, player sync, events, and metrics.
 - Typed Lua APIs, capability gates, and safe defaults are preferred over broad raw console execution.
 - Socket transport is the live path for latency-sensitive gameplay messaging; JSONL logs are kept as diagnostics and audit evidence.
 - Native hooks, live object scans, and runtime brick mutation remain guarded surfaces that need validation before regular gameplay use.
@@ -52,7 +52,7 @@ Commands
 - Added command validation for success paths, denied paths, unknown commands, reload behavior, and plugin-owned commands.
 
 Omegga
-- Added support for the BMF-supported Omegga Windows fork as the primary operating model.
+- Added support for the BMF-vendored Omegga Windows runtime as the primary operating model.
 - Added Omegga bridge support for BMF commands, player sync, minigame event feeds, chat helper delivery, and validation.
 - Added socket relay support so Omegga plugins can receive BMF events without waiting on file polling.
 - Improved socket polling and team-assignment flows so CityRPG-style plugins can respond faster.

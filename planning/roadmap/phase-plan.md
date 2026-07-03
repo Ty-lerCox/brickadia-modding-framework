@@ -44,8 +44,8 @@ and BMF-supported Omegga dependency installs on their existing lockfiles. The
 root setup command is `npm run setup`, and `scripts/validate-workspace.ps1`
 keeps that clean-checkout contract aligned with the roadmap.
 `packages/omegga-runtime` now contains the synced BMF-compatible Omegga source
-under `source/`, including sync metadata for the BMF-supported fork URL,
-upstream repository, fork commit, copied roots, required helper surfaces, and
+under `source/`, including sync metadata for the BMF-vendored runtime URL,
+upstream repository, supported upstream commit, copied roots, required helper surfaces, and
 do-not-vendor rules, validated by
 `scripts/validate-omegga-runtime-package.ps1`.
 `compat/ue4ss` now defines the UE4SS compatibility boundary for the current

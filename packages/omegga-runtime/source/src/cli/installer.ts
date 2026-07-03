@@ -1,6 +1,5 @@
 // DEPRECATED
 import Logger from '@/logger';
-import { IS_WINDOWS } from '@util/platform';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import readline from 'readline';
@@ -40,13 +39,6 @@ function runInstaller() {
 }
 
 export async function installLauncher() {
-  if (IS_WINDOWS) {
-    Logger.errorp(
-      'Legacy launcher install is not supported on Windows. Use SteamCMD or BRICKADIA_DIR instead.',
-    );
-    process.exit(1);
-  }
-
   const ok = await prompt();
 
   if (!ok) {

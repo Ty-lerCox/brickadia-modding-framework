@@ -1,9 +1,6 @@
 import Logger from '@/logger';
-import soft from '@/softconfig';
 import { EnvironmentPreset } from '@brickadia/presets';
 import Omegga from '@omegga/server';
-import { getProcessInvocation, terminateChildProcess } from '@util/process';
-import { resolveExistingPath } from '@util/platform';
 import { WriteSaveObject } from 'brs-js';
 import {
   JSONRPCClient,
@@ -21,6 +18,7 @@ import { bootstrap } from './plugin_node_safe/proxyOmegga';
 // TODO: write jsonrpc wrappers in a few languages, implement a few simple plugins
 // TODO: languages: [ python, go ]
 
+const MAIN_FILE = 'omegga_plugin';
 const DOC_FILE = 'doc.json';
 const PLUGIN_FILE = 'plugin.json';
 
@@ -35,7 +33,7 @@ export default class RpcPlugin extends Plugin {
   // all RPC plugins require a main (binary) file and a doc file
   static canLoad(pluginPath: string) {
     return (
-      resolveExistingPath(pluginPath, soft.RPC_PLUGIN_CANDIDATES) !== null &&
+      fs.existsSync(path.join(pluginPath, MAIN_FILE)) &&
       fs.existsSync(path.join(pluginPath, DOC_FILE))
     );
   }
@@ -57,9 +55,7 @@ export default class RpcPlugin extends Plugin {
     // TODO: validate documentation
     this.documentation = Plugin.readJSON(path.join(pluginPath, DOC_FILE));
     this.pluginConfig = Plugin.readJSON(path.join(pluginPath, PLUGIN_FILE));
-    this.pluginFile =
-      resolveExistingPath(pluginPath, soft.RPC_PLUGIN_CANDIDATES) ??
-      path.join(pluginPath, soft.RPC_PLUGIN_CANDIDATES[0]);
+    this.pluginFile = path.join(pluginPath, MAIN_FILE);
 
     this.eventPassthrough = this.eventPassthrough.bind(this);
     this.commands = [];
@@ -108,12 +104,7 @@ export default class RpcPlugin extends Plugin {
         );
       }
       verbose('Spawning child process');
-      const invocation = getProcessInvocation(this.pluginFile);
-      this.#child = spawn(invocation.command, invocation.args, {
-        cwd: this.path,
-        stdio: 'pipe',
-        ...invocation.options,
-      });
+      this.#child = spawn(this.pluginFile);
       this.#child.stdin.setDefaultEncoding('utf8');
       this.#outInterface = readline.createInterface({
         input: this.#child.stdout,
@@ -347,8 +338,17 @@ export default class RpcPlugin extends Plugin {
     this.omegga.off('*', this.eventPassthrough);
     if (!this.#child) return;
 
-    const child = this.#child;
-    await terminateChildProcess(child, { forceAfterMs: 2000 });
+    // create a promise for the exit of the process
+    const promise = new Promise(resolve => this.#child.once('exit', resolve));
+
+    // kill the process
+    this.#child.kill('SIGINT');
+
+    // ...kill it again just to make sure it's dead
+    spawn('kill', ['-9', this.#child.pid + '']);
+
+    // wait for the process to exit
+    await promise;
     this.#child = undefined;
     this.emitStatus();
   }
@@ -474,6 +474,80 @@ export default class RpcPlugin extends Plugin {
     rpc.addMethod('getSaves', () => this.omegga.getSaves());
     rpc.addMethod('getSavePath', name =>
       this.omegga.getSavePath(name as unknown as string),
+    );
+    rpc.addMethod('getPrefabs', () => this.omegga.getPrefabs());
+    rpc.addMethod(
+      'loadPrefab',
+      ({
+        path,
+        ...options
+      }: {
+        path: string;
+        offX?: number;
+        offY?: number;
+        offZ?: number;
+        atOriginalPosition?: boolean;
+        orientation?: number;
+        rootEntityPersistentIndex?: number;
+        mirrorAxes?: number;
+        overrideUserId?: string;
+      }) => this.omegga.loadPrefab(path, options),
+    );
+    rpc.addMethod(
+      'savePrefab',
+      ({
+        path,
+        ...options
+      }: {
+        path: string;
+        region?: {
+          center: [number, number, number];
+          extent: [number, number, number];
+        };
+        entities?: boolean;
+        rootEntityPersistentIndex?: number;
+        userId?: string;
+      }) => this.omegga.savePrefab(path, options),
+    );
+    rpc.addMethod(
+      'savePrefabAsync',
+      ({
+        path,
+        ...options
+      }: {
+        path: string;
+        region?: {
+          center: [number, number, number];
+          extent: [number, number, number];
+        };
+        entities?: boolean;
+        rootEntityPersistentIndex?: number;
+        userId?: string;
+      }) => this.omegga.savePrefabAsync(path, options),
+    );
+    rpc.addMethod(
+      'givePrefabToPlayer',
+      ({
+        path,
+        player,
+        preserveOwnership = false,
+      }: {
+        path: string;
+        player: string;
+        preserveOwnership?: boolean;
+      }) => this.omegga.givePrefabToPlayer(path, player, { preserveOwnership }),
+    );
+    rpc.addMethod(
+      'loadPrefabOnPlayer',
+      ({
+        path,
+        player,
+        preserveOwnership = false,
+      }: {
+        path: string;
+        player: string;
+        preserveOwnership?: boolean;
+      }) => this.omegga.loadPrefabOnPlayer(path, player, { preserveOwnership }),
     );
     rpc.addMethod(
       'clearBricks',

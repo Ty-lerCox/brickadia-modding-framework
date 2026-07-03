@@ -1,43 +1,52 @@
 import { Loader, Scroll } from '@components';
-import type { IServerStatus } from '@omegga/omegga/types';
+import { useHasScope } from '@hooks';
+import type { IServerStatus } from '@omegga/types';
 import { duration } from '@utils';
 import { useEffect, useState } from 'react';
 import { Link } from 'wouter';
-import { ioEmit, rpcReq, socket } from '../../socket';
+import { Permissions } from '../../permissions';
+import { handleGlobalError, trpc } from '../../trpc';
 
 export const StatusWidget = () => {
+  const canStatus = useHasScope(Permissions.ServerStatus);
+  const canPlayerList = useHasScope(Permissions.PlayerList);
   const [status, setStatus] = useState<IServerStatus | null>(null);
 
-  useEffect(() => {
-    socket.on('server.status', setStatus);
-    ioEmit('subscribe', 'status');
-    rpcReq('server.status').then(setStatus);
+  const { data: queryStatus } = trpc.server.status.useQuery(undefined, {
+    enabled: canStatus,
+  });
 
-    return () => {
-      socket.off('server.status', setStatus);
-      ioEmit('unsubscribe', 'status');
-    };
-  }, []);
+  useEffect(() => {
+    if (queryStatus && !status) {
+      setStatus(queryStatus);
+    }
+  }, [queryStatus]);
+
+  trpc.server.onHeartbeat.useSubscription(undefined, {
+    enabled: canStatus,
+    onError: handleGlobalError,
+    onData: setStatus,
+  });
 
   return (
     <div className="status-widget">
       {status?.players && (
-        <Scroll className="players">
-          <div className="players-child">
-            <div className="stats">
-              <div className="stat">
-                <b>Name:</b> {status.serverName}
-              </div>
-              <div className="stat">
-                <b>Uptime:</b> {duration(status.time)}
-              </div>
-              <div className="stat">
-                <b>Bricks:</b> {status.bricks}
-              </div>
-              <div className="stat">
-                <b>Players:</b> {status.players.length}
-              </div>
+        <div className="players">
+          <div className="stats">
+            <div className="stat">
+              <b>Name:</b> {status.serverName}
             </div>
+            <div className="stat">
+              <b>Uptime:</b> {duration(status.time)}
+            </div>
+            <div className="stat">
+              <b>Bricks:</b> {status.bricks}
+            </div>
+            <div className="stat">
+              <b>Players:</b> {status.players.length}
+            </div>
+          </div>
+          <Scroll className="player-table">
             <table className="br-table">
               <thead>
                 <tr>
@@ -50,9 +59,13 @@ export const StatusWidget = () => {
                 {status.players.map(player => (
                   <tr key={player.address + player.id}>
                     <td>
-                      <Link className="user" to={'/players/' + player.id}>
-                        {player.name}
-                      </Link>
+                      {canPlayerList ? (
+                        <Link className="user" to={'/players/' + player.id}>
+                          {player.name}
+                        </Link>
+                      ) : (
+                        <span className="user">{player.name}</span>
+                      )}
                     </td>
                     <td style={{ textAlign: 'right' }}>
                       {duration(player.time)}
@@ -62,8 +75,8 @@ export const StatusWidget = () => {
                 ))}
               </tbody>
             </table>
-          </div>
-        </Scroll>
+          </Scroll>
+        </div>
       )}
       {!status?.players && (
         <Loader blur size="huge">

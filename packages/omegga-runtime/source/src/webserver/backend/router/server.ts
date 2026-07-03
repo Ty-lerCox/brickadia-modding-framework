@@ -1,0 +1,278 @@
+import Logger from '@/logger';
+import type { IServerStatus } from '@/omegga/types';
+import { steamcmdDownloadGame } from '@/updater';
+import { getLastSteamUpdateCheck, hasSteamUpdate } from '@/updater/steam';
+import { on } from 'events';
+import { z } from 'zod/v4';
+import { serverEvents } from '../events';
+import type Webserver from '../index';
+import { getLastUtilization } from '../metrics';
+import { ScopeName } from '../scopes';
+import { getContextDeps, protectedProcedure, router } from '../trpc';
+
+let _server: Webserver | null = null;
+export function setWebserver(s: Webserver) {
+  _server = s;
+}
+
+// shared in-flight on-demand status fetch, so concurrent `status` callers on a
+// cold cache don't each issue their own Server.Status console command
+let _statusFetch: Promise<IServerStatus | null> | null = null;
+
+const autoRestartConfigSchema = z.object({
+  type: z.literal('autoRestartConfig'),
+  maxUptime: z.number(),
+  maxUptimeEnabled: z.boolean(),
+  emptyUptime: z.number(),
+  emptyUptimeEnabled: z.boolean(),
+  dailyHour: z.number(),
+  dailyHourEnabled: z.boolean(),
+  announcementEnabled: z.boolean(),
+  playersEnabled: z.boolean(),
+  saveWorld: z.boolean(),
+  autoUpdateEnabled: z.boolean(),
+  autoUpdateIntervalMins: z.number(),
+  crashRestartEnabled: z.boolean(),
+});
+
+export const serverRouter = router({
+  server: router({
+    autoRestart: router({
+      get: protectedProcedure(ScopeName.ServerAutorestartGet).query(
+        async () => {
+          const { database } = getContextDeps();
+          return await database.getAutoRestartConfig();
+        },
+      ),
+
+      set: protectedProcedure(ScopeName.ServerAutorestartSet)
+        .input(autoRestartConfigSchema)
+        .mutation(async ({ input: config }) => {
+          const { database } = getContextDeps();
+
+          if (
+            typeof config !== 'object' ||
+            !Object.entries({
+              type: 'string',
+              maxUptime: 'number',
+              maxUptimeEnabled: 'boolean',
+              emptyUptime: 'number',
+              emptyUptimeEnabled: 'boolean',
+              dailyHour: 'number',
+              dailyHourEnabled: 'boolean',
+              announcementEnabled: 'boolean',
+              playersEnabled: 'boolean',
+              saveWorld: 'boolean',
+              autoUpdateEnabled: 'boolean',
+              autoUpdateIntervalMins: 'number',
+              crashRestartEnabled: 'boolean',
+            }).every(
+              ([k, v]) =>
+                k in config &&
+                typeof config[k as keyof typeof config] === v &&
+                !Number.isNaN(config[k as keyof typeof config]),
+            ) ||
+            config.type !== 'autoRestartConfig'
+          )
+            return false;
+
+          await database.setAutoRestartConfig(config);
+          return true;
+        }),
+    }),
+
+    status: protectedProcedure(ScopeName.ServerStatus).query(async () => {
+      // serve the cached status from the last heartbeat when available
+      if (_server?.lastReportedStatus) return _server.lastReportedStatus;
+
+      // otherwise fetch it on demand - e.g. the page loaded (and wants the
+      // status, like for the page title) before the first heartbeat populated
+      // the cache, so don't make the caller wait for the next heartbeat
+      const { omegga } = getContextDeps();
+      if (!omegga.started) return null;
+
+      // reuse an in-flight fetch so concurrent callers share one console query;
+      // getServerStatus can reject (status command timeout / parse error), so
+      // fall back to the cache (or null) rather than erroring the request
+      _statusFetch ??= omegga
+        .getServerStatus()
+        .then(status => {
+          if (status && _server) _server.lastReportedStatus = status;
+          return status ?? null;
+        })
+        .catch(err => {
+          Logger.verbose('On-demand server status fetch failed', err);
+          return _server?.lastReportedStatus ?? null;
+        })
+        .finally(() => {
+          _statusFetch = null;
+        });
+      return _statusFetch;
+    }),
+
+    utilization: protectedProcedure(ScopeName.ServerUtilization).query(() => {
+      return getLastUtilization();
+    }),
+
+    started: protectedProcedure(ScopeName.ServerStatus).query(() => {
+      const { omegga } = getContextDeps();
+      return {
+        started: omegga.started,
+        starting: omegga.starting,
+        stopping: omegga.stopping,
+      };
+    }),
+
+    playerCount: protectedProcedure(ScopeName.ServerStatus).query(() => {
+      const { omegga } = getContextDeps();
+      return omegga.players.length;
+    }),
+
+    start: protectedProcedure(ScopeName.ServerStart).mutation(
+      async ({ ctx }) => {
+        const { omegga } = getContextDeps();
+        if (omegga.starting || omegga.stopping || omegga.started) return;
+        ctx.log('Starting server...');
+        await omegga.start();
+      },
+    ),
+
+    stop: protectedProcedure(ScopeName.ServerStop).mutation(async ({ ctx }) => {
+      const { omegga } = getContextDeps();
+      if (omegga.starting || omegga.stopping || !omegga.started) return;
+      ctx.log('Stopping server...');
+      await omegga.stop();
+    }),
+
+    restart: protectedProcedure(ScopeName.ServerRestart).mutation(
+      async ({ ctx }) => {
+        const { database, omegga } = getContextDeps();
+        if (omegga.starting || omegga.stopping) return;
+
+        try {
+          const config = await database.getAutoRestartConfig();
+          await omegga.saveServer({
+            players: config.playersEnabled,
+            saveWorld: config.saveWorld ?? true,
+            announcement: config.announcementEnabled,
+          });
+        } catch (err) {
+          ctx.error('Error while saving server setup', err);
+        }
+
+        database.addChatLog('server', {}, 'Restarting in 5 seconds...');
+        Logger.logp('Restarting in 5 seconds...');
+        omegga.broadcast(
+          `<size="20">Server restart in <b><color="ffffbb">${5} seconds</></></>`,
+        );
+
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        await omegga.restartServer();
+      },
+    ),
+
+    update: router({
+      check: protectedProcedure(ScopeName.ServerUpdateCheck).query(async () => {
+        const { omegga } = getContextDeps();
+        if (!omegga.config.__STEAM) return null;
+
+        const lastUpdate = getLastSteamUpdateCheck();
+        if (Date.now() - lastUpdate.attempt < 1000 * 5) {
+          Logger.verbose('[rpc] Using cached steam update check');
+          return lastUpdate.result;
+        }
+
+        Logger.verbose('[rpc] Checking for steam update');
+        return await hasSteamUpdate(omegga.config.server?.steambeta);
+      }),
+
+      run: protectedProcedure(ScopeName.ServerUpdateRun).mutation(
+        async ({ ctx }) => {
+          const { omegga } = getContextDeps();
+          if (!omegga.config.__STEAM) return false;
+          if (omegga.stopping || omegga.starting) return false;
+
+          const wasStarted = omegga.started;
+          if (wasStarted) {
+            ctx.log('Stopping server to update...');
+            await omegga.stop();
+          }
+
+          ctx.log('Updating server...');
+          let ok = false;
+          try {
+            steamcmdDownloadGame({
+              steambeta: omegga.config.server?.steambeta,
+              steambetaPassword: omegga.config.server?.steambetaPassword,
+            });
+            ok = true;
+            ctx.log('Server updated successfully');
+          } catch (err) {
+            ctx.error('Error updating server', err);
+          }
+
+          if (wasStarted) {
+            ctx.log('Starting server...');
+            await omegga.start();
+          }
+
+          return ok;
+        },
+      ),
+    }),
+
+    onStatus: protectedProcedure(ScopeName.ServerStatus).subscription(
+      async function* ({ signal, ctx }) {
+        const combined = AbortSignal.any([signal!, ctx.userAbort.signal]);
+        for await (const [_] of on(serverEvents, 'serverStatus', {
+          signal: combined,
+        })) {
+          const { omegga } = getContextDeps();
+          yield {
+            started: omegga.started,
+            starting: omegga.starting,
+            stopping: omegga.stopping,
+          };
+        }
+      },
+    ),
+
+    onHeartbeat: protectedProcedure(ScopeName.ServerStatus).subscription(
+      async function* ({ signal, ctx }) {
+        const combined = AbortSignal.any([signal!, ctx.userAbort.signal]);
+        for await (const [status] of on(serverEvents, 'heartbeat', {
+          signal: combined,
+        })) {
+          yield status;
+        }
+      },
+    ),
+
+    // realtime player count - yields the current count immediately, then again
+    // whenever a player joins or leaves
+    onPlayerCount: protectedProcedure(ScopeName.ServerStatus).subscription(
+      async function* ({ signal, ctx }) {
+        const { omegga } = getContextDeps();
+        const combined = AbortSignal.any([signal!, ctx.userAbort.signal]);
+        // start listening before the initial yield so a join/leave that lands
+        // in between isn't dropped (on() buffers events from when it's called)
+        const events = on(serverEvents, 'playerCount', { signal: combined });
+        yield omegga.players.length;
+        for await (const [count] of events) {
+          yield count as number;
+        }
+      },
+    ),
+
+    onUtilization: protectedProcedure(ScopeName.ServerUtilization).subscription(
+      async function* ({ signal, ctx }) {
+        const combined = AbortSignal.any([signal!, ctx.userAbort.signal]);
+        for await (const [utilization] of on(serverEvents, 'utilization', {
+          signal: combined,
+        })) {
+          yield utilization as import('../types').SystemUtilization;
+        }
+      },
+    ),
+  }),
+});

@@ -1,4 +1,5 @@
 @use '../../css/theme';
+@use 'sass:color';
 
 .input {
   display: flex;
@@ -24,8 +25,8 @@
     cursor: default;
   }
 
-  input {
-    height: theme.$br-element-height;
+  input,
+  textarea {
     font-family: 'Glacial Indifference';
     padding: 2px 12px;
     box-sizing: border-box;
@@ -35,15 +36,27 @@
     color: theme.$br-inverted-fg;
     border: none;
     border-radius: theme.$br-radius-sm;
+    width: 100%;
 
     &::placeholder {
-      color: theme.$br-element-bg;
+      color: color.adjust(theme.$br-element-bg, $lightness: -5%);
     }
 
     &:focus {
       background: theme.$br-element-overlay;
       outline: none;
     }
+  }
+
+  input {
+    height: theme.$br-element-height;
+  }
+
+  textarea {
+    padding: 8px 12px;
+    resize: vertical;
+    min-height: theme.$br-element-height;
+    max-height: 200px;
   }
   &.roboto > input {
     font-family: 'Roboto';

@@ -23,9 +23,9 @@ portable Desktop flow before script or package internals.
 
 - Windows 10 x64, Windows 11 x64, or Windows Server 2019+ x64.
 - Brickadia Dedicated Server for Brickadia EA2 `PC-Shipping-CL13530`.
-- Required BMF-supported Omegga Windows fork for Windows server launch, command
+- Required BMF-vendored Omegga Windows runtime for Windows server launch, command
   transport, bridge helpers, logs, and validation:
-  <https://github.com/Ty-lerCox/bmf-omegga-fork>.
+  <https://github.com/Ty-lerCox/brickadia-modding-framework/tree/main/packages/omegga-runtime>.
 - BMF Desktop portable exe from the BMF release:
   `BMF-Desktop-<version>-portable-x64.exe`.
 - File-system access to the server `Binaries\Win64` directory.

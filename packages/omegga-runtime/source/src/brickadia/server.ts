@@ -1,4 +1,4 @@
-/*
+﻿/*
   Brickadia Server Wrapper
   Manages IO with the game server
 */

@@ -1,9 +1,9 @@
 # Omegga-Supported Runtime
 
 BMF requires a BMF-compatible Omegga runtime through the
-BMF-supported Omegga Windows fork for Windows Brickadia dedicated servers:
+BMF-vendored Omegga Windows runtime for Windows Brickadia dedicated servers:
 
-<https://github.com/Ty-lerCox/bmf-omegga-fork>
+<https://github.com/Ty-lerCox/brickadia-modding-framework/tree/main/packages/omegga-runtime>
 
 That runtime is more than a convenience wrapper: it is the current server
 supervisor and UE4SS bridge environment that BMF canaries and some live-player
@@ -113,11 +113,11 @@ shim unless weather becomes a gameplay hook surface later.
 
 BMF packages the current Omegga player sync adapter at
 `packages/omegga-plugins/bmf-player-sync/` and the minigame event adapter at
-`packages/omegga-plugins/bmf-minigame-events/`. The supported fork is expected
+`packages/omegga-plugins/bmf-minigame-events/`. The supported BMF-vendored runtime is expected
 to install or load those adapters when Omegga-fed player identity or BMF-owned
 minigame data/event production is needed.
 
-The supported fork must provide or preserve these bridge/helper
+The supported BMF-vendored runtime must provide or preserve these bridge/helper
 surfaces until BMF replaces them with equivalent names:
 
 - `BMF Bridge socket`
@@ -137,8 +137,8 @@ surfaces until BMF replaces them with equivalent names:
 BMF should not vendor Omegga `node_modules` or runtime server data into the BMF
 release zip. The supported packaging shape is currently:
 
-- the BMF-supported Omegga Windows fork at
-  <https://github.com/Ty-lerCox/bmf-omegga-fork>.
+- the BMF-vendored Omegga Windows runtime at
+  <https://github.com/Ty-lerCox/brickadia-modding-framework/tree/main/packages/omegga-runtime>.
 
 Future packaging can move to a BMF-compatible release artifact or upstream
 Omegga only after the Windows/UE4SS compatibility work is accepted and BMF has

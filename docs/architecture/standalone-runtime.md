@@ -1,6 +1,6 @@
 # Omegga Requirement
 
-BMF requires the BMF-supported Omegga Windows fork for the supported Windows
+BMF requires the BMF-vendored Omegga Windows runtime for the supported Windows
 Brickadia dedicated-server setup. Omegga is part of the current BMF release
 shape.
 
@@ -19,11 +19,11 @@ or validation plans that describe the supported runtime.
 
 | Layer | Current Owner |
 | --- | --- |
-| Brickadia dedicated server launch | BMF-supported Omegga Windows fork |
-| UE4SS/BMF compatibility setup | BMF-supported Omegga Windows fork |
+| Brickadia dedicated server launch | BMF-vendored Omegga Windows runtime |
+| UE4SS/BMF compatibility setup | BMF-vendored Omegga Windows runtime |
 | BMF UE4SS Core | BMF |
-| BMF Bridge and command transport | BMF-supported Omegga fork plus BMF Bridge/BMFSocket |
-| Player identity and log context | BMF-supported Omegga fork plus packaged BMF adapters |
+| BMF Bridge and command transport | BMF-vendored Omegga runtime plus BMF Bridge/BMFSocket |
+| Player identity and log context | BMF-vendored Omegga runtime plus packaged BMF adapters |
 | Plugin config/data storage | BMF |
 | Metrics export | Omegga `/metrics` plus BMF runtime files |
 | Windows setup flow | BMF Desktop plus the required Omegga runtime |
@@ -40,7 +40,7 @@ and validation evidence. Until that replacement is accepted, the documented
 operator guidance remains:
 
 ```text
-Brickadia dedicated server + UE4SS + BMF + BMF-supported Omegga Windows fork
+Brickadia dedicated server + UE4SS + BMF + BMF-vendored Omegga Windows runtime
 ```
 
 ## Replacement Criteria

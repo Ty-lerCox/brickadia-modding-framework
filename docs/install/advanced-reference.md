@@ -95,7 +95,7 @@ uninstall.
 ## Manual Install Shape
 
 1. Stop the dedicated server.
-2. Install or select the BMF-supported Omegga Windows fork.
+2. Install or select the BMF-vendored Omegga Windows runtime.
 3. Install UE4SS for the Brickadia server build through that runtime or the BMF
    installer path.
 4. Copy `framework/ue4ss/Mods/BMF` into the UE4SS `Mods` folder.

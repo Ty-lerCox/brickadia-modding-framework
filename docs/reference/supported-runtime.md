@@ -19,7 +19,7 @@ between BMF and Omegga.
 The supported Windows runtime is:
 
 ```text
-Brickadia dedicated server + UE4SS + BMF + BMF-supported Omegga Windows fork
+Brickadia dedicated server + UE4SS + BMF + BMF-vendored Omegga Windows runtime
 ```
 
 Current target: Brickadia EA2 PC-Shipping-CL13530.
@@ -55,6 +55,6 @@ and setup docs should present Omegga as a requirement until every Omegga-owned
 runtime responsibility has an accepted and validated replacement.
 
 !!! warning
-    Do not replace the supported fork with arbitrary upstream Omegga until BMF
+    Do not replace the supported BMF-vendored runtime with arbitrary upstream Omegga until BMF
     has validated that release against command transport, helper globals, socket
     behavior, player sync, and canaries.

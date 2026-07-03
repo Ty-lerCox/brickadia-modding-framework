@@ -178,7 +178,7 @@ current source roots, install roots, build scripts, and stable runtime markers.
 The first Omegga runtime package boundary now lives in
 `packages/omegga-runtime`, with
 `scripts/validate-omegga-runtime-package.ps1` checking the BMF fork URL,
-upstream Omegga URL, synced fork commit, `source/` tree, required helper
+upstream Omegga URL, synced supported upstream commit, `source/` tree, required helper
 surfaces, dependency manifest alignment, and packaging guardrails.
 
 The first self-starting Omegga install path now lives in the shared

@@ -66,7 +66,7 @@ boundaries point at the current `framework/ue4ss/Mods/*` and `native/*` source
 roots so install scripts can keep using proven paths while release validation
 starts enforcing package ownership. The Omegga boundary now includes the
 synced BMF-compatible fork source in `packages/omegga-runtime/source`, records
-the fork/upstream URLs and source commit in sync metadata, and keeps generated
+the BMF/upstream URLs and source commit in sync metadata, and keeps generated
 dependency/cache directories out of the repo. The UE4SS boundary keeps
 `manifests/compatibility.json` authoritative for the current Brickadia target
 until a dedicated compatibility bundle layout is introduced.

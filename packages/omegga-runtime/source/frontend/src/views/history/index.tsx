@@ -7,6 +7,8 @@ import {
   PageContent,
   SideNav,
 } from '@components';
+import { AnimatePresence, motion } from 'motion/react';
+import { useHasScope, useRequireScope } from '@hooks';
 import {
   IconArrowLeft,
   IconArrowRight,
@@ -19,9 +21,15 @@ import React, {
   useRef,
   useState,
 } from 'react';
-import { rpcReq } from '../../socket';
 import { useRoute } from 'wouter';
-import type { HistoryRes } from '@omegga/webserver/backend/api';
+import { Permissions } from '../../permissions';
+import { trpc, type RouterOutputs } from '../../trpc';
+
+type ChatHistoryItem = RouterOutputs['chat']['history'][number];
+type ChatHistoryEntry = ChatHistoryItem & {
+  date: number;
+  newDay?: string;
+};
 
 const MONTHS = [
   'January',
@@ -44,6 +52,8 @@ const sorted = (obj: Record<number, any>, reverse = false) =>
     .sort((a, b) => (reverse ? b - a : a - b));
 
 export const HistoryView = () => {
+  const canAccess = useRequireScope(Permissions.ChatHistory);
+  const canCalendar = useHasScope(Permissions.ChatCalendar);
   const [_, params] = useRoute('/history/:time?');
   const paramTime = params?.time;
 
@@ -66,25 +76,22 @@ export const HistoryView = () => {
   const [absMax, setAbsMax] = useState<number | null>(null);
   const minRef = useRef<number | null>(null);
   const maxRef = useRef<number | null>(null);
-  const chatsRef = useRef<
-    (HistoryRes[number] & {
-      date: number;
-      newDay?: string;
-    })[]
-  >([]);
+  const chatsRef = useRef<ChatHistoryEntry[]>([]);
+
+  const utils = trpc.useUtils();
 
   const getCalendar = useCallback(async () => {
     setLoading(true);
-    const calendarData = await rpcReq('chat.calendar');
+    const calendarData = await utils.chat.calendar.fetch();
     setCalendar(calendarData);
     setLoading(false);
   }, []);
 
-  const handleChats = useCallback((chats: any[]) => {
+  const handleChats = useCallback((chats: ChatHistoryItem[]) => {
     if (!chats.length) return;
 
     // add new chats and sort by create time
-    chatsRef.current = chatsRef.current.concat(chats);
+    chatsRef.current = chatsRef.current.concat(chats as ChatHistoryEntry[]);
     chatsRef.current.sort((a, b) => a.created - b.created);
 
     // find the min and max times for message creation
@@ -117,22 +124,36 @@ export const HistoryView = () => {
       dir?: 'top' | 'bottom',
     ) => {
       setLoading(true);
-      const chatData: HistoryRes = await rpcReq('chat.history', {
+      const chatData = await utils.chat.history.fetch({
         before,
         after,
       });
       handleChats(chatData);
 
-      // remove chats that our off screen
-      if (dir === 'bottom' && chatsRef.current.length > 200) {
-        chatsRef.current.splice(0, chatsRef.current.length - 200);
-      }
-      if (dir === 'top' && chatsRef.current.length > 200) {
-        chatsRef.current.splice(200, chatsRef.current.length - 200);
-      }
-
       setFirstLoad(false);
       setLoading(false);
+
+      // Defer trimming to a separate frame so InfiniteScroll's useLayoutEffect
+      // sees the correct scrollHeight delta (prepend only, no truncation).
+      // Reset the absolute boundary for the truncated end so infinite scroll
+      // can re-fetch that direction.
+      const trimDir = dir;
+      if (trimDir && chatsRef.current.length > 200) {
+        requestAnimationFrame(() => {
+          if (trimDir === 'bottom') {
+            chatsRef.current.splice(0, chatsRef.current.length - 200);
+            minRef.current = chatsRef.current[0].created;
+            setAbsMin(null);
+          } else if (trimDir === 'top') {
+            chatsRef.current.splice(200, chatsRef.current.length - 200);
+            maxRef.current =
+              chatsRef.current[chatsRef.current.length - 1].created;
+            setAbsMax(null);
+          }
+          setHistoryKey(prev => prev + 1);
+        });
+      }
+
       return chatData;
     },
     [],
@@ -153,7 +174,7 @@ export const HistoryView = () => {
       paramTime &&
       new Date(paramTime.match(/^\d+$/) ? Number(paramTime) : paramTime);
     (async () => {
-      if (firstLoad) await getCalendar();
+      if (firstLoad && canCalendar) await getCalendar();
 
       // ensures time is not nan
       if (time && !Number.isNaN(time.getTime())) {
@@ -256,97 +277,53 @@ export const HistoryView = () => {
   const numDays = new Date(year, month + 1, 0).getDate();
   const startDay = new Date(year, month, 1).getDay();
 
+  if (!canAccess) return null;
+
   return (
     <>
       <NavHeader title="History">
-        <div className="calendar-container">
-          <Button
-            normal
-            boxy
-            style={{ marginRight: 0 }}
-            data-tooltip="Show a calendar previewing days"
-            onClick={() => setShowCalendar(!showCalendar)}
-          >
-            <IconCalendar /> Calendar
-          </Button>
-          {showCalendar && (
-            <div className="calendar">
-              <div className="year">
-                <Button
-                  icon
-                  normal
-                  disabled={!prevYear}
-                  onClick={() => setDate(prevYear)}
+        {canCalendar && (
+          <div className="calendar-container">
+            <Button
+              normal
+              boxy
+              style={{ marginRight: 0 }}
+              data-tooltip="Show a calendar previewing days"
+              onClick={() => setShowCalendar(!showCalendar)}
+            >
+              <IconCalendar /> Calendar
+            </Button>
+            <AnimatePresence>
+              {showCalendar && (
+                <motion.div
+                  initial={{ opacity: 0, y: -8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -8 }}
+                  transition={{ duration: 0.15 }}
                 >
-                  <IconArrowLeft />
-                </Button>
-                {year}
-                <Button
-                  icon
-                  normal
-                  disabled={!nextYear}
-                  onClick={() => setDate(nextYear)}
-                >
-                  <IconArrowRight />
-                </Button>
-              </div>
-              <div className="month">
-                <Button
-                  icon
-                  normal
-                  disabled={!prevMonth}
-                  onClick={() => setDate(prevMonth)}
-                >
-                  <IconArrowLeft />
-                </Button>
-                {MONTHS[month]}
-                <Button
-                  icon
-                  normal
-                  disabled={!nextMonth}
-                  onClick={() => setDate(nextMonth)}
-                >
-                  <IconArrowRight />
-                </Button>
-              </div>
-              <div className="calendar-days">
-                <div className="week-header days">S</div>
-                <div className="week-header days">M</div>
-                <div className="week-header days">T</div>
-                <div className="week-header days">W</div>
-                <div className="week-header days">T</div>
-                <div className="week-header days">F</div>
-                <div className="week-header days">S</div>
-                {Array.from({ length: startDay }).map((_, i) => (
-                  <div key={`empty-${i}`} />
-                ))}
-                {Array.from({
-                  length: numDays,
-                }).map((_, d) => (
-                  <div
-                    key={d}
-                    className={`days ${
-                      nowMonth === month && nowYear === year && d + 1 === nowDay
-                        ? 'today'
-                        : ''
-                    } ${
-                      !(
-                        nowMonth === month &&
-                        nowYear === year &&
-                        d + 1 > nowDay
-                      ) && calendar[year]?.[month]?.[d]
-                        ? 'available'
-                        : ''
-                    }`}
-                    onClick={() => focusDay(year, month, d + 1)}
-                  >
-                    {d + 1}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
+                  <Calendar
+                    {...{
+                      prevYear,
+                      setDate,
+                      year,
+                      nextYear,
+                      prevMonth,
+                      month,
+                      nextMonth,
+                      startDay,
+                      numDays,
+                      nowMonth,
+                      nowYear,
+                      nowDay,
+                      calendar,
+                      focusDay,
+                    }}
+                  />
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+        )}
       </NavHeader>
       <PageContent>
         <SideNav />
@@ -380,3 +357,108 @@ export const HistoryView = () => {
     </>
   );
 };
+
+const Calendar = ({
+  prevYear,
+  setDate,
+  year,
+  nextYear,
+  prevMonth,
+  month,
+  nextMonth,
+  startDay,
+  numDays,
+  nowMonth,
+  nowYear,
+  nowDay,
+  calendar,
+  focusDay,
+}: {
+  prevYear: [number, number] | null;
+  setDate: (date: [number, number] | null) => void;
+  year: number;
+  nextYear: [number, number] | null;
+  prevMonth: [number, number] | null;
+  month: number;
+  nextMonth: [number, number] | null;
+  startDay: number;
+  numDays: number;
+  nowMonth: number;
+  nowYear: number;
+  nowDay: number;
+  calendar: Record<number, Record<number, Record<number, boolean>>>;
+  focusDay: (year: number, month: number, day: number) => Promise<void>;
+}) => (
+  <div className="calendar">
+    <div className="year">
+      <Button
+        icon
+        normal
+        disabled={!prevYear}
+        onClick={() => setDate(prevYear)}
+      >
+        <IconArrowLeft />
+      </Button>
+      {year}
+      <Button
+        icon
+        normal
+        disabled={!nextYear}
+        onClick={() => setDate(nextYear)}
+      >
+        <IconArrowRight />
+      </Button>
+    </div>
+    <div className="month">
+      <Button
+        icon
+        normal
+        disabled={!prevMonth}
+        onClick={() => setDate(prevMonth)}
+      >
+        <IconArrowLeft />
+      </Button>
+      {MONTHS[month]}
+      <Button
+        icon
+        normal
+        disabled={!nextMonth}
+        onClick={() => setDate(nextMonth)}
+      >
+        <IconArrowRight />
+      </Button>
+    </div>
+    <div className="calendar-days">
+      <div className="week-header days">S</div>
+      <div className="week-header days">M</div>
+      <div className="week-header days">T</div>
+      <div className="week-header days">W</div>
+      <div className="week-header days">T</div>
+      <div className="week-header days">F</div>
+      <div className="week-header days">S</div>
+      {Array.from({ length: startDay }).map((_, i) => (
+        <div key={`empty-${i}`} />
+      ))}
+      {Array.from({
+        length: numDays,
+      }).map((_, d) => (
+        <div
+          key={d}
+          className={`days ${
+            nowMonth === month && nowYear === year && d + 1 === nowDay
+              ? 'today'
+              : ''
+          } ${
+            !(nowMonth === month && nowYear === year && d + 1 > nowDay) &&
+            calendar[year]?.[month]?.[d]
+              ? 'available'
+              : ''
+          }`}
+          onClick={() => focusDay(year, month, d + 1)}
+        >
+          {d + 1}
+        </div>
+      ))}
+    </div>
+  </div>
+);

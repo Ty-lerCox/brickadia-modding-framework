@@ -2,7 +2,6 @@ import Logger from '@/logger';
 import soft from '@/softconfig';
 import { IConfig } from '@config/types';
 import * as file from '@util/file';
-import { IS_WINDOWS } from '@util/platform';
 import 'colors';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -78,12 +77,6 @@ export async function genAuthFiles(
   },
 ) {
   Logger.verbose('Generating auth files');
-
-  if (IS_WINDOWS && branch) {
-    throw new Error(
-      'Legacy launcher branches are not supported on Windows auth generation.',
-    );
-  }
 
   // remove existing temporary install path
   await removeTempDir();

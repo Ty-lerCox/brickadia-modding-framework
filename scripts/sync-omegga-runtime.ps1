@@ -3,6 +3,10 @@ param(
   [Parameter(Mandatory = $true)]
   [string]$Source,
   [string]$OutJson = '',
+  [string]$SourceRepository = '',
+  [string]$UpstreamRepository = 'https://github.com/brickadia-community/omegga',
+  [string]$UpstreamCommit = '',
+  [string]$UpstreamVersion = '',
   [switch]$Force
 )
 
@@ -112,16 +116,20 @@ $allowedItems = @(
   '.prettierignore',
   '.prettierrc',
   'LICENSE',
+  'CHANGELOG.md',
   'README.md',
   'index.js',
   'package.json',
   'package-lock.json',
+  'drizzle.config.ts',
+  'drizzle.plugin.config.ts',
   'eslint.config.mjs',
   'vite.backend.config.mts',
   'vite.frontend.config.mts',
   'vitest.backend.config.mts',
   'bin',
   'configs',
+  'doc',
   'docs',
   'frontend',
   'public',
@@ -218,16 +226,32 @@ try {
     }
   }
 
-  $remote = Get-GitFirstLine $sourceFull @('remote', 'get-url', 'origin')
-  $commit = Get-GitFirstLine $sourceFull @('rev-parse', 'HEAD')
+  $sourceCheckoutRemote = Get-GitFirstLine $sourceFull @('remote', 'get-url', 'origin')
+  $sourceCheckoutCommit = Get-GitFirstLine $sourceFull @('rev-parse', 'HEAD')
+  $rootRemote = Get-GitFirstLine $rootFull @('remote', 'get-url', 'origin')
+  if ([string]::IsNullOrWhiteSpace($SourceRepository)) {
+    $SourceRepository = $rootRemote
+  }
+  if ([string]::IsNullOrWhiteSpace($SourceRepository)) {
+    $SourceRepository = $sourceCheckoutRemote
+  }
+  $sourceCommit = if (![string]::IsNullOrWhiteSpace($UpstreamCommit)) {
+    $UpstreamCommit
+  } else {
+    $sourceCheckoutCommit
+  }
   $dirty = Get-GitLines $sourceFull @('status', '--short')
   $metadataPath = Join-Path $packageRoot 'sync-metadata.json'
   $metadata = [ordered]@{
     schemaVersion = 1
     syncedAt = (Get-Date).ToUniversalTime().ToString('o')
     source = $sourceFull
-    sourceRepository = $remote
-    sourceCommit = $commit
+    sourceRepository = $SourceRepository
+    sourceCommit = $sourceCommit
+    upstreamRepository = $UpstreamRepository
+    upstreamCommit = $UpstreamCommit
+    upstreamVersion = $UpstreamVersion
+    sourceCheckoutCommit = $sourceCheckoutCommit
     dirtyStatus = @($dirty)
     destination = $destinationFull
     copiedItems = @($copied)
@@ -238,7 +262,7 @@ try {
       'do-not-vendor-runtime-server-data',
       'do-not-vendor-server-saves',
       'do-not-vendor-logs',
-      'record-fork-commit-before-release',
+      'record-supported-upstream-commit-before-release',
       'preserve-upstream-license-notice'
     )
   }

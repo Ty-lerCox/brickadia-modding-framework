@@ -1,19 +1,21 @@
-import { Server as SocketIo, DefaultEventsMap } from 'socket.io';
-
 declare module 'express-session' {
   interface SessionData {
     userId: string;
+    mfaPending?: boolean;
+    mfaChallenge?: string;
+    pendingTotpSecret?: string;
   }
 }
 
-export type OmeggaSocketIo = SocketIo<
-  DefaultEventsMap,
-  DefaultEventsMap,
-  DefaultEventsMap,
-  {
-    user: IStoreUser & { _id: string };
-  }
->;
+export interface IWebAuthnCredential {
+  id: string;
+  publicKey: string;
+  counter: number;
+  name: string;
+  created: number;
+  lastUsed: number;
+  transports?: string[];
+}
 
 export interface IPlayer {
   id?: string;
@@ -53,6 +55,7 @@ export interface IStoreAutoRestartConfig {
   announcementEnabled: boolean;
   playersEnabled: boolean;
   saveWorld: boolean;
+  crashRestartEnabled: boolean;
 }
 
 export interface IStoreChat {
@@ -127,6 +130,28 @@ export interface IStoreUser {
   roles: string[];
   playerId: string;
   isBanned?: boolean;
+  permissions?: import('./permissions').PermissionSet;
+  totpSecret?: string;
+  totpEnabled?: boolean;
+  passkeys?: IWebAuthnCredential[];
+  recoveryCodes?: string[];
+}
+
+export interface IStoreDefaultPermissions {
+  type: 'defaultPermissions';
+  root: import('./permissions').RootLevel;
+  domains: Partial<
+    Record<import('./scopes').Domain, import('./permissions').DomainLevel>
+  >;
+  scopes: Partial<Record<import('./scopes').Scope, boolean>>;
+}
+
+export interface IStoreRole {
+  type: 'webRole';
+  name: string;
+  description: string;
+  order: number;
+  permissions: import('./permissions').PermissionSet;
 }
 
 export interface IPunchcard {
@@ -137,4 +162,16 @@ export interface IPunchcard {
   month: number;
   year: number;
   punchcard: number[][];
+}
+
+export interface SystemUtilization {
+  cpu: number;
+  mem: { used: number; total: number };
+  disk: { used: number; total: number };
+  net: { rxSec: number; txSec: number };
+}
+
+export interface UtilizationWithHistory {
+  current: SystemUtilization | null;
+  history: SystemUtilization[];
 }

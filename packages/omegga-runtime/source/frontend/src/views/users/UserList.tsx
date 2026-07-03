@@ -1,4 +1,6 @@
+import type { GetUsersRes } from '@backend/api';
 import {
+  AnimatedDropdown,
   Button,
   Dimmer,
   Footer,
@@ -15,62 +17,99 @@ import {
   SortIcons,
 } from '@components';
 import { useStore } from '@nanostores/react';
-import type { GetUsersRes } from '@omegga/webserver/backend/api';
 import {
   IconArrowBarToLeft,
   IconArrowBarToRight,
   IconArrowLeft,
   IconArrowRight,
-  IconCirclePlus,
+  IconBan,
+  IconCaretDown,
+  IconCaretUp,
   IconLock,
   IconRotate,
+  IconShield,
   IconUserPlus,
+  IconUsers,
   IconX,
 } from '@tabler/icons-react';
-import { debounce, duration, logout } from '@utils';
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { useLocation, useRoute } from 'wouter';
-import { rpcReq } from '../../socket';
-import { $omeggaData, $user } from '../../stores/user';
+import { useHasScope, useMobileInspector, useRequireScope } from '@hooks';
+import { duration, logout } from '@utils';
+import { useEffect, useMemo, useState, useRef } from 'react';
+import { Route, Switch, useLocation, useRoute } from 'wouter';
+import { UserInspector } from './UserInspector';
+import { Permissions } from '../../permissions';
+import { $omeggaData, $user, $usersRefresh } from '../../stores/user';
+import { trpc } from '../../trpc';
+
+const ACTION_ENABLE_USERS = 'Enable Users';
+const ACTION_ADD_USER = 'Add User';
 
 export const UserList = () => {
+  const canAccess = useRequireScope(Permissions.UserList);
   const userless = useStore($omeggaData)?.userless;
   const myUser = useStore($user);
+
+  const canCreate = useHasScope(Permissions.UserCreate);
+  const canViewRoles = useHasScope(Permissions.RoleList);
+
+  const rolesQuery = trpc.role.list.useQuery(undefined, {
+    enabled: canViewRoles,
+  });
+  const rolesById = useMemo(() => {
+    const map: Record<string, { name: string; order: number }> = {};
+    for (const r of rolesQuery.data ?? []) map[r.id] = r;
+    return map;
+  }, [rolesQuery.data]);
 
   const [pages, setPages] = useState(0);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [users, setUsers] = useState<GetUsersRes['users']>([]);
+  const [search, setSearch] = useState('');
 
   const [error, setError] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
 
-  const [showCredentials, setShowCredentials] = useState(false);
   const [showCreateUser, setShowCreateUser] = useState(false);
+  const [showEnableUsers, setShowEnableUsers] = useState(false);
   const [modalLoading, setModalLoading] = useState(false);
-
-  // const [userLookup, setUserLookup] = useState<
-  //   Record<string, GetUsersRes['users'][number]>
-  // >({});
 
   const [_location, navigate] = useLocation();
   const [_match, params] = useRoute('/users/:id?');
+  const { onBack, swipeHandlers, inspectorOpen } = useMobileInspector(
+    !!params?.id,
+    '/users',
+  );
+
+  const utils = trpc.useUtils();
+  const createMutation = trpc.user.create.useMutation();
+
+  const [showActions, setShowActions] = useState(false);
+
+  const openEnableUsers = () => {
+    setShowActions(false);
+    setShowEnableUsers(true);
+    setShowCreateUser(false);
+    setUsername('');
+    setError('');
+  };
+
+  const openCreateUser = () => {
+    setShowActions(false);
+    setShowCreateUser(true);
+    setShowEnableUsers(false);
+    setUsername('');
+    setError('');
+  };
 
   const query = useRef({
     page: 0,
-    search: '',
-    sort: 'lastSeen',
+    sort: 'lastOnline',
     direction: -1,
   });
-  const { page, search, sort, direction } = query.current;
-  const [_searchKey, setSearchKey] = useState(0);
-  const setSearch = (search: string) => {
-    query.current.search = search;
-    doSearch();
-    setSearchKey(k => k + 1);
-  };
+  const { page, sort, direction } = query.current;
   const setPage = (page: number | ((old: number) => number)) => {
     if (typeof page === 'function') page = page(query.current.page);
     query.current.page = page;
@@ -83,76 +122,45 @@ export const UserList = () => {
 
   const getUsers = async () => {
     setLoading(true);
-    const { page, search, sort, direction } = query.current;
-    const { users, total, pages }: GetUsersRes = await rpcReq('users.list', {
+    const { page, sort, direction } = query.current;
+    const { users, total, pages } = await utils.user.list.fetch({
       page,
-      search,
+      search: '',
       sort,
       direction,
     });
     setPages(pages);
     setTotal(total);
     setUsers(users);
-    // setUserLookup(prev => ({
-    //   ...prev,
-    //   ...Object.fromEntries(users.map(u => [u.username, u])),
-    // }));
     setLoading(false);
   };
   const getUsersRef = useRef<() => Promise<void>>(getUsers);
   getUsersRef.current = getUsers;
 
+  const usersRefresh = useStore($usersRefresh);
   useEffect(() => {
-    getUsers();
-  }, []);
+    if (canAccess) getUsers();
+  }, [usersRefresh, canAccess]);
 
-  const doSearch = useMemo(
-    () =>
-      debounce(() => {
-        query.current.page = 0;
-        getUsersRef.current?.();
-      }, 500),
-    [],
-  );
-
-  // update table sort direction
   const setSort = (s: string) => {
-    // flip direction if it's the same column
     if (s == sort) {
       setDirection(d => d * -1);
     } else {
-      // otherwise, use the new column
       query.current.sort = s;
-      // sort only name ascending on first click, all metrics are descending
       setDirection(s === 'name' ? 1 : -1);
     }
     getUsers();
   };
 
-  // const selectedUser = useMemo(() => {
-  //   if (!params?.id) return null;
-  //   const user =
-  //     userLookup[params.id] ?? users.find(u => u.username === params.id);
-  //   return user ?? null;
-  // }, [params?.id, userLookup, users]);
-
-  const toggleAddUser = () => {
-    setShowCreateUser(!showCreateUser);
-    setShowCredentials(false);
-    setUsername('');
-    setError('');
-  };
-
-  const toggleCredentials = () => {
-    setShowCredentials(!showCredentials);
-    setShowCreateUser(false);
-    if (!userless) setUsername(myUser?.username ?? '');
-    setError('');
-  };
+  const filteredUsers = useMemo(() => {
+    if (!search) return users;
+    const q = search.toLowerCase();
+    return users.filter(u => (u.username || 'Admin').toLowerCase().includes(q));
+  }, [users, search]);
 
   const hideModals = () => {
     setShowCreateUser(false);
-    setShowCredentials(false);
+    setShowEnableUsers(false);
     setUsername('');
     setError('');
     setPassword('');
@@ -165,15 +173,16 @@ export const UserList = () => {
     setModalLoading(true);
     let err = '';
     try {
-      if (showCredentials && !userless) {
-        err = await rpcReq('users.passwd', myUser?.username, password);
-      } else {
-        err = await rpcReq('users.create', username, password);
-      }
+      err = await createMutation.mutateAsync({ username, password });
       setModalLoading(false);
       if (!err) {
-        if (showCredentials && userless) logout();
-        else hideModals();
+        if (showEnableUsers) logout();
+        else {
+          const createdName = username;
+          hideModals();
+          await getUsers();
+          navigate(`/users/${createdName}`);
+        }
         return;
       }
     } catch (e) {
@@ -183,48 +192,74 @@ export const UserList = () => {
   };
 
   const ok = useMemo(() => {
-    const nameOk = username.length !== 0 || !(showCredentials && !userless);
-    return username.match(/^\w{0,32}$/) && nameOk && password.length !== 0;
-  }, [username, password, showCredentials, userless]);
+    return (
+      username.match(/^\w{0,32}$/) &&
+      username.length !== 0 &&
+      password.length !== 0
+    );
+  }, [username, password]);
+
+  if (!canAccess) return null;
+
+  const hasDropdownActions = userless || (!userless && canCreate);
 
   return (
     <>
-      <NavHeader title="Users">
-        <span style={{ flex: 1 }} />
-        <Button
-          normal
-          data-tooltip={userless ? 'Enable user sign-in' : 'Change password'}
-          onClick={toggleCredentials}
-        >
-          {userless ? (
-            <>
-              <IconCirclePlus />
-              Enable Users
-            </>
-          ) : (
-            <>
-              <IconLock />
-              Change Password
-            </>
-          )}
-        </Button>
-        {!userless && myUser?.isOwner && (
-          <Button normal onClick={toggleAddUser} data-tooltip="Add a new user">
-            <IconUserPlus />
-            Add User
-          </Button>
+      <NavHeader title="Users" onBack={onBack}>
+        {hasDropdownActions && (
+          <div className="widgets-container">
+            <Button normal boxy onClick={() => setShowActions(!showActions)}>
+              {showActions ? <IconCaretUp /> : <IconCaretDown />}
+              Actions
+            </Button>
+            <AnimatedDropdown visible={showActions}>
+              {userless && (
+                <Button info onClick={openEnableUsers}>
+                  <IconLock />
+                  {ACTION_ENABLE_USERS}
+                </Button>
+              )}
+              {!userless && canCreate && (
+                <Button main onClick={openCreateUser}>
+                  <IconUserPlus />
+                  {ACTION_ADD_USER}
+                </Button>
+              )}
+            </AnimatedDropdown>
+          </div>
         )}
       </NavHeader>
       <PageContent>
         <SideNav />
-        <div className="generic-container players-container">
+        <div
+          className={`generic-container players-container ${inspectorOpen ? 'inspector-open' : ''}`}
+          {...swipeHandlers}
+        >
           <div className="player-table-container">
+            {canViewRoles && (
+              <NavBar attached>
+                <Button main boxy className="tab-button active">
+                  <IconUsers />
+                  Users
+                </Button>
+                <Button
+                  normal
+                  boxy
+                  className="tab-button"
+                  onClick={() => navigate('/roles')}
+                >
+                  <IconShield />
+                  Roles
+                </Button>
+                <span style={{ flex: 1 }} />
+              </NavBar>
+            )}
             <NavBar attached>
               <Input
                 type="text"
                 placeholder="Search Users..."
                 value={search}
-                onChange={setSearch}
+                onChange={s => setSearch(s)}
               />
               <span style={{ flex: 1 }} />
               <Button
@@ -283,17 +318,37 @@ export const UserList = () => {
                     </tr>
                   </thead>
                   <tbody>
-                    {users.map(u => (
+                    {filteredUsers.map(u => (
                       <tr
                         onClick={() => navigate(`/users/${u.username}`)}
                         className={u.username === params?.id ? 'active' : ''}
                         key={u.username}
                       >
                         <td>
-                          {u.username || 'Admin'}{' '}
-                          {(u.username || 'Admin') ===
-                            (myUser?.username || 'Admin') && (
-                            <span style={{ fontSize: 12 }}>(You)</span>
+                          <div>
+                            {u.isBanned && (
+                              <span className="ban">
+                                <IconBan size={14} />{' '}
+                              </span>
+                            )}
+                            {u.username || 'Admin'}{' '}
+                            {(u.username || 'Admin') ===
+                              (myUser?.username || 'Admin') && (
+                              <span style={{ fontSize: 12 }}>(You)</span>
+                            )}
+                          </div>
+                          {(u as any).roles?.length > 0 && (
+                            <div
+                              className="muted-text"
+                              style={{ fontSize: 12 }}
+                            >
+                              {((u as any).roles as string[])
+                                .map(id => rolesById[id])
+                                .filter(Boolean)
+                                .sort((a, b) => a.order - b.order)
+                                .map(r => r.name)
+                                .join(', ')}
+                            </div>
                           )}
                         </td>
                         <td
@@ -315,14 +370,12 @@ export const UserList = () => {
                   </tbody>
                 </table>
               </Scroll>
-              <Footer className="pagination-footer">
+              <Footer className="pagination-footer" attached>
                 <Button
                   icon
                   normal
                   disabled={page === 0}
-                  onClick={() => {
-                    setPage(0);
-                  }}
+                  onClick={() => setPage(0)}
                 >
                   <IconArrowBarToLeft />
                 </Button>
@@ -339,16 +392,14 @@ export const UserList = () => {
                     Page {page + 1} of {pages}
                   </div>
                   <div>
-                    Showing {users.length} of {total}
+                    Showing {filteredUsers.length} of {total}
                   </div>
                 </div>
                 <Button
                   icon
                   normal
                   disabled={page >= pages - 1}
-                  onClick={() =>
-                    setPage(p => Math.min(users.length - 1, p + 1))
-                  }
+                  onClick={() => setPage(p => Math.min(pages - 1, p + 1))}
                 >
                   <IconArrowRight />
                 </Button>
@@ -356,7 +407,7 @@ export const UserList = () => {
                   icon
                   normal
                   disabled={page >= pages - 1}
-                  onClick={() => setPage(users.length - 1)}
+                  onClick={() => setPage(pages - 1)}
                 >
                   <IconArrowBarToRight />
                 </Button>
@@ -366,20 +417,25 @@ export const UserList = () => {
               </Loader>
             </div>
           </div>
-          {/* <div className="player-inspector-container">
-            <NavBar>{selectedUserName}</NavBar>
-            <div className="player-inspector"></div>
-          </div> */}
-          <Dimmer visible={showCredentials || showCreateUser}>
+          <Switch>
+            <Route path="/users/:id" component={UserInspector} />
+            <Route>
+              <div className="player-inspector-container">
+                <NavBar attached>SELECT A USER</NavBar>
+                <div className="player-inspector" />
+              </div>
+            </Route>
+          </Switch>
+          <Dimmer visible={showCreateUser || showEnableUsers}>
             <Loader active={modalLoading} size="huge">
               Submitting
             </Loader>
             <Modal visible={!modalLoading}>
               <Header>
-                {showCreateUser ? 'Create New User' : 'Update Credentials'}
+                {showEnableUsers ? 'Enable Users' : 'Create New User'}
               </Header>
               <PopoutContent>
-                {userless && (
+                {showEnableUsers && (
                   <>
                     <p>
                       This will require you to enter a password when you sign
@@ -387,9 +443,6 @@ export const UserList = () => {
                     </p>
                     <p>This action cannot be undone.</p>
                   </>
-                )}
-                {!userless && showCredentials && (
-                  <p>Updating credentials for user "{username}""</p>
                 )}
                 {showCreateUser && (
                   <p>
@@ -400,14 +453,12 @@ export const UserList = () => {
                 {error && <p style={{ color: 'red' }}>Error: {error}</p>}
               </PopoutContent>
               <div className="popout-inputs">
-                {(userless || showCreateUser) && (
-                  <Input
-                    placeholder="username"
-                    type="text"
-                    value={username}
-                    onChange={u => setUsername(u)}
-                  />
-                )}
+                <Input
+                  placeholder="username"
+                  type="text"
+                  value={username}
+                  onChange={u => setUsername(u)}
+                />
                 <Input
                   placeholder="password"
                   type="password"
@@ -419,6 +470,9 @@ export const UserList = () => {
                   type="password"
                   value={confirmPassword}
                   onChange={p => setConfirmPassword(p)}
+                  onSubmit={
+                    ok && confirmPassword === password ? submit : undefined
+                  }
                 />
               </div>
               <Footer>
@@ -427,9 +481,8 @@ export const UserList = () => {
                   disabled={!ok || confirmPassword !== password}
                   onClick={() => submit()}
                 >
-                  {showCreateUser && <IconUserPlus />}
-                  {!showCreateUser && <IconLock />}
-                  {showCreateUser ? 'Add' : 'Update'}
+                  <IconUserPlus />
+                  {showEnableUsers ? 'Enable' : 'Add'}
                 </Button>
                 <div style={{ flex: 1 }} />
                 <Button normal onClick={hideModals}>

@@ -264,38 +264,11 @@ windowsDescribe('Windows platform support', () => {
         path.join(
           targetRoot,
           'ue4ss',
-          'Mods',
-          'BMF',
-          'Scripts',
-          'bmf',
-          'runtime.lua',
-        ),
-      ),
-    ).toBe(true);
-    expect(
-      fs.existsSync(
-        path.join(
-          targetRoot,
-          'ue4ss',
           'Brickadia',
           'Mods',
           'BMF',
           'Scripts',
           'main.lua',
-        ),
-      ),
-    ).toBe(true);
-    expect(
-      fs.existsSync(
-        path.join(
-          targetRoot,
-          'ue4ss',
-          'Brickadia',
-          'Mods',
-          'BMF',
-          'Scripts',
-          'bmf',
-          'runtime.lua',
         ),
       ),
     ).toBe(true);
@@ -411,14 +384,10 @@ windowsDescribe('Windows platform support', () => {
       '[]\n',
     );
 
-    fs.mkdirSync(path.join(bmfSource, 'Scripts', 'bmf'), { recursive: true });
+    fs.mkdirSync(path.join(bmfSource, 'Scripts'), { recursive: true });
     fs.writeFileSync(path.join(bmfSource, 'bmf.json'), '{"name":"BMF"}\n');
     fs.writeFileSync(
       path.join(bmfSource, 'Scripts', 'main.lua'),
-      'return nil\n',
-    );
-    fs.writeFileSync(
-      path.join(bmfSource, 'Scripts', 'bmf', 'runtime.lua'),
       'return nil\n',
     );
     fs.writeFileSync(path.join(bmfSource, 'override-marker.txt'), 'override\n');
@@ -515,14 +484,10 @@ windowsDescribe('Windows platform support', () => {
       '[]\n',
     );
 
-    fs.mkdirSync(path.join(bmfSource, 'Scripts', 'bmf'), { recursive: true });
+    fs.mkdirSync(path.join(bmfSource, 'Scripts'), { recursive: true });
     fs.writeFileSync(path.join(bmfSource, 'bmf.json'), '{"name":"BMF"}\n');
     fs.writeFileSync(
       path.join(bmfSource, 'Scripts', 'main.lua'),
-      'return nil\n',
-    );
-    fs.writeFileSync(
-      path.join(bmfSource, 'Scripts', 'bmf', 'runtime.lua'),
       'return nil\n',
     );
 
@@ -547,12 +512,6 @@ windowsDescribe('Windows platform support', () => {
     expect(
       fs.readFileSync(
         path.join(staleAliasBmf, 'Scripts', 'main.lua'),
-        'utf8',
-      ),
-    ).toBe('return nil\n');
-    expect(
-      fs.readFileSync(
-        path.join(staleAliasBmf, 'Scripts', 'bmf', 'runtime.lua'),
         'utf8',
       ),
     ).toBe('return nil\n');

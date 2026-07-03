@@ -9,7 +9,7 @@ link here instead of redefining it.
 | --- | --- |
 | BMF | Brickadia Modding Framework, the UE4SS-loaded Lua framework for server-side Brickadia plugins. |
 | UE4SS | Unreal Engine 4 scripting/runtime layer BMF uses to load Lua and call selected Brickadia/Unreal surfaces. |
-| BMF-supported Omegga fork | The supported Windows Omegga fork used for server launch, UE4SS setup, command transport, player sync, logs, and validation. |
+| BMF-vendored Omegga runtime | The supported Windows Omegga fork used for server launch, UE4SS setup, command transport, player sync, logs, and validation. |
 | Stock upstream Omegga | Upstream Omegga builds outside the supported BMF Windows fork. These are not the current supported BMF runtime. |
 | BMFSocket | Native UE4SS C++ transport used by BMF for loopback command responses and event delivery. |
 | Socket broker | The authenticated loopback TCP broker started by the supported Omegga fork for BMF and Omegga plugin clients. |

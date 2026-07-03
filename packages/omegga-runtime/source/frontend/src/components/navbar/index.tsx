@@ -1,8 +1,18 @@
 import { useStore } from '@nanostores/react';
 import type { HTMLAttributes, PropsWithChildren } from 'react';
+import { useState } from 'react';
+import { Link } from 'wouter';
+import { AnimatedDropdown } from '../animated-dropdown';
 import { Button } from '../button';
 import { logout } from '../../utils';
-import { IconLogout } from '@tabler/icons-react';
+import {
+  IconArrowLeft,
+  IconCaretDown,
+  IconCaretUp,
+  IconLogout,
+  IconUser,
+  IconUserCog,
+} from '@tabler/icons-react';
 import { $showLogout, $user } from '../../stores/user';
 
 export const NavBar = ({
@@ -19,27 +29,61 @@ export const NavHeader = ({
   title,
   className,
   children,
-}: PropsWithChildren<{ title: string; className?: string }>) => {
+  onBack,
+}: PropsWithChildren<{
+  title: string;
+  className?: string;
+  // When set, a back button is shown on the left (mobile only) - used to
+  // dismiss the inspector overlay.
+  onBack?: () => void;
+}>) => {
   const user = useStore($user);
   const showLogout = useStore($showLogout);
+  const [menuOpen, setMenuOpen] = useState(false);
 
   return (
     <div className={`main-nav ${className ?? ''}`}>
       <header className="nav-header">{title}</header>
       <NavBar>
-        <span style={{ flex: 1, marginLeft: 8 }}>
-          Welcome, {user?.username ?? '...'}
-        </span>
+        {onBack && (
+          <Button
+            normal
+            icon
+            className="nav-back"
+            data-tooltip="Back"
+            onClick={onBack}
+          >
+            <IconArrowLeft />
+          </Button>
+        )}
+        <span style={{ flex: 1 }} />
         {children}
         {showLogout && (
-          <Button
-            icon
-            error
-            data-tooltip="Logout of Web UI"
-            onClick={() => logout()}
-          >
-            <IconLogout />
-          </Button>
+          <div className="widgets-container user-menu">
+            <Button normal boxy onClick={() => setMenuOpen(!menuOpen)}>
+              <IconUser />
+              <span className="user-menu-name">
+                {user?.username || 'Admin'}
+              </span>
+              {menuOpen ? <IconCaretUp /> : <IconCaretDown />}
+            </Button>
+            <AnimatedDropdown visible={menuOpen}>
+              <Link
+                href="/account"
+                className="button normal"
+                onClick={() => setMenuOpen(false)}
+              >
+                <div className="button-content">
+                  <IconUserCog />
+                  Account
+                </div>
+              </Link>
+              <Button error onClick={() => logout()}>
+                <IconLogout />
+                Logout
+              </Button>
+            </AnimatedDropdown>
+          </div>
         )}
       </NavBar>
     </div>

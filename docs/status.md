@@ -15,7 +15,7 @@ BMF maintainers should use it as the public capability dashboard.
 
 | Area | Current state |
 | --- | --- |
-| Supported runtime | Windows Brickadia dedicated server through the BMF-supported Omegga fork. |
+| Supported runtime | Windows Brickadia dedicated server through the BMF-vendored Omegga runtime. |
 | Stability | Experimental framework bring-up; no production-ready API claim yet. |
 | Best-supported plugin path | Lua plugins, capability gates, storage, events, timers, audit/logging, and command registration. |
 | Best-supported integration path | Omegga bridge plus BMFSocket as the live command/event transport. |

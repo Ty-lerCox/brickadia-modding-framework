@@ -8,34 +8,14 @@ import BrickadiaServer from '@brickadia/server';
 import { IConfig } from '@config/types';
 import EventEmitter from 'events';
 import path from 'path';
+import { migrateConsoleCommand } from './commands';
 import LogWrangler from './logWrangler';
 import type Omegga from './server';
-
-export type OmeggaConsoleCommandMetric = {
-  command: string;
-  count: number;
-  lastAtMs: number;
-};
-
-export const normalizeConsoleCommandFamily = (command: string) => {
-  const tokens =
-    String(command || '')
-      .trim()
-      .match(/"[^"]*"|\S+/g)
-      ?.map(token => token.replace(/^"|"$/g, '')) ?? [];
-  const primary = tokens[0] || 'empty';
-  if (primary === 'GetAll' && tokens[1]) return `${primary} ${tokens[1]}`;
-  if (primary === 'Chat.Command' && tokens[1]) {
-    return `${primary} ${tokens[1]}`;
-  }
-  return primary.slice(0, 80);
-};
 
 class OmeggaWrapper extends EventEmitter {
   #server: BrickadiaServer;
   dataPath: string;
   path: string;
-  consoleCommandMetrics: Record<string, OmeggaConsoleCommandMetric> = {};
 
   logWrangler: LogWrangler;
   addMatcher: LogWrangler['addMatcher'];
@@ -62,17 +42,8 @@ class OmeggaWrapper extends EventEmitter {
     this.logWrangler = new LogWrangler(this as unknown as Omegga);
     this.#server.on('line', this.logWrangler.callback);
     this.#server.on('line', (line: string) => this.emit('line', line));
+    this.#server.on('err', (line: string) => this.emit('err', line));
     this.#server.on('closed', () => this.emit('closed'));
-    this.#server.on('control:ready', payload =>
-      this.emit('control:ready', payload),
-    );
-    this.#server.on('control:degraded', payload =>
-      this.emit('control:degraded', payload),
-    );
-    this.#server.on('control:log', payload => this.emit('control:log', payload));
-    this.#server.on('control:complete', payload =>
-      this.emit('control:complete', payload),
-    );
 
     this.addMatcher = this.logWrangler.addMatcher;
     this.addWatcher = this.logWrangler.addWatcher;
@@ -87,16 +58,21 @@ class OmeggaWrapper extends EventEmitter {
   write(str: string) {
     this.#server.write(str);
   }
-  writelnAsync(str: string) {
-    this.recordConsoleCommand(str);
-    return this.#server.writelnAsync(str);
-  }
   writeln(str: string) {
-    this.recordConsoleCommand(str);
-    this.#server.writeln(str);
+    // auto-migrate stale console command names to the running game version's
+    // name (e.g. `Bricks.Clear` -> `br.Bricks.Clear`) so older plugins keep
+    // working. OmeggaWrapper is never used without Omegga, so `version` exists.
+    this.#server.writeln(
+      migrateConsoleCommand(str, (this as unknown as Omegga).version),
+    );
+  }
+  async writelnAsync(str: string) {
+    // Keep safe-plugin borrowed methods aligned with the synchronous write path.
+    await this.#server.writelnAsync(
+      migrateConsoleCommand(str, (this as unknown as Omegga).version),
+    );
   }
   execControlCommandWithOutput(command: string, timeoutMs?: number) {
-    this.recordConsoleCommand(command);
     return this.#server.execControlCommandWithOutput(command, timeoutMs);
   }
   start() {
@@ -113,18 +89,6 @@ class OmeggaWrapper extends EventEmitter {
   }
   getWindowsControlBackend() {
     return this.#server.getWindowsControlBackend();
-  }
-
-  private recordConsoleCommand(command: string) {
-    const family = normalizeConsoleCommandFamily(command);
-    const existing = this.consoleCommandMetrics[family] ?? {
-      command: family,
-      count: 0,
-      lastAtMs: 0,
-    };
-    existing.count += 1;
-    existing.lastAtMs = Date.now();
-    this.consoleCommandMetrics[family] = existing;
   }
 
   // event emitter to catch everything

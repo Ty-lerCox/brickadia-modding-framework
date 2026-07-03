@@ -88,7 +88,6 @@ $requiredFiles = @(
   'packages/omegga-runtime/source/src/omegga/index.ts',
   'packages/omegga-runtime/source/tools/package-bmf-omegga.js',
   'packages/omegga-runtime/source/templates/windows-ue4ss/ue4ss/Mods/BMF/Scripts/main.lua',
-  'packages/omegga-runtime/source/templates/windows-ue4ss/ue4ss/Mods/BMF/Scripts/bmf/runtime.lua',
   'packages/omegga-plugins/bmf-bridge/plugin.json',
   'packages/omegga-plugins/bmf-bridge/doc.json',
   'packages/omegga-plugins/bmf-bridge/access.json',
@@ -394,7 +393,7 @@ foreach ($jsonRelative in @(
 $standaloneDoc = Join-Path $Root 'docs/architecture/standalone-runtime.md'
 if (Test-Path -LiteralPath $standaloneDoc) {
   $source = Get-Content -Raw -LiteralPath $standaloneDoc
-  foreach ($needle in @('Omegga Requirement', 'BMF-supported Omegga Windows fork', 'Documentation Rule', 'Replacement Criteria')) {
+  foreach ($needle in @('Omegga Requirement', 'BMF-vendored Omegga Windows runtime', 'Documentation Rule', 'Replacement Criteria')) {
     if ($source -notmatch [regex]::Escape($needle)) {
       $errors.Add("standalone-runtime.md does not contain expected marker: $needle")
     }

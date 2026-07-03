@@ -2,8 +2,8 @@
 
 Status: supported Omegga adapter.
 
-This plugin is part of the current BMF-supported Omegga Windows fork direction:
-<https://github.com/Ty-lerCox/bmf-omegga-fork>. It feeds safe Omegga player
+This plugin is part of the current BMF-vendored Omegga Windows runtime direction:
+<https://github.com/Ty-lerCox/brickadia-modding-framework/tree/main/packages/omegga-runtime>. It feeds safe Omegga player
 identity records into BMF without requiring BMF Lua to read unsafe live
 `PlayerState` properties directly.
 

@@ -1,4 +1,4 @@
-import default_commands from '@/info/default_commands.json';
+﻿import default_commands from '@/info/default_commands.json';
 import Logger from '@/logger';
 import { OmeggaLike, OmeggaPlayer, PluginInterop } from '@/plugin';
 import {
@@ -709,6 +709,7 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
   verbose: boolean;
   savePath: string;
   worldPath: string;
+  prefabPath: string;
   presetPath: string;
   configPath: string;
   options: IOmeggaOptions;
@@ -753,6 +754,7 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
     // path to save files
     this.savePath = join(this.path, DATA_PATH, savedDir, 'Builds');
     this.worldPath = join(this.path, DATA_PATH, savedDir, 'Worlds');
+    this.prefabPath = join(this.path, DATA_PATH, savedDir, 'Prefabs');
 
     this.presetPath = join(this.path, DATA_PATH, savedDir, 'Presets');
 

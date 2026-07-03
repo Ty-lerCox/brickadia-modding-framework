@@ -34,8 +34,8 @@ Key entry points:
 
 ## Runtime Model
 
-BMF currently targets the BMF-supported Omegga Windows fork for server
-operation. The supported fork owns launch coordination, player sync, minigame
+BMF currently targets the BMF-vendored Omegga Windows runtime for server
+operation. The vendored runtime owns launch coordination, player sync, minigame
 event feeding, live chat helper delivery, metrics export, and validation
 workflows.
 

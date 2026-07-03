@@ -1,14 +1,10 @@
 .github/
 .vscode/
-/artifacts/
+.claude/
 /data/
-/data-clean-*/
 /plugins/
-/plugins-disabled/
 /src/
 /frontend/
-/tools/
-*.log
 .omegga-config.yml
 .omegga.yml
 .prettierrc
@@ -21,3 +17,4 @@ test.js
 webpack.config.js
 vite.*.config.mts
 vitest.*.config.mts
+.mcp.json

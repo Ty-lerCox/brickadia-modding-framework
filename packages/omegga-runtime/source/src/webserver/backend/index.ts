@@ -24,6 +24,7 @@ import {
 import Database from './database';
 import { verifyToken as verifyTOTP } from './totp';
 import setupMetrics from './metrics';
+import setupPrometheusExporter from './prometheus';
 import { appRouter } from './router';
 import { setWebserver } from './router/server';
 import { createContext, setContextDeps } from './trpc';
@@ -384,6 +385,7 @@ export default class Webserver {
 
     // setup metrics and tracking
     setupMetrics(this);
+    setupPrometheusExporter(this);
 
     // every request goes through the index file (frontend handles 404s)
     this.app.use(async (req, res) => {

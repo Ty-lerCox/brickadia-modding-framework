@@ -4,7 +4,7 @@ BMF is the Brickadia Modding Framework: a server-side Lua framework for
 Windows Brickadia dedicated servers, backed by UE4SS and Brickadia-specific
 runtime compatibility work.
 
-Current target: Brickadia EA2 `PC-Shipping-CL13530`.
+Current target: Brickadia EA3 `PC-Shipping-CL24045983`.
 
 ## Start Here
 

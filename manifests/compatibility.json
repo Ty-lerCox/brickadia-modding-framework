@@ -1,7 +1,7 @@
 {
-  "generatedFor": "BMF 0.1.0-ea2.cl13530",
+  "generatedFor": "BMF 0.1.0-ea3.cl24045983",
   "brickadia": {
-    "primaryTarget": "Brickadia EA2 (PC-Shipping-CL13530)",
+    "primaryTarget": "Brickadia EA3 (PC-Shipping-CL24045983)",
     "serverExecutable": "BrickadiaServer-Win64-Shipping.exe",
     "platform": "Windows"
   },
@@ -70,7 +70,7 @@
     "compatibility.diagnostics": {
       "status": "headless-proven",
       "minimumValidation": "L2 Headless for BMF.compatibility.check/helpers, bmf.compatibility output, health/status compatibility fields, target build metadata, and UE4SS helper availability",
-      "notes": "BMF reports the declared target Brickadia build PC-Shipping-CL13530, Windows dedicated-server scope, report-only unsupported-build policy, and required/optional runtime helper groups. Full unsupported-build refusal waits for reliable runtime Brickadia build detection."
+      "notes": "BMF reports the declared target Brickadia build PC-Shipping-CL24045983, Windows dedicated-server scope, report-only unsupported-build policy, and required/optional runtime helper groups. Full unsupported-build refusal waits for reliable runtime Brickadia build detection."
     },
     "apiLabels.runtime": {
       "status": "headless-proven",
@@ -187,8 +187,8 @@
     },
     "server.shutdown": {
       "status": "headless-negative-proven-unavailable",
-      "minimumValidation": "L2 Headless + L5 Negative for missing-confirmation rejection and confirmed CL13530 executor safe failure",
-      "notes": "BMF.server.shutdown attempts exit only after confirm=BMF_SHUTDOWN, writes server.shutdown and server.shutdown.executed audit records, and is exposed through bmf.server.shutdown. Current CL13530 console-manager exit returns SHUTDOWN_UNAVAILABLE / CONSOLE_EXEC_FAILED, so actual stop/restart remains external-supervisor work. Plugin calls require server.shutdown plus allowPluginServerShutdown=true."
+      "minimumValidation": "L2 Headless + L5 Negative for missing-confirmation rejection and prior-target executor safe failure",
+      "notes": "BMF.server.shutdown attempts exit only after confirm=BMF_SHUTDOWN, writes server.shutdown and server.shutdown.executed audit records, and is exposed through bmf.server.shutdown. The prior CL13530 console-manager exit path returned SHUTDOWN_UNAVAILABLE / CONSOLE_EXEC_FAILED; EA3 shutdown execution remains external-supervisor work until revalidated. Plugin calls require server.shutdown plus allowPluginServerShutdown=true."
     },
     "permissions.rolePatch": {
       "status": "file-backed",

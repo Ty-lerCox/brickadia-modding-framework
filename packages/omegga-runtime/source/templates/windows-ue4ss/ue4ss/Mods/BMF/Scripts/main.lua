@@ -1,5 +1,5 @@
 local MOD_NAME = "BMF"
-local VERSION = "0.1.0-dev"
+local VERSION = "0.1.0-ea3.cl24045983"
 local ROOT = "ue4ss/main/Mods/" .. MOD_NAME
 local function append_package_path(path)
   if type(package) ~= "table" or type(package.path) ~= "string" then
@@ -29,8 +29,8 @@ local COMMAND_DIR = RUNTIME_DIR .. "/commands"
 local PLAYER_CACHE_PATH = RUNTIME_DIR .. "/players.json"
 local PLAYER_POSITIONS_SNAPSHOT_PATH = RUNTIME_DIR .. "/player-positions.json"
 local MINIGAME_DEFINITIONS_PATH = RUNTIME_DIR .. "/minigames/definitions.json"
-local TARGET_BRICKADIA_BUILD = "PC-Shipping-CL13530"
-local TARGET_BRICKADIA_NAME = "Brickadia EA2"
+local TARGET_BRICKADIA_BUILD = "PC-Shipping-CL24045983"
+local TARGET_BRICKADIA_NAME = "Brickadia EA3"
 local TARGET_SERVER_EXECUTABLE = "BrickadiaServer-Win64-Shipping.exe"
 local TARGET_PLATFORM = "windows-dedicated-server"
 local BUILD_DETECTION_MODE = "declared-target-only"
@@ -1898,7 +1898,7 @@ API_REGISTRY = {
   { name = "BMF.storage.writeConfig", namespace = "storage", kind = "function", stability = "stable", risk = "medium", validation = "L2 Headless", requiresPlayer = false, capability = "plugins.storage", summary = "Encode and write plugin config.json." },
   { name = "BMF.server.status", namespace = "server", kind = "function", stability = "stable", risk = "low", validation = "L2 Headless", requiresPlayer = false, capability = "", summary = "Structured BMF/server status with unknown live fields marked." },
   { name = "BMF.server.save", namespace = "server", kind = "function", stability = "experimental", risk = "medium", validation = "L2 Headless", requiresPlayer = false, capability = "server.save", summary = "Save current world through BMF.world.saveAs." },
-  { name = "BMF.server.shutdown", namespace = "server", kind = "function", stability = "restricted", risk = "high", validation = "L2 Headless + L5 Negative safe-failure on CL13530", requiresPlayer = false, capability = "server.shutdown", summary = "Attempt a confirmed server exit command and report unsupported executors explicitly." },
+  { name = "BMF.server.shutdown", namespace = "server", kind = "function", stability = "restricted", risk = "high", validation = "L2 Headless + L5 Negative safe-failure; EA3 executor revalidation pending", requiresPlayer = false, capability = "server.shutdown", summary = "Attempt a confirmed server exit command and report unsupported executors explicitly." },
   { name = "BMF.server.exec", namespace = "server", kind = "function", stability = "restricted", risk = "unsafe-native", validation = "L2 Headless + L5 Negative", requiresPlayer = false, capability = "server.exec", summary = "Raw console execution; prefer typed wrappers." },
   { name = "BMF.server.planSettingsPatch", namespace = "server", kind = "function", stability = "file-backed", risk = "medium", validation = "L0 Static", requiresPlayer = false, capability = "", summary = "Plan copied GameUserSettings.ini changes." },
   { name = "BMF.chat.broadcast", namespace = "chat", kind = "function", stability = "experimental", risk = "medium", validation = "L3 Live Player UI confirmed", requiresPlayer = false, capability = "chat.broadcast", summary = "Broadcasts by fanning out ClientPushChatMessage once per live player controller." },
@@ -9288,7 +9288,7 @@ local function ensure_applicator_component_hook()
   end
   if state.config.allowUnsafeApplicatorLuaHook ~= true then
     app.enabled = false
-    app.last_error = "Unsafe UE4SS Lua RegisterHook path is disabled; ServerAddComponent struct parameters crash while being marshaled to Lua on Brickadia CL13530"
+    app.last_error = "Unsafe UE4SS Lua RegisterHook path is disabled; ServerAddComponent struct parameter marshaling requires per-build revalidation on the current Brickadia target"
     return result(false, "APPLICATOR_LUA_HOOK_UNSAFE", app.last_error, {
       hookMode = "unsafe-lua-registerhook-disabled",
       optInConfig = "allowUnsafeApplicatorLuaHook",

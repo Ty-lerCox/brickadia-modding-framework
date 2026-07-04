@@ -27,6 +27,7 @@ const UE4SS_BUNDLE_MANIFEST_FILENAME = 'manifest.json';
 const UE4SS_VALIDATION_REPORT_JSON_FILENAME = 'validation-report.json';
 const UE4SS_VALIDATION_REPORT_MARKDOWN_FILENAME = 'validation-report.md';
 const UE4SS_VTABLE_LAYOUT_FILENAME = 'VTableLayout.ini';
+const UE4SS_MEMBER_VARIABLE_LAYOUT_FILENAME = 'MemberVariableLayout.ini';
 const UE4SS_CACHE_DIR = path.join(CONFIG_HOME, 'ue4ss');
 const UE4SS_BRIDGE_MOD_NAME = 'OmeggaBridge';
 const UE4SS_PROBE_MOD_NAME = 'OmeggaBridgeProbe';
@@ -47,11 +48,15 @@ const CUSTOM_GAME_CONFIG_ALIASES = [
   'BrickadiaServer-Win64-Shipping',
 ] as const;
 const UE4SS_PINNED_COMPATIBILITY_BUNDLE_ID =
-  process.env.OMEGGA_UE4SS_COMPAT_BUNDLE ?? 'CL13530';
+  process.env.OMEGGA_UE4SS_COMPAT_BUNDLE ?? 'CL24045983';
 const COMPATIBILITY_BUNDLE_REQUIRED_FILES = [
   UE4SS_VTABLE_LAYOUT_FILENAME,
+  UE4SS_MEMBER_VARIABLE_LAYOUT_FILENAME,
+  'CustomGameConfigs/Brickadia/VTableLayout.ini',
+  'CustomGameConfigs/Brickadia/MemberVariableLayout.ini',
   'CustomGameConfigs/Brickadia/UE4SS-settings.ini',
   'CustomGameConfigs/Brickadia/UE4SS_Signatures/CallFunctionByNameWithArguments.lua',
+  'CustomGameConfigs/Brickadia/UE4SS_Signatures/FName_Constructor.lua',
   'CustomGameConfigs/Brickadia/UE4SS_Signatures/FName_ToString.lua',
   'CustomGameConfigs/Brickadia/UE4SS_Signatures/GNatives.lua',
   'CustomGameConfigs/Brickadia/UE4SS_Signatures/GUObjectArray.lua',
@@ -484,6 +489,10 @@ function overlayCompatibilityBundle(
     compatibilityBundle.root,
     UE4SS_VTABLE_LAYOUT_FILENAME,
   );
+  const bundleMemberVariableLayout = path.join(
+    compatibilityBundle.root,
+    UE4SS_MEMBER_VARIABLE_LAYOUT_FILENAME,
+  );
 
   if (!fs.existsSync(bundleConfigDir)) {
     throw new Error(
@@ -497,11 +506,32 @@ function overlayCompatibilityBundle(
       path.join(targetUe4ssDir, UE4SS_VTABLE_LAYOUT_FILENAME),
     );
   }
+  if (fs.existsSync(bundleMemberVariableLayout)) {
+    fs.copyFileSync(
+      bundleMemberVariableLayout,
+      path.join(targetUe4ssDir, UE4SS_MEMBER_VARIABLE_LAYOUT_FILENAME),
+    );
+  }
 
   replaceDirectory(bundleConfigDir, targetCanonicalConfigDir);
+  copyCompatibilityLayoutFiles(compatibilityBundle.root, targetCanonicalConfigDir);
 
   for (const alias of normalizedAliases) {
-    replaceDirectory(bundleConfigDir, path.join(targetUe4ssDir, alias));
+    const targetAliasConfigDir = path.join(targetUe4ssDir, alias);
+    replaceDirectory(bundleConfigDir, targetAliasConfigDir);
+    copyCompatibilityLayoutFiles(compatibilityBundle.root, targetAliasConfigDir);
+  }
+}
+
+function copyCompatibilityLayoutFiles(sourceRoot: string, targetDir: string) {
+  for (const filename of [
+    UE4SS_VTABLE_LAYOUT_FILENAME,
+    UE4SS_MEMBER_VARIABLE_LAYOUT_FILENAME,
+  ]) {
+    const sourcePath = path.join(sourceRoot, filename);
+    if (fs.existsSync(sourcePath)) {
+      fs.copyFileSync(sourcePath, path.join(targetDir, filename));
+    }
   }
 }
 

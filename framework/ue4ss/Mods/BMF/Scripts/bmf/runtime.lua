@@ -1910,6 +1910,7 @@ API_REGISTRY = {
   { name = "BMF.players.find", namespace = "players", kind = "function", stability = "scaffold", risk = "live-player", validation = "L0 Fixture + L2 Headless negative; L3 Live Player for real records", requiresPlayer = true, capability = "", summary = "Fixture-proven lookup plus empty live adapter safety." },
   { name = "BMF.players.resolve", namespace = "players", kind = "function", stability = "scaffold", risk = "live-player", validation = "L0 Fixture + L2 Headless negative; L3 Live Player for real records", requiresPlayer = true, capability = "", summary = "Resolve direct or current-list player query." },
   { name = "BMF.players.getName", namespace = "players", kind = "function", stability = "scaffold", risk = "live-player", validation = "L0 Fixture + L2 Headless negative; L3 Live Player for real records", requiresPlayer = true, capability = "", summary = "Return normalized identity fields." },
+  { name = "BMF.players.setLeaderboardValue", namespace = "players", kind = "function", stability = "experimental", risk = "live-player", validation = "L3 Live Player native BRPlayerState SetLeaderboardValue", requiresPlayer = true, capability = "ue4ss-player-state-write", summary = "Set one live player's named leaderboard value through BRPlayerState native APIs." },
   { name = "BMF.players.summary", namespace = "players", kind = "function", stability = "experimental", risk = "low", validation = "L0 Static + L2 Headless; L3 Live Player for whispered delivery", requiresPlayer = false, capability = "", summary = "Resolve one player and include known-player/live-controller counts." },
   { name = "BMF.players.positions", namespace = "players", kind = "function", stability = "experimental", risk = "live-player", validation = "L0 Static + L3 Live Player", requiresPlayer = true, capability = "", summary = "Read live player pawn positions from safe PlayerState/Controller references." },
   { name = "BMF.players.whisperSummary", namespace = "players", kind = "function", stability = "experimental", risk = "live-player", validation = "L0 Static + L3 Live Player for visible delivery", requiresPlayer = true, capability = "chat.whisper", summary = "Whisper a cached identity summary back to the selected player." },
@@ -4498,6 +4499,28 @@ local function register_builtin_commands()
     }
     snapshot.data = data
     return snapshot
+  end)
+
+  BMF.commands.register("bmf.players.set-leaderboard", "Set one live player's named leaderboard value through BRPlayerState native APIs.", function(args)
+    local options = parse_command_options(args)
+    local positional = type(options._positional) == "table" and options._positional or {}
+    local player_query = options.player or options.query or options.name or options.uuid or positional[1] or ""
+    local key = options.key or options.stat or options.leaderboard or positional[2] or ""
+    local value = options.value or options.amount or positional[3] or ""
+    local written = BMF.players.setLeaderboardValue(player_query, key, value, {
+      dryRun = option_boolean(options, "dryrun", false),
+    })
+    local data = written.data or {}
+    data.lines = data.lines or {
+      "source=bmf.players.setLeaderboardValue",
+      "player=" .. tostring(player_query or ""),
+      "key=" .. tostring(key or ""),
+      "value=" .. tostring(value or ""),
+      "ok=" .. tostring(written.ok == true),
+      "code=" .. tostring(written.code or ""),
+    }
+    written.data = data
+    return written
   end)
 
   BMF.commands.register("bmf.players.sync", "Sync safe external player identity records into BMF.", function(args)
@@ -20259,6 +20282,294 @@ BMF.players.getName = function(player)
     originalName = record.originalName,
     source = resolved.data.source,
     adapter = resolved.data.adapter,
+  })
+end
+
+local PLAYER_LEADERBOARD_SET_FUNCTION_CANDIDATES = {
+  "Function /Script/Brickadia.BRPlayerState:SetLeaderboardValue",
+  "Function /Script/Brickadia.BRPlayerState.SetLeaderboardValue",
+  "/Script/Brickadia.BRPlayerState:SetLeaderboardValue",
+  "/Script/Brickadia.BRPlayerState.SetLeaderboardValue",
+  "SetLeaderboardValue",
+}
+
+local function player_leaderboard_quote_arg(value)
+  local text = tostring(value or "")
+  if text:match("^[A-Za-z0-9_.:@%-]+$") then
+    return text
+  end
+  return '"' .. text:gsub("\\", "\\\\"):gsub('"', '\\"') .. '"'
+end
+
+local function player_leaderboard_make_fname(key)
+  if type(FName) ~= "function" then
+    return nil, "FName helper is unavailable"
+  end
+  local mode = EFindName and EFindName.FNAME_Add or 1
+  local ok, value = pcall(FName, tostring(key or ""), mode)
+  if ok and value ~= nil then
+    return value, ""
+  end
+  return nil, tostring(value or "FName construction failed")
+end
+
+local function player_leaderboard_find_set_function()
+  if type(StaticFindObject) ~= "function" then
+    return nil, "", { "StaticFindObject unavailable" }
+  end
+  local errors = {}
+  for _, candidate in ipairs(PLAYER_LEADERBOARD_SET_FUNCTION_CANDIDATES) do
+    local ok, object = pcall(StaticFindObject, candidate)
+    if ok and minigame_object_valid(object) then
+      return object, candidate, errors
+    end
+    errors[#errors + 1] = tostring(candidate) .. "=" .. tostring(ok and object or object)
+  end
+  return nil, "", errors
+end
+
+local function player_leaderboard_try_call_by_name(player_state, key, value)
+  local attempts = {}
+  if type(OmeggaCallFunctionByNameWithArguments) ~= "function" then
+    return false, attempts, "OmeggaCallFunctionByNameWithArguments unavailable"
+  end
+
+  local commands = {
+    "SetLeaderboardValue " .. player_leaderboard_quote_arg(key) .. " " .. tostring(value),
+    "SetLeaderboardValue " .. player_leaderboard_quote_arg(key) .. " " .. player_leaderboard_quote_arg(value),
+    "SetLeaderboardValue " .. tostring(key) .. " " .. tostring(value),
+  }
+  for index, command in ipairs(commands) do
+    local ok, call_result, detail = pcall(
+      OmeggaCallFunctionByNameWithArguments,
+      player_state,
+      command,
+      player_state
+    )
+    attempts[#attempts + 1] = {
+      method = "callbyname",
+      index = index,
+      command = command,
+      ok = ok,
+      result = call_result,
+      detail = detail,
+    }
+    if ok and call_result ~= false then
+      return true, attempts, tostring(detail or "")
+    end
+  end
+
+  return false, attempts, "all CallFunctionByNameWithArguments attempts returned false"
+end
+
+local function player_leaderboard_try_direct_call(player_state, key, value)
+  local attempts = {}
+  if type(player_state) ~= "userdata" and type(player_state) ~= "table" then
+    return false, attempts, "player state is not callable"
+  end
+  if type(player_state.CallFunction) ~= "function" then
+    return false, attempts, "player state CallFunction helper is unavailable"
+  end
+
+  local function_object, function_source, function_errors = player_leaderboard_find_set_function()
+  if not function_object then
+    return false, attempts, table.concat(function_errors or {}, "|")
+  end
+
+  local fname_value, fname_error = player_leaderboard_make_fname(key)
+  local key_variants = {}
+  if fname_value ~= nil then
+    key_variants[#key_variants + 1] = {
+      label = "fname",
+      value = fname_value,
+    }
+  else
+    attempts[#attempts + 1] = {
+      method = "direct",
+      command = "FName(" .. tostring(key or "") .. ")",
+      ok = false,
+      result = false,
+      detail = fname_error,
+    }
+  end
+  key_variants[#key_variants + 1] = {
+    label = "string",
+    value = tostring(key or ""),
+  }
+
+  for index, key_variant in ipairs(key_variants) do
+    local ok, call_result = pcall(function()
+      return player_state:CallFunction(function_object, key_variant.value, value)
+    end)
+    attempts[#attempts + 1] = {
+      method = "direct",
+      index = index,
+      command = "CallFunction(" .. tostring(function_source or "") .. "," .. tostring(key_variant.label) .. "," .. tostring(value) .. ")",
+      ok = ok,
+      result = call_result,
+      detail = "",
+    }
+    if ok and call_result ~= false then
+      return true, attempts, tostring(function_source or "")
+    end
+  end
+
+  return false, attempts, "all direct CallFunction attempts returned false"
+end
+
+BMF.players.setLeaderboardValue = function(player, key, value, options)
+  local started_clock = os.clock()
+  local opts = type(options) == "table" and options or {}
+  local query = trim_string(player_query_text(player))
+  local leaderboard_key = trim_string(key or "")
+  local numeric_value, value_error = normalize_integer(value, "leaderboard value")
+  local dry_run = opts.dryRun == true
+  local attempts = {}
+
+  if query == "" then
+    return result(false, "PLAYER_REQUIRED", "player query is required", {
+      lines = {
+        "code=PLAYER_REQUIRED",
+        "source=bmf.players.setLeaderboardValue",
+      },
+    })
+  end
+  if leaderboard_key == "" then
+    return result(false, "LEADERBOARD_KEY_REQUIRED", "leaderboard key is required", {
+      player = query,
+      lines = {
+        "code=LEADERBOARD_KEY_REQUIRED",
+        "source=bmf.players.setLeaderboardValue",
+        "player=" .. query,
+      },
+    })
+  end
+  if numeric_value == nil then
+    return result(false, "INVALID_LEADERBOARD_VALUE", tostring(value_error or "leaderboard value must be an integer"), {
+      player = query,
+      key = leaderboard_key,
+      value = tostring(value or ""),
+      lines = {
+        "code=INVALID_LEADERBOARD_VALUE",
+        "source=bmf.players.setLeaderboardValue",
+        "player=" .. query,
+        "key=" .. leaderboard_key,
+        "value=" .. tostring(value or ""),
+        "error=" .. tostring(value_error or ""),
+      },
+    })
+  end
+
+  local resolve_started_clock = os.clock()
+  local player_item, candidates, meta = minigame_live_resolve_player_state_for_assignment(query)
+  local resolve_duration_ms = math.floor(((os.clock() - resolve_started_clock) * 1000) + 0.5)
+  if not player_item or not minigame_object_valid(player_item.object) then
+    return result(false, "PLAYER_STATE_NOT_FOUND", "live player state was not found", {
+      player = query,
+      key = leaderboard_key,
+      value = numeric_value,
+      candidates = candidates or {},
+      sourceMode = meta and meta.source or "",
+      lines = {
+        "code=PLAYER_STATE_NOT_FOUND",
+        "source=bmf.players.setLeaderboardValue",
+        "player=" .. query,
+        "key=" .. leaderboard_key,
+        "value=" .. tostring(numeric_value),
+        "source_mode=" .. tostring(meta and meta.source or ""),
+        "fast_path=" .. tostring(meta and meta.fastPath or ""),
+        "resolve_ms=" .. tostring(resolve_duration_ms),
+        "candidates=" .. table.concat(candidates or {}, "|"),
+      },
+    })
+  end
+
+  local player_state = player_item.object
+  local lines = {
+    "code=OK",
+    "source=bmf.players.setLeaderboardValue",
+    "player=" .. query,
+    "key=" .. leaderboard_key,
+    "value=" .. tostring(numeric_value),
+    "dry_run=" .. tostring(dry_run),
+    "source_mode=" .. tostring(meta and meta.source or ""),
+    "fast_path=" .. tostring(meta and meta.fastPath or ""),
+    "resolve_ms=" .. tostring(resolve_duration_ms),
+    "player_state=" .. minigame_object_address(player_state),
+    "player_state_name=" .. minigame_object_name(player_state),
+    "player_state_full=" .. minigame_object_full_name(player_state),
+  }
+
+  if dry_run then
+    lines[#lines + 1] = "ok=true"
+    lines[#lines + 1] = "method=dry-run"
+    lines[#lines + 1] = "total_ms=" .. tostring(math.floor(((os.clock() - started_clock) * 1000) + 0.5))
+    return result(true, "OK", "Leaderboard write dry run completed", {
+      player = query,
+      key = leaderboard_key,
+      value = numeric_value,
+      playerState = minigame_object_address(player_state),
+      lines = lines,
+    })
+  end
+
+  local call_by_name_ok, call_by_name_attempts, call_by_name_detail =
+    player_leaderboard_try_call_by_name(player_state, leaderboard_key, numeric_value)
+  for _, attempt in ipairs(call_by_name_attempts or {}) do
+    attempts[#attempts + 1] = attempt
+  end
+  local method = "callbyname"
+  local detail = call_by_name_detail
+  local write_ok = call_by_name_ok
+
+  if not write_ok then
+    local direct_ok, direct_attempts, direct_detail =
+      player_leaderboard_try_direct_call(player_state, leaderboard_key, numeric_value)
+    for _, attempt in ipairs(direct_attempts or {}) do
+      attempts[#attempts + 1] = attempt
+    end
+    method = "direct"
+    detail = direct_detail
+    write_ok = direct_ok
+  end
+
+  for index, attempt in ipairs(attempts) do
+    lines[#lines + 1] =
+      "attempt_" .. tostring(index) ..
+      "=method=" .. tostring(attempt.method or "") ..
+      "|index=" .. tostring(attempt.index or "") ..
+      "|ok=" .. tostring(attempt.ok) ..
+      "|result=" .. tostring(attempt.result) ..
+      "|detail=" .. tostring(attempt.detail or "") ..
+      "|command=" .. tostring(attempt.command or "")
+  end
+  lines[#lines + 1] = "ok=" .. tostring(write_ok == true)
+  lines[#lines + 1] = "method=" .. tostring(method or "")
+  lines[#lines + 1] = "detail=" .. tostring(detail or "")
+  lines[#lines + 1] = "total_ms=" .. tostring(math.floor(((os.clock() - started_clock) * 1000) + 0.5))
+
+  audit_record("players.set_leaderboard", {
+    player = query,
+    key = leaderboard_key,
+    value = numeric_value,
+    method = method,
+    playerState = minigame_object_address(player_state),
+  }, {
+    source = "framework",
+    severity = write_ok and "info" or "warn",
+    ok = write_ok == true,
+    code = write_ok and "OK" or "LEADERBOARD_WRITE_FAILED",
+  })
+
+  return result(write_ok == true, write_ok and "OK" or "LEADERBOARD_WRITE_FAILED", write_ok and "Leaderboard value written" or "Leaderboard native write failed", {
+    player = query,
+    key = leaderboard_key,
+    value = numeric_value,
+    method = method,
+    detail = detail,
+    playerState = minigame_object_address(player_state),
+    attempts = attempts,
+    lines = lines,
   })
 end
 

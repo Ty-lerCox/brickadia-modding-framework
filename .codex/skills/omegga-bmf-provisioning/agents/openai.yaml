@@ -1,0 +1,7 @@
+interface:
+  display_name: "Omegga BMF Provisioning"
+  short_description: "Keep BMF staged in Omegga servers"
+  default_prompt: "Use $omegga-bmf-provisioning to provision BMF into an Omegga-managed Brickadia server without losing mods or config."
+
+policy:
+  allow_implicit_invocation: true

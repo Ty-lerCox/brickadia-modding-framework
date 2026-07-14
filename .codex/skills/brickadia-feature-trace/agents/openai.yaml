@@ -1,0 +1,7 @@
+interface:
+  display_name: "Brickadia Feature Trace"
+  short_description: "Trace Brickadia gameplay features to hooks"
+  default_prompt: "Use $brickadia-feature-trace to discover how Brickadia implements this feature and identify a validated hook or boundary."
+
+policy:
+  allow_implicit_invocation: true

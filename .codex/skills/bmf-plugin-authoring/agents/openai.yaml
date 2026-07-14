@@ -1,0 +1,7 @@
+interface:
+  display_name: "BMF Plugin Authoring"
+  short_description: "Author and validate BMF Lua plugins"
+  default_prompt: "Use $bmf-plugin-authoring to create or evolve a BMF Lua plugin with commands, config, and validators."
+
+policy:
+  allow_implicit_invocation: true

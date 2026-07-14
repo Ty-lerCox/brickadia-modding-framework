@@ -1,0 +1,4 @@
+interface:
+  display_name: "BMF Performance Guardrails"
+  short_description: "Prevent BMF frame-time regressions."
+  default_prompt: "Use $bmf-performance-guardrails before adding or changing BMF, Omegga, or CityRPG features that can affect Brickadia server frame time."

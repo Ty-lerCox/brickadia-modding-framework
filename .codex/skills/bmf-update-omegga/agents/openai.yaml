@@ -1,0 +1,4 @@
+interface:
+  display_name: "BMF Update Omegga"
+  short_description: "Update BMF Omegga from upstream"
+  default_prompt: "Use $bmf-update-omegga to pull the latest upstream Omegga into the BMF fork and verify the web client."

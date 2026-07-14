@@ -1,0 +1,7 @@
+interface:
+  display_name: "UE4SS Brickadia Crash Forensics"
+  short_description: "Debug Brickadia UE4SS server crashes"
+  default_prompt: "Use $ue4ss-brickadia-crash-forensics to diagnose a Brickadia, UE4SS, bridge, Lua, or native-hook crash."
+
+policy:
+  allow_implicit_invocation: true

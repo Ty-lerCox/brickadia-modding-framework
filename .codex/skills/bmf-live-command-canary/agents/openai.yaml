@@ -1,0 +1,4 @@
+interface:
+  display_name: "BMF Live Command Canary"
+  short_description: "Safely run BMF/Omegga crash canaries"
+  default_prompt: "Use $bmf-live-command-canary to run the BMF/Omegga live command canary validation workflow."

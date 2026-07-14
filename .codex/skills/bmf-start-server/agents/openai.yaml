@@ -1,0 +1,4 @@
+interface:
+  display_name: "BMF Start Server"
+  short_description: "Start and verify the local BMF stack"
+  default_prompt: "Use $bmf-start-server to start the local BMF server stack and verify BMF, Brickadia, Omegga, Alloy, and metrics health."

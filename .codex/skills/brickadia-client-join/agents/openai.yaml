@@ -1,0 +1,4 @@
+interface:
+  display_name: "Brickadia Client Join"
+  short_description: "Fast Brickadia reconnect via AHK"
+  default_prompt: "Use $brickadia-client-join to quickly reconnect the Brickadia client to the local server and verify the logs."

@@ -1,0 +1,7 @@
+interface:
+  display_name: "Brickadia Permission Policy"
+  short_description: "Model Brickadia roles and permissions"
+  default_prompt: "Use $brickadia-permission-policy to inspect, patch, and validate Brickadia role permissions safely."
+
+policy:
+  allow_implicit_invocation: true

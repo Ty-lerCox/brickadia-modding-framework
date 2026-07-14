@@ -1,0 +1,7 @@
+interface:
+  display_name: "Brickadia Native Hook Lifecycle"
+  short_description: "Manage Brickadia native hooks safely"
+  default_prompt: "Use $brickadia-native-hook-lifecycle to discover, refresh, inject, and verify a Brickadia native hook safely."
+
+policy:
+  allow_implicit_invocation: true

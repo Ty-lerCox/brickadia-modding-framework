@@ -1,0 +1,7 @@
+interface:
+  display_name: "BMF Live Server Validation"
+  short_description: "Validate BMF behavior on live servers"
+  default_prompt: "Use $bmf-live-server-validation to validate this BMF change against a live Brickadia/Omegga server."
+
+policy:
+  allow_implicit_invocation: true

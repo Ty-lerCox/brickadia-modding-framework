@@ -60,6 +60,11 @@ delayed or simple callback per request. At the validated 25 ms setting the loop
 is scheduled every two frames, so expect roughly 33 ms game-thread
 quantization.
 
+`/cityrpgRemote` lines have the form
+`/cityrpgRemote action:field1:field2`; the one space after the command name is
+required Brickadia routing syntax. The tunnel does not parse or rewrite those
+colon-delimited fields. `/cityrpgroute` retains its separate legacy grammar.
+
 | Environment variable | Safe value |
 | --- | --- |
 | `BMF_GAME_COMMAND_TUNNEL_ENABLED` | `1` |

@@ -26,7 +26,7 @@ Socket-only mode sends bounded `ping` messages and does not require a player.
 Command mode:
 
 - requires the explicit `--confirm-live` flag;
-- generates only `/cityrpgRemote whisper <player> <unique marker>`;
+- generates only `/cityrpgRemote whisper:<player>:<unique marker>`;
 - allows no user-supplied gameplay action;
 - allows at most 20 command samples;
 - enforces at least 500 milliseconds between command samples;

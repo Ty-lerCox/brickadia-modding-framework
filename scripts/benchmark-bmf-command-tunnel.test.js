@@ -104,14 +104,16 @@ test('parseArgs keeps gameplay probes explicitly opt-in and bounded', () => {
 });
 
 test('safe probe always uses the fixed cityrpgRemote whisper shape', () => {
-  const probe = buildSafeCommandProbe('Player "One"', 'MARKER_123');
+  const probe = buildSafeCommandProbe('Player One', 'MARKER:123');
   assert.equal(
     probe.opaqueCommand,
-    '/cityrpgRemote whisper "Player \\"One\\"" "MARKER_123"',
+    '/cityrpgRemote whisper:Player One:MARKER:123',
   );
   assert.match(probe.bmfCommand, /^bmf\.chat\.player-message-impl message=%2FcityrpgRemote/);
-  assert.match(decodeURIComponent(probe.bmfCommand), /whisper "Player \\"One\\"" "MARKER_123"/);
+  assert.match(decodeURIComponent(probe.bmfCommand), /whisper:Player One:MARKER:123/);
   assert.doesNotMatch(probe.bmfCommand, /[\r\n]/);
+  assert.throws(() => buildSafeCommandProbe('Player:One', 'MARKER_123'), /player field/);
+  assert.throws(() => buildSafeCommandProbe('Player One', 'MARKER\n123'), /line break/);
 });
 
 test('latency summaries use interpolated percentiles', () => {
@@ -239,7 +241,7 @@ test('socket client measures authenticated ping and command response RTT', async
   });
   const ping = await client.ping().promise;
   const command = await client.command('bmf.status').promise;
-  const tunnel = await client.tunnel('/cityrpgRemote whisper "Ty" "MARKER"').promise;
+  const tunnel = await client.tunnel('/cityrpgRemote whisper:Ty:MARKER').promise;
   assert.ok(ping.durationMs >= 0);
   assert.equal(command.message.ok, true);
   assert.match(command.message.response, /implementation_called=true/);

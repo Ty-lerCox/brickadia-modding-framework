@@ -1,10 +1,17 @@
 # Generic Game-Command Tunnel
 
 The game-command tunnel is the standard low-latency path for moving an opaque
-CityRPG command from an Omegga plugin into Brickadia. It keeps the existing
-`/cityrpgRemote ...` and `/cityrpgroute ...` command grammars intact. BMF does
+CityRPG command from an Omegga plugin into Brickadia. It carries the complete
+`/cityrpgRemote ...` or `/cityrpgroute ...` line without interpreting its
+action fields. BMF does
 not know about team, whisper, leaderboard, or other CityRPG actions and does not
 add one native hook per action.
+
+`/cityrpgRemote` uses one mandatory routing space followed by a colon-delimited
+Wire payload: `/cityrpgRemote action:field1:field2`. Spaces are ordinary field
+content. Intermediate fields cannot contain colons or line breaks; the final
+field is the unsplit remainder and may contain colons. `/cityrpgroute` remains
+a separate legacy grammar.
 
 The tunnel is authenticated by the existing loopback BMF socket. Omegga routes
 each request to exactly one writable BMF native client, BMF admits it to a
@@ -26,7 +33,7 @@ Request:
   "v": 1,
   "id": "cityrpg_tunnel_...",
   "channel": "cityrpg.command.v1",
-  "line": "/cityrpgRemote whisper ...",
+  "line": "/cityrpgRemote whisper:Ty:Your balance is $100",
   "deadlineMs": 1784523000000,
   "serviceClass": "interactive",
   "issuedAtMs": 1784522992500

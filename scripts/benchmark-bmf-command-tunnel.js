@@ -321,12 +321,16 @@ function parseKeyValueResponse(response) {
   return fields;
 }
 
-function quoteConsoleArg(value) {
-  return `"${String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
-}
-
 function buildSafeCommandProbe(player, marker, template = DEFAULT_BMF_COMMAND_TEMPLATE) {
-  const opaqueCommand = `/cityrpgRemote whisper ${quoteConsoleArg(player)} ${quoteConsoleArg(marker)}`;
+  const playerField = String(player);
+  const markerField = String(marker);
+  if (/[:\r\n]/.test(playerField)) {
+    throw new Error('The cityrpgRemote whisper player field cannot contain a colon or line break.');
+  }
+  if (/[\r\n]/.test(markerField)) {
+    throw new Error('The cityrpgRemote whisper message cannot contain a line break.');
+  }
+  const opaqueCommand = `/cityrpgRemote whisper:${playerField}:${markerField}`;
   return {
     marker,
     opaqueCommand,
@@ -1043,7 +1047,7 @@ async function runBenchmark(args) {
     finishedAt: new Date().toISOString(),
     guardrails: {
       optInGameplayCommands: args.confirmLive,
-      fixedSafeCommand: '/cityrpgRemote whisper <player> <unique marker>',
+      fixedSafeCommand: '/cityrpgRemote whisper:<player>:<unique marker>',
       maximumCommandSamples: 20,
       commandSpacingMinimumMs: 500,
       actualCommandSamples: args.mode === 'socket' ? 0 : args.commandSamples,

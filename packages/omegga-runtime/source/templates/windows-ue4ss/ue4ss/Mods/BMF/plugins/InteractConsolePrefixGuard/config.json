@@ -1,14 +1,16 @@
 {
   "policy": {
-    "adminRoles": ["Owner", "Admin"],
-    "ownerIds": ["ff0f7114-85b9-46af-8ff1-85673e6ae0d6"],
+    "adminRoles": ["Moderator", "Admin", "Owner"],
+    "ownerIds": [],
     "savedDir": "C:/Users/tycox/OneDrive/Documents/GitHub/Brickadia/omegga-master/omegga-master/data/Saved",
     "allowedPrefixes": ["buyweapon:"],
     "allowedContexts": [],
     "denyUnknown": true,
     "allowEmpty": true,
     "allowSinglePlayerContextLearning": true,
-    "proactivePrimeAllowedContexts": true,
+    "contextPlayerMaxDistance": 1000,
+    "contextPlayerAmbiguityMargin": 256,
+    "proactivePrimeAllowedContexts": false,
     "proactivePrimeIntervalSeconds": 2
   },
   "native": {

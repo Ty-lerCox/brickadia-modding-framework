@@ -6,18 +6,25 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <tlhelp32.h>
 
 #include <Helpers/String.hpp>
 #include <Mod/CppUserModBase.hpp>
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
 #include <Unreal/AActor.hpp>
+#include <Unreal/Core/Containers/Array.hpp>
+#include <Unreal/Core/Containers/FString.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
+#include <Unreal/CoreUObject/UObject/FStrProperty.hpp>
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
 #include <Unreal/FField.hpp>
+#include <Unreal/FOutputDevice.hpp>
 #include <Unreal/NameTypes.hpp>
 #include <Unreal/UActorComponent.hpp>
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
+#include <Unreal/UnrealInitializer.hpp>
+#include <Unreal/World.hpp>
 
 #include <algorithm>
 #include <array>
@@ -47,6 +54,9 @@ using namespace RC;
 
 namespace
 {
+    std::string probe_property_class_label(Unreal::FProperty* property);
+    std::string pointer_hex(uintptr_t value);
+
     std::string json_escape(std::string_view value)
     {
         std::string out;
@@ -304,6 +314,13 @@ namespace
                !object->HasAnyFlags(Unreal::RF_ClassDefaultObject);
     }
 
+    bool is_valid_uobject_or_cdo(Unreal::UObject* object)
+    {
+        return object != nullptr &&
+               is_accessible_memory(reinterpret_cast<uintptr_t>(object), sizeof(uintptr_t)) &&
+               Unreal::UObject::IsReal(object);
+    }
+
     bool object_class_has_any_cast_flags(Unreal::UObject* object, Unreal::EClassCastFlags flags)
     {
         if (!is_live_uobject(object))
@@ -365,17 +382,22 @@ namespace
         return object_class_has_any_cast_flags(object, Unreal::CASTCLASS_APawn);
     }
 
-    std::string object_address_hex(Unreal::UObject* object)
+    std::string pointer_address_hex(uintptr_t address)
     {
-        if (!object)
+        if (address == 0)
         {
             return "";
         }
 
         std::ostringstream out;
         out << "0x" << std::hex << std::uppercase << std::setw(sizeof(uintptr_t) * 2)
-            << std::setfill('0') << reinterpret_cast<uintptr_t>(object);
+            << std::setfill('0') << address;
         return out.str();
+    }
+
+    std::string object_address_hex(Unreal::UObject* object)
+    {
+        return pointer_address_hex(reinterpret_cast<uintptr_t>(object));
     }
 
     std::string object_name(Unreal::UObject* object)
@@ -628,6 +650,9 @@ namespace
     }
 
     bool property_is_object_reference(Unreal::FProperty* property);
+    void write_player_position_memory_reference_probe(std::ostringstream& out,
+                                                      Unreal::UObject* source,
+                                                      int max_refs);
 
     Unreal::UObject* get_object_property(Unreal::UObject* object, const CharType* property_name)
     {
@@ -768,12 +793,353 @@ namespace
         }
     }
 
+    bool try_actor_transform_location(Unreal::UObject* actor_object, Unreal::FVector& out_vector)
+    {
+        if (!is_live_uobject(actor_object))
+        {
+            return false;
+        }
+
+        try
+        {
+            auto actor = static_cast<Unreal::AActor*>(actor_object);
+            Unreal::FTransform transform = actor->GetTransform();
+            Unreal::FVector vector = transform.GetTranslation();
+            const double x = vector.X();
+            const double y = vector.Y();
+            const double z = vector.Z();
+            if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
+            {
+                return false;
+            }
+
+            out_vector = vector;
+            return true;
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
+    bool object_text_looks_like_scene_component(Unreal::UObject* object);
+
+    bool read_vector3f_at_offset(Unreal::UObject* object,
+                                 uintptr_t offset,
+                                 Unreal::FVector& out_vector)
+    {
+        if (!is_live_uobject(object))
+        {
+            return false;
+        }
+
+        const uintptr_t object_address = reinterpret_cast<uintptr_t>(object);
+        if (object_address > UINTPTR_MAX - offset)
+        {
+            return false;
+        }
+
+        const uintptr_t vector_address = object_address + offset;
+        if (!is_accessible_memory(vector_address, sizeof(float) * 3))
+        {
+            return false;
+        }
+
+        float values[3]{};
+        __try
+        {
+            std::memcpy(values, reinterpret_cast<void*>(vector_address), sizeof(values));
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+
+        const double x = static_cast<double>(values[0]);
+        const double y = static_cast<double>(values[1]);
+        const double z = static_cast<double>(values[2]);
+        constexpr double kMaxReasonableCoordinate = 100000000.0;
+        if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z) ||
+            std::fabs(x) > kMaxReasonableCoordinate ||
+            std::fabs(y) > kMaxReasonableCoordinate ||
+            std::fabs(z) > kMaxReasonableCoordinate)
+        {
+            return false;
+        }
+
+        out_vector = Unreal::FVector{};
+        out_vector.SetX(x);
+        out_vector.SetY(y);
+        out_vector.SetZ(z);
+        return true;
+    }
+
+    bool read_vector3d_at_offset(Unreal::UObject* object,
+                                 uintptr_t offset,
+                                 Unreal::FVector& out_vector)
+    {
+        if (!is_live_uobject(object))
+        {
+            return false;
+        }
+
+        const uintptr_t object_address = reinterpret_cast<uintptr_t>(object);
+        if (object_address > UINTPTR_MAX - offset)
+        {
+            return false;
+        }
+
+        const uintptr_t vector_address = object_address + offset;
+        if (!is_accessible_memory(vector_address, sizeof(double) * 3))
+        {
+            return false;
+        }
+
+        double values[3]{};
+        __try
+        {
+            std::memcpy(values, reinterpret_cast<void*>(vector_address), sizeof(values));
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+
+        const double x = values[0];
+        const double y = values[1];
+        const double z = values[2];
+        constexpr double kMaxReasonableCoordinate = 100000000.0;
+        if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z) ||
+            std::fabs(x) > kMaxReasonableCoordinate ||
+            std::fabs(y) > kMaxReasonableCoordinate ||
+            std::fabs(z) > kMaxReasonableCoordinate)
+        {
+            return false;
+        }
+
+        out_vector = Unreal::FVector{};
+        out_vector.SetX(x);
+        out_vector.SetY(y);
+        out_vector.SetZ(z);
+        return true;
+    }
+
+    bool try_component_observed_memory_location(Unreal::UObject* component,
+                                                Unreal::FVector& out_vector,
+                                                std::string& method_suffix)
+    {
+        if (!is_live_uobject(component) ||
+            (!object_class_has_any_cast_flags(component, Unreal::CASTCLASS_USceneComponent) &&
+             !object_text_looks_like_scene_component(component)))
+        {
+            return false;
+        }
+
+        for (uintptr_t offset : {uintptr_t{0x118}, uintptr_t{0x150}, uintptr_t{0x230}})
+        {
+            if (read_vector3d_at_offset(component, offset, out_vector))
+            {
+                method_suffix = ".observed_memory.Vector3d+" + pointer_address_hex(offset);
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    bool try_actor_observed_memory_location(Unreal::UObject* actor_object,
+                                            Unreal::FVector& out_vector,
+                                            std::string& method)
+    {
+        if (!is_live_uobject(actor_object) || !object_is_actor(actor_object))
+        {
+            return false;
+        }
+        if (!env_flag_enabled("BMF_PLAYERS_POSITIONS_OBSERVED_MEMORY_ACCEPT"))
+        {
+            return false;
+        }
+
+        for (uintptr_t offset : {uintptr_t{0x190}})
+        {
+            if (read_vector3f_at_offset(actor_object, offset, out_vector))
+            {
+                method = ".observed_memory.Vector3f+" + pointer_address_hex(offset);
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    struct ReflectedFunctionCandidate
+    {
+        const CharType* short_name;
+        const CharType* path_a;
+        const CharType* path_b;
+        const char* label;
+    };
+
+    bool call_reflected_vector_no_params(Unreal::UObject* object,
+                                         const ReflectedFunctionCandidate& function_candidate,
+                                         Unreal::FVector& out_vector,
+                                         std::string& detail);
+    Unreal::UClass* scene_component_class();
+    bool try_actor_scene_component_location(Unreal::UObject* actor_object,
+                                            Unreal::FVector& out_vector,
+                                            std::string& method,
+                                            Unreal::UObject** out_component = nullptr);
+
+    bool object_text_looks_like_scene_component(Unreal::UObject* object)
+    {
+        if (!is_live_uobject(object))
+        {
+            return false;
+        }
+
+        const std::string lower_name = ascii_lower(object_name(object));
+        const std::string lower_class =
+            ascii_lower(object_class_name(object) + " " + object_class_full_name(object));
+        return lower_class.find("component") != std::string::npos ||
+               lower_name.find("collisioncylinder") != std::string::npos ||
+               lower_name.find("rootcomponent") != std::string::npos ||
+               lower_name.find("root_component") != std::string::npos ||
+               lower_name.find("charactermesh") != std::string::npos;
+    }
+
+    std::vector<uintptr_t> actor_root_component_candidate_offsets()
+    {
+        std::vector<uintptr_t> offsets;
+        try
+        {
+            auto offset_iter = Unreal::AActor::MemberOffsets.find(STR("RootComponent"));
+            if (offset_iter != Unreal::AActor::MemberOffsets.end())
+            {
+                offsets.push_back(static_cast<uintptr_t>(offset_iter->second));
+            }
+        }
+        catch (...)
+        {
+        }
+
+        for (uintptr_t offset : {
+                 uintptr_t{0x130}, uintptr_t{0x140}, uintptr_t{0x158}, uintptr_t{0x160},
+                 uintptr_t{0x168}, uintptr_t{0x190}, uintptr_t{0x198}, uintptr_t{0x1A0},
+                 uintptr_t{0x1B8}, uintptr_t{0x1C0},
+             })
+        {
+            if (std::find(offsets.begin(), offsets.end(), offset) == offsets.end())
+            {
+                offsets.push_back(offset);
+            }
+        }
+        return offsets;
+    }
+
+    Unreal::UObject* try_actor_root_component_from_member_offset(Unreal::UObject* actor_object)
+    {
+        if (!is_live_uobject(actor_object))
+        {
+            return nullptr;
+        }
+
+        try
+        {
+            const std::vector<uintptr_t> offsets = actor_root_component_candidate_offsets();
+            const uintptr_t actor_address = reinterpret_cast<uintptr_t>(actor_object);
+            for (uintptr_t offset : offsets)
+            {
+                const uintptr_t slot_address = actor_address + offset;
+                if (!is_accessible_memory(slot_address, sizeof(Unreal::UObject*)))
+                {
+                    continue;
+                }
+
+                auto root_component = *reinterpret_cast<Unreal::UObject**>(slot_address);
+                if (!is_live_uobject(root_component))
+                {
+                    continue;
+                }
+                if (!object_class_has_any_cast_flags(root_component, Unreal::CASTCLASS_USceneComponent) &&
+                    !object_text_looks_like_scene_component(root_component))
+                {
+                    continue;
+                }
+                return root_component;
+            }
+        }
+        catch (...)
+        {
+        }
+
+        return nullptr;
+    }
+
+    bool try_scene_component_location(Unreal::UObject* component,
+                                      Unreal::FVector& out_vector,
+                                      std::string& method_suffix)
+    {
+        if (!is_live_uobject(component))
+        {
+            return false;
+        }
+
+        std::string reflected_detail;
+        const ReflectedFunctionCandidate component_location{
+            STR("K2_GetComponentLocation"),
+            STR("/Script/Engine.SceneComponent:K2_GetComponentLocation"),
+            STR("/Script/Engine.SceneComponent:GetComponentLocation"),
+            "component location",
+        };
+        if (call_reflected_vector_no_params(component, component_location, out_vector, reflected_detail))
+        {
+            method_suffix = ".K2_GetComponentLocation";
+            return true;
+        }
+
+        const ReflectedFunctionCandidate component_location_alt{
+            STR("GetComponentLocation"),
+            STR("/Script/Engine.SceneComponent:GetComponentLocation"),
+            STR("/Script/Engine.SceneComponent:K2_GetComponentLocation"),
+            "component location",
+        };
+        if (call_reflected_vector_no_params(component, component_location_alt, out_vector, reflected_detail))
+        {
+            method_suffix = ".GetComponentLocation";
+            return true;
+        }
+
+        if (read_vector_property(component, STR("RelativeLocation"), out_vector))
+        {
+            method_suffix = ".RelativeLocation";
+            return true;
+        }
+
+        if (read_transform_translation_property(component, STR("ComponentToWorld"), out_vector))
+        {
+            method_suffix = ".ComponentToWorld";
+            return true;
+        }
+
+        if (try_component_observed_memory_location(component, out_vector, method_suffix))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
     bool try_actor_root_component_location(Unreal::UObject* pawn,
                                            Unreal::FVector& out_vector,
                                            std::string& method,
                                            Unreal::UObject** out_root_component = nullptr)
     {
-        Unreal::UObject* root_component = get_object_property(pawn, STR("RootComponent"));
+        Unreal::UObject* root_component = try_actor_root_component_from_member_offset(pawn);
+        const bool used_member_offset = is_live_uobject(root_component);
+        if (!used_member_offset)
+        {
+            root_component = get_object_property(pawn, STR("RootComponent"));
+        }
         if (out_root_component)
         {
             *out_root_component = root_component;
@@ -783,18 +1149,19 @@ namespace
             return false;
         }
 
-        if (read_vector_property(root_component, STR("RelativeLocation"), out_vector))
+        std::string component_method_suffix;
+        if (try_scene_component_location(root_component, out_vector, component_method_suffix))
         {
-            method = ".root_component.RelativeLocation";
+            method = used_member_offset
+                         ? ".root_component.MemberOffset" + component_method_suffix
+                         : ".root_component" + component_method_suffix;
             return true;
         }
 
-        if (read_transform_translation_property(root_component, STR("ComponentToWorld"), out_vector))
+        if (env_flag_enabled("BMF_PLAYERS_POSITIONS_UNSAFE_COMPONENT_SCAN"))
         {
-            method = ".root_component.ComponentToWorld";
-            return true;
+            return try_actor_scene_component_location(pawn, out_vector, method, out_root_component);
         }
-
         return false;
     }
 
@@ -809,6 +1176,19 @@ namespace
         if (read_vector_property(component, STR("RelativeLocation"), out_vector))
         {
             method = "RelativeLocation";
+            return true;
+        }
+        std::string method_suffix;
+        if (try_scene_component_location(component, out_vector, method_suffix))
+        {
+            if (!method_suffix.empty() && method_suffix.front() == '.')
+            {
+                method = method_suffix.substr(1);
+            }
+            else
+            {
+                method = method_suffix;
+            }
             return true;
         }
         return false;
@@ -826,6 +1206,176 @@ namespace
             << prefix << "_full_name=" << json_escape(object_full_name(object)) << "\n"
             << prefix << "_class=" << json_escape(object_class_name(object)) << "\n"
             << prefix << "_class_full_name=" << json_escape(object_class_full_name(object)) << "\n";
+    }
+
+    void write_vector_fields(std::ostringstream& out, std::string_view prefix, const Unreal::FVector& vector)
+    {
+        out << std::setprecision(17)
+            << prefix << "_x=" << static_cast<double>(vector.X()) << "\n"
+            << prefix << "_y=" << static_cast<double>(vector.Y()) << "\n"
+            << prefix << "_z=" << static_cast<double>(vector.Z()) << "\n";
+    }
+
+    void write_component_location_probe(std::ostringstream& out,
+                                        std::string_view prefix,
+                                        Unreal::UObject* component)
+    {
+        if (!is_live_uobject(component))
+        {
+            return;
+        }
+
+        const ReflectedFunctionCandidate component_location{
+            STR("K2_GetComponentLocation"),
+            STR("/Script/Engine.SceneComponent:K2_GetComponentLocation"),
+            STR("/Script/Engine.SceneComponent:GetComponentLocation"),
+            "component location",
+        };
+        Unreal::FVector vector{};
+        std::string detail;
+        bool ok = call_reflected_vector_no_params(component, component_location, vector, detail);
+        out << prefix << "_k2_get_component_location_ok=" << (ok ? "true" : "false") << "\n"
+            << prefix << "_k2_get_component_location_detail=" << json_escape(detail) << "\n";
+        if (ok)
+        {
+            write_vector_fields(out, std::string(prefix) + "_k2_get_component_location", vector);
+        }
+
+        const ReflectedFunctionCandidate component_location_alt{
+            STR("GetComponentLocation"),
+            STR("/Script/Engine.SceneComponent:GetComponentLocation"),
+            STR("/Script/Engine.SceneComponent:K2_GetComponentLocation"),
+            "component location",
+        };
+        detail.clear();
+        vector = Unreal::FVector{};
+        ok = call_reflected_vector_no_params(component, component_location_alt, vector, detail);
+        out << prefix << "_get_component_location_ok=" << (ok ? "true" : "false") << "\n"
+            << prefix << "_get_component_location_detail=" << json_escape(detail) << "\n";
+        if (ok)
+        {
+            write_vector_fields(out, std::string(prefix) + "_get_component_location", vector);
+        }
+
+        vector = Unreal::FVector{};
+        ok = read_vector_property(component, STR("RelativeLocation"), vector);
+        out << prefix << "_relative_location_ok=" << (ok ? "true" : "false") << "\n";
+        if (ok)
+        {
+            write_vector_fields(out, std::string(prefix) + "_relative_location", vector);
+        }
+
+        vector = Unreal::FVector{};
+        ok = read_transform_translation_property(component, STR("ComponentToWorld"), vector);
+        out << prefix << "_component_to_world_ok=" << (ok ? "true" : "false") << "\n";
+        if (ok)
+        {
+            write_vector_fields(out, std::string(prefix) + "_component_to_world", vector);
+        }
+
+        int observed_index = 0;
+        for (uintptr_t offset : {uintptr_t{0x118}, uintptr_t{0x150}, uintptr_t{0x230}})
+        {
+            vector = Unreal::FVector{};
+            if (!read_vector3d_at_offset(component, offset, vector))
+            {
+                continue;
+            }
+
+            ++observed_index;
+            const std::string observed_prefix =
+                std::string(prefix) + "_observed_memory_vector_" + std::to_string(observed_index);
+            out << observed_prefix << "_offset=" << json_escape(pointer_address_hex(offset)) << "\n";
+            write_vector_fields(out, observed_prefix, vector);
+        }
+        out << prefix << "_observed_memory_vector_count=" << observed_index << "\n";
+    }
+
+    void write_actor_root_component_probe(std::ostringstream& out, Unreal::UObject* actor_object)
+    {
+        if (!is_live_uobject(actor_object) || !object_is_actor(actor_object))
+        {
+            return;
+        }
+
+        const std::vector<uintptr_t> offsets = actor_root_component_candidate_offsets();
+        const uintptr_t actor_address = reinterpret_cast<uintptr_t>(actor_object);
+        out << "root_component_probe_offsets=" << offsets.size() << "\n";
+
+        int index = 0;
+        for (uintptr_t offset : offsets)
+        {
+            ++index;
+            const std::string prefix = std::string("root_component_probe_") + std::to_string(index);
+            out << prefix << "_offset=" << json_escape(pointer_address_hex(offset)) << "\n";
+
+            if (actor_address > UINTPTR_MAX - offset)
+            {
+                out << prefix << "_state=slot-overflow\n";
+                continue;
+            }
+
+            const uintptr_t slot_address = actor_address + offset;
+            out << prefix << "_slot=" << json_escape(pointer_address_hex(slot_address)) << "\n";
+            if (!is_accessible_memory(slot_address, sizeof(Unreal::UObject*)))
+            {
+                out << prefix << "_state=slot-inaccessible\n";
+                continue;
+            }
+
+            Unreal::UObject* candidate = *reinterpret_cast<Unreal::UObject**>(slot_address);
+            out << prefix << "_candidate_raw_address="
+                << json_escape(pointer_address_hex(reinterpret_cast<uintptr_t>(candidate))) << "\n";
+            if (!is_live_uobject(candidate))
+            {
+                out << prefix << "_state=candidate-not-live\n";
+                continue;
+            }
+
+            out << prefix << "_state=candidate-live\n";
+            write_object_reference_fields(out, prefix + "_candidate", candidate);
+
+            const bool scene_component =
+                object_class_has_any_cast_flags(candidate, Unreal::CASTCLASS_USceneComponent) ||
+                object_text_looks_like_scene_component(candidate);
+            out << prefix << "_candidate_is_scene_component=" << (scene_component ? "true" : "false") << "\n";
+            if (scene_component)
+            {
+                write_component_location_probe(out, prefix + "_location", candidate);
+            }
+        }
+
+        int vector_index = 0;
+        for (uintptr_t offset : {uintptr_t{0x180}, uintptr_t{0x188}, uintptr_t{0x190}, uintptr_t{0x198}, uintptr_t{0x1A0}})
+        {
+            Unreal::FVector vector{};
+            if (!read_vector3f_at_offset(actor_object, offset, vector))
+            {
+                continue;
+            }
+
+            ++vector_index;
+            const std::string prefix = std::string("observed_memory_vector_") + std::to_string(vector_index);
+            out << prefix << "_offset=" << json_escape(pointer_address_hex(offset)) << "\n";
+            write_vector_fields(out, prefix, vector);
+        }
+        out << "observed_memory_vector_count=" << vector_index << "\n";
+
+        Unreal::UObject* reflected_root_component = get_object_property(actor_object, STR("RootComponent"));
+        out << "root_component_reflected_property_live="
+            << (is_live_uobject(reflected_root_component) ? "true" : "false") << "\n";
+        if (is_live_uobject(reflected_root_component))
+        {
+            write_object_reference_fields(out, "root_component_reflected_property", reflected_root_component);
+            const bool scene_component =
+                object_class_has_any_cast_flags(reflected_root_component, Unreal::CASTCLASS_USceneComponent);
+            out << "root_component_reflected_property_is_scene_component="
+                << (scene_component ? "true" : "false") << "\n";
+            if (scene_component)
+            {
+                write_component_location_probe(out, "root_component_reflected_property_location", reflected_root_component);
+            }
+        }
     }
 
     bool property_is_object_reference(Unreal::FProperty* property)
@@ -970,17 +1520,22 @@ namespace
         {
             location_method = ".K2_GetActorLocation";
         }
+        else if (try_actor_transform_location(source, location))
+        {
+            location_method = ".GetTransform";
+        }
         else
         {
             try_actor_root_component_location(source, location, location_method);
         }
         if (!location_method.empty())
         {
-            out << std::setprecision(17)
-                << "object_location_method=" << json_escape(location_method) << "\n"
-                << "object_location_x=" << static_cast<double>(location.X()) << "\n"
-                << "object_location_y=" << static_cast<double>(location.Y()) << "\n"
-                << "object_location_z=" << static_cast<double>(location.Z()) << "\n";
+            out << "object_location_method=" << json_escape(location_method) << "\n";
+            write_vector_fields(out, "object_location", location);
+        }
+        else
+        {
+            write_actor_root_component_probe(out, source);
         }
 
         struct PropertyProbe
@@ -1012,6 +1567,7 @@ namespace
         }
 
         write_bounded_object_property_references(out, source, 32);
+        write_player_position_memory_reference_probe(out, source, 32);
 
         return out.str();
     }
@@ -1067,19 +1623,11 @@ namespace
         }
     }
 
-    struct ReflectedFunctionCandidate
-    {
-        const CharType* short_name;
-        const CharType* path_a;
-        const CharType* path_b;
-        const char* label;
-    };
-
     Unreal::UFunction* find_reflected_function(Unreal::UObject* object,
                                                const ReflectedFunctionCandidate& candidate,
                                                std::string& detail)
     {
-        if (is_live_uobject(object) && candidate.short_name)
+        if (is_valid_uobject_or_cdo(object) && candidate.short_name)
         {
             try
             {
@@ -1169,6 +1717,804 @@ namespace
         }
     }
 
+    std::string describe_reflected_function_text(std::string_view function_name,
+                                                 int32_t max_params)
+    {
+        std::ostringstream out;
+        out << "Native UFunction description\n"
+            << "source=BMFSocketDescribeUFunction\n"
+            << "requested=" << json_escape(function_name) << "\n";
+
+        if (max_params < 1)
+        {
+            max_params = 16;
+        }
+        if (max_params > 64)
+        {
+            max_params = 64;
+        }
+
+        std::string text = trim_ascii(function_name);
+        if (text.empty())
+        {
+            out << "ok=false\n"
+                << "detail=function name or path is required\n";
+            return out.str();
+        }
+
+        auto try_find = [&](const CharType* path) -> Unreal::UFunction* {
+            if (!path)
+            {
+                return nullptr;
+            }
+            try
+            {
+                return Unreal::UObjectGlobals::StaticFindObject<Unreal::UFunction*>(
+                    nullptr,
+                    nullptr,
+                    path);
+            }
+            catch (...)
+            {
+                return nullptr;
+            }
+        };
+
+        std::vector<StringType> candidates;
+        candidates.push_back(ensure_str(text.c_str()));
+        if (text.find('/') == std::string::npos && text.find(':') == std::string::npos)
+        {
+            candidates.push_back(ensure_str(("/Script/Brickadia.BRChatCommandWorldSubsystem:" + text).c_str()));
+            candidates.push_back(ensure_str(("/Script/Brickadia.BRChatCommandWorldSubsystem." + text).c_str()));
+        }
+
+        Unreal::UFunction* function = nullptr;
+        std::string resolved;
+        for (const StringType& candidate : candidates)
+        {
+            function = try_find(candidate.c_str());
+            if (function)
+            {
+                resolved = narrow_string(candidate);
+                break;
+            }
+        }
+
+        if (!function && text.find('/') == std::string::npos)
+        {
+            try
+            {
+                function = reinterpret_cast<Unreal::UFunction*>(
+                    Unreal::UObjectGlobals::FindObject(STR("Function"), ensure_str(text.c_str()).c_str()));
+                if (function)
+                {
+                    resolved = "FindObject(Function," + text + ")";
+                }
+            }
+            catch (...)
+            {
+            }
+        }
+
+        if (!is_live_uobject(function))
+        {
+            out << "ok=false\n"
+                << "detail=function was not found or is not a live UObject\n";
+            return out.str();
+        }
+
+        out << "ok=true\n"
+            << "resolved=" << json_escape(resolved) << "\n"
+            << "address=" << object_address_hex(function) << "\n"
+            << "name=" << json_escape(object_name(function)) << "\n"
+            << "full_name=" << json_escape(object_full_name(function)) << "\n"
+            << "class=" << json_escape(object_class_name(function)) << "\n"
+            << "num_parms=" << static_cast<int32_t>(function->GetNumParms()) << "\n"
+            << "parms_size=" << function->GetParmsSize() << "\n"
+            << "function_flags=0x" << std::uppercase << std::hex << function->GetFunctionFlags() << std::dec << "\n";
+
+        constexpr uintptr_t kUFunctionFuncOffset = 0xD8;
+        const uintptr_t function_address = reinterpret_cast<uintptr_t>(function);
+        const uintptr_t module_base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        const uintptr_t func_slot = function_address + kUFunctionFuncOffset;
+        uintptr_t func_target = 0;
+        const bool func_slot_accessible = is_accessible_memory(func_slot, sizeof(func_target));
+        if (func_slot_accessible)
+        {
+            std::memcpy(&func_target, reinterpret_cast<void*>(func_slot), sizeof(func_target));
+        }
+        out << "func_slot=" << pointer_hex(func_slot) << "\n"
+            << "func_slot_accessible=" << (func_slot_accessible ? "true" : "false") << "\n"
+            << "func_target=" << pointer_hex(func_target) << "\n"
+            << "func_target_executable=" << (is_executable_memory(func_target) ? "true" : "false") << "\n";
+        if (module_base != 0 && func_target >= module_base)
+        {
+            out << "func_target_rva=0x" << std::uppercase << std::hex
+                << (func_target - module_base) << std::dec << "\n";
+        }
+
+        out << "raw_slots_begin\n";
+        for (uintptr_t offset = 0; offset <= 0x180; offset += sizeof(uintptr_t))
+        {
+            const uintptr_t slot_address = function_address + offset;
+            uintptr_t value = 0;
+            const bool readable = is_accessible_memory(slot_address, sizeof(value));
+            if (readable)
+            {
+                std::memcpy(&value, reinterpret_cast<void*>(slot_address), sizeof(value));
+            }
+
+            out << "slot_0x" << std::uppercase << std::hex << offset << std::dec
+                << "=" << pointer_hex(value)
+                << " readable=" << (readable ? "true" : "false")
+                << " value_accessible=" << (value != 0 && is_accessible_memory(value, sizeof(uintptr_t)) ? "true" : "false")
+                << " value_executable=" << (value != 0 && is_executable_memory(value) ? "true" : "false");
+            if (module_base != 0 && value >= module_base && value < module_base + 0x10000000ULL)
+            {
+                out << " value_rva=0x" << std::uppercase << std::hex << (value - module_base) << std::dec;
+            }
+            out << "\n";
+        }
+        out << "raw_slots_end\n";
+
+        int visited = 0;
+        int emitted = 0;
+        int errors = 0;
+        try
+        {
+            for (Unreal::FProperty* property : Unreal::TFieldRange<Unreal::FProperty>(
+                     function,
+                     Unreal::EFieldIterationFlags::IncludeDeprecated))
+            {
+                ++visited;
+                if (!property)
+                {
+                    continue;
+                }
+                if (!property->HasAnyPropertyFlags(Unreal::EPropertyFlags::CPF_Parm))
+                {
+                    continue;
+                }
+                if (emitted >= max_params)
+                {
+                    out << "params_truncated=true\n";
+                    break;
+                }
+
+                ++emitted;
+                try
+                {
+                    out << "param_" << emitted << "_name=" << json_escape(narrow_string(property->GetName())) << "\n"
+                        << "param_" << emitted << "_type=" << json_escape(probe_property_class_label(property)) << "\n"
+                        << "param_" << emitted << "_offset=" << property->GetOffset_Internal() << "\n"
+                        << "param_" << emitted << "_size=" << property->GetSize() << "\n"
+                        << "param_" << emitted << "_flags=0x" << std::uppercase << std::hex
+                        << static_cast<uint64_t>(property->GetPropertyFlags()) << std::dec << "\n";
+                }
+                catch (...)
+                {
+                    ++errors;
+                    out << "param_" << emitted << "_error=true\n";
+                }
+            }
+        }
+        catch (...)
+        {
+            out << "params_iteration_error=true\n";
+        }
+
+        out << "params_visited=" << visited << "\n"
+            << "params_emitted=" << emitted << "\n"
+            << "params_errors=" << errors << "\n";
+        return out.str();
+    }
+
+    struct ChatCommandProcessEventParams
+    {
+        Unreal::UObject* player{nullptr};
+        Unreal::FName command;
+        Unreal::FString args;
+    };
+
+    struct ChatCommandWithArgsProcessEventParams
+    {
+        Unreal::UObject* player{nullptr};
+        Unreal::FName command;
+        Unreal::TArray<Unreal::FString> args;
+        uint8_t reflected_padding[8]{};
+    };
+
+    struct PlayerChatMessageProcessEventParams
+    {
+        Unreal::FString message;
+    };
+
+    static_assert(sizeof(Unreal::FName) == 8, "Unexpected FName size for CallChatCommand params");
+    static_assert(sizeof(Unreal::FString) == 16, "Unexpected FString size for CallChatCommand params");
+    static_assert(sizeof(ChatCommandProcessEventParams) == 32, "Unexpected CallChatCommand param packing");
+    static_assert(sizeof(ChatCommandWithArgsProcessEventParams) == 40, "Unexpected CallChatCommandWithArgs param packing");
+    static_assert(sizeof(PlayerChatMessageProcessEventParams) == 16, "Unexpected ServerPushChatMessage param packing");
+
+    constexpr std::size_t kServerPushChatMessageImplementationVTableOffset{0x1018};
+
+    Unreal::UObject* find_chat_command_world_subsystem(uint32_t& scanned, std::string& detail)
+    {
+        Unreal::UObject* found = nullptr;
+        scanned = 0;
+        constexpr uint32_t kMaxScan = 250000;
+        Unreal::UObjectGlobals::ForEachUObject([&](Unreal::UObject* object, int32_t, int32_t) {
+            if (found)
+            {
+                return LoopAction::Break;
+            }
+            ++scanned;
+            if (scanned > kMaxScan)
+            {
+                detail = "chat subsystem scan exceeded bounded object count";
+                return LoopAction::Break;
+            }
+            if (!is_live_uobject(object) || object->HasAnyFlags(Unreal::RF_ClassDefaultObject))
+            {
+                return LoopAction::Continue;
+            }
+
+            try
+            {
+                const std::string full_name = object_full_name(object);
+                const std::string class_name = object_class_name(object);
+                const std::string class_full_name = object_class_full_name(object);
+                const std::string lower_full_name = ascii_lower(full_name);
+                const std::string lower_class_name = ascii_lower(class_name);
+                const std::string lower_class_full_name = ascii_lower(class_full_name);
+
+                if (lower_class_name == "class" ||
+                    lower_class_name == "function" ||
+                    lower_class_name == "blueprintgeneratedclass" ||
+                    lower_full_name.rfind("class ", 0) == 0 ||
+                    lower_full_name.rfind("function ", 0) == 0 ||
+                    lower_full_name.rfind("scriptstruct ", 0) == 0 ||
+                    lower_full_name.rfind("enum ", 0) == 0 ||
+                    lower_full_name.find("default__") != std::string::npos)
+                {
+                    return LoopAction::Continue;
+                }
+
+                const bool class_matches =
+                    lower_class_name.find("brchatcommandworldsubsystem") != std::string::npos ||
+                    lower_class_name.find("chatcommandworldsubsystem") != std::string::npos ||
+                    lower_class_full_name.find("brchatcommandworldsubsystem") != std::string::npos ||
+                    lower_class_full_name.find("chatcommandworldsubsystem") != std::string::npos;
+                if (class_matches)
+                {
+                    found = object;
+                    detail = "matched live chat command world subsystem instance";
+                    return LoopAction::Break;
+                }
+            }
+            catch (...)
+            {
+            }
+
+            return LoopAction::Continue;
+        });
+
+        if (!found && detail.empty())
+        {
+            detail = "chat command world subsystem was not found";
+        }
+        return found;
+    }
+
+    bool process_event_guarded(Unreal::UObject* object,
+                               Unreal::UFunction* function,
+                               void* params,
+                               unsigned long& exception_code)
+    {
+        exception_code = 0;
+        __try
+        {
+            object->ProcessEvent(function, params);
+            return true;
+        }
+        __except ((exception_code = GetExceptionInformation()->ExceptionRecord->ExceptionCode), EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+    }
+
+    void* get_uobject_vtable_entry(Unreal::UObject* object,
+                                   std::size_t vtable_offset)
+    {
+        if (!object ||
+            vtable_offset % sizeof(void*) != 0 ||
+            vtable_offset > 0x2000 ||
+            !is_accessible_memory(reinterpret_cast<uintptr_t>(object), sizeof(void*)))
+        {
+            return nullptr;
+        }
+
+        auto** vtable = *reinterpret_cast<void***>(object);
+        if (!vtable ||
+            !is_accessible_memory(reinterpret_cast<uintptr_t>(vtable) + vtable_offset, sizeof(void*)))
+        {
+            return nullptr;
+        }
+
+        void* entry = vtable[vtable_offset / sizeof(void*)];
+        return is_executable_memory(reinterpret_cast<uintptr_t>(entry)) ? entry : nullptr;
+    }
+
+    bool get_uobject_vtable_entry_guarded(Unreal::UObject* object,
+                                          std::size_t vtable_offset,
+                                          void*& entry,
+                                          unsigned long& exception_code)
+    {
+        entry = nullptr;
+        exception_code = 0;
+        __try
+        {
+            entry = get_uobject_vtable_entry(object, vtable_offset);
+            return true;
+        }
+        __except ((exception_code = GetExceptionInformation()->ExceptionRecord->ExceptionCode), EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+    }
+
+    bool server_push_chat_message_implementation_guarded(Unreal::UObject* controller,
+                                                         void* implementation,
+                                                         const Unreal::FString& message,
+                                                         unsigned long& exception_code)
+    {
+        exception_code = 0;
+        if (!controller || !implementation)
+        {
+            return false;
+        }
+
+        using ServerPushChatMessageImplementationFn = void(__fastcall*)(void*, const Unreal::FString&);
+        const auto fn = reinterpret_cast<ServerPushChatMessageImplementationFn>(implementation);
+        __try
+        {
+            fn(controller, message);
+            return true;
+        }
+        __except ((exception_code = GetExceptionInformation()->ExceptionRecord->ExceptionCode), EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+    }
+
+    struct CapturingOutputDevice : public Unreal::FOutputDevice
+    {
+        std::string captured_output{};
+
+        void append_line(const std::string& line)
+        {
+            if (line.empty())
+            {
+                return;
+            }
+            if (!captured_output.empty())
+            {
+                captured_output.push_back('\n');
+            }
+            captured_output.append(line);
+        }
+
+        void capture(const TCHAR* value)
+        {
+            if (!value || !*value)
+            {
+                return;
+            }
+
+            const std::string utf8 = narrow_string(StringType(value));
+            size_t line_start = 0;
+            for (size_t index = 0; index < utf8.size(); ++index)
+            {
+                const char character = utf8[index];
+                if (character != '\r' && character != '\n')
+                {
+                    continue;
+                }
+
+                if (index > line_start)
+                {
+                    append_line(utf8.substr(line_start, index - line_start));
+                }
+
+                if (character == '\r' && index + 1 < utf8.size() && utf8[index + 1] == '\n')
+                {
+                    ++index;
+                }
+                line_start = index + 1;
+            }
+
+            if (line_start < utf8.size())
+            {
+                append_line(utf8.substr(line_start));
+            }
+        }
+
+        void Virtual_Serialize(const TCHAR* value,
+                               Unreal::ELogVerbosity::Type,
+                               const Unreal::FName&) override
+        {
+            capture(value);
+        }
+
+        void Virtual_Serialize(const TCHAR* value,
+                               Unreal::ELogVerbosity::Type,
+                               const Unreal::FName&,
+                               const double) override
+        {
+            capture(value);
+        }
+    };
+
+    bool process_console_exec_guarded(Unreal::UObject* context,
+                                      const StringType& command,
+                                      CapturingOutputDevice& output,
+                                      unsigned long& exception_code,
+                                      bool& result)
+    {
+        exception_code = 0;
+        result = false;
+        __try
+        {
+            result = context->ProcessConsoleExec(command.c_str(), output, context);
+            return true;
+        }
+        __except ((exception_code = GetExceptionInformation()->ExceptionRecord->ExceptionCode), EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+    }
+
+    bool process_console_exec_internal_guarded(Unreal::UObject* context,
+                                               const StringType& command,
+                                               CapturingOutputDevice& output,
+                                               unsigned long& exception_code,
+                                               bool& result,
+                                               bool& ready)
+    {
+        exception_code = 0;
+        result = false;
+        ready = Unreal::UObject::ProcessConsoleExecInternal.is_ready();
+        if (!ready)
+        {
+            return false;
+        }
+
+        __try
+        {
+            result = Unreal::UObject::ProcessConsoleExecInternal(
+                context,
+                command.c_str(),
+                output,
+                context);
+            return true;
+        }
+        __except ((exception_code = GetExceptionInformation()->ExceptionRecord->ExceptionCode), EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+    }
+
+    constexpr std::size_t kConsoleManagerProcessInputVTableOffset{0xE0};
+    constexpr std::size_t kConsoleManagerInitializerScanBytes{0x200};
+
+    void* resolve_rip_relative_target(std::uint8_t* instruction,
+                                      std::size_t instruction_length,
+                                      std::size_t displacement_offset)
+    {
+        std::int32_t displacement{};
+        std::memcpy(&displacement, instruction + displacement_offset, sizeof(displacement));
+        return instruction + instruction_length + displacement;
+    }
+
+    void** resolve_console_manager_singleton_slot()
+    {
+        auto* initializer = Unreal::UnrealInitializer::GConsoleManagerSingletonInitializer;
+        if (!initializer)
+        {
+            return nullptr;
+        }
+
+        auto* bytes = static_cast<std::uint8_t*>(initializer);
+        for (std::size_t index = 0; index + 8 < kConsoleManagerInitializerScanBytes; ++index)
+        {
+            if (bytes[index] == 0x48 &&
+                bytes[index + 1] == 0x83 &&
+                bytes[index + 2] == 0x3D &&
+                bytes[index + 7] == 0x00)
+            {
+                return reinterpret_cast<void**>(resolve_rip_relative_target(bytes + index, 8, 3));
+            }
+
+            if (bytes[index] == 0x48 &&
+                bytes[index + 1] == 0x89 &&
+                bytes[index + 2] == 0x35)
+            {
+                return reinterpret_cast<void**>(resolve_rip_relative_target(bytes + index, 7, 3));
+            }
+
+            if (bytes[index] == 0x48 &&
+                bytes[index + 1] == 0x8B &&
+                bytes[index + 2] == 0x35)
+            {
+                return reinterpret_cast<void**>(resolve_rip_relative_target(bytes + index, 7, 3));
+            }
+        }
+
+        return nullptr;
+    }
+
+    void* get_console_manager_singleton()
+    {
+        auto** slot = resolve_console_manager_singleton_slot();
+        return slot ? *slot : nullptr;
+    }
+
+    void* get_console_manager_vtable_entry(void* console_manager,
+                                           std::size_t vtable_offset)
+    {
+        if (!console_manager ||
+            vtable_offset % sizeof(void*) != 0 ||
+            vtable_offset > 0x400)
+        {
+            return nullptr;
+        }
+
+        auto** vtable = *reinterpret_cast<void***>(console_manager);
+        if (!vtable)
+        {
+            return nullptr;
+        }
+
+        return vtable[vtable_offset / sizeof(void*)];
+    }
+
+    bool get_console_manager_vtable_entry_guarded(void* console_manager,
+                                                  std::size_t vtable_offset,
+                                                  void*& entry,
+                                                  unsigned long& exception_code)
+    {
+        entry = nullptr;
+        exception_code = 0;
+        __try
+        {
+            entry = get_console_manager_vtable_entry(console_manager, vtable_offset);
+            return true;
+        }
+        __except ((exception_code = GetExceptionInformation()->ExceptionRecord->ExceptionCode), EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+    }
+
+    bool console_manager_input_guarded(void* console_manager,
+                                       void* process_input,
+                                       const StringType& command,
+                                       Unreal::UObject* world,
+                                       CapturingOutputDevice& output,
+                                       unsigned long& exception_code,
+                                       bool& result)
+    {
+        exception_code = 0;
+        result = false;
+        if (!console_manager || !process_input)
+        {
+            return false;
+        }
+
+        using ProcessUserConsoleInputFn = bool (*)(void*, const TCHAR*, Unreal::FOutputDevice&, void*);
+        const auto fn = reinterpret_cast<ProcessUserConsoleInputFn>(process_input);
+        __try
+        {
+            result = fn(console_manager, command.c_str(), output, static_cast<void*>(world));
+            return true;
+        }
+        __except ((exception_code = GetExceptionInformation()->ExceptionRecord->ExceptionCode), EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+    }
+
+    Unreal::UObject* find_live_player_controller(uint32_t& scanned, std::string& detail);
+
+    bool parse_chat_command_args(std::string_view input,
+                                 std::vector<std::string>& args,
+                                 std::string& detail)
+    {
+        args.clear();
+        size_t index = 0;
+        while (index < input.size())
+        {
+            while (index < input.size() &&
+                   std::isspace(static_cast<unsigned char>(input[index])))
+            {
+                ++index;
+            }
+            if (index >= input.size())
+            {
+                break;
+            }
+
+            std::string value;
+            if (input[index] == '"')
+            {
+                ++index;
+                bool closed = false;
+                while (index < input.size())
+                {
+                    const char ch = input[index++];
+                    if (ch == '"')
+                    {
+                        closed = true;
+                        break;
+                    }
+                    if (ch == '\\' && index < input.size())
+                    {
+                        value.push_back(input[index++]);
+                        continue;
+                    }
+                    value.push_back(ch);
+                }
+                if (!closed)
+                {
+                    detail = "unterminated quoted argument";
+                    return false;
+                }
+            }
+            else
+            {
+                while (index < input.size() &&
+                       !std::isspace(static_cast<unsigned char>(input[index])))
+                {
+                    value.push_back(input[index++]);
+                }
+            }
+
+            args.push_back(std::move(value));
+        }
+
+        detail = "ok";
+        return true;
+    }
+
+    std::string execute_chat_command_probe_text(std::string_view raw_command_line,
+                                                std::string_view confirmation)
+    {
+        std::ostringstream out;
+        out << "Native chat command probe\n"
+            << "source=BMFSocketChatCommandProbe\n";
+
+        const std::string command_line = trim_ascii(raw_command_line);
+        const std::string token = trim_ascii(confirmation);
+        out << "requested=" << json_escape(command_line) << "\n";
+        if (command_line.empty())
+        {
+            out << "ok=false\n"
+                << "stage=parse\n"
+                << "detail=command line is required\n";
+            return out.str();
+        }
+
+        if (token != "chat-command-probe")
+        {
+            out << "ok=false\n"
+                << "stage=confirmation\n"
+                << "detail=confirmation token chat-command-probe is required\n";
+            return out.str();
+        }
+
+        std::string command_name = command_line;
+        std::string args_text;
+        const size_t first_space = command_line.find_first_of(" \t\r\n");
+        if (first_space != std::string::npos)
+        {
+            command_name = command_line.substr(0, first_space);
+            args_text = trim_ascii(std::string_view(command_line).substr(first_space + 1));
+        }
+        while (!command_name.empty() && command_name.front() == '/')
+        {
+            command_name.erase(command_name.begin());
+        }
+
+        if (command_name.empty())
+        {
+            out << "ok=false\n"
+                << "stage=parse\n"
+                << "detail=command name is empty\n";
+            return out.str();
+        }
+
+        uint32_t scanned = 0;
+        std::string subsystem_detail;
+        Unreal::UObject* subsystem = find_chat_command_world_subsystem(scanned, subsystem_detail);
+        out << "subsystem_scanned=" << scanned << "\n"
+            << "subsystem_detail=" << json_escape(subsystem_detail) << "\n";
+        if (!is_live_uobject(subsystem))
+        {
+            out << "ok=false\n"
+                << "stage=find_subsystem\n"
+                << "detail=live BRChatCommandWorldSubsystem was not found\n";
+            return out.str();
+        }
+
+        std::string function_detail;
+        Unreal::UFunction* function = find_reflected_function(
+            subsystem,
+            {STR("CallChatCommandWithArgs"),
+             STR("/Script/Brickadia.BRChatCommandWorldSubsystem:CallChatCommandWithArgs"),
+             STR("Function /Script/Brickadia.BRChatCommandWorldSubsystem:CallChatCommandWithArgs"),
+             "CallChatCommandWithArgs"},
+            function_detail);
+        out << "subsystem=" << json_escape(object_full_name(subsystem)) << "\n"
+            << "function_detail=" << json_escape(function_detail) << "\n";
+        if (!is_live_uobject(function))
+        {
+            out << "ok=false\n"
+                << "stage=find_function\n"
+                << "detail=CallChatCommandWithArgs UFunction was not found\n";
+            return out.str();
+        }
+
+        const StringType command_name_wide = ensure_str(command_name.c_str());
+        std::vector<std::string> parsed_args;
+        std::string parse_detail;
+        if (!parse_chat_command_args(args_text, parsed_args, parse_detail))
+        {
+            out << "ok=false\n"
+                << "stage=parse_args\n"
+                << "detail=" << json_escape(parse_detail) << "\n";
+            return out.str();
+        }
+
+        uint32_t player_scanned = 0;
+        std::string player_detail;
+        Unreal::UObject* player = find_live_player_controller(player_scanned, player_detail);
+        ChatCommandWithArgsProcessEventParams params{};
+        params.player = is_live_uobject(player) ? player : nullptr;
+        params.command = Unreal::FName(command_name_wide.c_str(), Unreal::FNAME_Add);
+        params.args.Reserve(static_cast<int32_t>(parsed_args.size()));
+        for (const std::string& arg : parsed_args)
+        {
+            const StringType arg_wide = ensure_str(arg.c_str());
+            params.args.Add(Unreal::FString(arg_wide.c_str()));
+        }
+
+        out << "command_name=" << json_escape(command_name) << "\n"
+            << "args=" << json_escape(args_text) << "\n"
+            << "args_count=" << parsed_args.size() << "\n"
+            << "player_scanned=" << player_scanned << "\n"
+            << "player_detail=" << json_escape(player_detail) << "\n"
+            << "player="
+            << (params.player ? json_escape(object_full_name(params.player)) : "null")
+            << "\n"
+            << "params_size=" << sizeof(params) << "\n";
+
+        unsigned long exception_code = 0;
+        const bool called = process_event_guarded(subsystem, function, &params, exception_code);
+
+        out << "process_event_called=" << (called ? "true" : "false") << "\n";
+        if (!called)
+        {
+            out << "ok=false\n"
+                << "stage=process_event\n"
+                << "exception_code=0x" << std::uppercase << std::hex << exception_code << std::dec << "\n";
+            return out.str();
+        }
+
+        out << "ok=true\n"
+            << "stage=process_event\n"
+            << "detail=CallChatCommandWithArgs ProcessEvent returned\n";
+        return out.str();
+    }
+
     bool set_reflected_bool_param(Unreal::UFunction* function,
                                   void* params,
                                   const CharType* name,
@@ -1248,6 +2594,1473 @@ namespace
             *destination = value;
         }
         return true;
+    }
+
+    bool set_reflected_string_param(Unreal::UFunction* function,
+                                    void* params,
+                                    const CharType* name,
+                                    const StringType& value,
+                                    std::string& detail)
+    {
+        if (!function || !params || !name)
+        {
+            detail = "invalid string parameter target";
+            return false;
+        }
+
+        Unreal::FProperty* property = function->FindProperty(
+            Unreal::FName(name, Unreal::FNAME_Find));
+        if (!property)
+        {
+            detail = "string parameter not found";
+            return false;
+        }
+
+        Unreal::FString string_value(value.c_str());
+        if (auto* string_property = Unreal::CastField<Unreal::FStrProperty>(property))
+        {
+            string_property->SetPropertyValueInContainer(params, string_value);
+            return true;
+        }
+
+        if (property->GetSize() < static_cast<int32_t>(sizeof(Unreal::FString)))
+        {
+            detail = "string parameter property is smaller than FString";
+            return false;
+        }
+
+        auto* destination = reinterpret_cast<Unreal::FString*>(
+            static_cast<uint8_t*>(params) + property->GetOffset_Internal());
+        *destination = string_value;
+        return true;
+    }
+
+    bool set_reflected_object_param(Unreal::UFunction* function,
+                                    void* params,
+                                    const CharType* name,
+                                    Unreal::UObject* value,
+                                    std::string& detail)
+    {
+        if (!function || !params || !name)
+        {
+            detail = "invalid object parameter target";
+            return false;
+        }
+
+        Unreal::FProperty* property = function->FindProperty(
+            Unreal::FName(name, Unreal::FNAME_Find));
+        if (!property)
+        {
+            detail = "object parameter not found";
+            return false;
+        }
+
+        auto* destination = static_cast<uint8_t*>(params) + property->GetOffset_Internal();
+        if (auto* object_property = Unreal::CastField<Unreal::FObjectPropertyBase>(property))
+        {
+            object_property->SetObjectPropertyValue(destination, value);
+            return true;
+        }
+
+        if (property->GetSize() < static_cast<int32_t>(sizeof(Unreal::UObject*)))
+        {
+            detail = "object parameter property is smaller than UObject*";
+            return false;
+        }
+
+        *reinterpret_cast<Unreal::UObject**>(destination) = value;
+        return true;
+    }
+
+    bool looks_like_live_world(Unreal::UObject* object)
+    {
+        if (!is_live_uobject(object) || object->HasAnyFlags(Unreal::RF_ClassDefaultObject))
+        {
+            return false;
+        }
+
+        try
+        {
+            const std::string class_name = ascii_lower(object_class_name(object));
+            if (class_name == "class" ||
+                class_name == "function" ||
+                class_name == "blueprintgeneratedclass")
+            {
+                return false;
+            }
+            return class_name == "world" ||
+                   class_name.find("world") != std::string::npos ||
+                   object_class_has_any_cast_flags_guarded(object, Unreal::CASTCLASS_AActor);
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
+    std::string describe_live_uobject_brief(Unreal::UObject* object)
+    {
+        if (!is_live_uobject(object))
+        {
+            return "not a live UObject";
+        }
+
+        try
+        {
+            return object_full_name(object) + " class=" + object_class_full_name(object);
+        }
+        catch (...)
+        {
+            return "live UObject, name/class lookup failed";
+        }
+    }
+
+    bool looks_like_explicit_world_context(Unreal::UObject* object)
+    {
+        if (looks_like_live_world(object))
+        {
+            return true;
+        }
+        if (!is_live_uobject(object) || object->HasAnyFlags(Unreal::RF_ClassDefaultObject))
+        {
+            return false;
+        }
+
+        try
+        {
+            const std::string class_name = ascii_lower(object_class_name(object));
+            if (class_name == "class" ||
+                class_name == "function" ||
+                class_name == "blueprintgeneratedclass")
+            {
+                return false;
+            }
+
+            return class_name.find("brickgrid") != std::string::npos ||
+                   class_name.find("actor") != std::string::npos ||
+                   class_name.find("gamemode") != std::string::npos ||
+                   class_name.find("gamestate") != std::string::npos;
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
+    Unreal::UObject* find_known_live_world(std::string& detail)
+    {
+        const std::array<const CharType*, 4> world_paths{
+            STR("/Game/Maps/Plate/Plate.Plate"),
+            STR("World /Game/Maps/Plate/Plate.Plate"),
+            STR("/Game/Maps/ServerEntry/ServerEntry.ServerEntry"),
+            STR("World /Game/Maps/ServerEntry/ServerEntry.ServerEntry"),
+        };
+        for (const CharType* path : world_paths)
+        {
+            try
+            {
+                Unreal::UObject* candidate =
+                    Unreal::UObjectGlobals::StaticFindObject<Unreal::UObject*>(
+                        nullptr, nullptr, path);
+                if (looks_like_live_world(candidate))
+                {
+                    detail = "matched live world via StaticFindObject(" +
+                        narrow_string(path) +
+                        ")";
+                    return candidate;
+                }
+            }
+            catch (...)
+            {
+            }
+        }
+
+        const std::array<const CharType*, 2> world_names{
+            STR("Plate"),
+            STR("ServerEntry"),
+        };
+        for (const CharType* name : world_names)
+        {
+            try
+            {
+                Unreal::UObject* candidate =
+                    Unreal::UObjectGlobals::FindObject(STR("World"), name);
+                if (looks_like_live_world(candidate))
+                {
+                    detail = "matched live world via FindObject(World," +
+                        narrow_string(name) +
+                        ")";
+                    return candidate;
+                }
+            }
+            catch (...)
+            {
+            }
+        }
+
+        detail = "known live world paths were not found";
+        return nullptr;
+    }
+
+    Unreal::UObject* find_live_world(uint32_t& scanned, std::string& detail)
+    {
+        scanned = 0;
+        try
+        {
+            Unreal::UObject* candidate = Unreal::UObjectGlobals::FindFirstOf(STR("World"));
+            if (looks_like_live_world(candidate))
+            {
+                detail = "matched live world via FindFirstOf(World)";
+                return candidate;
+            }
+            if (candidate)
+            {
+                detail = "FindFirstOf(World) returned non-world or metadata: " +
+                    object_full_name(candidate) +
+                    " class=" +
+                    object_class_name(candidate);
+            }
+        }
+        catch (...)
+        {
+            detail = "FindFirstOf(World) threw";
+        }
+
+        if (Unreal::UObject* known_world = find_known_live_world(detail))
+        {
+            return known_world;
+        }
+
+        Unreal::UObject* game_world = nullptr;
+        Unreal::UObject* fallback_world = nullptr;
+        try
+        {
+            Unreal::UObjectGlobals::ForEachUObject([&](Unreal::UObject* object, int32_t, int32_t) {
+                ++scanned;
+                if (!is_live_uobject(object) || object->HasAnyFlags(Unreal::RF_ClassDefaultObject))
+                {
+                    return LoopAction::Continue;
+                }
+
+                std::string full_name;
+                try
+                {
+                    full_name = object_full_name(object);
+                }
+                catch (...)
+                {
+                    return LoopAction::Continue;
+                }
+
+                if (full_name.rfind("World ", 0) != 0 ||
+                    full_name.find("Default__") != std::string::npos)
+                {
+                    return LoopAction::Continue;
+                }
+
+                if (!fallback_world)
+                {
+                    fallback_world = object;
+                }
+
+                if (full_name.find("/Game/Maps/") != std::string::npos ||
+                    full_name.find("Plate.Plate") != std::string::npos)
+                {
+                    game_world = object;
+                    return LoopAction::Break;
+                }
+
+                return LoopAction::Continue;
+            });
+        }
+        catch (...)
+        {
+            if (detail.empty())
+            {
+                detail = "full-name world scan threw";
+            }
+        }
+
+        if (game_world || fallback_world)
+        {
+            detail = game_world
+                ? "matched live world via full-name scan"
+                : "matched fallback world via full-name scan";
+            return game_world ? game_world : fallback_world;
+        }
+
+        const std::array<const CharType*, 6> context_classes{
+            STR("BrickGridActor"),
+            STR("BP_BrickGrid_Global_C"),
+            STR("BrickGridDynamicActor"),
+            STR("Entity_DynamicBrickGrid"),
+            STR("BP_MicrochipBrickGridDynamicActor_C"),
+            STR("BP_Entity_Wheel_Deep1_C"),
+        };
+        for (const CharType* class_name : context_classes)
+        {
+            try
+            {
+                Unreal::UObject* candidate = Unreal::UObjectGlobals::FindFirstOf(class_name);
+                if (looks_like_live_world(candidate))
+                {
+                    detail = std::string("matched world context via FindFirstOf(") +
+                        narrow_string(class_name) +
+                        ")";
+                    return candidate;
+                }
+            }
+            catch (...)
+            {
+            }
+        }
+
+        Unreal::UObject* found = nullptr;
+        constexpr uint32_t kMaxScan = 250000;
+        Unreal::UObjectGlobals::ForEachUObject([&](Unreal::UObject* object, int32_t, int32_t) {
+            if (found)
+            {
+                return LoopAction::Break;
+            }
+            ++scanned;
+            if (scanned > kMaxScan)
+            {
+                if (detail.empty())
+                {
+                    detail = "world scan exceeded bounded object count";
+                }
+                return LoopAction::Break;
+            }
+
+            if (looks_like_live_world(object))
+            {
+                found = object;
+                detail = "matched live world via bounded class scan";
+                return LoopAction::Break;
+            }
+
+            return LoopAction::Continue;
+        });
+
+        if (!found && detail.empty())
+        {
+            detail = "live world was not found";
+        }
+        return found;
+    }
+
+    bool player_controller_lifecycle_is_usable_guarded(Unreal::UObject* object)
+    {
+        if (!object ||
+            !is_accessible_memory(reinterpret_cast<uintptr_t>(object), sizeof(uintptr_t)))
+        {
+            return false;
+        }
+
+        __try
+        {
+            return Unreal::UObject::IsReal(object) &&
+                   !object->HasAnyFlags(Unreal::RF_ClassDefaultObject) &&
+                   !object->HasAnyFlags(Unreal::RF_BeginDestroyed) &&
+                   !object->HasAnyFlags(Unreal::RF_FinishDestroyed) &&
+                   !object->IsUnreachable();
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+    }
+
+    bool is_live_player_controller_object(Unreal::UObject* object)
+    {
+        if (!player_controller_lifecycle_is_usable_guarded(object))
+        {
+            return false;
+        }
+
+        if (object_class_has_any_cast_flags_guarded(object, Unreal::CASTCLASS_APlayerController))
+        {
+            return true;
+        }
+
+        try
+        {
+            const std::string class_name = ascii_lower(object_class_name(object));
+            const std::string class_full_name = ascii_lower(object_class_full_name(object));
+            return class_name.find("brplayercontroller") != std::string::npos ||
+                   class_name.find("bp_playercontroller") != std::string::npos ||
+                   class_full_name.find("brplayercontroller") != std::string::npos ||
+                   class_full_name.find("bp_playercontroller") != std::string::npos;
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
+    Unreal::UObject* find_live_player_controller(uint32_t& scanned, std::string& detail)
+    {
+        Unreal::UObject* found = nullptr;
+        scanned = 0;
+
+        auto is_metadata_object = [](Unreal::UObject* object) {
+            if (!is_live_uobject(object) || object->HasAnyFlags(Unreal::RF_ClassDefaultObject))
+            {
+                return true;
+            }
+
+            try
+            {
+                const std::string full_name = ascii_lower(object_full_name(object));
+                const std::string class_name = ascii_lower(object_class_name(object));
+                return class_name == "class" ||
+                       class_name == "function" ||
+                       class_name == "blueprintgeneratedclass" ||
+                       full_name.rfind("class ", 0) == 0 ||
+                       full_name.rfind("function ", 0) == 0 ||
+                       full_name.rfind("scriptstruct ", 0) == 0 ||
+                       full_name.rfind("enum ", 0) == 0;
+            }
+            catch (...)
+            {
+                return true;
+            }
+        };
+
+        auto looks_like_controller = [&](Unreal::UObject* object) {
+            return !is_metadata_object(object) && is_live_player_controller_object(object);
+        };
+
+        const std::array<const CharType*, 5> targeted_classes{
+            STR("BRPlayerController"),
+            STR("BP_PlayerController_C"),
+            STR("PlayerController"),
+            STR("BRPlayerController_C"),
+            STR("BrickadiaPlayerController"),
+        };
+        std::vector<std::string> targeted_attempts;
+        for (const CharType* class_name : targeted_classes)
+        {
+            try
+            {
+                Unreal::UObject* candidate = Unreal::UObjectGlobals::FindFirstOf(class_name);
+                if (candidate)
+                {
+                    targeted_attempts.push_back(
+                        std::string("FindFirstOf(") +
+                        narrow_string(class_name) +
+                        ")=" +
+                        object_full_name(candidate) +
+                        " class=" +
+                        object_class_full_name(candidate));
+                }
+                if (looks_like_controller(candidate))
+                {
+                    detail = "matched live player controller via " + narrow_string(class_name);
+                    return candidate;
+                }
+            }
+            catch (...)
+            {
+                targeted_attempts.push_back(
+                    std::string("FindFirstOf(") +
+                    narrow_string(class_name) +
+                    ") threw");
+            }
+        }
+
+        constexpr uint32_t kMaxScan = 20000;
+        Unreal::UObjectGlobals::ForEachUObject([&](Unreal::UObject* object, int32_t, int32_t) {
+            if (found)
+            {
+                return LoopAction::Break;
+            }
+            ++scanned;
+            if (scanned > kMaxScan)
+            {
+                detail = "player controller scan exceeded bounded object count";
+                return LoopAction::Break;
+            }
+            if (!is_live_uobject(object) || object->HasAnyFlags(Unreal::RF_ClassDefaultObject))
+            {
+                return LoopAction::Continue;
+            }
+
+            try
+            {
+                const std::string class_name = object_class_name(object);
+                const std::string class_full_name = object_class_full_name(object);
+                const std::string full_name = object_full_name(object);
+                const std::string lower_class_name = ascii_lower(class_name);
+                const std::string lower_class_full_name = ascii_lower(class_full_name);
+                const std::string lower_full_name = ascii_lower(full_name);
+                if (lower_class_name == "class" ||
+                    lower_class_name == "function" ||
+                    lower_class_name == "blueprintgeneratedclass")
+                {
+                    return LoopAction::Continue;
+                }
+
+                const bool controller_candidate =
+                    object_class_has_any_cast_flags_guarded(object, Unreal::CASTCLASS_APlayerController) ||
+                    lower_class_name.find("brplayercontroller") != std::string::npos ||
+                    lower_class_name.find("bp_playercontroller") != std::string::npos ||
+                    lower_class_full_name.find("brplayercontroller") != std::string::npos ||
+                    lower_class_full_name.find("bp_playercontroller") != std::string::npos ||
+                    lower_full_name.find("brplayercontroller") != std::string::npos ||
+                    lower_full_name.find("bp_playercontroller") != std::string::npos;
+                if (controller_candidate)
+                {
+                    if (looks_like_controller(object))
+                    {
+                        found = object;
+                        detail = "matched live player controller via bounded class scan";
+                        return LoopAction::Break;
+                    }
+                }
+            }
+            catch (...)
+            {
+            }
+
+            return LoopAction::Continue;
+        });
+
+        if (!found && detail.empty())
+        {
+            std::ostringstream message;
+            message << "live player controller was not found";
+            for (const std::string& attempt : targeted_attempts)
+            {
+                message << "; " << attempt;
+            }
+            detail = message.str();
+        }
+        return found;
+    }
+
+    std::string execute_player_console_command_probe_text(std::string_view raw_command_line,
+                                                          std::string_view confirmation)
+    {
+        std::ostringstream out;
+        out << "Native player console command probe\n"
+            << "source=BMFSocketPlayerConsoleCommandProbe\n";
+
+        const std::string command_line = trim_ascii(raw_command_line);
+        const std::string token = trim_ascii(confirmation);
+        out << "requested=" << json_escape(command_line) << "\n";
+        if (command_line.empty())
+        {
+            out << "ok=false\n"
+                << "stage=parse\n"
+                << "detail=command line is required\n";
+            return out.str();
+        }
+        if (token != "player-console-command-probe")
+        {
+            out << "ok=false\n"
+                << "stage=confirmation\n"
+                << "detail=confirmation token player-console-command-probe is required\n";
+            return out.str();
+        }
+
+        uint32_t scanned = 0;
+        std::string controller_detail;
+        Unreal::UObject* controller = find_live_player_controller(scanned, controller_detail);
+        out << "controller_scanned=" << scanned << "\n"
+            << "controller_detail=" << json_escape(controller_detail) << "\n";
+        if (!is_live_uobject(controller))
+        {
+            out << "ok=false\n"
+                << "stage=find_controller\n"
+                << "detail=live player controller was not found\n";
+            return out.str();
+        }
+
+        const ReflectedFunctionCandidate console_command{
+            STR("ConsoleCommand"),
+            STR("/Script/Engine.PlayerController:ConsoleCommand"),
+            STR("/Script/Engine.PlayerController.ConsoleCommand"),
+            "PlayerController.ConsoleCommand"};
+
+        std::string resolve_detail;
+        Unreal::UFunction* function = find_reflected_function(controller, console_command, resolve_detail);
+        out << "controller=" << json_escape(object_full_name(controller)) << "\n"
+            << "controller_class=" << json_escape(object_class_full_name(controller)) << "\n"
+            << "function_detail=" << json_escape(resolve_detail) << "\n";
+        if (!is_live_uobject(function))
+        {
+            out << "ok=false\n"
+                << "stage=find_function\n"
+                << "detail=ConsoleCommand UFunction was not found\n";
+            return out.str();
+        }
+
+        const int32_t params_size = function->GetParmsSize();
+        out << "function=" << json_escape(object_full_name(function)) << "\n"
+            << "num_parms=" << static_cast<int32_t>(function->GetNumParms()) << "\n"
+            << "params_size=" << params_size << "\n";
+        if (params_size <= 0 || params_size > 1024)
+        {
+            out << "ok=false\n"
+                << "stage=params\n"
+                << "detail=ConsoleCommand parameter storage size is invalid\n";
+            return out.str();
+        }
+
+        std::vector<uint8_t> params(static_cast<size_t>(params_size), 0);
+        std::string set_detail;
+        const StringType command_wide = ensure_str(command_line.c_str());
+        if (!set_reflected_string_param(function, params.data(), STR("Command"), command_wide, set_detail))
+        {
+            out << "ok=false\n"
+                << "stage=set_command\n"
+                << "detail=" << json_escape(set_detail) << "\n";
+            return out.str();
+        }
+        set_detail.clear();
+        if (!set_reflected_bool_param(function, params.data(), STR("bWriteToLog"), true, set_detail))
+        {
+            out << "write_to_log_set=false\n"
+                << "write_to_log_detail=" << json_escape(set_detail) << "\n";
+        }
+        else
+        {
+            out << "write_to_log_set=true\n";
+        }
+
+        unsigned long exception_code = 0;
+        const bool called = process_event_guarded(controller, function, params.data(), exception_code);
+        out << "process_event_called=" << (called ? "true" : "false") << "\n";
+        if (!called)
+        {
+            out << "ok=false\n"
+                << "stage=process_event\n"
+                << "exception_code=0x" << std::uppercase << std::hex << exception_code << std::dec << "\n";
+            return out.str();
+        }
+
+        out << "ok=true\n"
+            << "stage=process_event\n"
+            << "detail=PlayerController.ConsoleCommand ProcessEvent returned\n";
+        return out.str();
+    }
+
+    std::string execute_player_chat_message_probe_text(std::string_view raw_message,
+                                                       std::string_view confirmation)
+    {
+        std::ostringstream out;
+        out << "Native player chat message probe\n"
+            << "source=BMFSocketPlayerChatMessageProbe\n";
+
+        const std::string message = trim_ascii(raw_message);
+        const std::string token = trim_ascii(confirmation);
+        out << "requested=" << json_escape(message) << "\n";
+        if (message.empty())
+        {
+            out << "ok=false\n"
+                << "stage=parse\n"
+                << "detail=chat message is required\n";
+            return out.str();
+        }
+        if (token != "player-chat-message-probe")
+        {
+            out << "ok=false\n"
+                << "stage=confirmation\n"
+                << "detail=confirmation token player-chat-message-probe is required\n";
+            return out.str();
+        }
+
+        uint32_t scanned = 0;
+        std::string controller_detail;
+        Unreal::UObject* controller = find_live_player_controller(scanned, controller_detail);
+        out << "controller_scanned=" << scanned << "\n"
+            << "controller_detail=" << json_escape(controller_detail) << "\n";
+        if (!is_live_uobject(controller))
+        {
+            out << "ok=false\n"
+                << "stage=find_controller\n"
+                << "detail=live player controller was not found\n";
+            return out.str();
+        }
+
+        const ReflectedFunctionCandidate server_push_chat_message{
+            STR("ServerPushChatMessage"),
+            STR("/Script/Brickadia.BRPlayerController:ServerPushChatMessage"),
+            STR("/Script/Brickadia.BRPlayerController.ServerPushChatMessage"),
+            "BRPlayerController.ServerPushChatMessage"};
+
+        std::string resolve_detail;
+        Unreal::UFunction* function = find_reflected_function(
+            controller,
+            server_push_chat_message,
+            resolve_detail);
+        out << "controller=" << json_escape(object_full_name(controller)) << "\n"
+            << "controller_class=" << json_escape(object_class_full_name(controller)) << "\n"
+            << "function_detail=" << json_escape(resolve_detail) << "\n";
+        if (!is_live_uobject(function))
+        {
+            out << "ok=false\n"
+                << "stage=find_function\n"
+                << "detail=ServerPushChatMessage UFunction was not found\n";
+            return out.str();
+        }
+
+        const int32_t params_size = function->GetParmsSize();
+        out << "function=" << json_escape(object_full_name(function)) << "\n"
+            << "num_parms=" << static_cast<int32_t>(function->GetNumParms()) << "\n"
+            << "params_size=" << params_size << "\n";
+        if (params_size != static_cast<int32_t>(sizeof(PlayerChatMessageProcessEventParams)))
+        {
+            out << "ok=false\n"
+                << "stage=params\n"
+                << "detail=ServerPushChatMessage parameter storage did not match FString layout\n"
+                << "generated_layout_size=" << static_cast<int32_t>(sizeof(PlayerChatMessageProcessEventParams)) << "\n";
+            return out.str();
+        }
+
+        const StringType message_wide = ensure_str(message.c_str());
+        PlayerChatMessageProcessEventParams params{
+            Unreal::FString(message_wide.c_str()),
+        };
+
+        out << "params_layout=FString@0\n";
+        unsigned long exception_code = 0;
+        const bool called = process_event_guarded(controller, function, &params, exception_code);
+        out << "process_event_called=" << (called ? "true" : "false") << "\n";
+        if (!called)
+        {
+            out << "ok=false\n"
+                << "stage=process_event\n"
+                << "exception_code=0x" << std::uppercase << std::hex << exception_code << std::dec << "\n";
+            return out.str();
+        }
+
+        out << "ok=true\n"
+            << "stage=process_event\n"
+            << "detail=ServerPushChatMessage ProcessEvent returned\n";
+        return out.str();
+    }
+
+    std::string execute_player_chat_message_implementation_probe_text(std::string_view raw_message,
+                                                                      std::string_view confirmation,
+                                                                      std::string_view raw_controller_address)
+    {
+        std::ostringstream out;
+        out << "Native player chat message implementation probe\n"
+            << "source=BMFSocketPlayerChatMessageImplementationProbe\n";
+
+        const std::string message = trim_ascii(raw_message);
+        const std::string token = trim_ascii(confirmation);
+        out << "requested=" << json_escape(message) << "\n";
+        if (message.empty())
+        {
+            out << "ok=false\n"
+                << "stage=parse\n"
+                << "detail=chat message is required\n";
+            return out.str();
+        }
+        if (token != "player-chat-message-implementation-probe")
+        {
+            out << "ok=false\n"
+                << "stage=confirmation\n"
+                << "detail=confirmation token player-chat-message-implementation-probe is required\n";
+            return out.str();
+        }
+
+        const std::string controller_address = trim_ascii(raw_controller_address);
+        uint32_t scanned = 0;
+        std::string controller_detail;
+        Unreal::UObject* controller = nullptr;
+        if (!controller_address.empty())
+        {
+            uintptr_t parsed_controller_address = 0;
+            if (!parse_uobject_address(controller_address, parsed_controller_address))
+            {
+                out << "controller_hint=" << json_escape(controller_address) << "\n"
+                    << "controller_hint_matched=false\n"
+                    << "controller_scanned=0\n"
+                    << "ok=false\n"
+                    << "stage=find_controller\n"
+                    << "detail=explicit controller address was invalid\n";
+                return out.str();
+            }
+
+            controller = reinterpret_cast<Unreal::UObject*>(parsed_controller_address);
+            if (!is_live_player_controller_object(controller))
+            {
+                out << "controller_hint=" << json_escape(controller_address) << "\n"
+                    << "controller_hint_matched=false\n"
+                    << "controller_scanned=0\n"
+                    << "ok=false\n"
+                    << "stage=find_controller\n"
+                    << "detail=explicit controller address did not identify a live player controller\n";
+                return out.str();
+            }
+            controller_detail = "matched explicit live player controller address";
+            out << "controller_hint=" << json_escape(controller_address) << "\n"
+                << "controller_hint_matched=true\n";
+        }
+        else
+        {
+            controller = find_live_player_controller(scanned, controller_detail);
+            out << "controller_hint=\n"
+                << "controller_hint_matched=false\n";
+        }
+        out << "controller_scanned=" << scanned << "\n"
+            << "controller_detail=" << json_escape(controller_detail) << "\n";
+        if (!is_live_uobject(controller))
+        {
+            out << "ok=false\n"
+                << "stage=find_controller\n"
+                << "detail=live player controller was not found\n";
+            return out.str();
+        }
+
+        void* implementation = nullptr;
+        unsigned long vtable_exception_code = 0;
+        const bool vtable_read = get_uobject_vtable_entry_guarded(
+            controller,
+            kServerPushChatMessageImplementationVTableOffset,
+            implementation,
+            vtable_exception_code);
+        out << "controller=" << json_escape(object_full_name(controller)) << "\n"
+            << "controller_class=" << json_escape(object_class_full_name(controller)) << "\n"
+            << "implementation_vtable_offset=0x" << std::uppercase << std::hex
+            << kServerPushChatMessageImplementationVTableOffset << std::dec << "\n"
+            << "implementation_vtable_read=" << (vtable_read ? "true" : "false") << "\n"
+            << "implementation_entry=" << pointer_hex(reinterpret_cast<uintptr_t>(implementation)) << "\n";
+        if (!vtable_read)
+        {
+            out << "ok=false\n"
+                << "stage=read_vtable\n"
+                << "exception_code=0x" << std::uppercase << std::hex << vtable_exception_code << std::dec << "\n";
+            return out.str();
+        }
+        if (!implementation)
+        {
+            out << "ok=false\n"
+                << "stage=read_vtable\n"
+                << "detail=ServerPushChatMessage implementation vtable entry was not executable\n";
+            return out.str();
+        }
+
+        const StringType message_wide = ensure_str(message.c_str());
+        const Unreal::FString message_param(message_wide.c_str());
+
+        unsigned long exception_code = 0;
+        const bool called = server_push_chat_message_implementation_guarded(
+            controller,
+            implementation,
+            message_param,
+            exception_code);
+        out << "implementation_called=" << (called ? "true" : "false") << "\n";
+        if (!called)
+        {
+            out << "ok=false\n"
+                << "stage=implementation_call\n"
+                << "exception_code=0x" << std::uppercase << std::hex << exception_code << std::dec << "\n";
+            return out.str();
+        }
+
+        out << "ok=true\n"
+            << "stage=implementation_call\n"
+            << "detail=ServerPushChatMessage implementation returned\n";
+        return out.str();
+    }
+
+    Unreal::UObject* find_kismet_system_library_default(std::string& detail)
+    {
+        auto accept_cdo = [&](Unreal::UObject* object, const std::string& source) -> Unreal::UObject* {
+            if (!is_valid_uobject_or_cdo(object))
+            {
+                return nullptr;
+            }
+
+            try
+            {
+                const bool is_cdo = object->HasAnyFlags(Unreal::RF_ClassDefaultObject);
+                const std::string object_name_lower = ascii_lower(object_name(object));
+                if (is_cdo || object_name_lower.find("default__kismetsystemlibrary") != std::string::npos)
+                {
+                    detail = source + ": " + object_full_name(object);
+                    return object;
+                }
+            }
+            catch (...)
+            {
+            }
+            return nullptr;
+        };
+
+        try
+        {
+            if (auto* object = accept_cdo(
+                    Unreal::UObjectGlobals::StaticFindObject_InternalNoToStringFromStrings(
+                        {STR("/Script/Engine"), STR("Default__KismetSystemLibrary")}),
+                    "resolved CDO via StaticFindObject_InternalNoToStringFromStrings"))
+            {
+                return object;
+            }
+        }
+        catch (...)
+        {
+        }
+
+        try
+        {
+            auto* class_object = static_cast<Unreal::UClass*>(
+                Unreal::UObjectGlobals::StaticFindObject_InternalNoToStringFromStrings(
+                    {STR("/Script/Engine"), STR("KismetSystemLibrary")}));
+            if (is_valid_uobject_or_cdo(class_object))
+            {
+                if (auto* object = accept_cdo(
+                        class_object->GetClassDefaultObject(),
+                        "resolved CDO via KismetSystemLibrary class default object"))
+                {
+                    return object;
+                }
+            }
+        }
+        catch (...)
+        {
+        }
+
+        const std::array<const CharType*, 4> paths{
+            STR("/Script/Engine.Default__KismetSystemLibrary"),
+            STR("Default__KismetSystemLibrary"),
+            STR("/Script/Engine.KismetSystemLibrary"),
+            STR("KismetSystemLibrary"),
+        };
+
+        for (const CharType* path : paths)
+        {
+            try
+            {
+                Unreal::UObject* object =
+                    Unreal::UObjectGlobals::StaticFindObject<Unreal::UObject*>(
+                        nullptr, nullptr, path);
+                if (auto* cdo = accept_cdo(object, std::string("resolved via ") + narrow_string(path)))
+                {
+                    return cdo;
+                }
+            }
+            catch (...)
+            {
+            }
+        }
+
+        try
+        {
+            Unreal::UObject* object =
+                Unreal::UObjectGlobals::FindObject(
+                    STR("Object"),
+                    STR("Default__KismetSystemLibrary"),
+                    static_cast<int32_t>(Unreal::RF_ClassDefaultObject),
+                    0);
+            if (auto* cdo = accept_cdo(object, "resolved via FindObject(Object, Default__KismetSystemLibrary)"))
+            {
+                return cdo;
+            }
+        }
+        catch (...)
+        {
+        }
+
+        detail = "Default__KismetSystemLibrary was not found";
+        return nullptr;
+    }
+
+    std::string execute_kismet_console_command_probe_text(std::string_view raw_command_line,
+                                                          std::string_view confirmation,
+                                                          std::string_view explicit_world_address = {})
+    {
+        std::ostringstream out;
+        out << "Native Kismet console command probe\n"
+            << "source=BMFSocketKismetConsoleCommandProbe\n";
+
+        const std::string command_line = trim_ascii(raw_command_line);
+        const std::string token = trim_ascii(confirmation);
+        out << "requested=" << json_escape(command_line) << "\n";
+        if (command_line.empty())
+        {
+            out << "ok=false\n"
+                << "stage=parse\n"
+                << "detail=command line is required\n";
+            return out.str();
+        }
+        const bool fast_world_lookup = token == "kismet-console-command-probe-fast";
+        if (token != "kismet-console-command-probe" && !fast_world_lookup)
+        {
+            out << "ok=false\n"
+                << "stage=confirmation\n"
+                << "detail=confirmation token kismet-console-command-probe or kismet-console-command-probe-fast is required\n";
+            return out.str();
+        }
+        out << "world_lookup_mode=" << (fast_world_lookup ? "fast" : "diagnostic") << "\n";
+
+        uint32_t world_scanned = 0;
+        std::string world_detail;
+        Unreal::UObject* world = nullptr;
+        const std::string explicit_world_text = trim_ascii(explicit_world_address);
+        if (!explicit_world_text.empty())
+        {
+            world = uobject_from_address(explicit_world_text);
+            if (looks_like_explicit_world_context(world))
+            {
+                world_detail = "matched explicit world context " +
+                    explicit_world_text +
+                    ": " +
+                    describe_live_uobject_brief(world);
+            }
+            else
+            {
+                world_detail = "explicit world address was not an accepted context: " +
+                    explicit_world_text +
+                    " object=" +
+                    describe_live_uobject_brief(world);
+                world = nullptr;
+            }
+        }
+        if (!world)
+        {
+            world = fast_world_lookup
+                ? find_known_live_world(world_detail)
+                : find_live_world(world_scanned, world_detail);
+        }
+        out << "world_scanned=" << world_scanned << "\n"
+            << "world_detail=" << json_escape(world_detail) << "\n";
+        if (!is_live_uobject(world))
+        {
+            out << "ok=false\n"
+                << "stage=find_world\n"
+                << "detail=live world was not found\n";
+            return out.str();
+        }
+
+        Unreal::UObject* world_context = world;
+        std::string world_context_detail = "using matched world context object directly";
+        if (object_is_actor(world))
+        {
+            try
+            {
+                auto* actor = static_cast<Unreal::AActor*>(world);
+                auto* actor_world = actor->GetWorld();
+                if (is_live_uobject(actor_world))
+                {
+                    world_context = actor_world;
+                    world_context_detail = "using AActor::GetWorld() from matched context actor";
+                }
+                else
+                {
+                    world_context_detail = "AActor::GetWorld() did not return a live UWorld; using actor context";
+                }
+            }
+            catch (...)
+            {
+                world_context_detail = "AActor::GetWorld() threw; using actor context";
+            }
+        }
+
+        std::string kismet_detail;
+        Unreal::UObject* kismet = find_kismet_system_library_default(kismet_detail);
+        out << "world=" << json_escape(object_full_name(world)) << "\n"
+            << "world_class=" << json_escape(object_class_full_name(world)) << "\n"
+            << "world_context=" << json_escape(is_live_uobject(world_context) ? object_full_name(world_context) : "") << "\n"
+            << "world_context_class=" << json_escape(is_live_uobject(world_context) ? object_class_full_name(world_context) : "") << "\n"
+            << "world_context_detail=" << json_escape(world_context_detail) << "\n"
+            << "kismet_detail=" << json_escape(kismet_detail) << "\n";
+        if (!is_valid_uobject_or_cdo(kismet))
+        {
+            out << "ok=false\n"
+                << "stage=find_kismet\n"
+                << "detail=KismetSystemLibrary default object was not found\n";
+            return out.str();
+        }
+
+        const ReflectedFunctionCandidate execute_console_command{
+            STR("ExecuteConsoleCommand"),
+            STR("/Script/Engine.KismetSystemLibrary:ExecuteConsoleCommand"),
+            STR("/Script/Engine.KismetSystemLibrary.ExecuteConsoleCommand"),
+            "KismetSystemLibrary.ExecuteConsoleCommand"};
+
+        std::string resolve_detail;
+        Unreal::UFunction* function = find_reflected_function(kismet, execute_console_command, resolve_detail);
+        out << "kismet=" << json_escape(object_full_name(kismet)) << "\n"
+            << "kismet_class=" << json_escape(object_class_full_name(kismet)) << "\n"
+            << "function_detail=" << json_escape(resolve_detail) << "\n";
+        if (!is_live_uobject(function))
+        {
+            out << "ok=false\n"
+                << "stage=find_function\n"
+                << "detail=ExecuteConsoleCommand UFunction was not found\n";
+            return out.str();
+        }
+
+        const int32_t params_size = function->GetParmsSize();
+        out << "function=" << json_escape(object_full_name(function)) << "\n"
+            << "num_parms=" << static_cast<int32_t>(function->GetNumParms()) << "\n"
+            << "params_size=" << params_size << "\n";
+        if (params_size <= 0 || params_size > 1024)
+        {
+            out << "ok=false\n"
+                << "stage=params\n"
+                << "detail=ExecuteConsoleCommand parameter storage size is invalid\n";
+            return out.str();
+        }
+
+        struct KismetExecuteConsoleCommandParams
+        {
+            const Unreal::UObject* WorldContextObject{};
+            Unreal::FString Command{};
+            Unreal::UObject* Player{};
+        };
+
+        if (params_size > static_cast<int32_t>(sizeof(KismetExecuteConsoleCommandParams)))
+        {
+            out << "ok=false\n"
+                << "stage=params\n"
+                << "detail=ExecuteConsoleCommand parameter storage is larger than generated UE4SS layout\n"
+                << "generated_layout_size=" << static_cast<int32_t>(sizeof(KismetExecuteConsoleCommandParams)) << "\n";
+            return out.str();
+        }
+
+        const StringType command_wide = ensure_str(command_line.c_str());
+        KismetExecuteConsoleCommandParams params{
+            .WorldContextObject = world_context,
+            .Command = Unreal::FString(command_wide.c_str()),
+            .Player = nullptr,
+        };
+        out << "params_layout=generated_ue4ss\n"
+            << "generated_layout_size=" << static_cast<int32_t>(sizeof(KismetExecuteConsoleCommandParams)) << "\n"
+            << "specific_player_set=true\n";
+
+        unsigned long exception_code = 0;
+        const bool called = process_event_guarded(kismet, function, &params, exception_code);
+        out << "process_event_called=" << (called ? "true" : "false") << "\n";
+        if (!called)
+        {
+            out << "ok=false\n"
+                << "stage=process_event\n"
+                << "exception_code=0x" << std::uppercase << std::hex << exception_code << std::dec << "\n";
+            return out.str();
+        }
+
+        out << "ok=true\n"
+            << "stage=process_event\n"
+            << "detail=KismetSystemLibrary.ExecuteConsoleCommand ProcessEvent returned\n";
+        return out.str();
+    }
+
+    std::string execute_process_console_exec_probe_text(std::string_view raw_command_line,
+                                                        std::string_view confirmation,
+                                                        std::string_view explicit_context_address = {})
+    {
+        std::ostringstream out;
+        out << "Native ProcessConsoleExec probe\n"
+            << "source=BMFSocketProcessConsoleExecProbe\n";
+
+        const std::string command_line = trim_ascii(raw_command_line);
+        const std::string token = trim_ascii(confirmation);
+        out << "requested=" << json_escape(command_line) << "\n";
+        if (command_line.empty())
+        {
+            out << "ok=false\n"
+                << "stage=parse\n"
+                << "detail=command line is required\n";
+            return out.str();
+        }
+        if (token != "process-console-exec-probe")
+        {
+            out << "ok=false\n"
+                << "stage=confirmation\n"
+                << "detail=confirmation token process-console-exec-probe is required\n";
+            return out.str();
+        }
+
+        uint32_t scanned = 0;
+        std::string context_detail;
+        Unreal::UObject* explicit_context = nullptr;
+        const std::string explicit_context_text = trim_ascii(explicit_context_address);
+        if (!explicit_context_text.empty())
+        {
+            explicit_context = uobject_from_address(explicit_context_text);
+            if (is_live_uobject(explicit_context))
+            {
+                context_detail = "matched explicit context " +
+                    explicit_context_text +
+                    ": " +
+                    describe_live_uobject_brief(explicit_context);
+            }
+            else
+            {
+                context_detail = "explicit context address was not a live UObject: " + explicit_context_text;
+                explicit_context = nullptr;
+            }
+        }
+
+        if (!explicit_context)
+        {
+            explicit_context = find_live_world(scanned, context_detail);
+        }
+
+        out << "context_scanned=" << scanned << "\n"
+            << "context_detail=" << json_escape(context_detail) << "\n";
+        if (!is_live_uobject(explicit_context))
+        {
+            out << "ok=false\n"
+                << "stage=find_context\n"
+                << "detail=live ProcessConsoleExec context was not found\n";
+            return out.str();
+        }
+
+        struct Candidate
+        {
+            Unreal::UObject* object{};
+            std::string source{};
+        };
+        std::vector<Candidate> candidates;
+        auto add_candidate = [&](Unreal::UObject* object, std::string source) {
+            if (!is_live_uobject(object))
+            {
+                return;
+            }
+            for (const Candidate& existing : candidates)
+            {
+                if (existing.object == object)
+                {
+                    return;
+                }
+            }
+            candidates.push_back(Candidate{object, std::move(source)});
+        };
+
+        if (object_is_actor(explicit_context))
+        {
+            try
+            {
+                auto* actor = static_cast<Unreal::AActor*>(explicit_context);
+                add_candidate(actor->GetWorld(), "actor.GetWorld()");
+            }
+            catch (...)
+            {
+                out << "actor_get_world_error=true\n";
+            }
+        }
+        add_candidate(explicit_context, "explicit_context");
+
+        const StringType command_wide = ensure_str(command_line.c_str());
+        bool any_success = false;
+        bool any_called = false;
+        for (size_t index = 0; index < candidates.size(); ++index)
+        {
+            const Candidate& candidate = candidates[index];
+            CapturingOutputDevice output;
+            unsigned long exception_code = 0;
+            bool result = false;
+            const bool called = process_console_exec_guarded(
+                candidate.object,
+                command_wide,
+                output,
+                exception_code,
+                result);
+            any_called = any_called || called;
+
+            const std::string prefix = "candidate_" + std::to_string(index + 1);
+            out << prefix << "_source=" << json_escape(candidate.source) << "\n"
+                << prefix << "_object=" << json_escape(object_full_name(candidate.object)) << "\n"
+                << prefix << "_class=" << json_escape(object_class_full_name(candidate.object)) << "\n"
+                << prefix << "_called=" << (called ? "true" : "false") << "\n";
+            if (!called)
+            {
+                out << prefix << "_exception_code=0x" << std::uppercase << std::hex << exception_code << std::dec << "\n";
+            }
+            else
+            {
+                out << prefix << "_success=" << (result ? "true" : "false") << "\n"
+                    << prefix << "_output=" << json_escape(output.captured_output) << "\n";
+                if (result)
+                {
+                    any_success = true;
+                }
+            }
+
+            CapturingOutputDevice internal_output;
+            unsigned long internal_exception_code = 0;
+            bool internal_result = false;
+            bool internal_ready = false;
+            const bool internal_called = process_console_exec_internal_guarded(
+                candidate.object,
+                command_wide,
+                internal_output,
+                internal_exception_code,
+                internal_result,
+                internal_ready);
+            any_called = any_called || internal_called;
+            out << prefix << "_internal_ready=" << (internal_ready ? "true" : "false") << "\n"
+                << prefix << "_internal_called=" << (internal_called ? "true" : "false") << "\n";
+            if (!internal_called)
+            {
+                out << prefix << "_internal_exception_code=0x" << std::uppercase << std::hex << internal_exception_code << std::dec << "\n";
+            }
+            else
+            {
+                out << prefix << "_internal_success=" << (internal_result ? "true" : "false") << "\n"
+                    << prefix << "_internal_output=" << json_escape(internal_output.captured_output) << "\n";
+                if (internal_result)
+                {
+                    any_success = true;
+                }
+            }
+        }
+
+        out << "ok=" << (any_success ? "true" : "false") << "\n"
+            << "stage=process_console_exec\n"
+            << "detail=" << (any_success
+                ? "ProcessConsoleExec returned true"
+                : (any_called ? "ProcessConsoleExec returned false for all candidates" : "ProcessConsoleExec did not call any candidate"))
+            << "\n";
+        return out.str();
+    }
+
+    std::string execute_console_manager_input_probe_text(std::string_view raw_command_line,
+                                                         std::string_view confirmation,
+                                                         std::string_view requested_offset_text = {},
+                                                         std::string_view requested_world_mode = {})
+    {
+        std::ostringstream out;
+        out << "Native ConsoleManager input probe\n"
+            << "source=BMFSocketConsoleManagerInputProbe\n";
+
+        const std::string command_line = trim_ascii(raw_command_line);
+        const std::string token = trim_ascii(confirmation);
+        const std::string offset_text = trim_ascii(requested_offset_text);
+        const std::string world_mode = ascii_lower(trim_ascii(requested_world_mode));
+        out << "requested=" << json_escape(command_line) << "\n";
+        if (command_line.empty())
+        {
+            out << "ok=false\n"
+                << "stage=parse\n"
+                << "detail=command line is required\n";
+            return out.str();
+        }
+        if (token != "console-manager-input-probe")
+        {
+            out << "ok=false\n"
+                << "stage=confirmation\n"
+                << "detail=confirmation token console-manager-input-probe is required\n";
+            return out.str();
+        }
+
+        std::size_t vtable_offset = kConsoleManagerProcessInputVTableOffset;
+        if (!offset_text.empty())
+        {
+            char* end = nullptr;
+            const unsigned long long parsed = std::strtoull(offset_text.c_str(), &end, 0);
+            if (end == offset_text.c_str() || (end && *end != '\0') || parsed > 0x400 || parsed % sizeof(void*) != 0)
+            {
+                out << "ok=false\n"
+                    << "stage=parse_offset\n"
+                    << "detail=vtable offset must be a pointer-aligned integer between 0 and 0x400\n";
+                return out.str();
+            }
+            vtable_offset = static_cast<std::size_t>(parsed);
+        }
+
+        auto* initializer = Unreal::UnrealInitializer::GConsoleManagerSingletonInitializer;
+        auto** slot = resolve_console_manager_singleton_slot();
+        auto* console_manager = slot ? *slot : nullptr;
+        out << "initializer=" << pointer_hex(reinterpret_cast<uintptr_t>(initializer)) << "\n"
+            << "slot=" << pointer_hex(reinterpret_cast<uintptr_t>(slot)) << "\n"
+            << "singleton=" << pointer_hex(reinterpret_cast<uintptr_t>(console_manager)) << "\n"
+            << "vtable_offset=0x" << std::uppercase << std::hex << vtable_offset << std::dec << "\n";
+        if (!console_manager)
+        {
+            out << "ok=false\n"
+                << "stage=console_manager\n"
+                << "detail=console manager singleton is unavailable\n";
+            return out.str();
+        }
+
+        void* process_input = nullptr;
+        unsigned long vtable_exception_code = 0;
+        const bool vtable_read = get_console_manager_vtable_entry_guarded(
+            console_manager,
+            vtable_offset,
+            process_input,
+            vtable_exception_code);
+        out << "vtable_read=" << (vtable_read ? "true" : "false") << "\n";
+        if (!vtable_read)
+        {
+            out << "vtable_exception_code=0x" << std::uppercase << std::hex << vtable_exception_code << std::dec << "\n";
+        }
+        out << "process_input=" << pointer_hex(reinterpret_cast<uintptr_t>(process_input)) << "\n";
+        if (!vtable_read || !process_input)
+        {
+            out << "ok=false\n"
+                << "stage=process_input\n"
+                << "detail=ProcessUserConsoleInput vtable entry is unavailable\n";
+            return out.str();
+        }
+
+        Unreal::UObject* world = nullptr;
+        uint32_t world_scanned = 0;
+        std::string world_detail;
+        if (world_mode == "null" || world_mode == "none")
+        {
+            world_detail = "world context intentionally omitted";
+        }
+        else
+        {
+            world = find_live_world(world_scanned, world_detail);
+        }
+
+        out << "world_mode=" << (world ? "world" : (world_detail == "world context intentionally omitted" ? "null" : "missing")) << "\n"
+            << "world_scanned=" << world_scanned << "\n"
+            << "world_detail=" << json_escape(world_detail) << "\n"
+            << "world=" << pointer_hex(reinterpret_cast<uintptr_t>(world)) << "\n";
+        if (world)
+        {
+            out << "world_object=" << json_escape(object_full_name(world)) << "\n"
+                << "world_class=" << json_escape(object_class_full_name(world)) << "\n";
+        }
+        else if (world_mode != "null" && world_mode != "none")
+        {
+            out << "ok=false\n"
+                << "stage=find_world\n"
+                << "detail=active world was not found\n";
+            return out.str();
+        }
+
+        CapturingOutputDevice output;
+        unsigned long exception_code = 0;
+        bool result = false;
+        const StringType command_wide = ensure_str(command_line.c_str());
+        const bool called = console_manager_input_guarded(
+            console_manager,
+            process_input,
+            command_wide,
+            world,
+            output,
+            exception_code,
+            result);
+
+        out << "called=" << (called ? "true" : "false") << "\n";
+        if (!called)
+        {
+            out << "exception_code=0x" << std::uppercase << std::hex << exception_code << std::dec << "\n"
+                << "ok=false\n"
+                << "stage=call\n"
+                << "detail=ProcessUserConsoleInput threw before returning\n";
+            return out.str();
+        }
+
+        out << "success=" << (result ? "true" : "false") << "\n"
+            << "output=" << json_escape(output.captured_output) << "\n"
+            << "ok=" << (result ? "true" : "false") << "\n"
+            << "stage=call\n"
+            << "detail=" << (result ? "ProcessUserConsoleInput returned true" : "ProcessUserConsoleInput returned false") << "\n";
+        return out.str();
     }
 
     bool call_component_bool_bool(Unreal::UObject* object,
@@ -1479,6 +4292,101 @@ namespace
         }
     }
 
+    Unreal::FProperty* find_vector_return_property(Unreal::UFunction* function)
+    {
+        if (!function)
+        {
+            return nullptr;
+        }
+
+        try
+        {
+            for (Unreal::FProperty* property : Unreal::TFieldRange<Unreal::FProperty>(
+                     function,
+                     Unreal::EFieldIterationFlags::IncludeSuper | Unreal::EFieldIterationFlags::IncludeDeprecated))
+            {
+                if (property &&
+                    property->HasAnyPropertyFlags(Unreal::EPropertyFlags::CPF_ReturnParm) &&
+                    property->GetSize() >= static_cast<int32_t>(sizeof(Unreal::FVector)))
+                {
+                    return property;
+                }
+            }
+        }
+        catch (...)
+        {
+        }
+        return nullptr;
+    }
+
+    bool call_reflected_vector_no_params(Unreal::UObject* object,
+                                         const ReflectedFunctionCandidate& function_candidate,
+                                         Unreal::FVector& out_vector,
+                                         std::string& detail)
+    {
+        if (!is_live_uobject(object))
+        {
+            detail = "target is not live";
+            return false;
+        }
+
+        std::string resolve_detail;
+        Unreal::UFunction* function = find_reflected_function(object, function_candidate, resolve_detail);
+        if (!function)
+        {
+            detail = resolve_detail;
+            return false;
+        }
+
+        Unreal::FProperty* return_property = find_vector_return_property(function);
+        if (!return_property)
+        {
+            detail = resolve_detail + "; FVector return property not found";
+            return false;
+        }
+
+        const int32_t params_size = function->GetParmsSize();
+        if (params_size <= 0)
+        {
+            detail = resolve_detail + "; reflected vector function has no parameter storage";
+            return false;
+        }
+
+        std::vector<uint8_t> params(static_cast<size_t>(params_size), 0);
+        try
+        {
+            object->ProcessEvent(function, params.data());
+        }
+        catch (...)
+        {
+            detail = resolve_detail + "; reflected vector function raised an exception";
+            return false;
+        }
+
+        try
+        {
+            auto value = reinterpret_cast<Unreal::FVector*>(
+                params.data() + return_property->GetOffset_Internal());
+            const double x = value->X();
+            const double y = value->Y();
+            const double z = value->Z();
+            if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
+            {
+                detail = resolve_detail + "; reflected vector return was non-finite";
+                return false;
+            }
+
+            out_vector = *value;
+            detail = resolve_detail;
+            return true;
+        }
+        catch (...)
+        {
+            detail = resolve_detail + "; reflected vector return read failed";
+            return false;
+        }
+    }
+
     Unreal::UClass* scene_component_class()
     {
         try
@@ -1491,6 +4399,117 @@ namespace
         catch (...)
         {
             return nullptr;
+        }
+    }
+
+    int scene_component_location_priority(Unreal::UObject* component)
+    {
+        const std::string name = ascii_lower(object_name(component));
+        const std::string class_name = ascii_lower(object_class_name(component));
+        if (name.find("collisioncylinder") != std::string::npos ||
+            class_name.find("capsule") != std::string::npos)
+        {
+            return 100;
+        }
+        if (name.find("capsule") != std::string::npos)
+        {
+            return 90;
+        }
+        if (name.find("root") != std::string::npos)
+        {
+            return 80;
+        }
+        if (name.find("mesh") != std::string::npos)
+        {
+            return 40;
+        }
+        return 10;
+    }
+
+    bool try_actor_scene_component_location(Unreal::UObject* actor_object,
+                                            Unreal::FVector& out_vector,
+                                            std::string& method,
+                                            Unreal::UObject** out_component)
+    {
+        if (!is_live_uobject(actor_object) || !object_is_actor(actor_object))
+        {
+            return false;
+        }
+
+        Unreal::UClass* component_class = scene_component_class();
+        if (!component_class)
+        {
+            return false;
+        }
+
+        try
+        {
+            auto* actor = static_cast<Unreal::AActor*>(actor_object);
+            Unreal::TArray<Unreal::UObject*> components =
+                actor->K2_GetComponentsByClass(component_class);
+            constexpr int32_t kMaxComponentsPerActor = 64;
+            const int32_t component_count = std::max<int32_t>(
+                0,
+                std::min<int32_t>(components.Num(), kMaxComponentsPerActor));
+
+            int best_priority = -1;
+            int best_index = -1;
+            Unreal::UObject* best_component = nullptr;
+            Unreal::FVector best_vector{};
+            std::string best_suffix;
+
+            for (int32_t index = 0; index < component_count; ++index)
+            {
+                Unreal::UObject* component = components[index];
+                if (!is_live_uobject(component) ||
+                    !object_class_has_any_cast_flags(component, Unreal::CASTCLASS_USceneComponent))
+                {
+                    continue;
+                }
+
+                Unreal::FVector vector{};
+                std::string suffix;
+                if (!try_scene_component_location(component, vector, suffix))
+                {
+                    continue;
+                }
+
+                const double x = vector.X();
+                const double y = vector.Y();
+                const double z = vector.Z();
+                if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
+                {
+                    continue;
+                }
+
+                const int priority = scene_component_location_priority(component);
+                if (priority > best_priority)
+                {
+                    best_priority = priority;
+                    best_index = index;
+                    best_component = component;
+                    best_vector = vector;
+                    best_suffix = suffix;
+                }
+            }
+
+            if (!is_live_uobject(best_component))
+            {
+                return false;
+            }
+
+            out_vector = best_vector;
+            method = ".scene_component.K2_GetComponentsByClass[" + std::to_string(best_index) +
+                     "]" + best_suffix;
+            if (out_component)
+            {
+                *out_component = best_component;
+            }
+            return true;
+        }
+        catch (...)
+        {
+            return false;
         }
     }
 
@@ -4055,6 +7074,11 @@ namespace
             method = "K2_GetActorLocation";
             return true;
         }
+        if (try_actor_transform_location(actor, out_vector))
+        {
+            method = "GetTransform";
+            return true;
+        }
         if (try_actor_root_component_location(actor, out_vector, method))
         {
             return true;
@@ -5507,6 +8531,3754 @@ namespace
                 << "probe." << index << ".last_tick_ms=" << probe.last_tick_ms.load() << "\n"
                 << "probe." << index << ".first_summary=" << json_escape(g_treecut_probe_first_summary[index]) << "\n"
                 << "probe." << index << ".last_summary=" << json_escape(g_treecut_probe_last_summary[index]) << "\n";
+        }
+        return out.str();
+    }
+
+    struct ZoneEventObjectRef
+    {
+        std::string role;
+        std::string property;
+        uintptr_t offset{0};
+        Unreal::UObject* object{nullptr};
+    };
+
+    struct ZoneEventHookSlot
+    {
+        const char* label;
+        const char* action;
+        const char* event_name;
+        const CharType* short_name;
+        const CharType* path_a;
+        const CharType* path_b;
+        std::atomic<bool> installed{false};
+        std::atomic<uint64_t> hits{0};
+        std::atomic<uintptr_t> function{0};
+        std::atomic<uintptr_t> slot{0};
+        std::atomic<uintptr_t> original{0};
+        std::atomic<uintptr_t> last_context{0};
+        std::atomic<uintptr_t> last_stack{0};
+        std::atomic<uintptr_t> last_locals{0};
+        std::atomic<uint64_t> last_tick_ms{0};
+
+        constexpr ZoneEventHookSlot(
+            const char* label_value,
+            const char* action_value,
+            const char* event_name_value,
+            const CharType* short_name_value,
+            const CharType* path_a_value,
+            const CharType* path_b_value)
+            : label(label_value),
+              action(action_value),
+              event_name(event_name_value),
+              short_name(short_name_value),
+              path_a(path_a_value),
+              path_b(path_b_value)
+        {
+        }
+    };
+
+    void __fastcall zone_event_detour_0(void* context, void* stack, void* result);
+    void __fastcall zone_event_detour_1(void* context, void* stack, void* result);
+    void __fastcall zone_event_detour_2(void* context, void* stack, void* result);
+    void __fastcall zone_event_detour_3(void* context, void* stack, void* result);
+
+    std::atomic<bool> g_zone_event_enabled{false};
+    std::atomic<bool> g_zone_event_capture_all{false};
+    std::atomic<bool> g_zone_event_scan_local_objects{false};
+    std::atomic<uint64_t> g_zone_event_hits{0};
+    std::atomic<uint64_t> g_zone_event_events{0};
+    std::atomic<uint64_t> g_zone_event_rejected_non_zone{0};
+    std::atomic<uint64_t> g_zone_event_param_failures{0};
+    std::atomic<uint64_t> g_zone_event_queue_drops{0};
+    std::mutex g_zone_event_mutex;
+    std::deque<std::string> g_zone_event_queue;
+    std::string g_zone_event_last_error;
+    std::string g_zone_event_last_summary;
+
+    ZoneEventHookSlot g_zone_event_hook_slots[] = {
+        ZoneEventHookSlot{
+            "Actor.ReceiveActorBeginOverlap",
+            "entered",
+            "zones.character.entered",
+            STR("ReceiveActorBeginOverlap"),
+            STR("/Script/Engine.Actor:ReceiveActorBeginOverlap"),
+            STR("/Script/Engine.Actor.ReceiveActorBeginOverlap")},
+        ZoneEventHookSlot{
+            "Actor.ReceiveActorEndOverlap",
+            "left",
+            "zones.character.left",
+            STR("ReceiveActorEndOverlap"),
+            STR("/Script/Engine.Actor:ReceiveActorEndOverlap"),
+            STR("/Script/Engine.Actor.ReceiveActorEndOverlap")},
+        ZoneEventHookSlot{
+            "PrimitiveComponent.ReceiveComponentBeginOverlap",
+            "entered",
+            "zones.character.entered",
+            STR("ReceiveComponentBeginOverlap"),
+            STR("/Script/Engine.PrimitiveComponent:ReceiveComponentBeginOverlap"),
+            STR("/Script/Engine.PrimitiveComponent.ReceiveComponentBeginOverlap")},
+        ZoneEventHookSlot{
+            "PrimitiveComponent.ReceiveComponentEndOverlap",
+            "left",
+            "zones.character.left",
+            STR("ReceiveComponentEndOverlap"),
+            STR("/Script/Engine.PrimitiveComponent:ReceiveComponentEndOverlap"),
+            STR("/Script/Engine.PrimitiveComponent.ReceiveComponentEndOverlap")},
+    };
+
+    constexpr size_t kZoneEventHookSlotCount = sizeof(g_zone_event_hook_slots) / sizeof(g_zone_event_hook_slots[0]);
+    NativeFunc g_zone_event_detours[kZoneEventHookSlotCount] = {
+        zone_event_detour_0,
+        zone_event_detour_1,
+        zone_event_detour_2,
+        zone_event_detour_3,
+    };
+
+    constexpr size_t kZoneBcsTouchHookMaxSlots = 64;
+
+    struct ZoneBcsTouchHookSlot
+    {
+        const char* label{"BCSNativeEvents.Touch"};
+        const char* action{"unknown"};
+        const char* event_name{"zones.character.unknown"};
+        std::atomic<bool> installed{false};
+        std::atomic<uint64_t> hits{0};
+        std::atomic<uintptr_t> accessor{0};
+        std::atomic<uintptr_t> slot{0};
+        std::atomic<uintptr_t> original{0};
+        std::atomic<uint64_t> last_tick_ms{0};
+    };
+
+    using ZoneBcsTouchFn = uintptr_t(__fastcall*)(void*, void*, void*, void*);
+
+    uintptr_t zone_bcs_touch_handle(size_t index, void* arg0, void* arg1, void* arg2, void* arg3);
+    size_t zone_bcs_touch_install_all();
+    size_t zone_bcs_touch_vmethod_install_all();
+
+    template <size_t Index>
+    uintptr_t __fastcall zone_bcs_touch_detour(void* arg0, void* arg1, void* arg2, void* arg3)
+    {
+        return zone_bcs_touch_handle(Index, arg0, arg1, arg2, arg3);
+    }
+
+#define ZONE_BCS_TOUCH_DETOUR_ENTRY(index) zone_bcs_touch_detour<index>
+
+    ZoneBcsTouchFn g_zone_bcs_touch_detours[kZoneBcsTouchHookMaxSlots] = {
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(0),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(1),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(2),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(3),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(4),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(5),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(6),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(7),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(8),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(9),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(10),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(11),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(12),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(13),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(14),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(15),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(16),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(17),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(18),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(19),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(20),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(21),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(22),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(23),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(24),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(25),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(26),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(27),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(28),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(29),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(30),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(31),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(32),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(33),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(34),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(35),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(36),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(37),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(38),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(39),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(40),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(41),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(42),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(43),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(44),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(45),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(46),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(47),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(48),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(49),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(50),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(51),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(52),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(53),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(54),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(55),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(56),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(57),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(58),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(59),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(60),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(61),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(62),
+        ZONE_BCS_TOUCH_DETOUR_ENTRY(63),
+    };
+
+#undef ZONE_BCS_TOUCH_DETOUR_ENTRY
+
+    ZoneBcsTouchHookSlot g_zone_bcs_touch_hooks[kZoneBcsTouchHookMaxSlots];
+    std::atomic<size_t> g_zone_bcs_touch_hook_count{0};
+    std::atomic<uint64_t> g_zone_bcs_touch_hits{0};
+    std::atomic<uint64_t> g_zone_bcs_touch_scan_refs{0};
+    std::atomic<uint64_t> g_zone_bcs_touch_scan_slots{0};
+    std::atomic<uint64_t> g_zone_bcs_touch_install_failures{0};
+    std::string g_zone_bcs_touch_last_error;
+
+    struct ZoneBcsVmethodHookState
+    {
+        std::atomic<bool> installed{false};
+        std::atomic<uintptr_t> target{0};
+        std::atomic<uintptr_t> trampoline{0};
+        std::atomic<uintptr_t> begin_object{0};
+        std::atomic<uintptr_t> end_object{0};
+        std::atomic<uint64_t> hits{0};
+        std::atomic<uint64_t> begin_hits{0};
+        std::atomic<uint64_t> end_hits{0};
+        std::atomic<uintptr_t> last_event_object{0};
+        std::atomic<uintptr_t> last_out_counter{0};
+        std::atomic<int32_t> last_ref_count{0};
+        std::atomic<uint64_t> last_tick_ms{0};
+        size_t overwrite_length{0};
+    };
+
+    using ZoneBcsVmethodFn = int* (__fastcall*)(uintptr_t event_object, int* out_counter);
+
+    constexpr uintptr_t kZoneBcsTouchVmethodRva = 0x5F12E0;
+    constexpr uintptr_t kZoneBcsTouchBeginObjectSlotRva = 0x8FE8920;
+    constexpr uintptr_t kZoneBcsTouchEndObjectSlotRva = 0x8FE8930;
+    constexpr size_t kZoneBcsTouchVmethodOverwriteLength = 14;
+
+    ZoneBcsVmethodHookState g_zone_bcs_touch_vmethod_hook;
+    std::string g_zone_bcs_touch_vmethod_last_error;
+
+    int* __fastcall zone_bcs_touch_vmethod_detour(uintptr_t event_object, int* out_counter);
+
+    void zone_event_set_error(std::string value)
+    {
+        std::lock_guard lock(g_zone_event_mutex);
+        g_zone_event_last_error = std::move(value);
+    }
+
+    void zone_bcs_touch_set_error(std::string value)
+    {
+        std::lock_guard lock(g_zone_event_mutex);
+        g_zone_bcs_touch_last_error = std::move(value);
+    }
+
+    void zone_bcs_touch_vmethod_set_error(std::string value)
+    {
+        std::lock_guard lock(g_zone_event_mutex);
+        g_zone_bcs_touch_vmethod_last_error = std::move(value);
+    }
+
+    std::string zone_event_object_text(Unreal::UObject* object)
+    {
+        if (!is_live_uobject(object))
+        {
+            return "";
+        }
+        return ascii_lower(
+            object_name(object) + " " +
+            object_full_name(object) + " " +
+            object_class_name(object) + " " +
+            object_class_full_name(object));
+    }
+
+    bool zone_event_text_is_zone_related(std::string_view text)
+    {
+        return text.find("zone") != std::string::npos ||
+               text.find("projection") != std::string::npos ||
+               text.find("attachedzone") != std::string::npos ||
+               text.find("characterevent") != std::string::npos ||
+               text.find("eventgate_zone") != std::string::npos ||
+               text.find("b_1x1_eventgate_zone") != std::string::npos;
+    }
+
+    bool zone_event_text_is_character_related(std::string_view text)
+    {
+        return text.find("character") != std::string::npos ||
+               text.find("figure") != std::string::npos ||
+               text.find("pawn") != std::string::npos ||
+               text.find("player") != std::string::npos ||
+               text.find("controller") != std::string::npos;
+    }
+
+    bool zone_event_ref_exists(const std::vector<ZoneEventObjectRef>& refs, Unreal::UObject* object)
+    {
+        for (const ZoneEventObjectRef& ref : refs)
+        {
+            if (ref.object == object)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void zone_event_add_ref(std::vector<ZoneEventObjectRef>& refs,
+                            const char* role,
+                            std::string property,
+                            uintptr_t offset,
+                            Unreal::UObject* object)
+    {
+        if (!is_live_uobject(object) || refs.size() >= 24 || zone_event_ref_exists(refs, object))
+        {
+            return;
+        }
+        ZoneEventObjectRef ref;
+        ref.role = role ? role : "unknown";
+        ref.property = std::move(property);
+        ref.offset = offset;
+        ref.object = object;
+        refs.push_back(std::move(ref));
+    }
+
+    Unreal::UObject* find_zone_event_function(const ZoneEventHookSlot& hook)
+    {
+        for (const CharType* candidate : {hook.path_a, hook.path_b})
+        {
+            if (!candidate)
+            {
+                continue;
+            }
+            try
+            {
+                if (auto* function = Unreal::UObjectGlobals::StaticFindObject(nullptr, nullptr, candidate))
+                {
+                    return function;
+                }
+            }
+            catch (...)
+            {
+            }
+        }
+        if (hook.short_name)
+        {
+            try
+            {
+                if (auto* function = Unreal::UObjectGlobals::FindObject(STR("Function"), hook.short_name))
+                {
+                    return function;
+                }
+            }
+            catch (...)
+            {
+            }
+        }
+        return nullptr;
+    }
+
+    bool zone_event_install_slot(size_t index)
+    {
+        if (index >= kZoneEventHookSlotCount)
+        {
+            return false;
+        }
+
+        ZoneEventHookSlot& hook = g_zone_event_hook_slots[index];
+        if (hook.installed.load())
+        {
+            return true;
+        }
+
+        Unreal::UObject* function = find_zone_event_function(hook);
+        if (!function)
+        {
+            return false;
+        }
+
+        const uintptr_t function_address = reinterpret_cast<uintptr_t>(function);
+        const uintptr_t slot_address = function_address + kTreeCutFuncOffset;
+        hook.function.store(function_address);
+        hook.slot.store(slot_address);
+        if (!is_accessible_memory(slot_address, sizeof(void*)))
+        {
+            return false;
+        }
+
+        void** slot = reinterpret_cast<void**>(slot_address);
+        void* current = nullptr;
+        std::memcpy(&current, slot, sizeof(current));
+        if (current != reinterpret_cast<void*>(g_zone_event_detours[index]) &&
+            (!current || !is_executable_memory(reinterpret_cast<uintptr_t>(current))))
+        {
+            return false;
+        }
+
+        DWORD old_protect = 0;
+        if (!VirtualProtect(slot, sizeof(void*), PAGE_EXECUTE_READWRITE, &old_protect))
+        {
+            return false;
+        }
+
+        void* previous = InterlockedExchangePointer(slot, reinterpret_cast<void*>(g_zone_event_detours[index]));
+        DWORD ignored = 0;
+        VirtualProtect(slot, sizeof(void*), old_protect, &ignored);
+        FlushInstructionCache(GetCurrentProcess(), slot, sizeof(void*));
+
+        if (previous == reinterpret_cast<void*>(g_zone_event_detours[index]))
+        {
+            previous = reinterpret_cast<void*>(hook.original.load());
+        }
+        if (!previous)
+        {
+            return false;
+        }
+
+        hook.original.store(reinterpret_cast<uintptr_t>(previous));
+        hook.installed.store(true);
+        return true;
+    }
+
+    size_t zone_event_install_all()
+    {
+        size_t installed = 0;
+        for (size_t index = 0; index < kZoneEventHookSlotCount; ++index)
+        {
+            if (zone_event_install_slot(index))
+            {
+                ++installed;
+            }
+        }
+        const size_t bcs_installed = zone_bcs_touch_install_all();
+        const size_t bcs_vmethod_installed = zone_bcs_touch_vmethod_install_all();
+        if (installed == 0 && bcs_installed == 0 && bcs_vmethod_installed == 0)
+        {
+            zone_event_set_error("no character-zone hook candidate functions resolved");
+        }
+        else
+        {
+            zone_event_set_error("");
+        }
+        return installed + bcs_installed + bcs_vmethod_installed;
+    }
+
+    struct ZoneModuleSection
+    {
+        uintptr_t start{0};
+        size_t size{0};
+        DWORD characteristics{0};
+    };
+
+    bool zone_module_section_by_name(const char* wanted, ZoneModuleSection& out)
+    {
+        if (!wanted)
+        {
+            return false;
+        }
+
+        const uintptr_t module_base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        if (module_base == 0 || !is_accessible_memory(module_base, sizeof(IMAGE_DOS_HEADER)))
+        {
+            return false;
+        }
+
+        auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(module_base);
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE)
+        {
+            return false;
+        }
+
+        auto* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(module_base + static_cast<uintptr_t>(dos->e_lfanew));
+        if (!is_accessible_memory(reinterpret_cast<uintptr_t>(nt), sizeof(IMAGE_NT_HEADERS)) ||
+            nt->Signature != IMAGE_NT_SIGNATURE)
+        {
+            return false;
+        }
+
+        IMAGE_SECTION_HEADER* section = IMAGE_FIRST_SECTION(nt);
+        for (WORD index = 0; index < nt->FileHeader.NumberOfSections; ++index, ++section)
+        {
+            char name[9]{};
+            std::memcpy(name, section->Name, sizeof(section->Name));
+            if (std::strcmp(name, wanted) != 0)
+            {
+                continue;
+            }
+
+            out.start = module_base + static_cast<uintptr_t>(section->VirtualAddress);
+            out.size = static_cast<size_t>(std::max<DWORD>(
+                section->Misc.VirtualSize,
+                section->SizeOfRawData));
+            out.characteristics = section->Characteristics;
+            return out.start != 0 && out.size > 0;
+        }
+
+        return false;
+    }
+
+    bool zone_pointer_in_section(uintptr_t value, const ZoneModuleSection& section)
+    {
+        return section.start != 0 &&
+               section.size > 0 &&
+               value >= section.start &&
+               value < section.start + section.size;
+    }
+
+    uintptr_t zone_rip_target(uintptr_t instruction, size_t length)
+    {
+        int32_t displacement = 0;
+        if (!is_accessible_memory(instruction + 3, sizeof(displacement)))
+        {
+            return 0;
+        }
+        std::memcpy(&displacement, reinterpret_cast<void*>(instruction + 3), sizeof(displacement));
+        return instruction + length + static_cast<intptr_t>(displacement);
+    }
+
+    uintptr_t zone_rip_target_unchecked(uintptr_t instruction, size_t length)
+    {
+        int32_t displacement = 0;
+        std::memcpy(&displacement, reinterpret_cast<void*>(instruction + 3), sizeof(displacement));
+        return instruction + length + static_cast<intptr_t>(displacement);
+    }
+
+    std::vector<uintptr_t> zone_find_wide_strings(const wchar_t* text, uint64_t max_ms = 0)
+    {
+        std::vector<uintptr_t> found;
+        ZoneModuleSection rdata;
+        if (!text || !zone_module_section_by_name(".rdata", rdata))
+        {
+            return found;
+        }
+
+        const size_t len = std::char_traits<wchar_t>::length(text) * sizeof(wchar_t);
+        if (len == 0 || rdata.size < len)
+        {
+            return found;
+        }
+
+        auto* bytes = reinterpret_cast<const uint8_t*>(rdata.start);
+        const auto* wanted = reinterpret_cast<const uint8_t*>(text);
+        const uint64_t started_ms = monotonic_ms();
+        for (size_t offset = 0; offset + len <= rdata.size; offset += 2)
+        {
+            if (max_ms > 0 && (offset & 0x3FFFF) == 0 &&
+                monotonic_ms() - started_ms >= max_ms)
+            {
+                break;
+            }
+            if (std::memcmp(bytes + offset, wanted, len) == 0)
+            {
+                found.push_back(rdata.start + offset);
+            }
+        }
+        return found;
+    }
+
+    std::vector<uintptr_t> zone_find_rip_lea_refs(uintptr_t target,
+                                                  const ZoneModuleSection& text,
+                                                  size_t max_refs = 64,
+                                                  uint64_t max_ms = 0)
+    {
+        std::vector<uintptr_t> refs;
+        if (target == 0 || text.start == 0 || text.size < 7)
+        {
+            return refs;
+        }
+
+        auto* bytes = reinterpret_cast<const uint8_t*>(text.start);
+        const uint64_t started_ms = monotonic_ms();
+        for (size_t offset = 0; offset + 7 <= text.size; ++offset)
+        {
+            if (max_ms > 0 && (offset & 0xFFFFF) == 0 &&
+                monotonic_ms() - started_ms >= max_ms)
+            {
+                break;
+            }
+            if (bytes[offset] != 0x48 || bytes[offset + 1] != 0x8D ||
+                (bytes[offset + 2] & 0xC7) != 0x05)
+            {
+                continue;
+            }
+
+            const uintptr_t instruction = text.start + offset;
+            if (zone_rip_target_unchecked(instruction, 7) == target)
+            {
+                refs.push_back(instruction);
+                if (max_refs > 0 && refs.size() >= max_refs)
+                {
+                    break;
+                }
+            }
+        }
+        return refs;
+    }
+
+    constexpr uintptr_t kUnknownCommandMessagesNameRva = 0x8706178;
+    constexpr uintptr_t kUnknownCommandMessagesFlagRva = 0x8DA0D60;
+    constexpr uintptr_t kUnknownCommandMessagesRegistrationRefRva = 0x5D64DC9;
+    constexpr uintptr_t kUnknownCommandMessagesBranchRefRva = 0x5CF4EA2;
+    constexpr uint64_t kUnknownCommandMessagesScanBudgetMs = 1500;
+
+    std::atomic<uintptr_t> g_unknown_command_messages_flag{0};
+
+    bool unknown_command_messages_registration_matches(uintptr_t registration_ref,
+                                                       uintptr_t name_address,
+                                                       uintptr_t flag_address)
+    {
+        if (!is_accessible_memory(registration_ref, 17))
+        {
+            return false;
+        }
+
+        const auto* bytes = reinterpret_cast<const uint8_t*>(registration_ref);
+        return bytes[0] == 0x4C && bytes[1] == 0x8D && bytes[2] == 0x05 &&
+               zone_rip_target_unchecked(registration_ref, 7) == name_address &&
+               bytes[7] == 0x4C && bytes[8] == 0x8D && bytes[9] == 0x0D &&
+               zone_rip_target_unchecked(registration_ref + 7, 7) == flag_address &&
+               bytes[14] == 0x31 && bytes[15] == 0xD2 && bytes[16] == 0xE8;
+    }
+
+    bool unknown_command_messages_branch_matches(uintptr_t branch_ref, uintptr_t flag_address)
+    {
+        if (!is_accessible_memory(branch_ref, 9))
+        {
+            return false;
+        }
+
+        const auto* bytes = reinterpret_cast<const uint8_t*>(branch_ref);
+        if (bytes[0] != 0x83 || bytes[1] != 0x3D || bytes[6] != 0x00)
+        {
+            return false;
+        }
+
+        int32_t displacement = 0;
+        std::memcpy(&displacement, bytes + 2, sizeof(displacement));
+        const uintptr_t target = branch_ref + 7 + static_cast<intptr_t>(displacement);
+        const bool conditional_jump = bytes[7] == 0x74 ||
+                                      (bytes[7] == 0x0F && bytes[8] == 0x84);
+        return target == flag_address && conditional_jump;
+    }
+
+    bool unknown_command_messages_flag_is_valid(uintptr_t flag_address,
+                                                const ZoneModuleSection& data)
+    {
+        if (!zone_pointer_in_section(flag_address, data) ||
+            flag_address + sizeof(LONG) > data.start + data.size ||
+            (data.characteristics & IMAGE_SCN_MEM_WRITE) == 0 ||
+            !is_accessible_memory(flag_address, sizeof(LONG)))
+        {
+            return false;
+        }
+
+        LONG value = 0;
+        std::memcpy(&value, reinterpret_cast<const void*>(flag_address), sizeof(value));
+        return value == 0 || value == 1;
+    }
+
+    bool resolve_unknown_command_messages_flag(uintptr_t& out_flag,
+                                               std::string& out_resolver,
+                                               std::string& out_detail)
+    {
+        out_flag = g_unknown_command_messages_flag.load();
+        ZoneModuleSection text;
+        ZoneModuleSection rdata;
+        ZoneModuleSection data;
+        if (!zone_module_section_by_name(".text", text) ||
+            !zone_module_section_by_name(".rdata", rdata) ||
+            !zone_module_section_by_name(".data", data))
+        {
+            out_detail = "Brickadia module sections are unavailable";
+            return false;
+        }
+
+        if (out_flag != 0 && unknown_command_messages_flag_is_valid(out_flag, data))
+        {
+            out_resolver = "cached";
+            out_detail = "cached backing flag validated";
+            return true;
+        }
+
+        const uintptr_t module_base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        if (module_base == 0)
+        {
+            out_detail = "Brickadia module base is unavailable";
+            return false;
+        }
+
+        const wchar_t* name = L"br.Chat.MessageForUnknownCommands";
+        const size_t name_bytes = (std::char_traits<wchar_t>::length(name) + 1) * sizeof(wchar_t);
+        const uintptr_t fast_name = module_base + kUnknownCommandMessagesNameRva;
+        const uintptr_t fast_flag = module_base + kUnknownCommandMessagesFlagRva;
+        const uintptr_t fast_registration = module_base + kUnknownCommandMessagesRegistrationRefRva;
+        const uintptr_t fast_branch = module_base + kUnknownCommandMessagesBranchRefRva;
+        if (zone_pointer_in_section(fast_name, rdata) &&
+            is_accessible_memory(fast_name, name_bytes) &&
+            std::memcmp(reinterpret_cast<const void*>(fast_name), name, name_bytes) == 0 &&
+            unknown_command_messages_flag_is_valid(fast_flag, data) &&
+            unknown_command_messages_registration_matches(fast_registration, fast_name, fast_flag) &&
+            unknown_command_messages_branch_matches(fast_branch, fast_flag))
+        {
+            g_unknown_command_messages_flag.store(fast_flag);
+            out_flag = fast_flag;
+            out_resolver = "validated-ea3-rva";
+            out_detail = "EA3 registration and message branch signatures validated";
+            return true;
+        }
+
+        const uint64_t started_ms = monotonic_ms();
+        const auto names = zone_find_wide_strings(name, kUnknownCommandMessagesScanBudgetMs / 3);
+        if (names.empty())
+        {
+            out_detail = "br.Chat.MessageForUnknownCommands string was not found";
+            return false;
+        }
+
+        const auto* text_bytes = reinterpret_cast<const uint8_t*>(text.start);
+        for (uintptr_t name_address : names)
+        {
+            for (size_t offset = 0; offset + 17 <= text.size; ++offset)
+            {
+                if ((offset & 0xFFFFF) == 0 &&
+                    monotonic_ms() - started_ms >= kUnknownCommandMessagesScanBudgetMs)
+                {
+                    out_detail = "unknown-command flag registration scan timed out";
+                    return false;
+                }
+                const uintptr_t registration_ref = text.start + offset;
+                if (text_bytes[offset] != 0x4C || text_bytes[offset + 1] != 0x8D ||
+                    text_bytes[offset + 2] != 0x05 ||
+                    zone_rip_target_unchecked(registration_ref, 7) != name_address ||
+                    text_bytes[offset + 7] != 0x4C || text_bytes[offset + 8] != 0x8D ||
+                    text_bytes[offset + 9] != 0x0D || text_bytes[offset + 14] != 0x31 ||
+                    text_bytes[offset + 15] != 0xD2 || text_bytes[offset + 16] != 0xE8)
+                {
+                    continue;
+                }
+
+                const uintptr_t candidate = zone_rip_target_unchecked(registration_ref + 7, 7);
+                if (!unknown_command_messages_flag_is_valid(candidate, data))
+                {
+                    continue;
+                }
+
+                for (size_t branch_offset = 0; branch_offset + 9 <= text.size; ++branch_offset)
+                {
+                    if ((branch_offset & 0xFFFFF) == 0 &&
+                        monotonic_ms() - started_ms >= kUnknownCommandMessagesScanBudgetMs)
+                    {
+                        out_detail = "unknown-command flag usage scan timed out";
+                        return false;
+                    }
+                    const uintptr_t branch_ref = text.start + branch_offset;
+                    if (!unknown_command_messages_branch_matches(branch_ref, candidate))
+                    {
+                        continue;
+                    }
+
+                    g_unknown_command_messages_flag.store(candidate);
+                    out_flag = candidate;
+                    out_resolver = "dynamic-registration-scan";
+                    out_detail = "named console-variable registration and message branch validated";
+                    return true;
+                }
+            }
+        }
+
+        out_detail = "no validated backing flag was resolved";
+        return false;
+    }
+
+    struct UnknownCommandMessagesSetResult
+    {
+        bool ok{false};
+        std::string output;
+    };
+
+    UnknownCommandMessagesSetResult set_unknown_command_messages_enabled(bool enabled)
+    {
+        UnknownCommandMessagesSetResult result;
+        uintptr_t flag_address = 0;
+        std::string resolver;
+        std::string detail;
+        if (!resolve_unknown_command_messages_flag(flag_address, resolver, detail))
+        {
+            result.output = "ok=false\nresolver=" + resolver + "\ndetail=" + detail + "\n";
+            return result;
+        }
+
+        auto* flag = reinterpret_cast<volatile LONG*>(flag_address);
+        const LONG desired = enabled ? 1 : 0;
+        const LONG previous = InterlockedExchange(flag, desired);
+        const LONG current = InterlockedCompareExchange(flag, desired, desired);
+        result.ok = current == desired;
+
+        const uintptr_t module_base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        std::ostringstream out;
+        out << "ok=" << (result.ok ? "true" : "false") << "\n"
+            << "enabled=" << (enabled ? "true" : "false") << "\n"
+            << "previous=" << previous << "\n"
+            << "current=" << current << "\n"
+            << "resolver=" << resolver << "\n"
+            << "flag_address=" << pointer_hex(flag_address) << "\n"
+            << "flag_rva=" << pointer_hex(flag_address - module_base) << "\n"
+            << "detail=" << detail << "\n";
+        result.output = out.str();
+        return result;
+    }
+
+    bool zone_bcs_touch_accessor_slot(uintptr_t accessor, uintptr_t& out_slot)
+    {
+        out_slot = 0;
+        if (!is_executable_memory(accessor) || !is_accessible_memory(accessor, 0x60))
+        {
+            return false;
+        }
+
+        auto* bytes = reinterpret_cast<const uint8_t*>(accessor);
+        if (bytes[0] != 0x48 || bytes[1] != 0x83 || bytes[2] != 0xEC)
+        {
+            return false;
+        }
+
+        for (size_t offset = 0; offset + 7 <= 0x60; ++offset)
+        {
+            if (bytes[offset] != 0x48 || bytes[offset + 1] != 0x8B || bytes[offset + 2] != 0x0D)
+            {
+                continue;
+            }
+
+            const uintptr_t slot = zone_rip_target(accessor + offset, 7);
+            if (slot != 0 && is_accessible_memory(slot, sizeof(void*)))
+            {
+                out_slot = slot;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    bool zone_bcs_touch_find_accessor_after_ref(uintptr_t ref,
+                                                const ZoneModuleSection& text,
+                                                uintptr_t& out_accessor,
+                                                uintptr_t& out_slot)
+    {
+        out_accessor = 0;
+        out_slot = 0;
+        if (!zone_pointer_in_section(ref, text) || !is_accessible_memory(ref, 0xC0))
+        {
+            return false;
+        }
+
+        auto* bytes = reinterpret_cast<const uint8_t*>(ref);
+        for (size_t offset = 0; offset + 12 <= 0xC0; ++offset)
+        {
+            if (bytes[offset] != 0x48 || bytes[offset + 1] != 0x8D ||
+                bytes[offset + 2] != 0x0D || bytes[offset + 7] != 0xE8)
+            {
+                continue;
+            }
+
+            const uintptr_t instruction = ref + offset;
+            const uintptr_t accessor = zone_rip_target(instruction, 7);
+            if (!zone_pointer_in_section(accessor, text))
+            {
+                continue;
+            }
+
+            uintptr_t slot = 0;
+            if (zone_bcs_touch_accessor_slot(accessor, slot))
+            {
+                out_accessor = accessor;
+                out_slot = slot;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    bool zone_bcs_touch_slot_known(uintptr_t slot)
+    {
+        const size_t count = g_zone_bcs_touch_hook_count.load();
+        for (size_t index = 0; index < count && index < kZoneBcsTouchHookMaxSlots; ++index)
+        {
+            if (g_zone_bcs_touch_hooks[index].slot.load() == slot)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool zone_bcs_touch_install_slot(uintptr_t accessor,
+                                     uintptr_t slot_address,
+                                     const char* label,
+                                     const char* action,
+                                     const char* event_name)
+    {
+        if (accessor == 0 || slot_address == 0 || zone_bcs_touch_slot_known(slot_address))
+        {
+            return false;
+        }
+
+        const size_t index = g_zone_bcs_touch_hook_count.load();
+        if (index >= kZoneBcsTouchHookMaxSlots)
+        {
+            zone_bcs_touch_set_error("BCS touch hook slot limit reached");
+            return false;
+        }
+
+        void* current = nullptr;
+        std::memcpy(&current, reinterpret_cast<void*>(slot_address), sizeof(current));
+        if (current == reinterpret_cast<void*>(g_zone_bcs_touch_detours[index]))
+        {
+            return false;
+        }
+        if (!current || !is_executable_memory(reinterpret_cast<uintptr_t>(current)))
+        {
+            g_zone_bcs_touch_install_failures.fetch_add(1);
+            return false;
+        }
+
+        DWORD old_protect = 0;
+        if (!VirtualProtect(
+                reinterpret_cast<void*>(slot_address),
+                sizeof(void*),
+                PAGE_EXECUTE_READWRITE,
+                &old_protect))
+        {
+            g_zone_bcs_touch_install_failures.fetch_add(1);
+            return false;
+        }
+
+        void* previous = InterlockedExchangePointer(
+            reinterpret_cast<void**>(slot_address),
+            reinterpret_cast<void*>(g_zone_bcs_touch_detours[index]));
+        DWORD ignored = 0;
+        VirtualProtect(reinterpret_cast<void*>(slot_address), sizeof(void*), old_protect, &ignored);
+        FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(slot_address), sizeof(void*));
+
+        if (!previous || previous == reinterpret_cast<void*>(g_zone_bcs_touch_detours[index]))
+        {
+            g_zone_bcs_touch_install_failures.fetch_add(1);
+            return false;
+        }
+
+        ZoneBcsTouchHookSlot& hook = g_zone_bcs_touch_hooks[index];
+        hook.label = label ? label : "BCSNativeEvents.Touch";
+        hook.action = action ? action : "unknown";
+        hook.event_name = event_name ? event_name : "zones.character.unknown";
+        hook.accessor.store(accessor);
+        hook.slot.store(slot_address);
+        hook.original.store(reinterpret_cast<uintptr_t>(previous));
+        hook.hits.store(0);
+        hook.last_tick_ms.store(0);
+        hook.installed.store(true);
+        g_zone_bcs_touch_hook_count.store(index + 1);
+        g_zone_bcs_touch_scan_slots.fetch_add(1);
+        return true;
+    }
+
+    size_t zone_bcs_touch_install_for_event(const wchar_t* display_name,
+                                            const char* label,
+                                            const char* action,
+                                            const char* event_name)
+    {
+        ZoneModuleSection text;
+        if (!zone_module_section_by_name(".text", text))
+        {
+            zone_bcs_touch_set_error("Brickadia .text section unavailable");
+            return 0;
+        }
+
+        size_t installed = 0;
+        const uint64_t scan_budget_ms = env_u64(
+            "BMF_ZONE_BCS_TOUCH_SCAN_BUDGET_MS",
+            100,
+            1,
+            2000);
+        const uint64_t started_ms = monotonic_ms();
+        for (uintptr_t display_address : zone_find_wide_strings(display_name, scan_budget_ms))
+        {
+            const uint64_t elapsed_ms = monotonic_ms() - started_ms;
+            if (elapsed_ms >= scan_budget_ms)
+            {
+                zone_bcs_touch_set_error("BCS character-touch scan timed out before text xref scan");
+                break;
+            }
+
+            const uint64_t remaining_ms = scan_budget_ms - elapsed_ms;
+            for (uintptr_t ref : zone_find_rip_lea_refs(display_address, text, 32, remaining_ms))
+            {
+                g_zone_bcs_touch_scan_refs.fetch_add(1);
+                uintptr_t accessor = 0;
+                uintptr_t slot = 0;
+                if (zone_bcs_touch_find_accessor_after_ref(ref, text, accessor, slot) &&
+                    zone_bcs_touch_install_slot(accessor, slot, label, action, event_name))
+                {
+                    ++installed;
+                }
+            }
+            if (monotonic_ms() - started_ms >= scan_budget_ms)
+            {
+                break;
+            }
+        }
+        return installed;
+    }
+
+    size_t zone_bcs_touch_install_all()
+    {
+        if (!env_flag_enabled("BMF_ZONE_BCS_TOUCH_SLOT_HOOK_ENABLED"))
+        {
+            zone_bcs_touch_set_error(
+                "BCS character-touch slot hooks disabled; set BMF_ZONE_BCS_TOUCH_SLOT_HOOK_ENABLED=1 to opt in");
+            return 0;
+        }
+
+        size_t installed = 0;
+        installed += zone_bcs_touch_install_for_event(
+            L"On Character Begin Touch",
+            "BCSNativeEvents.OnCharacterBeginTouch",
+            "entered",
+            "zones.character.entered");
+        installed += zone_bcs_touch_install_for_event(
+            L"On Character End Touch",
+            "BCSNativeEvents.OnCharacterEndTouch",
+            "left",
+            "zones.character.left");
+
+        if (installed > 0)
+        {
+            zone_bcs_touch_set_error("");
+        }
+        else if (g_zone_bcs_touch_hook_count.load() == 0)
+        {
+            zone_bcs_touch_set_error("no BCS character-touch slots resolved");
+        }
+        return installed;
+    }
+
+    bool zone_read_pointer(uintptr_t address, uintptr_t& out_value)
+    {
+        out_value = 0;
+        if (!is_accessible_memory(address, sizeof(uintptr_t)))
+        {
+            return false;
+        }
+
+        __try
+        {
+            std::memcpy(&out_value, reinterpret_cast<void*>(address), sizeof(out_value));
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            out_value = 0;
+            return false;
+        }
+        return true;
+    }
+
+    bool zone_read_i32(uintptr_t address, int32_t& out_value)
+    {
+        out_value = 0;
+        if (!is_accessible_memory(address, sizeof(out_value)))
+        {
+            return false;
+        }
+
+        __try
+        {
+            std::memcpy(&out_value, reinterpret_cast<void*>(address), sizeof(out_value));
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            out_value = 0;
+            return false;
+        }
+        return true;
+    }
+
+    void zone_write_absolute_jump(uint8_t* destination, uintptr_t target, size_t length)
+    {
+        std::memset(destination, 0x90, length);
+        destination[0] = 0xFF;
+        destination[1] = 0x25;
+        destination[2] = 0x00;
+        destination[3] = 0x00;
+        destination[4] = 0x00;
+        destination[5] = 0x00;
+        std::memcpy(destination + 6, &target, sizeof(target));
+    }
+
+    bool zone_bcs_touch_vmethod_install_detour(uintptr_t target)
+    {
+        if (g_zone_bcs_touch_vmethod_hook.installed.load())
+        {
+            return true;
+        }
+        if (!is_executable_memory(target) ||
+            !is_accessible_memory(target, kZoneBcsTouchVmethodOverwriteLength))
+        {
+            zone_bcs_touch_vmethod_set_error("BCS touch vmethod target is not executable/readable");
+            return false;
+        }
+
+        constexpr size_t kAbsoluteJumpLength = 14;
+        const size_t trampoline_size = kZoneBcsTouchVmethodOverwriteLength + kAbsoluteJumpLength;
+        auto* trampoline = static_cast<uint8_t*>(VirtualAlloc(
+            nullptr,
+            trampoline_size,
+            MEM_RESERVE | MEM_COMMIT,
+            PAGE_EXECUTE_READWRITE));
+        if (!trampoline)
+        {
+            zone_bcs_touch_vmethod_set_error(
+                "BCS touch vmethod trampoline allocation failed: " +
+                std::to_string(GetLastError()));
+            return false;
+        }
+
+        std::memcpy(
+            trampoline,
+            reinterpret_cast<void*>(target),
+            kZoneBcsTouchVmethodOverwriteLength);
+        zone_write_absolute_jump(
+            trampoline + kZoneBcsTouchVmethodOverwriteLength,
+            target + kZoneBcsTouchVmethodOverwriteLength,
+            kAbsoluteJumpLength);
+        FlushInstructionCache(GetCurrentProcess(), trampoline, trampoline_size);
+
+        DWORD old_protect = 0;
+        if (!VirtualProtect(
+                reinterpret_cast<void*>(target),
+                kZoneBcsTouchVmethodOverwriteLength,
+                PAGE_EXECUTE_READWRITE,
+                &old_protect))
+        {
+            VirtualFree(trampoline, 0, MEM_RELEASE);
+            zone_bcs_touch_vmethod_set_error(
+                "BCS touch vmethod VirtualProtect failed: " +
+                std::to_string(GetLastError()));
+            return false;
+        }
+
+        zone_write_absolute_jump(
+            reinterpret_cast<uint8_t*>(target),
+            reinterpret_cast<uintptr_t>(&zone_bcs_touch_vmethod_detour),
+            kZoneBcsTouchVmethodOverwriteLength);
+        DWORD ignored = 0;
+        VirtualProtect(
+            reinterpret_cast<void*>(target),
+            kZoneBcsTouchVmethodOverwriteLength,
+            old_protect,
+            &ignored);
+        FlushInstructionCache(
+            GetCurrentProcess(),
+            reinterpret_cast<void*>(target),
+            kZoneBcsTouchVmethodOverwriteLength);
+
+        g_zone_bcs_touch_vmethod_hook.target.store(target);
+        g_zone_bcs_touch_vmethod_hook.trampoline.store(reinterpret_cast<uintptr_t>(trampoline));
+        g_zone_bcs_touch_vmethod_hook.overwrite_length = kZoneBcsTouchVmethodOverwriteLength;
+        g_zone_bcs_touch_vmethod_hook.installed.store(true);
+        zone_bcs_touch_vmethod_set_error("");
+        return true;
+    }
+
+    size_t zone_bcs_touch_vmethod_install_all()
+    {
+        const uintptr_t module_base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        if (module_base == 0)
+        {
+            zone_bcs_touch_vmethod_set_error("Brickadia module base unavailable");
+            return 0;
+        }
+
+        uintptr_t begin_object = 0;
+        uintptr_t end_object = 0;
+        const bool begin_ok = zone_read_pointer(
+            module_base + kZoneBcsTouchBeginObjectSlotRva,
+            begin_object);
+        const bool end_ok = zone_read_pointer(
+            module_base + kZoneBcsTouchEndObjectSlotRva,
+            end_object);
+        if (!begin_ok || !end_ok || begin_object == 0 || end_object == 0)
+        {
+            zone_bcs_touch_vmethod_set_error("BCS touch event objects are not initialized");
+            return 0;
+        }
+
+        g_zone_bcs_touch_vmethod_hook.begin_object.store(begin_object);
+        g_zone_bcs_touch_vmethod_hook.end_object.store(end_object);
+
+        const uintptr_t target = module_base + kZoneBcsTouchVmethodRva;
+        return zone_bcs_touch_vmethod_install_detour(target) ? 1 : 0;
+    }
+
+    void zone_event_collect_param_refs(const ZoneEventHookSlot& hook,
+                                       uintptr_t locals,
+                                       std::vector<ZoneEventObjectRef>& refs)
+    {
+        auto* function = reinterpret_cast<Unreal::UFunction*>(hook.function.load());
+        if (!is_live_uobject(function) || !is_accessible_memory(locals, sizeof(uintptr_t)))
+        {
+            return;
+        }
+
+        try
+        {
+            for (Unreal::FProperty* property : Unreal::TFieldRange<Unreal::FProperty>(
+                     function,
+                     Unreal::EFieldIterationFlags::IncludeDeprecated))
+            {
+                if (!property ||
+                    !property->HasAnyPropertyFlags(Unreal::EPropertyFlags::CPF_Parm) ||
+                    !property_is_object_reference(property))
+                {
+                    continue;
+                }
+
+                const int32_t raw_offset = property->GetOffset_Internal();
+                if (raw_offset < 0)
+                {
+                    continue;
+                }
+
+                Unreal::UObject* object = read_uobject_at(locals + static_cast<uintptr_t>(raw_offset));
+                if (!is_live_uobject(object))
+                {
+                    continue;
+                }
+                zone_event_add_ref(
+                    refs,
+                    "param",
+                    narrow_string(property->GetName()),
+                    static_cast<uintptr_t>(raw_offset),
+                    object);
+            }
+        }
+        catch (...)
+        {
+        }
+    }
+
+    void zone_event_collect_local_scan_refs(uintptr_t locals, std::vector<ZoneEventObjectRef>& refs)
+    {
+        if (!is_accessible_memory(locals, sizeof(uintptr_t)))
+        {
+            return;
+        }
+
+        for (uintptr_t offset = 0; offset < 0x120 && refs.size() < 24; offset += sizeof(uintptr_t))
+        {
+            Unreal::UObject* object = read_uobject_at(locals + offset);
+            if (!is_live_uobject(object))
+            {
+                continue;
+            }
+            std::ostringstream property;
+            property << "local_0x" << std::hex << std::uppercase << offset;
+            zone_event_add_ref(refs, "local", property.str(), offset, object);
+        }
+    }
+
+    void zone_event_write_object_json(std::ostringstream& out, Unreal::UObject* object)
+    {
+        out << "{"
+            << "\"address\":\"" << json_escape(object_address_hex(object)) << "\","
+            << "\"name\":\"" << json_escape(object_name(object)) << "\","
+            << "\"fullName\":\"" << json_escape(object_full_name(object)) << "\","
+            << "\"className\":\"" << json_escape(object_class_name(object)) << "\","
+            << "\"classFullName\":\"" << json_escape(object_class_full_name(object)) << "\","
+            << "\"isActor\":" << (object_is_actor(object) ? "true" : "false")
+            << "}";
+    }
+
+    bool zone_event_should_emit(Unreal::UObject* context,
+                                const std::vector<ZoneEventObjectRef>& refs,
+                                std::string& reason)
+    {
+        if (g_zone_event_capture_all.load())
+        {
+            reason = "capture-all";
+            return true;
+        }
+
+        bool has_zone = false;
+        bool has_character = false;
+        const std::string context_text = zone_event_object_text(context);
+        if (zone_event_text_is_zone_related(context_text))
+        {
+            has_zone = true;
+        }
+        if (zone_event_text_is_character_related(context_text))
+        {
+            has_character = true;
+        }
+
+        for (const ZoneEventObjectRef& ref : refs)
+        {
+            const std::string text = zone_event_object_text(ref.object);
+            if (zone_event_text_is_zone_related(text))
+            {
+                has_zone = true;
+            }
+            if (zone_event_text_is_character_related(text))
+            {
+                has_character = true;
+            }
+        }
+
+        if (has_zone && has_character)
+        {
+            reason = "zone-and-character-text";
+            return true;
+        }
+        if (has_zone)
+        {
+            reason = "zone-text";
+            return true;
+        }
+
+        reason = "no-zone-text";
+        return false;
+    }
+
+    std::string build_zone_event_json(size_t index,
+                                      void* context,
+                                      uintptr_t locals,
+                                      const std::vector<ZoneEventObjectRef>& refs,
+                                      const std::string& match_reason)
+    {
+        ZoneEventHookSlot& hook = g_zone_event_hook_slots[index];
+        const uint64_t sequence = g_zone_event_events.fetch_add(1) + 1;
+        auto* context_object = reinterpret_cast<Unreal::UObject*>(context);
+
+        std::ostringstream out;
+        out << "{"
+            << "\"type\":\"character_zone_" << hook.action << "\","
+            << "\"source\":\"BMFSocketZoneNative\","
+            << "\"event\":\"" << hook.event_name << "\","
+            << "\"sequence\":" << sequence << ","
+            << "\"timestamp\":\"" << json_escape(system_utc_iso()) << "\","
+            << "\"hook\":\"" << json_escape(hook.label) << "\","
+            << "\"action\":\"" << json_escape(hook.action) << "\","
+            << "\"function\":\"" << json_escape(hook.label) << "\","
+            << "\"functionAddress\":\"" << json_escape(pointer_hex(hook.function.load())) << "\","
+            << "\"contextAddress\":\"" << json_escape(pointer_hex(reinterpret_cast<uintptr_t>(context))) << "\","
+            << "\"localsAddress\":\"" << json_escape(pointer_hex(locals)) << "\","
+            << "\"matchReason\":\"" << json_escape(match_reason) << "\","
+            << "\"captureAll\":" << (g_zone_event_capture_all.load() ? "true" : "false") << ",";
+
+        out << "\"context\":";
+        if (is_live_uobject(context_object))
+        {
+            zone_event_write_object_json(out, context_object);
+        }
+        else
+        {
+            out << "null";
+        }
+
+        out << ",\"objects\":[";
+        for (size_t ref_index = 0; ref_index < refs.size(); ++ref_index)
+        {
+            const ZoneEventObjectRef& ref = refs[ref_index];
+            if (ref_index > 0)
+            {
+                out << ",";
+            }
+            out << "{"
+                << "\"role\":\"" << json_escape(ref.role) << "\","
+                << "\"property\":\"" << json_escape(ref.property) << "\","
+                << "\"offset\":\"" << json_escape(pointer_hex(ref.offset)) << "\","
+                << "\"object\":";
+            zone_event_write_object_json(out, ref.object);
+            out << "}";
+        }
+        out << "]}";
+        return out.str();
+    }
+
+    void enqueue_zone_event(std::string event_json)
+    {
+        std::lock_guard lock(g_zone_event_mutex);
+        if (g_zone_event_queue.size() >= 512)
+        {
+            g_zone_event_queue.pop_front();
+            g_zone_event_queue_drops.fetch_add(1);
+        }
+        g_zone_event_last_summary = event_json.substr(0, 1024);
+        g_zone_event_queue.push_back(std::move(event_json));
+    }
+
+    using WriteFileFn = BOOL(WINAPI*)(HANDLE, LPCVOID, DWORD, LPDWORD, LPOVERLAPPED);
+    using WriteConsoleAFn = BOOL(WINAPI*)(HANDLE, const VOID*, DWORD, LPDWORD, LPVOID);
+    using WriteConsoleWFn = BOOL(WINAPI*)(HANDLE, const VOID*, DWORD, LPDWORD, LPVOID);
+
+    constexpr size_t kZoneConsoleTraceFilterMax = 255;
+    constexpr size_t kZoneConsoleTraceMessageMax = 4096;
+    constexpr size_t kZoneConsoleTraceStackMax = 48;
+
+    std::atomic<bool> g_zone_console_trace_enabled{false};
+    std::atomic<uint64_t> g_zone_console_trace_events{0};
+    std::atomic<uint64_t> g_zone_console_trace_limit{16};
+    std::atomic<uint64_t> g_zone_console_trace_drops{0};
+    std::atomic<uint64_t> g_zone_console_trace_write_file_hits{0};
+    std::atomic<uint64_t> g_zone_console_trace_write_console_a_hits{0};
+    std::atomic<uint64_t> g_zone_console_trace_write_console_w_hits{0};
+    std::atomic<uint64_t> g_zone_console_trace_patch_entries{0};
+    std::atomic<uint64_t> g_zone_console_trace_patch_modules{0};
+    std::atomic<uint64_t> g_zone_console_trace_filter_len{0};
+    std::atomic<uintptr_t> g_zone_console_trace_write_file_original{0};
+    std::atomic<uintptr_t> g_zone_console_trace_write_console_a_original{0};
+    std::atomic<uintptr_t> g_zone_console_trace_write_console_w_original{0};
+    std::array<char, kZoneConsoleTraceFilterMax + 1> g_zone_console_trace_filter{};
+    std::mutex g_zone_console_trace_mutex;
+    std::string g_zone_console_trace_last_error;
+    std::string g_zone_console_trace_last_summary;
+    thread_local bool g_zone_console_trace_in_detour = false;
+
+    BOOL WINAPI zone_console_trace_write_file_detour(
+        HANDLE file,
+        LPCVOID buffer,
+        DWORD bytes_to_write,
+        LPDWORD bytes_written,
+        LPOVERLAPPED overlapped);
+    BOOL WINAPI zone_console_trace_write_console_a_detour(
+        HANDLE console,
+        const VOID* buffer,
+        DWORD chars_to_write,
+        LPDWORD chars_written,
+        LPVOID reserved);
+    BOOL WINAPI zone_console_trace_write_console_w_detour(
+        HANDLE console,
+        const VOID* buffer,
+        DWORD chars_to_write,
+        LPDWORD chars_written,
+        LPVOID reserved);
+
+    void zone_console_trace_set_error(std::string value)
+    {
+        std::lock_guard lock(g_zone_console_trace_mutex);
+        g_zone_console_trace_last_error = std::move(value);
+    }
+
+    void zone_console_trace_set_summary(std::string value)
+    {
+        std::lock_guard lock(g_zone_console_trace_mutex);
+        g_zone_console_trace_last_summary = std::move(value);
+    }
+
+    std::string zone_console_trace_filter_text()
+    {
+        const size_t length = std::min<size_t>(
+            static_cast<size_t>(g_zone_console_trace_filter_len.load()),
+            kZoneConsoleTraceFilterMax);
+        if (length == 0)
+        {
+            return "";
+        }
+        return std::string(g_zone_console_trace_filter.data(), length);
+    }
+
+    bool zone_console_trace_set_filter(std::string_view filter)
+    {
+        const std::string trimmed = trim_ascii(filter);
+        if (trimmed.size() < 3)
+        {
+            zone_console_trace_set_error("console trace filter must be at least 3 characters");
+            return false;
+        }
+
+        const size_t length = std::min<size_t>(trimmed.size(), kZoneConsoleTraceFilterMax);
+        g_zone_console_trace_filter_len.store(0);
+        std::fill(g_zone_console_trace_filter.begin(), g_zone_console_trace_filter.end(), '\0');
+        std::memcpy(g_zone_console_trace_filter.data(), trimmed.data(), length);
+        g_zone_console_trace_filter_len.store(length);
+        return true;
+    }
+
+    bool zone_console_trace_guarded_memcpy(void* destination, const void* source, size_t byte_count)
+    {
+        if (!destination || !source || byte_count == 0)
+        {
+            return false;
+        }
+        __try
+        {
+            std::memcpy(destination, source, byte_count);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+        return true;
+    }
+
+    std::string zone_console_trace_safe_copy_bytes(const void* buffer, size_t byte_count)
+    {
+        if (!buffer || byte_count == 0)
+        {
+            return "";
+        }
+        byte_count = std::min<size_t>(byte_count, kZoneConsoleTraceMessageMax);
+        std::string text(byte_count, '\0');
+        if (!zone_console_trace_guarded_memcpy(text.data(), buffer, byte_count))
+        {
+            return "";
+        }
+        while (!text.empty() && text.back() == '\0')
+        {
+            text.pop_back();
+        }
+        return text;
+    }
+
+    std::string zone_console_trace_safe_copy_wide(const void* buffer, size_t char_count)
+    {
+        if (!buffer || char_count == 0)
+        {
+            return "";
+        }
+        char_count = std::min<size_t>(char_count, kZoneConsoleTraceMessageMax / sizeof(wchar_t));
+        std::wstring wide(char_count, L'\0');
+        if (!zone_console_trace_guarded_memcpy(wide.data(), buffer, char_count * sizeof(wchar_t)))
+        {
+            return "";
+        }
+        while (!wide.empty() && wide.back() == L'\0')
+        {
+            wide.pop_back();
+        }
+        if (wide.empty())
+        {
+            return "";
+        }
+        const int required = WideCharToMultiByte(
+            CP_UTF8,
+            0,
+            wide.data(),
+            static_cast<int>(wide.size()),
+            nullptr,
+            0,
+            nullptr,
+            nullptr);
+        if (required <= 0)
+        {
+            std::string ascii;
+            ascii.reserve(wide.size());
+            for (wchar_t ch : wide)
+            {
+                ascii.push_back(ch >= 0 && ch <= 0x7F ? static_cast<char>(ch) : '?');
+            }
+            return ascii;
+        }
+        std::string text(static_cast<size_t>(required), '\0');
+        WideCharToMultiByte(
+            CP_UTF8,
+            0,
+            wide.data(),
+            static_cast<int>(wide.size()),
+            text.data(),
+            required,
+            nullptr,
+            nullptr);
+        return text;
+    }
+
+    bool zone_console_trace_matches(std::string_view text)
+    {
+        const size_t filter_len = std::min<size_t>(
+            static_cast<size_t>(g_zone_console_trace_filter_len.load()),
+            kZoneConsoleTraceFilterMax);
+        if (filter_len == 0 || text.empty())
+        {
+            return false;
+        }
+        const std::string_view filter(g_zone_console_trace_filter.data(), filter_len);
+        return text.find(filter) != std::string_view::npos;
+    }
+
+    size_t zone_console_trace_module_image_size(uintptr_t module_base)
+    {
+        if (module_base == 0 || !is_accessible_memory(module_base, sizeof(IMAGE_DOS_HEADER)))
+        {
+            return 0;
+        }
+        auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(module_base);
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE)
+        {
+            return 0;
+        }
+        auto* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(module_base + static_cast<uintptr_t>(dos->e_lfanew));
+        if (!is_accessible_memory(reinterpret_cast<uintptr_t>(nt), sizeof(IMAGE_NT_HEADERS)) ||
+            nt->Signature != IMAGE_NT_SIGNATURE)
+        {
+            return 0;
+        }
+        return static_cast<size_t>(nt->OptionalHeader.SizeOfImage);
+    }
+
+    std::string zone_console_trace_module_name(HMODULE module)
+    {
+        char path[MAX_PATH]{};
+        if (!module || GetModuleFileNameA(module, path, static_cast<DWORD>(sizeof(path))) == 0)
+        {
+            return "";
+        }
+        std::string text(path);
+        const size_t slash = text.find_last_of("\\/");
+        if (slash != std::string::npos)
+        {
+            return text.substr(slash + 1);
+        }
+        return text;
+    }
+
+    void zone_console_trace_write_stack_frame_json(
+        std::ostringstream& out,
+        size_t index,
+        uintptr_t address,
+        uintptr_t brickadia_base,
+        size_t brickadia_size)
+    {
+        HMODULE module = nullptr;
+        std::string module_name;
+        uintptr_t module_base = 0;
+        size_t module_size = 0;
+        if (GetModuleHandleExW(
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                reinterpret_cast<LPCWSTR>(address),
+                &module) &&
+            module != nullptr)
+        {
+            module_base = reinterpret_cast<uintptr_t>(module);
+            module_size = zone_console_trace_module_image_size(module_base);
+            module_name = zone_console_trace_module_name(module);
+        }
+
+        const bool in_brickadia =
+            brickadia_base != 0 &&
+            address >= brickadia_base &&
+            address < brickadia_base + brickadia_size;
+        const bool in_module =
+            module_base != 0 &&
+            module_size > 0 &&
+            address >= module_base &&
+            address < module_base + module_size;
+
+        out << "{"
+            << "\"index\":" << index << ","
+            << "\"address\":\"" << json_escape(pointer_hex(address)) << "\","
+            << "\"module\":\"" << json_escape(module_name) << "\","
+            << "\"moduleBase\":\"" << json_escape(pointer_hex(module_base)) << "\","
+            << "\"moduleRva\":\"" << json_escape(in_module ? pointer_hex(address - module_base) : "") << "\","
+            << "\"brickadiaRva\":\"" << json_escape(in_brickadia ? pointer_hex(address - brickadia_base) : "") << "\","
+            << "\"isBrickadia\":" << (in_brickadia ? "true" : "false")
+            << "}";
+    }
+
+    std::string zone_console_trace_build_event_json(
+        const char* api,
+        std::string_view message,
+        void* const* frames,
+        size_t frame_count,
+        uint64_t sequence)
+    {
+        const uintptr_t brickadia_base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        const size_t brickadia_size = zone_console_trace_module_image_size(brickadia_base);
+        const std::string filter = zone_console_trace_filter_text();
+
+        std::ostringstream out;
+        out << "{"
+            << "\"type\":\"zone_console_trace\","
+            << "\"source\":\"BMFSocketZoneConsoleTrace\","
+            << "\"event\":\"zones.console.trace\","
+            << "\"sequence\":" << sequence << ","
+            << "\"timestamp\":\"" << json_escape(system_utc_iso()) << "\","
+            << "\"api\":\"" << json_escape(api ? api : "") << "\","
+            << "\"threadId\":" << static_cast<uint64_t>(GetCurrentThreadId()) << ","
+            << "\"filter\":\"" << json_escape(filter) << "\","
+            << "\"message\":\"" << json_escape(message) << "\","
+            << "\"brickadiaModuleBase\":\"" << json_escape(pointer_hex(brickadia_base)) << "\","
+            << "\"stack\":[";
+        for (size_t index = 0; index < frame_count; ++index)
+        {
+            if (index > 0)
+            {
+                out << ",";
+            }
+            zone_console_trace_write_stack_frame_json(
+                out,
+                index,
+                reinterpret_cast<uintptr_t>(frames[index]),
+                brickadia_base,
+                brickadia_size);
+        }
+        out << "]}";
+        return out.str();
+    }
+
+    void zone_console_trace_capture(const char* api, std::string_view message)
+    {
+        const uint64_t limit = g_zone_console_trace_limit.load();
+        const uint64_t next_sequence = g_zone_console_trace_events.fetch_add(1) + 1;
+        if (limit > 0 && next_sequence > limit)
+        {
+            g_zone_console_trace_drops.fetch_add(1);
+            return;
+        }
+        if (limit > 0 && next_sequence >= limit)
+        {
+            g_zone_console_trace_enabled.store(false);
+        }
+
+        void* frames[kZoneConsoleTraceStackMax]{};
+        const USHORT frame_count = CaptureStackBackTrace(
+            0,
+            static_cast<DWORD>(kZoneConsoleTraceStackMax),
+            frames,
+            nullptr);
+        const std::string event_json = zone_console_trace_build_event_json(
+            api,
+            message,
+            frames,
+            static_cast<size_t>(frame_count),
+            next_sequence);
+        zone_console_trace_set_summary(event_json.substr(0, 1024));
+        enqueue_zone_event(event_json);
+    }
+
+    void zone_console_trace_maybe_capture(const char* api, std::string_view message)
+    {
+        if (!g_zone_console_trace_enabled.load() || g_zone_console_trace_in_detour)
+        {
+            return;
+        }
+        if (!zone_console_trace_matches(message))
+        {
+            return;
+        }
+
+        g_zone_console_trace_in_detour = true;
+        zone_console_trace_capture(api, message);
+        g_zone_console_trace_in_detour = false;
+    }
+
+    template <typename Fn>
+    Fn zone_console_trace_original(std::atomic<uintptr_t>& original)
+    {
+        return reinterpret_cast<Fn>(original.load());
+    }
+
+    BOOL WINAPI zone_console_trace_write_file_detour(
+        HANDLE file,
+        LPCVOID buffer,
+        DWORD bytes_to_write,
+        LPDWORD bytes_written,
+        LPOVERLAPPED overlapped)
+    {
+        auto original = zone_console_trace_original<WriteFileFn>(
+            g_zone_console_trace_write_file_original);
+        if (!original)
+        {
+            return FALSE;
+        }
+
+        if (g_zone_console_trace_enabled.load() && !g_zone_console_trace_in_detour)
+        {
+            const std::string text = zone_console_trace_safe_copy_bytes(buffer, bytes_to_write);
+            if (zone_console_trace_matches(text))
+            {
+                g_zone_console_trace_write_file_hits.fetch_add(1);
+                zone_console_trace_maybe_capture("WriteFile", text);
+            }
+        }
+        return original(file, buffer, bytes_to_write, bytes_written, overlapped);
+    }
+
+    BOOL WINAPI zone_console_trace_write_console_a_detour(
+        HANDLE console,
+        const VOID* buffer,
+        DWORD chars_to_write,
+        LPDWORD chars_written,
+        LPVOID reserved)
+    {
+        auto original = zone_console_trace_original<WriteConsoleAFn>(
+            g_zone_console_trace_write_console_a_original);
+        if (!original)
+        {
+            return FALSE;
+        }
+
+        if (g_zone_console_trace_enabled.load() && !g_zone_console_trace_in_detour)
+        {
+            const std::string text = zone_console_trace_safe_copy_bytes(buffer, chars_to_write);
+            if (zone_console_trace_matches(text))
+            {
+                g_zone_console_trace_write_console_a_hits.fetch_add(1);
+                zone_console_trace_maybe_capture("WriteConsoleA", text);
+            }
+        }
+        return original(console, buffer, chars_to_write, chars_written, reserved);
+    }
+
+    BOOL WINAPI zone_console_trace_write_console_w_detour(
+        HANDLE console,
+        const VOID* buffer,
+        DWORD chars_to_write,
+        LPDWORD chars_written,
+        LPVOID reserved)
+    {
+        auto original = zone_console_trace_original<WriteConsoleWFn>(
+            g_zone_console_trace_write_console_w_original);
+        if (!original)
+        {
+            return FALSE;
+        }
+
+        if (g_zone_console_trace_enabled.load() && !g_zone_console_trace_in_detour)
+        {
+            const std::string text = zone_console_trace_safe_copy_wide(buffer, chars_to_write);
+            if (zone_console_trace_matches(text))
+            {
+                g_zone_console_trace_write_console_w_hits.fetch_add(1);
+                zone_console_trace_maybe_capture("WriteConsoleW", text);
+            }
+        }
+        return original(console, buffer, chars_to_write, chars_written, reserved);
+    }
+
+    bool zone_console_trace_patch_thunk(
+        void** slot,
+        void* detour,
+        std::atomic<uintptr_t>& original,
+        const char* api_name)
+    {
+        if (!slot || !is_accessible_memory(reinterpret_cast<uintptr_t>(slot), sizeof(void*)))
+        {
+            return false;
+        }
+        void* current = nullptr;
+        if (!zone_console_trace_guarded_memcpy(&current, slot, sizeof(current)))
+        {
+            return false;
+        }
+        if (!current)
+        {
+            return false;
+        }
+        if (current == detour)
+        {
+            return true;
+        }
+
+        const uintptr_t original_value = original.load();
+        if (original_value != 0 && reinterpret_cast<uintptr_t>(current) != original_value)
+        {
+            return false;
+        }
+
+        DWORD old_protect = 0;
+        if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &old_protect))
+        {
+            zone_console_trace_set_error(
+                std::string(api_name ? api_name : "console trace") + " IAT VirtualProtect failed: " +
+                std::to_string(GetLastError()));
+            return false;
+        }
+        void* previous = InterlockedExchangePointer(
+            reinterpret_cast<PVOID volatile*>(slot),
+            detour);
+        DWORD ignored = 0;
+        VirtualProtect(slot, sizeof(void*), old_protect, &ignored);
+        FlushInstructionCache(GetCurrentProcess(), slot, sizeof(void*));
+
+        if (previous && previous != detour)
+        {
+            uintptr_t expected = 0;
+            original.compare_exchange_strong(expected, reinterpret_cast<uintptr_t>(previous));
+        }
+        return previous != detour;
+    }
+
+    bool zone_console_trace_patch_named_import(
+        const char* import_name,
+        void** slot,
+        size_t& patched_entries)
+    {
+        if (!import_name || !slot)
+        {
+            return false;
+        }
+        if (std::strcmp(import_name, "WriteFile") == 0)
+        {
+            if (zone_console_trace_patch_thunk(
+                    slot,
+                    reinterpret_cast<void*>(&zone_console_trace_write_file_detour),
+                    g_zone_console_trace_write_file_original,
+                    "WriteFile"))
+            {
+                ++patched_entries;
+                return true;
+            }
+        }
+        else if (std::strcmp(import_name, "WriteConsoleA") == 0)
+        {
+            if (zone_console_trace_patch_thunk(
+                    slot,
+                    reinterpret_cast<void*>(&zone_console_trace_write_console_a_detour),
+                    g_zone_console_trace_write_console_a_original,
+                    "WriteConsoleA"))
+            {
+                ++patched_entries;
+                return true;
+            }
+        }
+        else if (std::strcmp(import_name, "WriteConsoleW") == 0)
+        {
+            if (zone_console_trace_patch_thunk(
+                    slot,
+                    reinterpret_cast<void*>(&zone_console_trace_write_console_w_detour),
+                    g_zone_console_trace_write_console_w_original,
+                    "WriteConsoleW"))
+            {
+                ++patched_entries;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    size_t zone_console_trace_patch_imports_for_module(HMODULE module)
+    {
+        const uintptr_t base = reinterpret_cast<uintptr_t>(module);
+        if (base == 0 || !is_accessible_memory(base, sizeof(IMAGE_DOS_HEADER)))
+        {
+            return 0;
+        }
+
+        auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE)
+        {
+            return 0;
+        }
+        auto* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(base + static_cast<uintptr_t>(dos->e_lfanew));
+        if (!is_accessible_memory(reinterpret_cast<uintptr_t>(nt), sizeof(IMAGE_NT_HEADERS)) ||
+            nt->Signature != IMAGE_NT_SIGNATURE)
+        {
+            return 0;
+        }
+
+        const IMAGE_DATA_DIRECTORY& import_directory =
+            nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+        if (import_directory.VirtualAddress == 0 || import_directory.Size == 0)
+        {
+            return 0;
+        }
+
+        auto* descriptor = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(
+            base + static_cast<uintptr_t>(import_directory.VirtualAddress));
+        if (!is_accessible_memory(reinterpret_cast<uintptr_t>(descriptor), sizeof(IMAGE_IMPORT_DESCRIPTOR)))
+        {
+            return 0;
+        }
+
+#ifdef _WIN64
+        constexpr uintptr_t ordinal_flag = IMAGE_ORDINAL_FLAG64;
+#else
+        constexpr uintptr_t ordinal_flag = IMAGE_ORDINAL_FLAG32;
+#endif
+
+        size_t patched_entries = 0;
+        for (; descriptor->Name != 0; ++descriptor)
+        {
+            if (!is_accessible_memory(reinterpret_cast<uintptr_t>(descriptor), sizeof(IMAGE_IMPORT_DESCRIPTOR)))
+            {
+                break;
+            }
+            const DWORD original_first_thunk_rva =
+                descriptor->OriginalFirstThunk != 0 ? descriptor->OriginalFirstThunk : descriptor->FirstThunk;
+            if (original_first_thunk_rva == 0 || descriptor->FirstThunk == 0)
+            {
+                continue;
+            }
+
+            auto* original_thunk = reinterpret_cast<IMAGE_THUNK_DATA*>(
+                base + static_cast<uintptr_t>(original_first_thunk_rva));
+            auto* first_thunk = reinterpret_cast<IMAGE_THUNK_DATA*>(
+                base + static_cast<uintptr_t>(descriptor->FirstThunk));
+
+            for (size_t index = 0;; ++index)
+            {
+                if (!is_accessible_memory(
+                        reinterpret_cast<uintptr_t>(&original_thunk[index]),
+                        sizeof(IMAGE_THUNK_DATA)) ||
+                    !is_accessible_memory(
+                        reinterpret_cast<uintptr_t>(&first_thunk[index]),
+                        sizeof(IMAGE_THUNK_DATA)))
+                {
+                    break;
+                }
+                const uintptr_t ordinal_or_name = static_cast<uintptr_t>(original_thunk[index].u1.Ordinal);
+                if (ordinal_or_name == 0)
+                {
+                    break;
+                }
+                if ((ordinal_or_name & ordinal_flag) != 0)
+                {
+                    continue;
+                }
+
+                auto* import_by_name = reinterpret_cast<IMAGE_IMPORT_BY_NAME*>(
+                    base + static_cast<uintptr_t>(original_thunk[index].u1.AddressOfData));
+                if (!is_accessible_memory(reinterpret_cast<uintptr_t>(import_by_name), sizeof(IMAGE_IMPORT_BY_NAME)))
+                {
+                    continue;
+                }
+
+                const char* import_name = reinterpret_cast<const char*>(import_by_name->Name);
+                if (!is_accessible_memory(reinterpret_cast<uintptr_t>(import_name), 1))
+                {
+                    continue;
+                }
+                auto** slot = reinterpret_cast<void**>(&first_thunk[index].u1.Function);
+                zone_console_trace_patch_named_import(import_name, slot, patched_entries);
+            }
+        }
+        return patched_entries;
+    }
+
+    size_t zone_console_trace_patch_loaded_modules()
+    {
+        size_t patched_entries = 0;
+        size_t patched_modules = 0;
+        HANDLE snapshot = CreateToolhelp32Snapshot(
+            TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32,
+            GetCurrentProcessId());
+        if (snapshot == INVALID_HANDLE_VALUE)
+        {
+            zone_console_trace_set_error(
+                "console trace module snapshot failed: " + std::to_string(GetLastError()));
+            return 0;
+        }
+
+        MODULEENTRY32W entry{};
+        entry.dwSize = sizeof(entry);
+        if (!Module32FirstW(snapshot, &entry))
+        {
+            CloseHandle(snapshot);
+            zone_console_trace_set_error(
+                "console trace module enumeration failed: " + std::to_string(GetLastError()));
+            return 0;
+        }
+
+        do
+        {
+            const size_t before = patched_entries;
+            patched_entries += zone_console_trace_patch_imports_for_module(entry.hModule);
+            if (patched_entries > before)
+            {
+                ++patched_modules;
+            }
+            entry.dwSize = sizeof(entry);
+        } while (Module32NextW(snapshot, &entry));
+
+        CloseHandle(snapshot);
+        g_zone_console_trace_patch_entries.store(patched_entries);
+        g_zone_console_trace_patch_modules.store(patched_modules);
+        return patched_entries;
+    }
+
+    bool zone_console_trace_start(std::string_view filter, uint64_t max_captures)
+    {
+        g_zone_console_trace_enabled.store(false);
+        if (!zone_console_trace_set_filter(filter))
+        {
+            return false;
+        }
+        max_captures = std::min<uint64_t>(std::max<uint64_t>(max_captures, 1), 128);
+        g_zone_console_trace_limit.store(max_captures);
+        g_zone_console_trace_events.store(0);
+        g_zone_console_trace_drops.store(0);
+        g_zone_console_trace_write_file_hits.store(0);
+        g_zone_console_trace_write_console_a_hits.store(0);
+        g_zone_console_trace_write_console_w_hits.store(0);
+        zone_console_trace_set_summary("");
+
+        const size_t patched_entries = zone_console_trace_patch_loaded_modules();
+        if (patched_entries == 0)
+        {
+            zone_console_trace_set_error("console trace could not patch any WriteFile/WriteConsole imports");
+            return false;
+        }
+
+        zone_console_trace_set_error("");
+        g_zone_console_trace_enabled.store(true);
+        return true;
+    }
+
+    void zone_console_trace_stop()
+    {
+        g_zone_console_trace_enabled.store(false);
+    }
+
+    std::string zone_console_trace_status_text()
+    {
+        std::string last_error;
+        std::string last_summary;
+        size_t queued = 0;
+        {
+            std::lock_guard lock(g_zone_console_trace_mutex);
+            last_error = g_zone_console_trace_last_error;
+            last_summary = g_zone_console_trace_last_summary;
+        }
+        {
+            std::lock_guard lock(g_zone_event_mutex);
+            queued = g_zone_event_queue.size();
+        }
+
+        std::ostringstream out;
+        out << "Zone console trace status\n"
+            << "source=BMFSocketZoneConsoleTrace\n"
+            << "enabled=" << (g_zone_console_trace_enabled.load() ? "true" : "false") << "\n"
+            << "filter=" << json_escape(zone_console_trace_filter_text()) << "\n"
+            << "limit=" << g_zone_console_trace_limit.load() << "\n"
+            << "events=" << g_zone_console_trace_events.load() << "\n"
+            << "drops=" << g_zone_console_trace_drops.load() << "\n"
+            << "queued=" << queued << "\n"
+            << "patch_entries=" << g_zone_console_trace_patch_entries.load() << "\n"
+            << "patch_modules=" << g_zone_console_trace_patch_modules.load() << "\n"
+            << "write_file_hits=" << g_zone_console_trace_write_file_hits.load() << "\n"
+            << "write_console_a_hits=" << g_zone_console_trace_write_console_a_hits.load() << "\n"
+            << "write_console_w_hits=" << g_zone_console_trace_write_console_w_hits.load() << "\n"
+            << "write_file_original=" << json_escape(pointer_hex(g_zone_console_trace_write_file_original.load())) << "\n"
+            << "write_console_a_original=" << json_escape(pointer_hex(g_zone_console_trace_write_console_a_original.load())) << "\n"
+            << "write_console_w_original=" << json_escape(pointer_hex(g_zone_console_trace_write_console_w_original.load())) << "\n"
+            << "last_error=" << json_escape(last_error) << "\n"
+            << "last_summary=" << json_escape(last_summary) << "\n";
+        return out.str();
+    }
+
+    using ZoneWirePrintFormatterFn = void(__fastcall*)(void* category, void* format, uint64_t verbosity, void* value);
+
+    constexpr uintptr_t kZoneWirePrintCallsiteRva = 0x52CD68A;
+    constexpr uintptr_t kZoneWirePrintFormatterRva = 0x618150;
+    constexpr size_t kZoneWirePrintPatchLength = 5;
+    constexpr size_t kZoneWirePrintStubLength = 12;
+    constexpr size_t kZoneWirePrintMessageMax = 512;
+
+    std::atomic<bool> g_zone_wire_print_enabled{false};
+    std::atomic<bool> g_zone_wire_print_installed{false};
+    std::atomic<uint64_t> g_zone_wire_print_limit{16};
+    std::atomic<uint64_t> g_zone_wire_print_hits{0};
+    std::atomic<uint64_t> g_zone_wire_print_matches{0};
+    std::atomic<uint64_t> g_zone_wire_print_events{0};
+    std::atomic<uint64_t> g_zone_wire_print_drops{0};
+    std::atomic<uintptr_t> g_zone_wire_print_callsite{0};
+    std::atomic<uintptr_t> g_zone_wire_print_formatter{0};
+    std::atomic<uintptr_t> g_zone_wire_print_stub{0};
+    std::mutex g_zone_wire_print_mutex;
+    std::string g_zone_wire_print_last_error;
+    std::string g_zone_wire_print_last_summary;
+    thread_local bool g_zone_wire_print_in_detour = false;
+
+    void __fastcall zone_wire_print_formatter_detour(void* category, void* format, uint64_t verbosity, void* value);
+
+    void zone_wire_print_set_error(std::string value)
+    {
+        std::lock_guard lock(g_zone_wire_print_mutex);
+        g_zone_wire_print_last_error = std::move(value);
+    }
+
+    void zone_wire_print_set_summary(std::string value)
+    {
+        std::lock_guard lock(g_zone_wire_print_mutex);
+        g_zone_wire_print_last_summary = std::move(value);
+    }
+
+    bool zone_wire_print_read_wchar(const wchar_t* wide, size_t index, wchar_t& out)
+    {
+        out = L'\0';
+        __try
+        {
+            out = wide[index];
+            return true;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+    }
+
+    bool zone_wire_print_try_capture(void* category, void* format, uint64_t verbosity, void* value);
+
+    std::string zone_wire_print_safe_copy_wide_z(const void* raw, size_t max_chars = kZoneWirePrintMessageMax)
+    {
+        if (!raw || max_chars == 0)
+        {
+            return "";
+        }
+
+        const auto* wide = static_cast<const wchar_t*>(raw);
+        std::string out;
+        out.reserve(std::min<size_t>(max_chars, 128));
+        for (size_t index = 0; index < max_chars; ++index)
+        {
+            wchar_t ch = L'\0';
+            if (!zone_wire_print_read_wchar(wide, index, ch))
+            {
+                break;
+            }
+            if (ch == L'\0')
+            {
+                break;
+            }
+            if (ch == L'\r' || ch == L'\n' || ch == L'\t')
+            {
+                out.push_back(' ');
+            }
+            else if (ch >= 0x20 && ch <= 0x7E)
+            {
+                out.push_back(static_cast<char>(ch));
+            }
+            else
+            {
+                out.push_back('?');
+            }
+        }
+        return out;
+    }
+
+    bool zone_wire_print_marker_matches(void* category)
+    {
+        uintptr_t marker_text = 0;
+        if (!zone_read_pointer(reinterpret_cast<uintptr_t>(category), marker_text))
+        {
+            return false;
+        }
+        return zone_wire_print_safe_copy_wide_z(reinterpret_cast<void*>(marker_text), 64) == "[Wire Graph]";
+    }
+
+    uintptr_t zone_call_rel32_target(uintptr_t callsite)
+    {
+        if (!is_accessible_memory(callsite, kZoneWirePrintPatchLength))
+        {
+            return 0;
+        }
+        auto* bytes = reinterpret_cast<const uint8_t*>(callsite);
+        if (bytes[0] != 0xE8)
+        {
+            return 0;
+        }
+        int32_t displacement = 0;
+        std::memcpy(&displacement, bytes + 1, sizeof(displacement));
+        return callsite + kZoneWirePrintPatchLength + static_cast<intptr_t>(displacement);
+    }
+
+    void* zone_wire_print_alloc_near(uintptr_t target, size_t bytes)
+    {
+        SYSTEM_INFO info{};
+        GetSystemInfo(&info);
+        const uintptr_t granularity = std::max<uintptr_t>(info.dwAllocationGranularity, 0x10000);
+        const uintptr_t max_distance = 0x70000000ULL;
+        const uintptr_t base = target & ~(granularity - 1);
+
+        for (uintptr_t distance = 0; distance <= max_distance; distance += granularity)
+        {
+            for (int sign : {-1, 1})
+            {
+                if (sign < 0 && base < distance)
+                {
+                    continue;
+                }
+                const uintptr_t candidate = sign < 0 ? base - distance : base + distance;
+                if (candidate == 0)
+                {
+                    continue;
+                }
+                const int64_t rel = static_cast<int64_t>(candidate) -
+                                    static_cast<int64_t>(target + kZoneWirePrintPatchLength);
+                if (rel < std::numeric_limits<int32_t>::min() ||
+                    rel > std::numeric_limits<int32_t>::max())
+                {
+                    continue;
+                }
+                void* allocated = VirtualAlloc(
+                    reinterpret_cast<void*>(candidate),
+                    bytes,
+                    MEM_RESERVE | MEM_COMMIT,
+                    PAGE_EXECUTE_READWRITE);
+                if (allocated)
+                {
+                    return allocated;
+                }
+            }
+        }
+
+        return nullptr;
+    }
+
+    bool zone_wire_print_patch_callsite(uintptr_t callsite, uintptr_t formatter)
+    {
+        if (g_zone_wire_print_installed.load())
+        {
+            return true;
+        }
+        if (!is_executable_memory(callsite) || !is_accessible_memory(callsite, kZoneWirePrintPatchLength))
+        {
+            zone_wire_print_set_error("wire PrintToConsole callsite is not executable/readable");
+            return false;
+        }
+        if (zone_call_rel32_target(callsite) != formatter)
+        {
+            zone_wire_print_set_error("wire PrintToConsole callsite did not target the expected formatter");
+            return false;
+        }
+
+        auto* stub = static_cast<uint8_t*>(
+            zone_wire_print_alloc_near(callsite, kZoneWirePrintStubLength));
+        if (!stub)
+        {
+            zone_wire_print_set_error(
+                "wire PrintToConsole near stub allocation failed: " + std::to_string(GetLastError()));
+            return false;
+        }
+
+        stub[0] = 0x48;
+        stub[1] = 0xB8;
+        const uintptr_t detour = reinterpret_cast<uintptr_t>(&zone_wire_print_formatter_detour);
+        std::memcpy(stub + 2, &detour, sizeof(detour));
+        stub[10] = 0xFF;
+        stub[11] = 0xE0;
+        FlushInstructionCache(GetCurrentProcess(), stub, kZoneWirePrintStubLength);
+
+        const int64_t rel64 = static_cast<int64_t>(reinterpret_cast<uintptr_t>(stub)) -
+                              static_cast<int64_t>(callsite + kZoneWirePrintPatchLength);
+        if (rel64 < std::numeric_limits<int32_t>::min() || rel64 > std::numeric_limits<int32_t>::max())
+        {
+            VirtualFree(stub, 0, MEM_RELEASE);
+            zone_wire_print_set_error("wire PrintToConsole near stub was outside rel32 range");
+            return false;
+        }
+        const int32_t rel32 = static_cast<int32_t>(rel64);
+
+        uint8_t patch[kZoneWirePrintPatchLength]{};
+        patch[0] = 0xE8;
+        std::memcpy(patch + 1, &rel32, sizeof(rel32));
+
+        DWORD old_protect = 0;
+        if (!VirtualProtect(
+                reinterpret_cast<void*>(callsite),
+                kZoneWirePrintPatchLength,
+                PAGE_EXECUTE_READWRITE,
+                &old_protect))
+        {
+            VirtualFree(stub, 0, MEM_RELEASE);
+            zone_wire_print_set_error(
+                "wire PrintToConsole callsite VirtualProtect failed: " + std::to_string(GetLastError()));
+            return false;
+        }
+        std::memcpy(reinterpret_cast<void*>(callsite), patch, sizeof(patch));
+        DWORD ignored = 0;
+        VirtualProtect(reinterpret_cast<void*>(callsite), kZoneWirePrintPatchLength, old_protect, &ignored);
+        FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(callsite), kZoneWirePrintPatchLength);
+
+        g_zone_wire_print_callsite.store(callsite);
+        g_zone_wire_print_formatter.store(formatter);
+        g_zone_wire_print_stub.store(reinterpret_cast<uintptr_t>(stub));
+        g_zone_wire_print_installed.store(true);
+        zone_wire_print_set_error("");
+        return true;
+    }
+
+    bool zone_wire_print_resolve_static(uintptr_t& out_callsite, uintptr_t& out_formatter)
+    {
+        const uintptr_t module_base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        if (module_base == 0)
+        {
+            return false;
+        }
+
+        const uintptr_t callsite = module_base + kZoneWirePrintCallsiteRva;
+        const uintptr_t formatter = module_base + kZoneWirePrintFormatterRva;
+        if (zone_call_rel32_target(callsite) == formatter && is_executable_memory(formatter))
+        {
+            out_callsite = callsite;
+            out_formatter = formatter;
+            return true;
+        }
+        return false;
+    }
+
+    std::vector<uintptr_t> zone_find_qword_refs(uintptr_t target,
+                                                const ZoneModuleSection& section,
+                                                size_t max_refs,
+                                                uint64_t max_ms)
+    {
+        std::vector<uintptr_t> refs;
+        if (target == 0 || section.start == 0 || section.size < sizeof(uintptr_t))
+        {
+            return refs;
+        }
+
+        const uint64_t started_ms = monotonic_ms();
+        auto* bytes = reinterpret_cast<const uint8_t*>(section.start);
+        for (size_t offset = 0; offset + sizeof(uintptr_t) <= section.size; offset += sizeof(uintptr_t))
+        {
+            if (max_ms > 0 && (offset & 0x3FFFF) == 0 &&
+                monotonic_ms() - started_ms >= max_ms)
+            {
+                break;
+            }
+
+            uintptr_t value = 0;
+            std::memcpy(&value, bytes + offset, sizeof(value));
+            if (value == target)
+            {
+                refs.push_back(section.start + offset);
+                if (max_refs > 0 && refs.size() >= max_refs)
+                {
+                    break;
+                }
+            }
+        }
+        return refs;
+    }
+
+    bool zone_wire_print_resolve_dynamic(uintptr_t& out_callsite, uintptr_t& out_formatter)
+    {
+        ZoneModuleSection rdata;
+        ZoneModuleSection text;
+        if (!zone_module_section_by_name(".rdata", rdata) ||
+            !zone_module_section_by_name(".text", text))
+        {
+            return false;
+        }
+
+        const uint64_t budget_ms = env_u64("BMF_ZONE_WIRE_PRINT_RESOLVE_BUDGET_MS", 250, 25, 2000);
+        const uint64_t started_ms = monotonic_ms();
+        for (uintptr_t marker : zone_find_wide_strings(L"[Wire Graph]", budget_ms))
+        {
+            const uint64_t elapsed_ms = monotonic_ms() - started_ms;
+            if (elapsed_ms >= budget_ms)
+            {
+                break;
+            }
+
+            for (uintptr_t marker_slot : zone_find_qword_refs(marker, rdata, 16, budget_ms - elapsed_ms))
+            {
+                const uint64_t slot_elapsed_ms = monotonic_ms() - started_ms;
+                if (slot_elapsed_ms >= budget_ms)
+                {
+                    break;
+                }
+                for (uintptr_t ref : zone_find_rip_lea_refs(marker_slot, text, 16, budget_ms - slot_elapsed_ms))
+                {
+                    if (!is_accessible_memory(ref, 0x30))
+                    {
+                        continue;
+                    }
+                    auto* bytes = reinterpret_cast<const uint8_t*>(ref);
+                    for (size_t offset = 0; offset + kZoneWirePrintPatchLength <= 0x30; ++offset)
+                    {
+                        if (bytes[offset] != 0xE8)
+                        {
+                            continue;
+                        }
+                        const uintptr_t callsite = ref + offset;
+                        const uintptr_t formatter = zone_call_rel32_target(callsite);
+                        if (formatter != 0 && is_executable_memory(formatter))
+                        {
+                            out_callsite = callsite;
+                            out_formatter = formatter;
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
+    bool zone_wire_print_install()
+    {
+        if (g_zone_wire_print_installed.load())
+        {
+            return true;
+        }
+
+        uintptr_t callsite = 0;
+        uintptr_t formatter = 0;
+        if (!zone_wire_print_resolve_static(callsite, formatter) &&
+            !zone_wire_print_resolve_dynamic(callsite, formatter))
+        {
+            zone_wire_print_set_error("wire PrintToConsole callsite could not be resolved");
+            return false;
+        }
+        return zone_wire_print_patch_callsite(callsite, formatter);
+    }
+
+    std::string zone_wire_print_build_event_json(std::string value,
+                                                 uint64_t sequence,
+                                                 void* category,
+                                                 void* format,
+                                                 uint64_t verbosity,
+                                                 void* raw_value,
+                                                 void* const* frames,
+                                                 USHORT frame_count)
+    {
+        const uintptr_t brickadia_base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        const size_t brickadia_size = zone_console_trace_module_image_size(brickadia_base);
+        std::ostringstream out;
+        out << "{"
+            << "\"type\":\"zone_wire_print_console\","
+            << "\"source\":\"BMFSocketZoneWirePrintTrace\","
+            << "\"event\":\"zones.wire.print_console\","
+            << "\"sequence\":" << sequence << ","
+            << "\"timestamp\":\"" << json_escape(system_utc_iso()) << "\","
+            << "\"marker\":\"[Wire Graph]\","
+            << "\"value\":\"" << json_escape(value) << "\","
+            << "\"message\":\"" << json_escape(std::string("[Wire Graph] ") + value) << "\","
+            << "\"threadId\":" << static_cast<uint64_t>(GetCurrentThreadId()) << ","
+            << "\"category\":\"" << json_escape(pointer_hex(reinterpret_cast<uintptr_t>(category))) << "\","
+            << "\"format\":\"" << json_escape(pointer_hex(reinterpret_cast<uintptr_t>(format))) << "\","
+            << "\"verbosity\":" << verbosity << ","
+            << "\"valueAddress\":\"" << json_escape(pointer_hex(reinterpret_cast<uintptr_t>(raw_value))) << "\","
+            << "\"callsite\":\"" << json_escape(pointer_hex(g_zone_wire_print_callsite.load())) << "\","
+            << "\"formatter\":\"" << json_escape(pointer_hex(g_zone_wire_print_formatter.load())) << "\","
+            << "\"stub\":\"" << json_escape(pointer_hex(g_zone_wire_print_stub.load())) << "\","
+            << "\"brickadiaModuleBase\":\"" << json_escape(pointer_hex(brickadia_base)) << "\","
+            << "\"stack\":[";
+        for (USHORT index = 0; index < frame_count; ++index)
+        {
+            if (index > 0)
+            {
+                out << ",";
+            }
+            zone_console_trace_write_stack_frame_json(
+                out,
+                index,
+                reinterpret_cast<uintptr_t>(frames[index]),
+                brickadia_base,
+                brickadia_size);
+        }
+        out << "]}";
+        return out.str();
+    }
+
+    void zone_wire_print_capture(void* category, void* format, uint64_t verbosity, void* value)
+    {
+        g_zone_wire_print_hits.fetch_add(1);
+        if (!g_zone_wire_print_enabled.load())
+        {
+            return;
+        }
+        g_zone_wire_print_matches.fetch_add(1);
+        const uint64_t limit = g_zone_wire_print_limit.load();
+        const uint64_t sequence = g_zone_wire_print_events.fetch_add(1) + 1;
+        if (sequence > limit)
+        {
+            g_zone_wire_print_drops.fetch_add(1);
+            g_zone_wire_print_enabled.store(false);
+            return;
+        }
+        if (sequence >= limit)
+        {
+            g_zone_wire_print_enabled.store(false);
+        }
+
+        void* frames[kZoneConsoleTraceStackMax]{};
+        const USHORT frame_count = CaptureStackBackTrace(0, static_cast<DWORD>(kZoneConsoleTraceStackMax), frames, nullptr);
+        const std::string copied_value = zone_wire_print_safe_copy_wide_z(value);
+        const std::string event_json = zone_wire_print_build_event_json(
+            copied_value,
+            sequence,
+            category,
+            format,
+            verbosity,
+            value,
+            frames,
+            frame_count);
+        enqueue_zone_event(event_json);
+        zone_wire_print_set_summary(event_json.substr(0, 1024));
+    }
+
+    bool zone_wire_print_try_capture(void* category, void* format, uint64_t verbosity, void* value)
+    {
+        __try
+        {
+            zone_wire_print_capture(category, format, verbosity, value);
+            return true;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+    }
+
+    void __fastcall zone_wire_print_formatter_detour(void* category, void* format, uint64_t verbosity, void* value)
+    {
+        if (g_zone_wire_print_enabled.load() && !g_zone_wire_print_in_detour)
+        {
+            g_zone_wire_print_in_detour = true;
+            if (!zone_wire_print_try_capture(category, format, verbosity, value))
+            {
+                zone_wire_print_set_error("wire PrintToConsole capture failed");
+            }
+            g_zone_wire_print_in_detour = false;
+        }
+
+        auto original = reinterpret_cast<ZoneWirePrintFormatterFn>(
+            g_zone_wire_print_formatter.load());
+        if (original && original != &zone_wire_print_formatter_detour)
+        {
+            original(category, format, verbosity, value);
+        }
+    }
+
+    bool zone_wire_print_start(uint64_t max_captures)
+    {
+        g_zone_wire_print_enabled.store(false);
+        max_captures = std::min<uint64_t>(std::max<uint64_t>(max_captures, 1), 128);
+        g_zone_wire_print_limit.store(max_captures);
+        g_zone_wire_print_hits.store(0);
+        g_zone_wire_print_matches.store(0);
+        g_zone_wire_print_events.store(0);
+        g_zone_wire_print_drops.store(0);
+        zone_wire_print_set_summary("");
+
+        if (!zone_wire_print_install())
+        {
+            return false;
+        }
+
+        zone_wire_print_set_error("");
+        g_zone_wire_print_enabled.store(true);
+        return true;
+    }
+
+    void zone_wire_print_stop()
+    {
+        g_zone_wire_print_enabled.store(false);
+    }
+
+    std::string zone_wire_print_status_text()
+    {
+        std::string last_error;
+        std::string last_summary;
+        size_t queued = 0;
+        {
+            std::lock_guard lock(g_zone_wire_print_mutex);
+            last_error = g_zone_wire_print_last_error;
+            last_summary = g_zone_wire_print_last_summary;
+        }
+        {
+            std::lock_guard lock(g_zone_event_mutex);
+            queued = g_zone_event_queue.size();
+        }
+
+        std::ostringstream out;
+        out << "Zone wire PrintToConsole trace status\n"
+            << "source=BMFSocketZoneWirePrintTrace\n"
+            << "enabled=" << (g_zone_wire_print_enabled.load() ? "true" : "false") << "\n"
+            << "installed=" << (g_zone_wire_print_installed.load() ? "true" : "false") << "\n"
+            << "limit=" << g_zone_wire_print_limit.load() << "\n"
+            << "hits=" << g_zone_wire_print_hits.load() << "\n"
+            << "matches=" << g_zone_wire_print_matches.load() << "\n"
+            << "events=" << g_zone_wire_print_events.load() << "\n"
+            << "drops=" << g_zone_wire_print_drops.load() << "\n"
+            << "queued=" << queued << "\n"
+            << "callsite=" << json_escape(pointer_hex(g_zone_wire_print_callsite.load())) << "\n"
+            << "formatter=" << json_escape(pointer_hex(g_zone_wire_print_formatter.load())) << "\n"
+            << "stub=" << json_escape(pointer_hex(g_zone_wire_print_stub.load())) << "\n"
+            << "callsite_rva=0x" << std::uppercase << std::hex << kZoneWirePrintCallsiteRva << std::dec << "\n"
+            << "formatter_rva=0x" << std::uppercase << std::hex << kZoneWirePrintFormatterRva << std::dec << "\n"
+            << "last_error=" << json_escape(last_error) << "\n"
+            << "last_summary=" << json_escape(last_summary) << "\n";
+        return out.str();
+    }
+
+    using ZoneProcessEventFn = void(__fastcall*)(void* object, void* function, void* params);
+
+    constexpr size_t kZoneProcessTraceHookMaxSlots = 512;
+    constexpr size_t kZoneProcessTraceFilterMax = 16;
+    constexpr size_t kZoneProcessTraceFilterChars = 128;
+    constexpr size_t kZoneProcessTraceParamPreviewBytes = 256;
+    constexpr size_t kZoneProcessTraceStackMax = 48;
+    constexpr uint32_t kZoneProcessTraceDefaultSlotIndex = 72;
+
+    struct ZoneProcessTraceHookSlot
+    {
+        std::atomic<bool> installed{false};
+        std::atomic<uintptr_t> vtable{0};
+        std::atomic<uintptr_t> slot{0};
+        std::atomic<uintptr_t> original{0};
+        std::atomic<uint64_t> hits{0};
+    };
+
+    void __fastcall zone_process_trace_detour(void* object, void* function, void* params);
+
+    std::array<ZoneProcessTraceHookSlot, kZoneProcessTraceHookMaxSlots> g_zone_process_trace_hooks;
+    std::array<std::array<char, kZoneProcessTraceFilterChars + 1>, kZoneProcessTraceFilterMax>
+        g_zone_process_trace_filters{};
+    std::atomic<bool> g_zone_process_trace_enabled{false};
+    std::atomic<bool> g_zone_process_trace_installed{false};
+    std::atomic<uint32_t> g_zone_process_trace_slot_index{kZoneProcessTraceDefaultSlotIndex};
+    std::atomic<size_t> g_zone_process_trace_hook_count{0};
+    std::atomic<uint64_t> g_zone_process_trace_limit{16};
+    std::atomic<uint64_t> g_zone_process_trace_filter_count{0};
+    std::atomic<uint64_t> g_zone_process_trace_hits{0};
+    std::atomic<uint64_t> g_zone_process_trace_matches{0};
+    std::atomic<uint64_t> g_zone_process_trace_events{0};
+    std::atomic<uint64_t> g_zone_process_trace_drops{0};
+    std::atomic<uint64_t> g_zone_process_trace_missing_original{0};
+    std::atomic<uint64_t> g_zone_process_trace_patch_failures{0};
+    std::atomic<uint64_t> g_zone_process_trace_scanned_objects{0};
+    std::atomic<uint64_t> g_zone_process_trace_scanned_vtables{0};
+    std::mutex g_zone_process_trace_mutex;
+    std::string g_zone_process_trace_last_error;
+    std::string g_zone_process_trace_last_summary;
+    thread_local bool g_zone_process_trace_in_detour = false;
+
+    bool zone_process_trace_read_pointer(uintptr_t address, uintptr_t& out_value)
+    {
+        out_value = 0;
+        if (!is_accessible_memory(address, sizeof(uintptr_t)))
+        {
+            return false;
+        }
+
+        __try
+        {
+            std::memcpy(&out_value, reinterpret_cast<void*>(address), sizeof(out_value));
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            out_value = 0;
+            return false;
+        }
+        return true;
+    }
+
+    void zone_process_trace_set_error(std::string value)
+    {
+        std::lock_guard lock(g_zone_process_trace_mutex);
+        g_zone_process_trace_last_error = std::move(value);
+    }
+
+    void zone_process_trace_set_summary(std::string value)
+    {
+        std::lock_guard lock(g_zone_process_trace_mutex);
+        g_zone_process_trace_last_summary = std::move(value);
+    }
+
+    std::vector<std::string> zone_process_trace_parse_filters(std::string_view raw)
+    {
+        std::string text = trim_ascii(raw);
+        if (text.empty())
+        {
+            text = "CharacterZoneEvent PrintToConsole WireGraph";
+        }
+        for (char& ch : text)
+        {
+            if (ch == ',' || ch == ';' || ch == '|')
+            {
+                ch = ' ';
+            }
+        }
+
+        std::vector<std::string> filters;
+        std::istringstream input(text);
+        std::string token;
+        while (input >> token)
+        {
+            token = ascii_lower(trim_ascii(token));
+            if (token.size() < 3)
+            {
+                continue;
+            }
+            bool duplicate = false;
+            for (const std::string& existing : filters)
+            {
+                if (existing == token)
+                {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (!duplicate)
+            {
+                filters.push_back(token.substr(0, kZoneProcessTraceFilterChars));
+            }
+            if (filters.size() >= kZoneProcessTraceFilterMax)
+            {
+                break;
+            }
+        }
+        return filters;
+    }
+
+    bool zone_process_trace_set_filters(std::string_view raw)
+    {
+        const std::vector<std::string> filters = zone_process_trace_parse_filters(raw);
+        if (filters.empty())
+        {
+            zone_process_trace_set_error("ProcessEvent trace requires at least one filter of 3+ characters");
+            return false;
+        }
+
+        g_zone_process_trace_filter_count.store(0);
+        for (auto& filter : g_zone_process_trace_filters)
+        {
+            std::fill(filter.begin(), filter.end(), '\0');
+        }
+        for (size_t index = 0; index < filters.size(); ++index)
+        {
+            std::memcpy(
+                g_zone_process_trace_filters[index].data(),
+                filters[index].data(),
+                filters[index].size());
+        }
+        g_zone_process_trace_filter_count.store(filters.size());
+        return true;
+    }
+
+    std::string zone_process_trace_filter_text()
+    {
+        std::ostringstream out;
+        const size_t count = std::min<size_t>(
+            static_cast<size_t>(g_zone_process_trace_filter_count.load()),
+            kZoneProcessTraceFilterMax);
+        for (size_t index = 0; index < count; ++index)
+        {
+            if (index > 0)
+            {
+                out << ",";
+            }
+            out << g_zone_process_trace_filters[index].data();
+        }
+        return out.str();
+    }
+
+    bool zone_process_trace_text_matches(std::string_view value)
+    {
+        if (value.empty())
+        {
+            return false;
+        }
+        const std::string lowered = ascii_lower(std::string(value));
+        const size_t count = std::min<size_t>(
+            static_cast<size_t>(g_zone_process_trace_filter_count.load()),
+            kZoneProcessTraceFilterMax);
+        for (size_t index = 0; index < count; ++index)
+        {
+            const char* filter = g_zone_process_trace_filters[index].data();
+            if (filter && filter[0] != '\0' && lowered.find(filter) != std::string::npos)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void zone_process_trace_append_object_text(std::ostringstream& out, Unreal::UObject* object)
+    {
+        if (!is_live_uobject(object))
+        {
+            return;
+        }
+        out << " " << object_name(object)
+            << " " << object_full_name(object)
+            << " " << object_class_name(object)
+            << " " << object_class_full_name(object);
+    }
+
+    std::string zone_process_trace_match_text(Unreal::UObject* context, Unreal::UObject* function)
+    {
+        std::ostringstream out;
+        zone_process_trace_append_object_text(out, function);
+        zone_process_trace_append_object_text(out, context);
+        return out.str();
+    }
+
+    std::string zone_process_trace_param_preview_hex(Unreal::UFunction* function, void* params, size_t& out_bytes)
+    {
+        out_bytes = 0;
+        if (!is_live_uobject(function) || !params)
+        {
+            return "";
+        }
+
+        int32_t params_size = 0;
+        try
+        {
+            params_size = function->GetParmsSize();
+        }
+        catch (...)
+        {
+            return "";
+        }
+        if (params_size <= 0)
+        {
+            return "";
+        }
+
+        const size_t bytes = std::min<size_t>(
+            static_cast<size_t>(params_size),
+            kZoneProcessTraceParamPreviewBytes);
+        if (!is_accessible_memory(reinterpret_cast<uintptr_t>(params), bytes))
+        {
+            return "";
+        }
+
+        std::array<uint8_t, kZoneProcessTraceParamPreviewBytes> buffer{};
+        if (!zone_console_trace_guarded_memcpy(buffer.data(), params, bytes))
+        {
+            return "";
+        }
+
+        out_bytes = bytes;
+        std::ostringstream out;
+        out << std::uppercase << std::hex << std::setfill('0');
+        for (size_t index = 0; index < bytes; ++index)
+        {
+            out << std::setw(2) << static_cast<unsigned int>(buffer[index]);
+        }
+        return out.str();
+    }
+
+    void zone_process_trace_write_param_refs_json(std::ostringstream& out,
+                                                  Unreal::UFunction* function,
+                                                  void* params)
+    {
+        out << "[";
+        if (!is_live_uobject(function) || !params)
+        {
+            out << "]";
+            return;
+        }
+
+        bool first = true;
+        try
+        {
+            for (Unreal::FProperty* property : Unreal::TFieldRange<Unreal::FProperty>(
+                     function,
+                     Unreal::EFieldIterationFlags::IncludeDeprecated))
+            {
+                if (!property ||
+                    !property->HasAnyPropertyFlags(Unreal::EPropertyFlags::CPF_Parm) ||
+                    !property_is_object_reference(property))
+                {
+                    continue;
+                }
+
+                const int32_t raw_offset = property->GetOffset_Internal();
+                if (raw_offset < 0)
+                {
+                    continue;
+                }
+
+                Unreal::UObject* value = read_uobject_at(
+                    reinterpret_cast<uintptr_t>(params) + static_cast<uintptr_t>(raw_offset));
+                if (!is_live_uobject(value))
+                {
+                    continue;
+                }
+
+                if (!first)
+                {
+                    out << ",";
+                }
+                first = false;
+                out << "{"
+                    << "\"property\":\"" << json_escape(narrow_string(property->GetName())) << "\","
+                    << "\"offset\":\"" << json_escape(pointer_hex(static_cast<uintptr_t>(raw_offset))) << "\","
+                    << "\"object\":";
+                zone_event_write_object_json(out, value);
+                out << "}";
+            }
+        }
+        catch (...)
+        {
+        }
+        out << "]";
+    }
+
+    std::string zone_process_trace_build_event_json(void* context,
+                                                    void* function,
+                                                    void* params,
+                                                    const std::string& match_text,
+                                                    uint64_t sequence)
+    {
+        auto* context_object = reinterpret_cast<Unreal::UObject*>(context);
+        auto* function_object = reinterpret_cast<Unreal::UFunction*>(function);
+        size_t param_preview_bytes = 0;
+        const std::string param_preview =
+            zone_process_trace_param_preview_hex(function_object, params, param_preview_bytes);
+        void* frames[kZoneProcessTraceStackMax]{};
+        const USHORT frame_count = CaptureStackBackTrace(
+            0,
+            static_cast<DWORD>(kZoneProcessTraceStackMax),
+            frames,
+            nullptr);
+        const uintptr_t brickadia_base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        const size_t brickadia_size = zone_console_trace_module_image_size(brickadia_base);
+
+        std::ostringstream out;
+        out << "{"
+            << "\"type\":\"zone_process_event_trace\","
+            << "\"source\":\"BMFSocketZoneProcessEventTrace\","
+            << "\"event\":\"zones.process_event.trace\","
+            << "\"sequence\":" << sequence << ","
+            << "\"timestamp\":\"" << json_escape(system_utc_iso()) << "\","
+            << "\"threadId\":" << static_cast<uint64_t>(GetCurrentThreadId()) << ","
+            << "\"slotIndex\":" << g_zone_process_trace_slot_index.load() << ","
+            << "\"filters\":\"" << json_escape(zone_process_trace_filter_text()) << "\","
+            << "\"contextAddress\":\"" << json_escape(pointer_hex(reinterpret_cast<uintptr_t>(context))) << "\","
+            << "\"functionAddress\":\"" << json_escape(pointer_hex(reinterpret_cast<uintptr_t>(function))) << "\","
+            << "\"paramsAddress\":\"" << json_escape(pointer_hex(reinterpret_cast<uintptr_t>(params))) << "\","
+            << "\"paramPreviewBytes\":" << param_preview_bytes << ","
+            << "\"paramPreviewHex\":\"" << json_escape(param_preview) << "\","
+            << "\"matchText\":\"" << json_escape(match_text) << "\",";
+
+        out << "\"function\":";
+        if (is_live_uobject(function_object))
+        {
+            zone_event_write_object_json(out, function_object);
+        }
+        else
+        {
+            out << "null";
+        }
+
+        out << ",\"context\":";
+        if (is_live_uobject(context_object))
+        {
+            zone_event_write_object_json(out, context_object);
+        }
+        else
+        {
+            out << "null";
+        }
+
+        out << ",\"paramObjects\":";
+        zone_process_trace_write_param_refs_json(out, function_object, params);
+        out << ",\"brickadiaModuleBase\":\"" << json_escape(pointer_hex(brickadia_base)) << "\","
+            << "\"stack\":[";
+        for (size_t index = 0; index < static_cast<size_t>(frame_count); ++index)
+        {
+            if (index > 0)
+            {
+                out << ",";
+            }
+            zone_console_trace_write_stack_frame_json(
+                out,
+                index,
+                reinterpret_cast<uintptr_t>(frames[index]),
+                brickadia_base,
+                brickadia_size);
+        }
+        out << "]}";
+        return out.str();
+    }
+
+    bool zone_process_trace_known_vtable(uintptr_t vtable)
+    {
+        const size_t count = std::min<size_t>(
+            g_zone_process_trace_hook_count.load(),
+            kZoneProcessTraceHookMaxSlots);
+        for (size_t index = 0; index < count; ++index)
+        {
+            if (g_zone_process_trace_hooks[index].vtable.load() == vtable)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool zone_process_trace_patch_vtable(uintptr_t vtable, uintptr_t slot_address, uintptr_t current)
+    {
+        if (vtable == 0 || slot_address == 0 || current == 0 ||
+            current == reinterpret_cast<uintptr_t>(&zone_process_trace_detour))
+        {
+            return false;
+        }
+        if (zone_process_trace_known_vtable(vtable))
+        {
+            return false;
+        }
+
+        const size_t index = g_zone_process_trace_hook_count.load();
+        if (index >= kZoneProcessTraceHookMaxSlots)
+        {
+            return false;
+        }
+
+        DWORD old_protect = 0;
+        if (!VirtualProtect(
+                reinterpret_cast<void*>(slot_address),
+                sizeof(void*),
+                PAGE_EXECUTE_READWRITE,
+                &old_protect))
+        {
+            g_zone_process_trace_patch_failures.fetch_add(1);
+            return false;
+        }
+
+        void* previous = InterlockedExchangePointer(
+            reinterpret_cast<void**>(slot_address),
+            reinterpret_cast<void*>(&zone_process_trace_detour));
+        DWORD ignored = 0;
+        VirtualProtect(reinterpret_cast<void*>(slot_address), sizeof(void*), old_protect, &ignored);
+        FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(slot_address), sizeof(void*));
+
+        if (!previous ||
+            previous == reinterpret_cast<void*>(&zone_process_trace_detour) ||
+            !is_executable_memory(reinterpret_cast<uintptr_t>(previous)))
+        {
+            g_zone_process_trace_patch_failures.fetch_add(1);
+            return false;
+        }
+
+        ZoneProcessTraceHookSlot& hook = g_zone_process_trace_hooks[index];
+        hook.vtable.store(vtable);
+        hook.slot.store(slot_address);
+        hook.original.store(reinterpret_cast<uintptr_t>(previous));
+        hook.hits.store(0);
+        hook.installed.store(true);
+        g_zone_process_trace_hook_count.store(index + 1);
+        return true;
+    }
+
+    size_t zone_process_trace_install_vtable_hooks(size_t max_vtables, uint32_t slot_index)
+    {
+        max_vtables = std::min<size_t>(
+            std::max<size_t>(max_vtables, 1),
+            kZoneProcessTraceHookMaxSlots);
+        g_zone_process_trace_scanned_objects.store(0);
+        g_zone_process_trace_scanned_vtables.store(0);
+        g_zone_process_trace_patch_failures.store(0);
+
+        size_t installed = 0;
+        Unreal::UObjectGlobals::ForEachUObject([&](Unreal::UObject* object, int32_t, int32_t) {
+            g_zone_process_trace_scanned_objects.fetch_add(1);
+            if (!is_live_uobject(object))
+            {
+                return LoopAction::Continue;
+            }
+
+            uintptr_t vtable = 0;
+            if (!zone_process_trace_read_pointer(reinterpret_cast<uintptr_t>(object), vtable) ||
+                vtable == 0 ||
+                zone_process_trace_known_vtable(vtable))
+            {
+                return LoopAction::Continue;
+            }
+            g_zone_process_trace_scanned_vtables.fetch_add(1);
+
+            const uintptr_t slot_address =
+                vtable + static_cast<uintptr_t>(slot_index) * sizeof(uintptr_t);
+            uintptr_t current = 0;
+            if (!zone_process_trace_read_pointer(slot_address, current) ||
+                current == 0 ||
+                current == reinterpret_cast<uintptr_t>(&zone_process_trace_detour) ||
+                !is_executable_memory(current))
+            {
+                return LoopAction::Continue;
+            }
+
+            if (zone_process_trace_patch_vtable(vtable, slot_address, current))
+            {
+                ++installed;
+            }
+            return installed >= max_vtables ? LoopAction::Break : LoopAction::Continue;
+        });
+        return installed;
+    }
+
+    void zone_process_trace_restore_hooks()
+    {
+        g_zone_process_trace_enabled.store(false);
+        const size_t count = std::min<size_t>(
+            g_zone_process_trace_hook_count.load(),
+            kZoneProcessTraceHookMaxSlots);
+        for (size_t index = 0; index < count; ++index)
+        {
+            ZoneProcessTraceHookSlot& hook = g_zone_process_trace_hooks[index];
+            const uintptr_t slot_address = hook.slot.load();
+            const uintptr_t original = hook.original.load();
+            if (!hook.installed.load() || slot_address == 0 || original == 0 ||
+                !is_accessible_memory(slot_address, sizeof(void*)))
+            {
+                continue;
+            }
+
+            uintptr_t current = 0;
+            if (!zone_process_trace_read_pointer(slot_address, current) ||
+                current != reinterpret_cast<uintptr_t>(&zone_process_trace_detour))
+            {
+                hook.installed.store(false);
+                continue;
+            }
+
+            DWORD old_protect = 0;
+            if (VirtualProtect(
+                    reinterpret_cast<void*>(slot_address),
+                    sizeof(void*),
+                    PAGE_EXECUTE_READWRITE,
+                    &old_protect))
+            {
+                InterlockedExchangePointer(
+                    reinterpret_cast<void**>(slot_address),
+                    reinterpret_cast<void*>(original));
+                DWORD ignored = 0;
+                VirtualProtect(reinterpret_cast<void*>(slot_address), sizeof(void*), old_protect, &ignored);
+                FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(slot_address), sizeof(void*));
+            }
+            hook.installed.store(false);
+        }
+        g_zone_process_trace_installed.store(false);
+        g_zone_process_trace_hook_count.store(0);
+    }
+
+    ZoneProcessEventFn zone_process_trace_original_for(void* object, size_t& out_index)
+    {
+        out_index = SIZE_MAX;
+        uintptr_t vtable = 0;
+        if (!zone_process_trace_read_pointer(reinterpret_cast<uintptr_t>(object), vtable) || vtable == 0)
+        {
+            return nullptr;
+        }
+
+        const size_t count = std::min<size_t>(
+            g_zone_process_trace_hook_count.load(),
+            kZoneProcessTraceHookMaxSlots);
+        for (size_t index = 0; index < count; ++index)
+        {
+            ZoneProcessTraceHookSlot& hook = g_zone_process_trace_hooks[index];
+            if (hook.installed.load() && hook.vtable.load() == vtable)
+            {
+                out_index = index;
+                hook.hits.fetch_add(1);
+                return reinterpret_cast<ZoneProcessEventFn>(hook.original.load());
+            }
+        }
+        return nullptr;
+    }
+
+    void zone_process_trace_maybe_capture(void* object, void* function, void* params)
+    {
+        if (!g_zone_process_trace_enabled.load() || g_zone_process_trace_in_detour)
+        {
+            return;
+        }
+
+        auto* context_object = reinterpret_cast<Unreal::UObject*>(object);
+        auto* function_object = reinterpret_cast<Unreal::UObject*>(function);
+        if (!is_live_uobject(function_object))
+        {
+            return;
+        }
+
+        g_zone_process_trace_hits.fetch_add(1);
+        const std::string match_text =
+            zone_process_trace_match_text(context_object, function_object);
+        if (!zone_process_trace_text_matches(match_text))
+        {
+            return;
+        }
+
+        g_zone_process_trace_matches.fetch_add(1);
+        const uint64_t limit = g_zone_process_trace_limit.load();
+        const uint64_t sequence = g_zone_process_trace_events.fetch_add(1) + 1;
+        if (limit > 0 && sequence > limit)
+        {
+            g_zone_process_trace_drops.fetch_add(1);
+            g_zone_process_trace_enabled.store(false);
+            return;
+        }
+        if (limit > 0 && sequence >= limit)
+        {
+            g_zone_process_trace_enabled.store(false);
+        }
+
+        const std::string event_json =
+            zone_process_trace_build_event_json(object, function, params, match_text, sequence);
+        zone_process_trace_set_summary(event_json.substr(0, 1024));
+        enqueue_zone_event(event_json);
+    }
+
+    void __fastcall zone_process_trace_detour(void* object, void* function, void* params)
+    {
+        size_t hook_index = SIZE_MAX;
+        ZoneProcessEventFn original = zone_process_trace_original_for(object, hook_index);
+        if (!original)
+        {
+            g_zone_process_trace_missing_original.fetch_add(1);
+            return;
+        }
+
+        if (g_zone_process_trace_enabled.load() && !g_zone_process_trace_in_detour)
+        {
+            g_zone_process_trace_in_detour = true;
+            try
+            {
+                zone_process_trace_maybe_capture(object, function, params);
+            }
+            catch (...)
+            {
+                zone_process_trace_set_error("ProcessEvent trace capture failed");
+            }
+            g_zone_process_trace_in_detour = false;
+        }
+        original(object, function, params);
+    }
+
+    bool zone_process_trace_start(std::string_view filters,
+                                  uint64_t max_captures,
+                                  uint32_t slot_index,
+                                  uint64_t max_vtables)
+    {
+        zone_process_trace_restore_hooks();
+        if (!zone_process_trace_set_filters(filters))
+        {
+            return false;
+        }
+
+        max_captures = std::min<uint64_t>(std::max<uint64_t>(max_captures, 1), 128);
+        max_vtables = std::min<uint64_t>(
+            std::max<uint64_t>(max_vtables, 1),
+            kZoneProcessTraceHookMaxSlots);
+        if (slot_index > 512)
+        {
+            zone_process_trace_set_error("ProcessEvent trace slot index is out of range");
+            return false;
+        }
+
+        g_zone_process_trace_slot_index.store(slot_index);
+        g_zone_process_trace_limit.store(max_captures);
+        g_zone_process_trace_hits.store(0);
+        g_zone_process_trace_matches.store(0);
+        g_zone_process_trace_events.store(0);
+        g_zone_process_trace_drops.store(0);
+        g_zone_process_trace_missing_original.store(0);
+        zone_process_trace_set_summary("");
+
+        const size_t installed = zone_process_trace_install_vtable_hooks(
+            static_cast<size_t>(max_vtables),
+            slot_index);
+        if (installed == 0)
+        {
+            zone_process_trace_set_error("ProcessEvent trace could not patch any UObject vtable slots");
+            return false;
+        }
+
+        zone_process_trace_set_error("");
+        g_zone_process_trace_installed.store(true);
+        g_zone_process_trace_enabled.store(true);
+        return true;
+    }
+
+    void zone_process_trace_stop()
+    {
+        zone_process_trace_restore_hooks();
+    }
+
+    std::string zone_process_trace_status_text()
+    {
+        std::string last_error;
+        std::string last_summary;
+        size_t queued = 0;
+        {
+            std::lock_guard lock(g_zone_process_trace_mutex);
+            last_error = g_zone_process_trace_last_error;
+            last_summary = g_zone_process_trace_last_summary;
+        }
+        {
+            std::lock_guard lock(g_zone_event_mutex);
+            queued = g_zone_event_queue.size();
+        }
+
+        size_t installed = 0;
+        const size_t count = std::min<size_t>(
+            g_zone_process_trace_hook_count.load(),
+            kZoneProcessTraceHookMaxSlots);
+        for (size_t index = 0; index < count; ++index)
+        {
+            if (g_zone_process_trace_hooks[index].installed.load())
+            {
+                ++installed;
+            }
+        }
+
+        std::ostringstream out;
+        out << "Zone ProcessEvent trace status\n"
+            << "source=BMFSocketZoneProcessEventTrace\n"
+            << "enabled=" << (g_zone_process_trace_enabled.load() ? "true" : "false") << "\n"
+            << "installed=" << installed << "\n"
+            << "slot_index=" << g_zone_process_trace_slot_index.load() << "\n"
+            << "filters=" << json_escape(zone_process_trace_filter_text()) << "\n"
+            << "limit=" << g_zone_process_trace_limit.load() << "\n"
+            << "hits=" << g_zone_process_trace_hits.load() << "\n"
+            << "matches=" << g_zone_process_trace_matches.load() << "\n"
+            << "events=" << g_zone_process_trace_events.load() << "\n"
+            << "drops=" << g_zone_process_trace_drops.load() << "\n"
+            << "queued=" << queued << "\n"
+            << "missing_original=" << g_zone_process_trace_missing_original.load() << "\n"
+            << "patch_failures=" << g_zone_process_trace_patch_failures.load() << "\n"
+            << "scanned_objects=" << g_zone_process_trace_scanned_objects.load() << "\n"
+            << "scanned_vtables=" << g_zone_process_trace_scanned_vtables.load() << "\n"
+            << "last_error=" << json_escape(last_error) << "\n"
+            << "last_summary=" << json_escape(last_summary) << "\n";
+
+        for (size_t index = 0; index < std::min<size_t>(count, 24); ++index)
+        {
+            const ZoneProcessTraceHookSlot& hook = g_zone_process_trace_hooks[index];
+            out << "hook." << index << ".installed=" << (hook.installed.load() ? "true" : "false") << "\n"
+                << "hook." << index << ".hits=" << hook.hits.load() << "\n"
+                << "hook." << index << ".vtable=" << json_escape(pointer_hex(hook.vtable.load())) << "\n"
+                << "hook." << index << ".slot=" << json_escape(pointer_hex(hook.slot.load())) << "\n"
+                << "hook." << index << ".original=" << json_escape(pointer_hex(hook.original.load())) << "\n";
+        }
+        return out.str();
+    }
+
+    std::string build_zone_bcs_touch_event_json(size_t index,
+                                                void* arg0,
+                                                void* arg1,
+                                                void* arg2,
+                                                void* arg3)
+    {
+        ZoneBcsTouchHookSlot& hook = g_zone_bcs_touch_hooks[index];
+        const uint64_t sequence = g_zone_event_events.fetch_add(1) + 1;
+
+        std::ostringstream out;
+        out << "{"
+            << "\"type\":\"character_zone_" << hook.action << "\","
+            << "\"source\":\"BMFSocketZoneNative.BCSTouch\","
+            << "\"event\":\"" << hook.event_name << "\","
+            << "\"sequence\":" << sequence << ","
+            << "\"timestamp\":\"" << json_escape(system_utc_iso()) << "\","
+            << "\"hook\":\"" << json_escape(hook.label) << "\","
+            << "\"action\":\"" << json_escape(hook.action) << "\","
+            << "\"accessorAddress\":\"" << json_escape(pointer_hex(hook.accessor.load())) << "\","
+            << "\"slotAddress\":\"" << json_escape(pointer_hex(hook.slot.load())) << "\","
+            << "\"originalAddress\":\"" << json_escape(pointer_hex(hook.original.load())) << "\","
+            << "\"threadId\":" << static_cast<uint64_t>(GetCurrentThreadId()) << ","
+            << "\"arg0\":\"" << json_escape(pointer_hex(reinterpret_cast<uintptr_t>(arg0))) << "\","
+            << "\"arg1\":\"" << json_escape(pointer_hex(reinterpret_cast<uintptr_t>(arg1))) << "\","
+            << "\"arg2\":\"" << json_escape(pointer_hex(reinterpret_cast<uintptr_t>(arg2))) << "\","
+            << "\"arg3\":\"" << json_escape(pointer_hex(reinterpret_cast<uintptr_t>(arg3))) << "\","
+            << "\"dataStatus\":\"raw-arguments\","
+            << "\"objects\":[]"
+            << "}";
+        return out.str();
+    }
+
+    uintptr_t zone_bcs_touch_handle(size_t index, void* arg0, void* arg1, void* arg2, void* arg3)
+    {
+        ZoneBcsTouchFn original = nullptr;
+        if (index < g_zone_bcs_touch_hook_count.load() && index < kZoneBcsTouchHookMaxSlots)
+        {
+            ZoneBcsTouchHookSlot& hook = g_zone_bcs_touch_hooks[index];
+            g_zone_bcs_touch_hits.fetch_add(1);
+            hook.hits.fetch_add(1);
+            hook.last_tick_ms.store(GetTickCount64());
+            original = reinterpret_cast<ZoneBcsTouchFn>(hook.original.load());
+
+            if (g_zone_event_enabled.load())
+            {
+                enqueue_zone_event(build_zone_bcs_touch_event_json(index, arg0, arg1, arg2, arg3));
+            }
+        }
+
+        if (original && original != g_zone_bcs_touch_detours[index])
+        {
+            return original(arg0, arg1, arg2, arg3);
+        }
+        return 0;
+    }
+
+    std::string build_zone_bcs_vmethod_event_json(uintptr_t event_object,
+                                                  int* out_counter,
+                                                  int32_t ref_count,
+                                                  const char* action,
+                                                  const char* event_name)
+    {
+        const uint64_t sequence = g_zone_event_events.fetch_add(1) + 1;
+        std::ostringstream out;
+        out << "{"
+            << "\"type\":\"character_zone_" << (action ? action : "unknown") << "\","
+            << "\"source\":\"BMFSocketZoneNative.BCSTouchVmethod\","
+            << "\"event\":\"" << (event_name ? event_name : "zones.character.unknown") << "\","
+            << "\"sequence\":" << sequence << ","
+            << "\"timestamp\":\"" << json_escape(system_utc_iso()) << "\","
+            << "\"hook\":\"BCSNativeEvents.Touch.vmethod+0x10\","
+            << "\"action\":\"" << (action ? action : "unknown") << "\","
+            << "\"targetAddress\":\"" << json_escape(pointer_hex(g_zone_bcs_touch_vmethod_hook.target.load())) << "\","
+            << "\"trampolineAddress\":\"" << json_escape(pointer_hex(g_zone_bcs_touch_vmethod_hook.trampoline.load())) << "\","
+            << "\"eventObject\":\"" << json_escape(pointer_hex(event_object)) << "\","
+            << "\"outCounterAddress\":\"" << json_escape(pointer_hex(reinterpret_cast<uintptr_t>(out_counter))) << "\","
+            << "\"refCountBefore\":" << ref_count << ","
+            << "\"threadId\":" << static_cast<uint64_t>(GetCurrentThreadId()) << ","
+            << "\"dataStatus\":\"bcs-event-object-accessor\","
+            << "\"objects\":[]"
+            << "}";
+        return out.str();
+    }
+
+    int* __fastcall zone_bcs_touch_vmethod_detour(uintptr_t event_object, int* out_counter)
+    {
+        const uintptr_t begin_object = g_zone_bcs_touch_vmethod_hook.begin_object.load();
+        const uintptr_t end_object = g_zone_bcs_touch_vmethod_hook.end_object.load();
+        const bool is_begin = event_object != 0 && event_object == begin_object;
+        const bool is_end = event_object != 0 && event_object == end_object;
+
+        if (is_begin || is_end)
+        {
+            int32_t ref_count = 0;
+            zone_read_i32(event_object + 8, ref_count);
+            g_zone_bcs_touch_vmethod_hook.hits.fetch_add(1);
+            if (is_begin)
+            {
+                g_zone_bcs_touch_vmethod_hook.begin_hits.fetch_add(1);
+            }
+            if (is_end)
+            {
+                g_zone_bcs_touch_vmethod_hook.end_hits.fetch_add(1);
+            }
+            g_zone_bcs_touch_vmethod_hook.last_event_object.store(event_object);
+            g_zone_bcs_touch_vmethod_hook.last_out_counter.store(reinterpret_cast<uintptr_t>(out_counter));
+            g_zone_bcs_touch_vmethod_hook.last_ref_count.store(ref_count);
+            g_zone_bcs_touch_vmethod_hook.last_tick_ms.store(GetTickCount64());
+
+            if (g_zone_event_enabled.load())
+            {
+                enqueue_zone_event(build_zone_bcs_vmethod_event_json(
+                    event_object,
+                    out_counter,
+                    ref_count,
+                    is_begin ? "entered" : "left",
+                    is_begin ? "zones.character.entered" : "zones.character.left"));
+            }
+        }
+
+        auto original = reinterpret_cast<ZoneBcsVmethodFn>(
+            g_zone_bcs_touch_vmethod_hook.trampoline.load());
+        if (original && original != &zone_bcs_touch_vmethod_detour)
+        {
+            return original(event_object, out_counter);
+        }
+        return out_counter;
+    }
+
+    void zone_event_handle(size_t index, void* context, void* stack, void* result)
+    {
+        NativeFunc original = nullptr;
+        if (index < kZoneEventHookSlotCount)
+        {
+            ZoneEventHookSlot& hook = g_zone_event_hook_slots[index];
+            g_zone_event_hits.fetch_add(1);
+            hook.hits.fetch_add(1);
+            hook.last_context.store(reinterpret_cast<uintptr_t>(context));
+            hook.last_stack.store(reinterpret_cast<uintptr_t>(stack));
+            hook.last_tick_ms.store(GetTickCount64());
+
+            uintptr_t locals = 0;
+            const bool locals_read = read_process_event_locals(stack, locals);
+            if (locals_read)
+            {
+                hook.last_locals.store(locals);
+            }
+            else
+            {
+                g_zone_event_param_failures.fetch_add(1);
+            }
+
+            original = reinterpret_cast<NativeFunc>(hook.original.load());
+
+            if (g_zone_event_enabled.load() && locals_read)
+            {
+                try
+                {
+                    std::vector<ZoneEventObjectRef> refs;
+                    zone_event_add_ref(refs, "context", "context", 0, reinterpret_cast<Unreal::UObject*>(context));
+                    zone_event_collect_param_refs(hook, locals, refs);
+                    if (g_zone_event_scan_local_objects.load() || g_zone_event_capture_all.load())
+                    {
+                        zone_event_collect_local_scan_refs(locals, refs);
+                    }
+
+                    std::string reason;
+                    if (zone_event_should_emit(reinterpret_cast<Unreal::UObject*>(context), refs, reason))
+                    {
+                        enqueue_zone_event(build_zone_event_json(index, context, locals, refs, reason));
+                    }
+                    else
+                    {
+                        g_zone_event_rejected_non_zone.fetch_add(1);
+                    }
+                }
+                catch (...)
+                {
+                    zone_event_set_error("character-zone event serialization failed");
+                }
+            }
+        }
+
+        if (original && index < kZoneEventHookSlotCount && original != reinterpret_cast<NativeFunc>(g_zone_event_detours[index]))
+        {
+            original(context, stack, result);
+        }
+    }
+
+    void __fastcall zone_event_detour_0(void* context, void* stack, void* result)
+    {
+        zone_event_handle(0, context, stack, result);
+    }
+
+    void __fastcall zone_event_detour_1(void* context, void* stack, void* result)
+    {
+        zone_event_handle(1, context, stack, result);
+    }
+
+    void __fastcall zone_event_detour_2(void* context, void* stack, void* result)
+    {
+        zone_event_handle(2, context, stack, result);
+    }
+
+    void __fastcall zone_event_detour_3(void* context, void* stack, void* result)
+    {
+        zone_event_handle(3, context, stack, result);
+    }
+
+    std::vector<std::string> drain_zone_native_events(size_t max_count)
+    {
+        if (max_count < 1)
+        {
+            max_count = 1;
+        }
+        if (max_count > 256)
+        {
+            max_count = 256;
+        }
+
+        std::vector<std::string> events;
+        std::lock_guard lock(g_zone_event_mutex);
+        while (!g_zone_event_queue.empty() && events.size() < max_count)
+        {
+            events.push_back(std::move(g_zone_event_queue.front()));
+            g_zone_event_queue.pop_front();
+        }
+        return events;
+    }
+
+    std::string zone_event_status_text()
+    {
+        std::lock_guard lock(g_zone_event_mutex);
+        size_t overlap_installed = 0;
+        for (size_t index = 0; index < kZoneEventHookSlotCount; ++index)
+        {
+            if (g_zone_event_hook_slots[index].installed.load())
+            {
+                ++overlap_installed;
+            }
+        }
+        size_t bcs_touch_installed = 0;
+        const size_t bcs_touch_count = g_zone_bcs_touch_hook_count.load();
+        for (size_t index = 0; index < bcs_touch_count && index < kZoneBcsTouchHookMaxSlots; ++index)
+        {
+            if (g_zone_bcs_touch_hooks[index].installed.load())
+            {
+                ++bcs_touch_installed;
+            }
+        }
+        const bool bcs_touch_vmethod_installed = g_zone_bcs_touch_vmethod_hook.installed.load();
+        const size_t bcs_touch_vmethod_installed_count = bcs_touch_vmethod_installed ? 1 : 0;
+
+        std::ostringstream out;
+        out << "Character-zone native status\n"
+            << "source=BMFSocketZoneNative\n"
+            << "enabled=" << (g_zone_event_enabled.load() ? "true" : "false") << "\n"
+            << "installed=" << (overlap_installed + bcs_touch_installed + bcs_touch_vmethod_installed_count) << "\n"
+            << "candidates=" << (kZoneEventHookSlotCount + kZoneBcsTouchHookMaxSlots + 1) << "\n"
+            << "overlap_installed=" << overlap_installed << "\n"
+            << "overlap_candidates=" << kZoneEventHookSlotCount << "\n"
+            << "bcs_touch_installed=" << bcs_touch_installed << "\n"
+            << "bcs_touch_candidates=" << kZoneBcsTouchHookMaxSlots << "\n"
+            << "bcs_touch_discovered=" << bcs_touch_count << "\n"
+            << "bcs_touch_vmethod_installed=" << (bcs_touch_vmethod_installed ? "true" : "false") << "\n"
+            << "bcs_touch_vmethod_target=" << json_escape(pointer_hex(g_zone_bcs_touch_vmethod_hook.target.load())) << "\n"
+            << "bcs_touch_vmethod_trampoline=" << json_escape(pointer_hex(g_zone_bcs_touch_vmethod_hook.trampoline.load())) << "\n"
+            << "bcs_touch_vmethod_begin_object=" << json_escape(pointer_hex(g_zone_bcs_touch_vmethod_hook.begin_object.load())) << "\n"
+            << "bcs_touch_vmethod_end_object=" << json_escape(pointer_hex(g_zone_bcs_touch_vmethod_hook.end_object.load())) << "\n"
+            << "bcs_touch_vmethod_hits=" << g_zone_bcs_touch_vmethod_hook.hits.load() << "\n"
+            << "bcs_touch_vmethod_begin_hits=" << g_zone_bcs_touch_vmethod_hook.begin_hits.load() << "\n"
+            << "bcs_touch_vmethod_end_hits=" << g_zone_bcs_touch_vmethod_hook.end_hits.load() << "\n"
+            << "bcs_touch_vmethod_last_event_object=" << json_escape(pointer_hex(g_zone_bcs_touch_vmethod_hook.last_event_object.load())) << "\n"
+            << "bcs_touch_vmethod_last_out_counter=" << json_escape(pointer_hex(g_zone_bcs_touch_vmethod_hook.last_out_counter.load())) << "\n"
+            << "bcs_touch_vmethod_last_ref_count=" << g_zone_bcs_touch_vmethod_hook.last_ref_count.load() << "\n"
+            << "bcs_touch_vmethod_last_tick_ms=" << g_zone_bcs_touch_vmethod_hook.last_tick_ms.load() << "\n"
+            << "bcs_touch_vmethod_last_error=" << json_escape(g_zone_bcs_touch_vmethod_last_error) << "\n"
+            << "capture_all=" << (g_zone_event_capture_all.load() ? "true" : "false") << "\n"
+            << "scan_local_objects=" << (g_zone_event_scan_local_objects.load() ? "true" : "false") << "\n"
+            << "hits=" << g_zone_event_hits.load() << "\n"
+            << "bcs_touch_hits=" << g_zone_bcs_touch_hits.load() << "\n"
+            << "events=" << g_zone_event_events.load() << "\n"
+            << "rejected_non_zone=" << g_zone_event_rejected_non_zone.load() << "\n"
+            << "queued=" << g_zone_event_queue.size() << "\n"
+            << "queue_drops=" << g_zone_event_queue_drops.load() << "\n"
+            << "param_failures=" << g_zone_event_param_failures.load() << "\n"
+            << "bcs_touch_scan_refs=" << g_zone_bcs_touch_scan_refs.load() << "\n"
+            << "bcs_touch_scan_slots=" << g_zone_bcs_touch_scan_slots.load() << "\n"
+            << "bcs_touch_install_failures=" << g_zone_bcs_touch_install_failures.load() << "\n"
+            << "bcs_touch_last_error=" << json_escape(g_zone_bcs_touch_last_error) << "\n"
+            << "last_error=" << json_escape(g_zone_event_last_error) << "\n"
+            << "last_summary=" << json_escape(g_zone_event_last_summary) << "\n";
+
+        for (size_t index = 0; index < kZoneEventHookSlotCount; ++index)
+        {
+            const ZoneEventHookSlot& hook = g_zone_event_hook_slots[index];
+            out << "hook." << index << ".label=" << json_escape(hook.label) << "\n"
+                << "hook." << index << ".action=" << json_escape(hook.action) << "\n"
+                << "hook." << index << ".event=" << json_escape(hook.event_name) << "\n"
+                << "hook." << index << ".installed=" << (hook.installed.load() ? "true" : "false") << "\n"
+                << "hook." << index << ".hits=" << hook.hits.load() << "\n"
+                << "hook." << index << ".function=" << json_escape(pointer_hex(hook.function.load())) << "\n"
+                << "hook." << index << ".slot=" << json_escape(pointer_hex(hook.slot.load())) << "\n"
+                << "hook." << index << ".original=" << json_escape(pointer_hex(hook.original.load())) << "\n"
+                << "hook." << index << ".last_context=" << json_escape(pointer_hex(hook.last_context.load())) << "\n"
+                << "hook." << index << ".last_stack=" << json_escape(pointer_hex(hook.last_stack.load())) << "\n"
+                << "hook." << index << ".last_locals=" << json_escape(pointer_hex(hook.last_locals.load())) << "\n"
+                << "hook." << index << ".last_tick_ms=" << hook.last_tick_ms.load() << "\n";
+        }
+        for (size_t index = 0; index < bcs_touch_count && index < kZoneBcsTouchHookMaxSlots; ++index)
+        {
+            const ZoneBcsTouchHookSlot& hook = g_zone_bcs_touch_hooks[index];
+            out << "bcs_hook." << index << ".label=" << json_escape(hook.label) << "\n"
+                << "bcs_hook." << index << ".action=" << json_escape(hook.action) << "\n"
+                << "bcs_hook." << index << ".event=" << json_escape(hook.event_name) << "\n"
+                << "bcs_hook." << index << ".installed=" << (hook.installed.load() ? "true" : "false") << "\n"
+                << "bcs_hook." << index << ".hits=" << hook.hits.load() << "\n"
+                << "bcs_hook." << index << ".accessor=" << json_escape(pointer_hex(hook.accessor.load())) << "\n"
+                << "bcs_hook." << index << ".slot=" << json_escape(pointer_hex(hook.slot.load())) << "\n"
+                << "bcs_hook." << index << ".original=" << json_escape(pointer_hex(hook.original.load())) << "\n"
+                << "bcs_hook." << index << ".last_tick_ms=" << hook.last_tick_ms.load() << "\n";
         }
         return out.str();
     }
@@ -14682,6 +21454,21 @@ namespace
         std::vector<std::string> playerish_sample_names;
     };
 
+    struct ControllerPawnCacheRecord
+    {
+        uintptr_t pawn_address = 0;
+        uint64_t cached_at_ms = 0;
+        uint64_t last_scan_ms = 0;
+        size_t last_scan_objects = 0;
+    };
+
+    std::mutex g_player_position_controller_pawn_cache_mutex;
+    std::unordered_map<uintptr_t, ControllerPawnCacheRecord> g_player_position_controller_pawn_cache;
+    std::atomic<uint64_t> g_player_position_controller_pawn_cache_hits{0};
+    std::atomic<uint64_t> g_player_position_controller_pawn_cache_misses{0};
+    std::atomic<uint64_t> g_player_position_controller_pawn_scans{0};
+    std::atomic<uint64_t> g_player_position_controller_pawn_scan_objects{0};
+
     bool maybe_player_controller_name(std::string_view value)
     {
         return contains_ascii_case_insensitive(value, "PlayerController") ||
@@ -14738,6 +21525,13 @@ namespace
             else if (try_actor_k2_location(pawn, vector))
             {
                 source_kind_suffix = ".K2_GetActorLocation";
+            }
+            else if (try_actor_transform_location(pawn, vector))
+            {
+                source_kind_suffix = ".GetTransform";
+            }
+            else if (try_actor_observed_memory_location(pawn, vector, source_kind_suffix))
+            {
             }
             else
             {
@@ -14837,6 +21631,419 @@ namespace
         }
     }
 
+    bool player_position_text_excluded_as_body(std::string_view lower_text)
+    {
+        return lower_text.find("playercontroller") != std::string::npos ||
+               lower_text.find("player_controller") != std::string::npos ||
+               lower_text.find("playerstate") != std::string::npos ||
+               lower_text.find("player_state") != std::string::npos ||
+               lower_text.find("gamemode") != std::string::npos ||
+               lower_text.find("gamestate") != std::string::npos ||
+               lower_text.find("ruleset") != std::string::npos ||
+               lower_text.find("team") != std::string::npos ||
+               lower_text.find("minigame") != std::string::npos ||
+               lower_text.find("spectator") != std::string::npos ||
+               lower_text.find("camera") != std::string::npos ||
+               lower_text.find("weapon") != std::string::npos ||
+               lower_text.find("tool") != std::string::npos ||
+               lower_text.find("handaxe") != std::string::npos ||
+               lower_text.find("pickaxe") != std::string::npos;
+    }
+
+    std::string player_position_object_search_text(Unreal::UObject* object)
+    {
+        return ascii_lower(
+            object_name(object) + " " +
+            object_full_name(object) + " " +
+            object_class_name(object) + " " +
+            object_class_full_name(object));
+    }
+
+    bool player_position_likely_body_actor(Unreal::UObject* object)
+    {
+        if (!is_live_uobject(object) || !object_is_actor(object))
+        {
+            return false;
+        }
+
+        const std::string lower_text = player_position_object_search_text(object);
+        if (player_position_text_excluded_as_body(lower_text))
+        {
+            return false;
+        }
+
+        return object_class_has_any_cast_flags(object, Unreal::CASTCLASS_APawn) ||
+               lower_text.find("figure") != std::string::npos ||
+               lower_text.find("character") != std::string::npos ||
+               lower_text.find("pawn") != std::string::npos;
+    }
+
+    bool player_position_likely_body_component(Unreal::UObject* object)
+    {
+        if (!is_live_uobject(object))
+        {
+            return false;
+        }
+
+        const std::string lower_text = player_position_object_search_text(object);
+        if (player_position_text_excluded_as_body(lower_text))
+        {
+            return false;
+        }
+
+        const std::string lower_name = ascii_lower(object_name(object));
+        const std::string lower_class =
+            ascii_lower(object_class_name(object) + " " + object_class_full_name(object));
+        const bool component_like =
+            object_class_has_any_cast_flags(object, Unreal::CASTCLASS_USceneComponent) ||
+            object_text_looks_like_scene_component(object);
+        if (!component_like)
+        {
+            return false;
+        }
+
+        return lower_name.find("collisioncylinder") != std::string::npos ||
+               lower_name.find("rootcomponent") != std::string::npos ||
+               lower_name.find("root_component") != std::string::npos ||
+               lower_name.find("charactermesh") != std::string::npos ||
+               lower_class.find("capsulecomponent") != std::string::npos ||
+               lower_class.find("scenecomponent") != std::string::npos ||
+               lower_class.find("skeletalmeshcomponent") != std::string::npos;
+    }
+
+    struct PlayerPositionMemoryReference
+    {
+        uintptr_t offset{0};
+        Unreal::UObject* object{nullptr};
+    };
+
+    std::vector<PlayerPositionMemoryReference> collect_bounded_player_position_memory_refs(Unreal::UObject* source,
+                                                                                           uintptr_t max_offset)
+    {
+        std::vector<PlayerPositionMemoryReference> refs;
+        if (!is_live_uobject(source))
+        {
+            return refs;
+        }
+
+        const uintptr_t base = reinterpret_cast<uintptr_t>(source);
+        for (uintptr_t offset = 0; offset <= max_offset; offset += sizeof(uintptr_t))
+        {
+            if (base > UINTPTR_MAX - offset)
+            {
+                break;
+            }
+
+            Unreal::UObject* candidate = read_uobject_at(base + offset);
+            if (!is_live_uobject(candidate) || candidate == source)
+            {
+                continue;
+            }
+
+            bool seen = false;
+            for (const PlayerPositionMemoryReference& existing : refs)
+            {
+                if (existing.object == candidate)
+                {
+                    seen = true;
+                    break;
+                }
+            }
+            if (seen)
+            {
+                continue;
+            }
+
+            refs.push_back({offset, candidate});
+        }
+        return refs;
+    }
+
+    bool try_push_memory_reference_location(std::vector<NativePlayerLocation>& results,
+                                            std::vector<Unreal::UObject*>& seen_sources,
+                                            Unreal::UObject* source,
+                                            Unreal::UObject* controller,
+                                            const PlayerPositionMemoryReference& ref,
+                                            std::string_view source_kind)
+    {
+        if (!is_live_uobject(ref.object))
+        {
+            return false;
+        }
+
+        const std::string offset_suffix = ".ref+" + pointer_address_hex(ref.offset);
+        if (player_position_likely_body_actor(ref.object))
+        {
+            return try_push_pawn_location(
+                results,
+                seen_sources,
+                source,
+                controller,
+                ref.object,
+                std::string(source_kind) + offset_suffix);
+        }
+
+        if (player_position_likely_body_component(ref.object))
+        {
+            return try_push_component_location(
+                results,
+                seen_sources,
+                ref.object,
+                std::string(source_kind) + offset_suffix + ".component");
+        }
+
+        return false;
+    }
+
+    bool try_push_bounded_memory_reference_locations(std::vector<NativePlayerLocation>& results,
+                                                     std::vector<Unreal::UObject*>& seen_sources,
+                                                     Unreal::UObject* source,
+                                                     Unreal::UObject* controller,
+                                                     std::string_view source_kind)
+    {
+        constexpr uintptr_t kMaxPlayerPositionReferenceOffset = 0x900;
+        const auto refs = collect_bounded_player_position_memory_refs(source, kMaxPlayerPositionReferenceOffset);
+        for (const PlayerPositionMemoryReference& ref : refs)
+        {
+            if (try_push_memory_reference_location(results, seen_sources, source, controller, ref, source_kind))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    void write_player_position_memory_reference_probe(std::ostringstream& out,
+                                                      Unreal::UObject* source,
+                                                      int max_refs)
+    {
+        if (!is_live_uobject(source) || max_refs <= 0)
+        {
+            out << "memory_ref_count=0\n";
+            return;
+        }
+
+        constexpr uintptr_t kMaxPlayerPositionReferenceOffset = 0x900;
+        const auto refs = collect_bounded_player_position_memory_refs(source, kMaxPlayerPositionReferenceOffset);
+        int emitted = 0;
+        for (const PlayerPositionMemoryReference& ref : refs)
+        {
+            if (emitted >= max_refs)
+            {
+                break;
+            }
+
+            ++emitted;
+            const std::string prefix = "memory_ref_" + std::to_string(emitted);
+            out << prefix << "_offset=" << json_escape(pointer_address_hex(ref.offset)) << "\n";
+            write_object_reference_fields(out, prefix, ref.object);
+            out << prefix << "_is_actor=" << (object_is_actor(ref.object) ? "true" : "false") << "\n"
+                << prefix << "_is_pawn=" << (object_is_pawn(ref.object) ? "true" : "false") << "\n"
+                << prefix << "_is_body_actor=" << (player_position_likely_body_actor(ref.object) ? "true" : "false") << "\n"
+                << prefix << "_is_body_component=" << (player_position_likely_body_component(ref.object) ? "true" : "false") << "\n";
+
+            std::vector<NativePlayerLocation> locations;
+            std::vector<Unreal::UObject*> seen_sources;
+            if (try_push_memory_reference_location(
+                    locations,
+                    seen_sources,
+                    source,
+                    nullptr,
+                    ref,
+                    "describe.memory"))
+            {
+                const NativePlayerLocation& location = locations.front();
+                out << prefix << "_location_ok=true\n"
+                    << prefix << "_location_source_kind=" << json_escape(location.source_kind) << "\n"
+                    << std::setprecision(17)
+                    << prefix << "_location_x=" << location.x << "\n"
+                    << prefix << "_location_y=" << location.y << "\n"
+                    << prefix << "_location_z=" << location.z << "\n";
+            }
+            else
+            {
+                out << prefix << "_location_ok=false\n";
+            }
+        }
+
+        out << "memory_ref_count=" << refs.size() << "\n"
+            << "memory_ref_emitted=" << emitted << "\n"
+            << "memory_ref_truncated=" << (static_cast<size_t>(emitted) < refs.size() ? "true" : "false") << "\n";
+    }
+
+    bool maybe_player_figure_actor(Unreal::UObject* object)
+    {
+        if (!is_live_uobject(object) || !object_is_actor(object))
+        {
+            return false;
+        }
+
+        const std::string name = object_name(object);
+        const std::string class_name = object_class_name(object);
+        if (contains_ascii_case_insensitive(name, "BP_FigureV2_Bot_C") ||
+            contains_ascii_case_insensitive(class_name, "BP_FigureV2_Bot_C"))
+        {
+            return false;
+        }
+
+        return contains_ascii_case_insensitive(name, "BP_FigureV2_C") ||
+               contains_ascii_case_insensitive(class_name, "BP_FigureV2_C");
+    }
+
+    bool figure_actor_controller_matches(Unreal::UObject* figure, Unreal::UObject* controller)
+    {
+        if (!is_live_uobject(figure) || !is_live_uobject(controller))
+        {
+            return false;
+        }
+
+        constexpr uintptr_t kObservedControllerOffsets[] = {
+            0x160,
+        };
+        const uintptr_t object_address = reinterpret_cast<uintptr_t>(figure);
+        for (uintptr_t offset : kObservedControllerOffsets)
+        {
+            if (object_address > UINTPTR_MAX - offset)
+            {
+                continue;
+            }
+            Unreal::UObject* value = read_uobject_at(object_address + offset);
+            if (value == controller)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    Unreal::UObject* find_figure_actor_for_controller(Unreal::UObject* controller, size_t* out_scanned = nullptr)
+    {
+        if (!is_live_uobject(controller))
+        {
+            return nullptr;
+        }
+
+        Unreal::UObject* matched_actor = nullptr;
+        size_t scanned = 0;
+        constexpr size_t kMaxObjectsToScan = 32768;
+
+        Unreal::UObjectGlobals::ForEachUObject([&](Unreal::UObject* object, int32_t, int32_t) {
+            if (matched_actor)
+            {
+                return LoopAction::Break;
+            }
+            if (++scanned > kMaxObjectsToScan)
+            {
+                return LoopAction::Break;
+            }
+
+            try
+            {
+                if (!maybe_player_figure_actor(object))
+                {
+                    return LoopAction::Continue;
+                }
+
+                if (figure_actor_controller_matches(object, controller))
+                {
+                    matched_actor = object;
+                    return LoopAction::Break;
+                }
+            }
+            catch (...)
+            {
+            }
+
+            return LoopAction::Continue;
+        });
+
+        if (out_scanned)
+        {
+            *out_scanned = scanned;
+        }
+        return matched_actor;
+    }
+
+    bool player_position_controller_pawn_cache_enabled()
+    {
+        return env_flag_enabled("BMF_PLAYERS_POSITIONS_CONTROLLER_PAWN_CACHE") ||
+               env_flag_enabled("BMF_PLAYERS_POSITIONS_UNSAFE_INVERSE_FIGURE_SCAN");
+    }
+
+    uint64_t player_position_controller_pawn_cache_ttl_ms()
+    {
+        return env_u64("BMF_PLAYERS_POSITIONS_CONTROLLER_PAWN_CACHE_TTL_MS", 30000, 1000, 300000);
+    }
+
+    uint64_t player_position_controller_pawn_miss_backoff_ms()
+    {
+        return env_u64("BMF_PLAYERS_POSITIONS_CONTROLLER_PAWN_MISS_BACKOFF_MS", 5000, 1000, 60000);
+    }
+
+    Unreal::UObject* cached_figure_actor_for_controller(Unreal::UObject* controller)
+    {
+        if (!is_live_uobject(controller) || !player_position_controller_pawn_cache_enabled())
+        {
+            return nullptr;
+        }
+
+        const uintptr_t controller_address = reinterpret_cast<uintptr_t>(controller);
+        const uint64_t now_ms = monotonic_ms();
+        {
+            std::lock_guard lock(g_player_position_controller_pawn_cache_mutex);
+            auto iter = g_player_position_controller_pawn_cache.find(controller_address);
+            if (iter != g_player_position_controller_pawn_cache.end())
+            {
+                ControllerPawnCacheRecord& record = iter->second;
+                const uint64_t age_ms = now_ms >= record.cached_at_ms ? now_ms - record.cached_at_ms : UINT64_MAX;
+                if (record.pawn_address != 0 && age_ms <= player_position_controller_pawn_cache_ttl_ms())
+                {
+                    auto* pawn = reinterpret_cast<Unreal::UObject*>(record.pawn_address);
+                    if (maybe_player_figure_actor(pawn) && figure_actor_controller_matches(pawn, controller))
+                    {
+                        g_player_position_controller_pawn_cache_hits.fetch_add(1);
+                        return pawn;
+                    }
+                    record.pawn_address = 0;
+                    record.cached_at_ms = 0;
+                }
+
+                const uint64_t miss_age_ms =
+                    now_ms >= record.last_scan_ms ? now_ms - record.last_scan_ms : UINT64_MAX;
+                if (record.pawn_address == 0 && miss_age_ms < player_position_controller_pawn_miss_backoff_ms())
+                {
+                    g_player_position_controller_pawn_cache_misses.fetch_add(1);
+                    return nullptr;
+                }
+            }
+        }
+
+        size_t scanned = 0;
+        Unreal::UObject* pawn = find_figure_actor_for_controller(controller, &scanned);
+        g_player_position_controller_pawn_scans.fetch_add(1);
+        g_player_position_controller_pawn_scan_objects.fetch_add(static_cast<uint64_t>(scanned));
+
+        {
+            std::lock_guard lock(g_player_position_controller_pawn_cache_mutex);
+            ControllerPawnCacheRecord& record = g_player_position_controller_pawn_cache[controller_address];
+            record.pawn_address = reinterpret_cast<uintptr_t>(pawn);
+            record.cached_at_ms = pawn ? now_ms : 0;
+            record.last_scan_ms = now_ms;
+            record.last_scan_objects = scanned;
+        }
+
+        if (pawn)
+        {
+            g_player_position_controller_pawn_cache_hits.fetch_add(1);
+        }
+        else
+        {
+            g_player_position_controller_pawn_cache_misses.fetch_add(1);
+        }
+        return pawn;
+    }
+
     bool try_push_controller_location(std::vector<NativePlayerLocation>& results,
                                       std::vector<Unreal::UObject*>& seen_sources,
                                       Unreal::UObject* controller)
@@ -14860,6 +22067,28 @@ namespace
             if (!pawn)
             {
                 pawn = get_first_object_property_with_class_flags(controller, Unreal::CASTCLASS_APawn);
+            }
+            if (!pawn && env_flag_enabled("BMF_PLAYERS_POSITIONS_UNSAFE_INVERSE_FIGURE_SCAN"))
+            {
+                pawn = find_figure_actor_for_controller(controller);
+            }
+            if (!pawn)
+            {
+                pawn = cached_figure_actor_for_controller(controller);
+            }
+            if (!pawn &&
+                try_push_bounded_memory_reference_locations(
+                    results,
+                    seen_sources,
+                    controller,
+                    controller,
+                    "controller.memory"))
+            {
+                return true;
+            }
+            if (!pawn && env_flag_enabled("BMF_PLAYERS_POSITIONS_OBSERVED_MEMORY"))
+            {
+                return try_push_pawn_location(results, seen_sources, controller, controller, controller, "controller");
             }
             return try_push_pawn_location(results, seen_sources, controller, controller, pawn, "controller");
         }
@@ -14904,6 +22133,26 @@ namespace
             }
 
             Unreal::UObject* source = owner ? owner : player_state;
+            if (!pawn &&
+                try_push_bounded_memory_reference_locations(
+                    results,
+                    seen_sources,
+                    player_state,
+                    owner,
+                    "player_state.memory"))
+            {
+                return true;
+            }
+            if (!pawn && owner &&
+                try_push_bounded_memory_reference_locations(
+                    results,
+                    seen_sources,
+                    owner,
+                    owner,
+                    "player_state.owner.memory"))
+            {
+                return true;
+            }
             return try_push_pawn_location(results, seen_sources, source, owner, pawn, "player_state");
         }
         catch (...)
@@ -15627,6 +22876,149 @@ namespace
         return 1;
     }
 
+    int lua_socket_describe_ufunction(const LuaMadeSimple::Lua& lua)
+    {
+        lua_State* state = lua.get_lua_state();
+        size_t name_length = 0;
+        const char* name = lua_isstring(state, 1) ? lua_tolstring(state, 1, &name_length) : "";
+        int32_t max_params = 16;
+        if (lua_isnumber(state, 2))
+        {
+            const lua_Integer raw = lua_tointeger(state, 2);
+            max_params = raw < 1 ? 16 : static_cast<int32_t>(std::min<lua_Integer>(raw, 64));
+        }
+        lua.set_string(describe_reflected_function_text(
+            name ? std::string_view(name, name_length) : std::string_view(),
+            max_params));
+        return 1;
+    }
+
+    int lua_socket_chat_command_probe(const LuaMadeSimple::Lua& lua)
+    {
+        lua_State* state = lua.get_lua_state();
+        size_t command_length = 0;
+        const char* command = lua_isstring(state, 1) ? lua_tolstring(state, 1, &command_length) : "";
+        size_t confirmation_length = 0;
+        const char* confirmation = lua_isstring(state, 2) ? lua_tolstring(state, 2, &confirmation_length) : "";
+        lua.set_string(execute_chat_command_probe_text(
+            command ? std::string_view(command, command_length) : std::string_view(),
+            confirmation ? std::string_view(confirmation, confirmation_length) : std::string_view()));
+        return 1;
+    }
+
+    int lua_socket_player_console_command_probe(const LuaMadeSimple::Lua& lua)
+    {
+        lua_State* state = lua.get_lua_state();
+        size_t command_length = 0;
+        const char* command = lua_isstring(state, 1) ? lua_tolstring(state, 1, &command_length) : "";
+        size_t confirmation_length = 0;
+        const char* confirmation = lua_isstring(state, 2) ? lua_tolstring(state, 2, &confirmation_length) : "";
+        lua.set_string(execute_player_console_command_probe_text(
+            command ? std::string_view(command, command_length) : std::string_view(),
+            confirmation ? std::string_view(confirmation, confirmation_length) : std::string_view()));
+        return 1;
+    }
+
+    int lua_socket_player_chat_message_probe(const LuaMadeSimple::Lua& lua)
+    {
+        lua_State* state = lua.get_lua_state();
+        size_t message_length = 0;
+        const char* message = lua_isstring(state, 1) ? lua_tolstring(state, 1, &message_length) : "";
+        size_t confirmation_length = 0;
+        const char* confirmation = lua_isstring(state, 2) ? lua_tolstring(state, 2, &confirmation_length) : "";
+        lua.set_string(execute_player_chat_message_probe_text(
+            message ? std::string_view(message, message_length) : std::string_view(),
+            confirmation ? std::string_view(confirmation, confirmation_length) : std::string_view()));
+        return 1;
+    }
+
+    int lua_socket_player_chat_message_implementation_probe(const LuaMadeSimple::Lua& lua)
+    {
+        lua_State* state = lua.get_lua_state();
+        size_t message_length = 0;
+        const char* message = lua_isstring(state, 1) ? lua_tolstring(state, 1, &message_length) : "";
+        size_t confirmation_length = 0;
+        const char* confirmation = lua_isstring(state, 2) ? lua_tolstring(state, 2, &confirmation_length) : "";
+        size_t controller_address_length = 0;
+        const char* controller_address = lua_isstring(state, 3) ? lua_tolstring(state, 3, &controller_address_length) : "";
+        lua.set_string(execute_player_chat_message_implementation_probe_text(
+            message ? std::string_view(message, message_length) : std::string_view(),
+            confirmation ? std::string_view(confirmation, confirmation_length) : std::string_view(),
+            controller_address ? std::string_view(controller_address, controller_address_length) : std::string_view()));
+        return 1;
+    }
+
+    int lua_socket_kismet_console_command_probe(const LuaMadeSimple::Lua& lua)
+    {
+        lua_State* state = lua.get_lua_state();
+        size_t command_length = 0;
+        const char* command = lua_isstring(state, 1) ? lua_tolstring(state, 1, &command_length) : "";
+        size_t confirmation_length = 0;
+        const char* confirmation = lua_isstring(state, 2) ? lua_tolstring(state, 2, &confirmation_length) : "";
+        size_t world_address_length = 0;
+        const char* world_address = lua_isstring(state, 3) ? lua_tolstring(state, 3, &world_address_length) : "";
+        lua.set_string(execute_kismet_console_command_probe_text(
+            command ? std::string_view(command, command_length) : std::string_view(),
+            confirmation ? std::string_view(confirmation, confirmation_length) : std::string_view(),
+            world_address ? std::string_view(world_address, world_address_length) : std::string_view()));
+        return 1;
+    }
+
+    int lua_socket_process_console_exec_probe(const LuaMadeSimple::Lua& lua)
+    {
+        lua_State* state = lua.get_lua_state();
+        size_t command_length = 0;
+        const char* command = lua_isstring(state, 1) ? lua_tolstring(state, 1, &command_length) : "";
+        size_t confirmation_length = 0;
+        const char* confirmation = lua_isstring(state, 2) ? lua_tolstring(state, 2, &confirmation_length) : "";
+        size_t context_address_length = 0;
+        const char* context_address = lua_isstring(state, 3) ? lua_tolstring(state, 3, &context_address_length) : "";
+        lua.set_string(execute_process_console_exec_probe_text(
+            command ? std::string_view(command, command_length) : std::string_view(),
+            confirmation ? std::string_view(confirmation, confirmation_length) : std::string_view(),
+            context_address ? std::string_view(context_address, context_address_length) : std::string_view()));
+        return 1;
+    }
+
+    int lua_socket_console_manager_input_probe(const LuaMadeSimple::Lua& lua)
+    {
+        lua_State* state = lua.get_lua_state();
+        size_t command_length = 0;
+        const char* command = lua_isstring(state, 1) ? lua_tolstring(state, 1, &command_length) : "";
+        size_t confirmation_length = 0;
+        const char* confirmation = lua_isstring(state, 2) ? lua_tolstring(state, 2, &confirmation_length) : "";
+        size_t offset_length = 0;
+        const char* offset = lua_isstring(state, 3) ? lua_tolstring(state, 3, &offset_length) : "";
+        size_t world_mode_length = 0;
+        const char* world_mode = lua_isstring(state, 4) ? lua_tolstring(state, 4, &world_mode_length) : "";
+        lua.set_string(execute_console_manager_input_probe_text(
+            command ? std::string_view(command, command_length) : std::string_view(),
+            confirmation ? std::string_view(confirmation, confirmation_length) : std::string_view(),
+            offset ? std::string_view(offset, offset_length) : std::string_view(),
+            world_mode ? std::string_view(world_mode, world_mode_length) : std::string_view()));
+        return 1;
+    }
+
+    int lua_socket_set_unknown_command_messages(const LuaMadeSimple::Lua& lua)
+    {
+        lua_State* state = lua.get_lua_state();
+        bool enabled = false;
+        if (lua_isboolean(state, 1))
+        {
+            enabled = lua_toboolean(state, 1) != 0;
+        }
+        else if (lua_isnumber(state, 1))
+        {
+            enabled = lua_tointeger(state, 1) != 0;
+        }
+
+        const UnknownCommandMessagesSetResult result =
+            set_unknown_command_messages_enabled(enabled);
+        lua.set_bool(result.ok);
+        lua.set_string(result.output);
+        return 2;
+    }
+
     int64_t lua_parse_optional_bool_arg(lua_State* state, int index)
     {
         if (lua_isboolean(state, index))
@@ -15746,6 +23138,194 @@ namespace
         lua.set_bool(installed);
         lua.set_string(treecut_native_status_text());
         return 2;
+    }
+
+    int lua_socket_zone_native_start(const LuaMadeSimple::Lua& lua)
+    {
+        lua_State* state = lua.get_lua_state();
+        bool capture_all = env_flag_enabled("BMF_ZONE_NATIVE_CAPTURE_ALL_OVERLAPS");
+        bool scan_local_objects = env_flag_enabled("BMF_ZONE_NATIVE_SCAN_LOCAL_OBJECTS");
+        if (lua_isboolean(state, 1))
+        {
+            capture_all = lua_toboolean(state, 1) != 0;
+        }
+        else if (lua_isnumber(state, 1))
+        {
+            capture_all = lua_tointeger(state, 1) != 0;
+        }
+        if (lua_isboolean(state, 2))
+        {
+            scan_local_objects = lua_toboolean(state, 2) != 0;
+        }
+        else if (lua_isnumber(state, 2))
+        {
+            scan_local_objects = lua_tointeger(state, 2) != 0;
+        }
+
+        g_zone_event_capture_all.store(capture_all);
+        g_zone_event_scan_local_objects.store(scan_local_objects);
+        const size_t installed = zone_event_install_all();
+        g_zone_event_enabled.store(installed > 0);
+        lua.set_bool(installed > 0);
+        lua.set_string(zone_event_status_text());
+        return 2;
+    }
+
+    int lua_socket_zone_native_stop(const LuaMadeSimple::Lua& lua)
+    {
+        g_zone_event_enabled.store(false);
+        lua.set_bool(true);
+        lua.set_string(zone_event_status_text());
+        return 2;
+    }
+
+    int lua_socket_zone_native_status(const LuaMadeSimple::Lua& lua)
+    {
+        lua.set_string(zone_event_status_text());
+        return 1;
+    }
+
+    int lua_socket_zone_native_drain(const LuaMadeSimple::Lua& lua)
+    {
+        lua_State* state = lua.get_lua_state();
+        int64_t max_count = 64;
+        if (lua_isnumber(state, 1))
+        {
+            max_count = static_cast<int64_t>(lua_tointeger(state, 1));
+        }
+        if (max_count < 1)
+        {
+            max_count = 1;
+        }
+        if (max_count > 256)
+        {
+            max_count = 256;
+        }
+
+        const auto events = drain_zone_native_events(static_cast<size_t>(max_count));
+        lua_newtable(state);
+        int index = 1;
+        for (const std::string& event : events)
+        {
+            lua_pushlstring(state, event.data(), event.size());
+            lua_rawseti(state, -2, index++);
+        }
+        return 1;
+    }
+
+    int lua_socket_zone_console_trace_start(const LuaMadeSimple::Lua& lua)
+    {
+        lua_State* state = lua.get_lua_state();
+        std::string filter = "BMF_ZONE_TRACE";
+        uint64_t max_captures = 16;
+        if (lua_isstring(state, 1))
+        {
+            size_t length = 0;
+            const char* raw = lua_tolstring(state, 1, &length);
+            filter = raw ? std::string(raw, length) : "";
+        }
+        if (lua_isnumber(state, 2))
+        {
+            max_captures = static_cast<uint64_t>(std::max<lua_Integer>(1, lua_tointeger(state, 2)));
+        }
+
+        const bool started = zone_console_trace_start(filter, max_captures);
+        lua.set_bool(started);
+        lua.set_string(zone_console_trace_status_text());
+        return 2;
+    }
+
+    int lua_socket_zone_console_trace_stop(const LuaMadeSimple::Lua& lua)
+    {
+        zone_console_trace_stop();
+        lua.set_bool(true);
+        lua.set_string(zone_console_trace_status_text());
+        return 2;
+    }
+
+    int lua_socket_zone_console_trace_status(const LuaMadeSimple::Lua& lua)
+    {
+        lua.set_string(zone_console_trace_status_text());
+        return 1;
+    }
+
+    int lua_socket_zone_wire_print_trace_start(const LuaMadeSimple::Lua& lua)
+    {
+        lua_State* state = lua.get_lua_state();
+        uint64_t max_captures = 16;
+        if (lua_isnumber(state, 1))
+        {
+            max_captures = static_cast<uint64_t>(std::max<lua_Integer>(1, lua_tointeger(state, 1)));
+        }
+
+        const bool started = zone_wire_print_start(max_captures);
+        lua.set_bool(started);
+        lua.set_string(zone_wire_print_status_text());
+        return 2;
+    }
+
+    int lua_socket_zone_wire_print_trace_stop(const LuaMadeSimple::Lua& lua)
+    {
+        zone_wire_print_stop();
+        lua.set_bool(true);
+        lua.set_string(zone_wire_print_status_text());
+        return 2;
+    }
+
+    int lua_socket_zone_wire_print_trace_status(const LuaMadeSimple::Lua& lua)
+    {
+        lua.set_string(zone_wire_print_status_text());
+        return 1;
+    }
+
+    int lua_socket_zone_process_trace_start(const LuaMadeSimple::Lua& lua)
+    {
+        lua_State* state = lua.get_lua_state();
+        std::string filters = "CharacterZoneEvent PrintToConsole WireGraph";
+        uint64_t max_captures = 16;
+        uint32_t slot_index = kZoneProcessTraceDefaultSlotIndex;
+        uint64_t max_vtables = 256;
+        if (lua_isstring(state, 1))
+        {
+            size_t length = 0;
+            const char* raw = lua_tolstring(state, 1, &length);
+            filters = raw ? std::string(raw, length) : "";
+        }
+        if (lua_isnumber(state, 2))
+        {
+            max_captures = static_cast<uint64_t>(std::max<lua_Integer>(1, lua_tointeger(state, 2)));
+        }
+        if (lua_isnumber(state, 3))
+        {
+            const lua_Integer raw_slot = lua_tointeger(state, 3);
+            if (raw_slot >= 0 && raw_slot <= 512)
+            {
+                slot_index = static_cast<uint32_t>(raw_slot);
+            }
+        }
+        if (lua_isnumber(state, 4))
+        {
+            max_vtables = static_cast<uint64_t>(std::max<lua_Integer>(1, lua_tointeger(state, 4)));
+        }
+
+        const bool started = zone_process_trace_start(filters, max_captures, slot_index, max_vtables);
+        lua.set_bool(started);
+        lua.set_string(zone_process_trace_status_text());
+        return 2;
+    }
+
+    int lua_socket_zone_process_trace_stop(const LuaMadeSimple::Lua& lua)
+    {
+        zone_process_trace_stop();
+        lua.set_bool(true);
+        lua.set_string(zone_process_trace_status_text());
+        return 2;
+    }
+
+    int lua_socket_zone_process_trace_status(const LuaMadeSimple::Lua& lua)
+    {
+        lua.set_string(zone_process_trace_status_text());
+        return 1;
     }
 
     int lua_socket_treecut_stop(const LuaMadeSimple::Lua& lua)
@@ -16330,12 +23910,34 @@ namespace
             lua.register_function("BMFSocketStatus", lua_socket_status);
             lua.register_function("BMFSocketPlayerLocation", lua_socket_player_location);
             lua.register_function("BMFSocketDescribeUObject", lua_socket_describe_uobject);
+            lua.register_function("BMFSocketDescribeUFunction", lua_socket_describe_ufunction);
+            lua.register_function("BMFSocketChatCommandProbe", lua_socket_chat_command_probe);
+            lua.register_function("BMFSocketPlayerConsoleCommandProbe", lua_socket_player_console_command_probe);
+            lua.register_function("BMFSocketPlayerChatMessageProbe", lua_socket_player_chat_message_probe);
+            lua.register_function("BMFSocketPlayerChatMessageImplementationProbe", lua_socket_player_chat_message_implementation_probe);
+            lua.register_function("BMFSocketKismetConsoleCommandProbe", lua_socket_kismet_console_command_probe);
+            lua.register_function("BMFSocketProcessConsoleExecProbe", lua_socket_process_console_exec_probe);
+            lua.register_function("BMFSocketConsoleManagerInputProbe", lua_socket_console_manager_input_probe);
+            lua.register_function("BMFSocketSetUnknownCommandMessages", lua_socket_set_unknown_command_messages);
             lua.register_function("BMFSocketUObjectPhysicalSet", lua_socket_uobject_physical_set);
             lua.register_function("BMFSocketUObjectFindNear", lua_socket_uobject_find_near);
             lua.register_function("BMFSocketTreeCutStart", lua_socket_treecut_start);
             lua.register_function("BMFSocketTreeCutStop", lua_socket_treecut_stop);
             lua.register_function("BMFSocketTreeCutStatus", lua_socket_treecut_status);
             lua.register_function("BMFSocketTreeCutFindTag", lua_socket_treecut_find_tag);
+            lua.register_function("BMFSocketZoneNativeStart", lua_socket_zone_native_start);
+            lua.register_function("BMFSocketZoneNativeStop", lua_socket_zone_native_stop);
+            lua.register_function("BMFSocketZoneNativeStatus", lua_socket_zone_native_status);
+            lua.register_function("BMFSocketZoneNativeDrain", lua_socket_zone_native_drain);
+            lua.register_function("BMFSocketZoneConsoleTraceStart", lua_socket_zone_console_trace_start);
+            lua.register_function("BMFSocketZoneConsoleTraceStop", lua_socket_zone_console_trace_stop);
+            lua.register_function("BMFSocketZoneConsoleTraceStatus", lua_socket_zone_console_trace_status);
+            lua.register_function("BMFSocketZoneWirePrintTraceStart", lua_socket_zone_wire_print_trace_start);
+            lua.register_function("BMFSocketZoneWirePrintTraceStop", lua_socket_zone_wire_print_trace_stop);
+            lua.register_function("BMFSocketZoneWirePrintTraceStatus", lua_socket_zone_wire_print_trace_status);
+            lua.register_function("BMFSocketZoneProcessTraceStart", lua_socket_zone_process_trace_start);
+            lua.register_function("BMFSocketZoneProcessTraceStop", lua_socket_zone_process_trace_stop);
+            lua.register_function("BMFSocketZoneProcessTraceStatus", lua_socket_zone_process_trace_status);
             lua.register_function("BMFSocketResourceNativeStart", lua_socket_treecut_start);
             lua.register_function("BMFSocketResourceNativeStop", lua_socket_treecut_stop);
             lua.register_function("BMFSocketResourceNativeStatus", lua_socket_treecut_status);

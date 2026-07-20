@@ -137,8 +137,11 @@ current safety level matters.
   `ServerAddComponent` blocker plus BMF/Omegga feedback.
 - The direct UE4SS Lua Applicator hook remains disabled after a struct
   marshaling crash on `PC-Shipping-CL13530`.
-- Interactable Print-to-Console prefix policy has live validation for Owner
-  allow and denied-role block feedback.
+- Interactable Print-to-Console prefix policy has live validation for
+  Moderator/Admin/Owner allow and denied-role block feedback.
+- Multi-player native context resolution compares the live Applicator actor to
+  controller positions and refuses a bypass when a nearby non-bypass player
+  makes attribution ambiguous.
 - Brick asset placement is policy-ready; live placement/paste blocking still
   needs a cancellable native hook.
 

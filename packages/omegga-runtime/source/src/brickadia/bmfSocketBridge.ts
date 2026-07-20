@@ -19,12 +19,16 @@ type BridgeMessage = {
   ok?: boolean;
   detail?: string;
   response?: string;
+  deadlineMs?: number;
 };
 
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT_MIN = 26000;
 const DEFAULT_PORT_MAX = 61000;
 const DEFAULT_COMMAND_TIMEOUT_MS = 3000;
+const DEFAULT_TUNNEL_ROUTE_TIMEOUT_MS = 15000;
+const MAX_TUNNEL_ROUTE_TIMEOUT_MS = 300000;
+const MAX_PENDING_TUNNEL_ROUTES = 512;
 const RETRYABLE_BIND_ERROR_CODES = new Set(['EADDRINUSE', 'EACCES']);
 
 export default class BmfSocketBridgeHost extends EventEmitter {
@@ -41,6 +45,14 @@ export default class BmfSocketBridgeHost extends EventEmitter {
     {
       resolve: (message: BridgeMessage) => void;
       reject: (error: Error) => void;
+      timeout: NodeJS.Timeout;
+    }
+  >();
+  #pendingTunnelRoutes = new Map<
+    string,
+    {
+      origin: Socket;
+      native: Socket;
       timeout: NodeJS.Timeout;
     }
   >();
@@ -150,6 +162,10 @@ export default class BmfSocketBridgeHost extends EventEmitter {
       pending.reject(new Error(`BMF socket bridge stopped before command ${id} completed.`));
     }
     this.#pendingCommands.clear();
+    for (const route of this.#pendingTunnelRoutes.values()) {
+      clearTimeout(route.timeout);
+    }
+    this.#pendingTunnelRoutes.clear();
 
     for (const socket of this.#clients.keys()) {
       socket.removeAllListeners();
@@ -293,6 +309,13 @@ export default class BmfSocketBridgeHost extends EventEmitter {
     }
 
     if (client.role === 'bmf-native') {
+      if (
+        (message.type === 'tunnel.ack' || message.type === 'tunnel.result') &&
+        message.id
+      ) {
+        this.routeTunnelResponse(socket, message, trimmed);
+        return;
+      }
       if (message.type === 'response' && message.id) {
         this.resolvePendingCommand(message);
       }
@@ -300,8 +323,13 @@ export default class BmfSocketBridgeHost extends EventEmitter {
       return;
     }
 
+    if (message.type === 'tunnel.request') {
+      this.routeTunnelRequest(socket, message, trimmed);
+      return;
+    }
+
     if (message.type === 'command' || message.type === 'ping') {
-      if (this.#bmfClients.size === 0) {
+      if (!this.sendToFirstBmfClient(trimmed)) {
         socket.write(
           `${JSON.stringify({
             type: 'response',
@@ -312,7 +340,6 @@ export default class BmfSocketBridgeHost extends EventEmitter {
         );
         return;
       }
-      this.broadcast(trimmed, socket, socket => this.#bmfClients.has(socket));
     }
   }
 
@@ -333,6 +360,132 @@ export default class BmfSocketBridgeHost extends EventEmitter {
     return 'unknown';
   }
 
+  private firstWritableBmfClient() {
+    for (const socket of this.#bmfClients) {
+      if (!socket.destroyed && socket.writable) return socket;
+    }
+    return null;
+  }
+
+  private sendToFirstBmfClient(line: string) {
+    const socket = this.firstWritableBmfClient();
+    if (!socket) return false;
+    const payload = `${line}\n`;
+    socket.write(payload);
+    return true;
+  }
+
+  private writeTunnelResult(
+    socket: Socket,
+    id: string | undefined,
+    state: 'rejected' | 'outcome_unknown',
+    code: string,
+    detail: string,
+  ) {
+    if (socket.destroyed || !socket.writable) return;
+    socket.write(
+      `${JSON.stringify({
+        type: 'tunnel.result',
+        source: 'omegga-broker',
+        v: 1,
+        id,
+        state,
+        code,
+        detail,
+        queueDepth: this.#pendingTunnelRoutes.size,
+      })}\n`,
+    );
+  }
+
+  private routeTunnelRequest(origin: Socket, message: BridgeMessage, line: string) {
+    const id = String(message.id || '').trim();
+    if (!id) {
+      this.writeTunnelResult(origin, message.id, 'rejected', 'INVALID_ID', 'tunnel request id is required');
+      return;
+    }
+    if (this.#pendingTunnelRoutes.has(id)) {
+      this.writeTunnelResult(
+        origin,
+        id,
+        'rejected',
+        'DUPLICATE_ID_ACTIVE',
+        'tunnel request id is already active at the broker',
+      );
+      return;
+    }
+    if (this.#pendingTunnelRoutes.size >= MAX_PENDING_TUNNEL_ROUTES) {
+      this.writeTunnelResult(
+        origin,
+        id,
+        'rejected',
+        'BROKER_QUEUE_FULL',
+        'bounded broker tunnel route table is full',
+      );
+      return;
+    }
+
+    const nowMs = Date.now();
+    const absoluteDeadlineMs = Number(message.deadlineMs || 0);
+    if (Number.isFinite(absoluteDeadlineMs) && absoluteDeadlineMs > 0 && absoluteDeadlineMs <= nowMs) {
+      this.writeTunnelResult(
+        origin,
+        id,
+        'rejected',
+        'DEADLINE_EXPIRED',
+        'absolute tunnel deadline elapsed before broker forwarding',
+      );
+      return;
+    }
+
+    const native = this.firstWritableBmfClient();
+    if (!native) {
+      this.writeTunnelResult(
+        origin,
+        id,
+        'rejected',
+        'TUNNEL_UNAVAILABLE',
+        'no bmf-native clients connected',
+      );
+      return;
+    }
+
+    const routeTimeoutMs =
+      Number.isFinite(absoluteDeadlineMs) && absoluteDeadlineMs > nowMs
+        ? Math.max(
+            100,
+            Math.min(MAX_TUNNEL_ROUTE_TIMEOUT_MS, absoluteDeadlineMs - nowMs + 1000),
+          )
+        : DEFAULT_TUNNEL_ROUTE_TIMEOUT_MS;
+    const timeout = setTimeout(() => {
+      const route = this.#pendingTunnelRoutes.get(id);
+      if (!route || route.origin !== origin || route.native !== native) return;
+      this.#pendingTunnelRoutes.delete(id);
+      this.writeTunnelResult(
+        origin,
+        id,
+        'outcome_unknown',
+        'BROKER_ROUTE_TIMEOUT',
+        'broker route expired after the request was forwarded to BMF',
+      );
+    }, routeTimeoutMs);
+    timeout.unref?.();
+    this.#pendingTunnelRoutes.set(id, { origin, native, timeout });
+    native.write(`${line}\n`);
+  }
+
+  private routeTunnelResponse(native: Socket, message: BridgeMessage, line: string) {
+    const id = String(message.id || '').trim();
+    const route = this.#pendingTunnelRoutes.get(id);
+    if (!route || route.native !== native) return;
+    if (!route.origin.destroyed && route.origin.writable) {
+      route.origin.write(`${line}\n`);
+    }
+    if (message.type === 'tunnel.result') {
+      clearTimeout(route.timeout);
+      this.#pendingTunnelRoutes.delete(id);
+    }
+  }
+
   private broadcast(
     line: string,
     sender: Socket,
@@ -351,6 +504,20 @@ export default class BmfSocketBridgeHost extends EventEmitter {
     if (!this.#clients.has(socket)) return;
     this.#clients.delete(socket);
     this.#bmfClients.delete(socket);
+    for (const [id, route] of this.#pendingTunnelRoutes) {
+      if (route.origin !== socket && route.native !== socket) continue;
+      clearTimeout(route.timeout);
+      this.#pendingTunnelRoutes.delete(id);
+      if (route.native === socket && route.origin !== socket) {
+        this.writeTunnelResult(
+          route.origin,
+          id,
+          'outcome_unknown',
+          'BMF_NATIVE_DISCONNECTED',
+          'selected BMF native client disconnected after request forwarding',
+        );
+      }
+    }
     socket.removeAllListeners();
     if (!this.#stopped) {
       this.emit('client', {

@@ -157,15 +157,15 @@ $requiredFiles = @(
   'examples/SpawnVehicleSet/main.lua',
   'examples/ListMinigames/bmf.json',
   'examples/ListMinigames/main.lua',
-  'examples/NoSpawnItemApplicator/bmf.json',
-  'examples/NoSpawnItemApplicator/config.json',
-  'examples/NoSpawnItemApplicator/main.lua',
-  'examples/InteractConsolePrefixGuard/bmf.json',
-  'examples/InteractConsolePrefixGuard/config.json',
-  'examples/InteractConsolePrefixGuard/main.lua',
-  'examples/BrickAssetPlacementGuard/bmf.json',
-  'examples/BrickAssetPlacementGuard/config.json',
-  'examples/BrickAssetPlacementGuard/main.lua',
+  'framework/ue4ss/Mods/BMF/plugins/NoSpawnItemApplicator/bmf.json',
+  'framework/ue4ss/Mods/BMF/plugins/NoSpawnItemApplicator/config.json',
+  'framework/ue4ss/Mods/BMF/plugins/NoSpawnItemApplicator/main.lua',
+  'framework/ue4ss/Mods/BMF/plugins/InteractConsolePrefixGuard/bmf.json',
+  'framework/ue4ss/Mods/BMF/plugins/InteractConsolePrefixGuard/config.json',
+  'framework/ue4ss/Mods/BMF/plugins/InteractConsolePrefixGuard/main.lua',
+  'deprecated/plugins/BrickAssetPlacementGuard/bmf.json',
+  'deprecated/plugins/BrickAssetPlacementGuard/config.json',
+  'deprecated/plugins/BrickAssetPlacementGuard/main.lua',
   'examples/RuntimeBrickState/bmf.json',
   'examples/RuntimeBrickState/main.lua',
   'examples/WelcomeMessage/bmf.json',
@@ -257,6 +257,7 @@ $requiredFiles = @(
   'scripts/validate-bmf-rate-limits.ps1',
   'scripts/validate-bmf-player-messaging.ps1',
   'scripts/validate-bmf-permission-policy.ps1',
+  'scripts/validate-bmf-applicator-context-safety.ps1',
   'scripts/validate-bmf-brick-asset-policy.ps1',
   'scripts/validate-bmf-role-assignments.ps1',
   'scripts/validate-bmf-command-access-policy.ps1',
@@ -366,12 +367,12 @@ foreach ($jsonRelative in @(
   'examples/LoadCarBrz/bmf.json',
   'examples/SpawnVehicleSet/bmf.json',
   'examples/ListMinigames/bmf.json',
-  'examples/NoSpawnItemApplicator/bmf.json',
-  'examples/NoSpawnItemApplicator/config.json',
-  'examples/InteractConsolePrefixGuard/bmf.json',
-  'examples/InteractConsolePrefixGuard/config.json',
-  'examples/BrickAssetPlacementGuard/bmf.json',
-  'examples/BrickAssetPlacementGuard/config.json',
+  'framework/ue4ss/Mods/BMF/plugins/NoSpawnItemApplicator/bmf.json',
+  'framework/ue4ss/Mods/BMF/plugins/NoSpawnItemApplicator/config.json',
+  'framework/ue4ss/Mods/BMF/plugins/InteractConsolePrefixGuard/bmf.json',
+  'framework/ue4ss/Mods/BMF/plugins/InteractConsolePrefixGuard/config.json',
+  'deprecated/plugins/BrickAssetPlacementGuard/bmf.json',
+  'deprecated/plugins/BrickAssetPlacementGuard/config.json',
   'examples/RuntimeBrickState/bmf.json',
   'examples/WelcomeMessage/bmf.json',
   'tests/fixtures/players/empty.json',
@@ -602,6 +603,19 @@ if (Test-Path -LiteralPath $vehicleInventoryScript) {
   foreach ($needle in @('OutText', "ChangeExtension(`$outPath, '.txt')", 'Vehicle inventory console-style text report', 'textPath')) {
     if ($source -notmatch [regex]::Escape($needle)) {
       $errors.Add("export-vehicle-inventory.ps1 does not contain expected text-report marker: $needle")
+    }
+  }
+}
+
+$applicatorSafetyValidator = Join-Path $Root 'scripts/validate-bmf-applicator-context-safety.ps1'
+if (Test-Path -LiteralPath $applicatorSafetyValidator) {
+  $applicatorSafetyOut = Join-Path $Root 'artifacts/local/bmf-applicator-context-safety-package-validation.json'
+  $applicatorSafetyOutput = & $applicatorSafetyValidator -Root $Root -OutJson $applicatorSafetyOut
+  $applicatorSafetyResult = $applicatorSafetyOutput | ConvertFrom-Json
+  if ($applicatorSafetyResult.status -ne 'passed') {
+    $errors.Add('BMF Applicator context safety validation failed.')
+    foreach ($errorItem in @($applicatorSafetyResult.errors)) {
+      $errors.Add("applicator-context-safety: $errorItem")
     }
   }
 }

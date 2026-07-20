@@ -41,6 +41,15 @@ BMF_COMMAND_WORKER_FALLBACK_POLL_MS = 1000
 BMF_COMMAND_WORKER_DEFAULT_MAX_FILES_PER_POLL = 1
 BMF_STATUS_HEARTBEAT_DEFAULT_SECONDS = 15
 local SOCKET_DEFAULT_POLL_MS = 25
+local GAME_COMMAND_TUNNEL_DEFAULT_INTERVAL_MS = 50
+local GAME_COMMAND_TUNNEL_DEFAULT_MAX_QUEUE = 64
+local GAME_COMMAND_TUNNEL_DEFAULT_MAX_INTERACTIVE_QUEUE = 48
+local GAME_COMMAND_TUNNEL_DEFAULT_MAX_BULK_QUEUE = 32
+local GAME_COMMAND_TUNNEL_DEFAULT_MAX_BYTES = 131072
+local GAME_COMMAND_TUNNEL_DEFAULT_MAX_LINE_BYTES = 4096
+local GAME_COMMAND_TUNNEL_MAX_IDEMPOTENCY_KEY_BYTES = 128
+local GAME_COMMAND_TUNNEL_DEFAULT_INTERACTIVE_BURST = 4
+local GAME_COMMAND_TUNNEL_COMPLETED_RETENTION = 1024
 
 local state = {
   started_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
@@ -148,6 +157,7 @@ local state = {
   game_thread_callback_retention_limit = 65536,
   next_game_thread_callback_id = 1,
   delayed_callbacks = {},
+  game_thread_loop_handles = {},
   delayed_callback_order = {},
   delayed_callback_retention_limit = 65536,
   next_delayed_callback_id = 1,
@@ -164,6 +174,9 @@ local state = {
   command_inflight_files = {},
   socket_worker_started = false,
   socket_worker_mode = "stopped",
+  socket_worker_generation = 0,
+  socket_worker_watchdog_started = false,
+  socket_worker_watchdog_mode = "stopped",
   command_empty_reads = {},
   socket = {
     enabled = false,
@@ -179,12 +192,77 @@ local state = {
     received_messages = 0,
     poll_count = 0,
     last_poll_at = "",
+    last_poll_epoch = 0,
     last_drain_count = 0,
     last_error = "",
     last_status = "",
     last_started_at = "",
+    last_started_epoch = 0,
     metadata_last_write_epoch = 0,
     metadata_heartbeat_interval_seconds = BMF_STATUS_HEARTBEAT_DEFAULT_SECONDS,
+    watchdog_interval_ms = 5000,
+    watchdog_stale_ms = 5000,
+    watchdog_checks = 0,
+    watchdog_restarts = 0,
+    watchdog_consecutive_stale = 0,
+    watchdog_forced_delayed_recoveries = 0,
+    last_watchdog_at = "",
+    last_watchdog_restart_at = "",
+    last_watchdog_error = "",
+  },
+  game_command_tunnel = {
+    enabled = true,
+    protocol_version = 1,
+    channel = "cityrpg.command.v1",
+    interval_ms = GAME_COMMAND_TUNNEL_DEFAULT_INTERVAL_MS,
+    max_queue = GAME_COMMAND_TUNNEL_DEFAULT_MAX_QUEUE,
+    max_interactive_queue = GAME_COMMAND_TUNNEL_DEFAULT_MAX_INTERACTIVE_QUEUE,
+    max_bulk_queue = GAME_COMMAND_TUNNEL_DEFAULT_MAX_BULK_QUEUE,
+    max_bytes = GAME_COMMAND_TUNNEL_DEFAULT_MAX_BYTES,
+    max_line_bytes = GAME_COMMAND_TUNNEL_DEFAULT_MAX_LINE_BYTES,
+    interactive_burst = GAME_COMMAND_TUNNEL_DEFAULT_INTERACTIVE_BURST,
+    queues = {
+      interactive = {},
+      bulk = {},
+    },
+    queued_count = 0,
+    queued_bytes = 0,
+    peak_depth = 0,
+    peak_bytes = 0,
+    scheduled = false,
+    running = false,
+    worker_started = false,
+    worker_mode = "stopped",
+    worker_ticks = 0,
+    worker_idle_ticks = 0,
+    worker_errors = 0,
+    cooldown_ticks = 0,
+    last_worker_tick_at = "",
+    last_worker_error = "",
+    interactive_since_bulk = 0,
+    accepted = 0,
+    injected = 0,
+    rejected = 0,
+    expired = 0,
+    outcome_unknown = 0,
+    duplicate_requests = 0,
+    scheduler_failures = 0,
+    controller_cache_hits = 0,
+    controller_cache_refreshes = 0,
+    cached_controller_address = "",
+    dispatch_count = 0,
+    active_by_id = {},
+    active_by_idempotency_key = {},
+    completed_by_id = {},
+    completed_by_idempotency_key = {},
+    completed_order = {},
+    completed_retention = GAME_COMMAND_TUNNEL_COMPLETED_RETENTION,
+    last_dispatch_ms = 0,
+    max_dispatch_ms = 0,
+    dispatch_ms_sum = 0,
+    last_result_state = "",
+    last_result_code = "",
+    last_error = "",
   },
   player_cache = nil,
   player_cache_error = "",
@@ -231,6 +309,12 @@ local state = {
       allowed_events = 0,
       component_cache = {},
       component_cache_notes = {},
+      native_targets_cache = nil,
+      native_targets_cached_at = "",
+      native_targets_refresh_count = 0,
+      native_targets_requests = 0,
+      native_targets_cache_reads = 0,
+      native_targets_rejected_requests = 0,
       last_error = "",
       last_event = nil,
     },
@@ -273,12 +357,73 @@ local state = {
       physical_sequence = 0,
       last_physical_result = nil,
     },
+    zone_native = {
+      enabled = false,
+      available = false,
+      started = false,
+      capture_all = false,
+      scan_local_objects = false,
+      total_events = 0,
+      drained_events = 0,
+      emitted_events = 0,
+      decode_errors = 0,
+      last_event = nil,
+      last_started_at = "",
+      last_error = "",
+      last_status = "",
+    },
+    zone_console_trace = {
+      enabled = false,
+      available = false,
+      total_events = 0,
+      drained_events = 0,
+      emitted_events = 0,
+      decode_errors = 0,
+      last_event = nil,
+      last_started_at = "",
+      last_error = "",
+      last_status = "",
+      filter = "",
+    },
+    zone_wire_trace = {
+      enabled = false,
+      available = false,
+      total_events = 0,
+      drained_events = 0,
+      emitted_events = 0,
+      decode_errors = 0,
+      last_event = nil,
+      last_started_at = "",
+      last_error = "",
+      last_status = "",
+    },
+    zone_process_trace = {
+      enabled = false,
+      available = false,
+      total_events = 0,
+      drained_events = 0,
+      emitted_events = 0,
+      decode_errors = 0,
+      last_event = nil,
+      last_started_at = "",
+      last_error = "",
+      last_status = "",
+      filters = "",
+    },
     brick_runtime = {
       sequence = 0,
       last_result = nil,
       last_error = "",
       guid_bindings = {},
       guid_binding_order = {},
+    },
+    prefab_region = {
+      sequence = 0,
+      last_result = nil,
+      last_error = "",
+      transfers = {},
+      transfer_order = {},
+      last_transfer_id = "",
     },
   },
   config = {
@@ -306,6 +451,11 @@ local UNSAFE_PLUGIN_GLOBAL_NAMES = {
   "FindAllOf",
   "FindFirstOf",
   "LoadAsset",
+  "BMFSocketPlayerChatMessageImplementationProbe",
+  "BMFSocketReceive",
+  "BMFSocketSend",
+  "BMFSocketStart",
+  "BMF_process_socket_message",
   "NotifyOnNewObject",
   "OmeggaExecuteCachedConsoleExec",
   "OmeggaExecuteConsoleManagerInput",
@@ -326,18 +476,29 @@ local function normalize_parent(path)
   return normalized:match("^(.*)\\[^\\]+$")
 end
 
+local ensured_parent_paths = {}
+
 local function ensure_parent(path)
   local parent = normalize_parent(path)
-  if parent and parent ~= "" then
-    os.execute('if not exist "' .. parent .. '" mkdir "' .. parent .. '"')
+  if not parent or parent == "" then
+    return
   end
+  local key = parent:lower()
+  if ensured_parent_paths[key] then
+    return
+  end
+  os.execute('if not exist "' .. parent .. '" mkdir "' .. parent .. '"')
+  ensured_parent_paths[key] = true
 end
 
 local function append_file(path, value)
-  ensure_parent(path)
   local handle = io.open(path, "a")
   if not handle then
-    return false
+    ensure_parent(path)
+    handle = io.open(path, "a")
+    if not handle then
+      return false
+    end
   end
   handle:write(value)
   handle:close()
@@ -355,10 +516,13 @@ local function read_file(path)
 end
 
 local function write_file(path, value)
-  ensure_parent(path)
   local handle = io.open(path, "w")
   if not handle then
-    return false
+    ensure_parent(path)
+    handle = io.open(path, "w")
+    if not handle then
+      return false
+    end
   end
   handle:write(value)
   handle:close()
@@ -960,11 +1124,74 @@ function BMF_telemetry_snapshot()
   }
   telemetry.socket = {
     started = state.socket.started and true or false,
+    worker_started = state.socket_worker_started and true or false,
+    worker_mode = tostring(state.socket_worker_mode or "unknown"),
+    worker_generation = tonumber(state.socket_worker_generation) or 0,
     received_messages = tonumber(state.socket.received_messages) or 0,
     received_commands = tonumber(state.socket.received_commands) or 0,
     sent_responses = tonumber(state.socket.sent_responses) or 0,
     poll_count = tonumber(state.socket.poll_count) or 0,
+    last_poll_at = tostring(state.socket.last_poll_at or ""),
+    last_poll_age_ms = type(BMF_socket_poll_age_ms) == "function" and BMF_socket_poll_age_ms() or 0,
     last_drain_count = tonumber(state.socket.last_drain_count) or 0,
+    watchdog_started = state.socket_worker_watchdog_started and true or false,
+    watchdog_mode = tostring(state.socket_worker_watchdog_mode or "stopped"),
+    watchdog_checks = tonumber(state.socket.watchdog_checks) or 0,
+    watchdog_restarts = tonumber(state.socket.watchdog_restarts) or 0,
+    watchdog_consecutive_stale = tonumber(state.socket.watchdog_consecutive_stale) or 0,
+    watchdog_forced_delayed_recoveries = tonumber(state.socket.watchdog_forced_delayed_recoveries) or 0,
+    last_watchdog_at = tostring(state.socket.last_watchdog_at or ""),
+    last_watchdog_restart_at = tostring(state.socket.last_watchdog_restart_at or ""),
+    last_watchdog_error = tostring(state.socket.last_watchdog_error or ""),
+  }
+  local tunnel = state.game_command_tunnel
+  local tunnel_ready = tunnel.enabled == true
+    and tunnel.worker_started == true
+    and state.socket_worker_started == true
+    and state.socket_worker_mode == "LoopInGameThread"
+  telemetry.game_command_tunnel = {
+    supported = true,
+    enabled = tunnel_ready,
+    configured = tunnel.enabled == true,
+    protocol_version = tonumber(tunnel.protocol_version) or 1,
+    channel = tostring(tunnel.channel or "cityrpg.command.v1"),
+    interval_ms = tonumber(tunnel.interval_ms) or 0,
+    max_queue = tonumber(tunnel.max_queue) or 0,
+    max_interactive_queue = tonumber(tunnel.max_interactive_queue) or 0,
+    max_bulk_queue = tonumber(tunnel.max_bulk_queue) or 0,
+    max_bytes = tonumber(tunnel.max_bytes) or 0,
+    max_line_bytes = tonumber(tunnel.max_line_bytes) or 0,
+    completed_retention = tonumber(tunnel.completed_retention) or 0,
+    queued_count = tonumber(tunnel.queued_count) or 0,
+    interactive_depth = #(tunnel.queues.interactive or {}),
+    bulk_depth = #(tunnel.queues.bulk or {}),
+    queued_bytes = tonumber(tunnel.queued_bytes) or 0,
+    peak_depth = tonumber(tunnel.peak_depth) or 0,
+    peak_bytes = tonumber(tunnel.peak_bytes) or 0,
+    accepted = tonumber(tunnel.accepted) or 0,
+    injected = tonumber(tunnel.injected) or 0,
+    rejected = tonumber(tunnel.rejected) or 0,
+    expired = tonumber(tunnel.expired) or 0,
+    outcome_unknown = tonumber(tunnel.outcome_unknown) or 0,
+    duplicate_requests = tonumber(tunnel.duplicate_requests) or 0,
+    scheduler_failures = tonumber(tunnel.scheduler_failures) or 0,
+    worker_started = tunnel.worker_started == true,
+    worker_mode = tostring(tunnel.worker_mode or "stopped"),
+    worker_ticks = tonumber(tunnel.worker_ticks) or 0,
+    worker_idle_ticks = tonumber(tunnel.worker_idle_ticks) or 0,
+    worker_errors = tonumber(tunnel.worker_errors) or 0,
+    cooldown_ticks = tonumber(tunnel.cooldown_ticks) or 0,
+    last_worker_tick_at = tostring(tunnel.last_worker_tick_at or ""),
+    last_worker_error = tostring(tunnel.last_worker_error or ""),
+    controller_cache_hits = tonumber(tunnel.controller_cache_hits) or 0,
+    controller_cache_refreshes = tonumber(tunnel.controller_cache_refreshes) or 0,
+    dispatch_count = tonumber(tunnel.dispatch_count) or 0,
+    last_dispatch_ms = tonumber(tunnel.last_dispatch_ms) or 0,
+    max_dispatch_ms = tonumber(tunnel.max_dispatch_ms) or 0,
+    dispatch_ms_sum = tonumber(tunnel.dispatch_ms_sum) or 0,
+    last_result_state = tostring(tunnel.last_result_state or ""),
+    last_result_code = tostring(tunnel.last_result_code or ""),
+    last_error = tostring(tunnel.last_error or ""),
   }
   telemetry.player_position_snapshot = {
     enabled = state.player_position_snapshot.enabled and true or false,
@@ -1299,6 +1526,10 @@ end
 write_status = function()
   state.status_last_write_epoch = os.time()
   local compatibility = compatibility_snapshot()
+  local tunnel_ready = state.game_command_tunnel.enabled == true
+    and state.game_command_tunnel.worker_started == true
+    and state.socket_worker_started == true
+    and state.socket_worker_mode == "LoopInGameThread"
   local parts = {
     "\"state\":\"running\"",
     "\"mod\":\"BMF\"",
@@ -1319,6 +1550,37 @@ write_status = function()
     "\"command_worker_mode\":" .. json_string(state.command_worker_mode or "unknown"),
     "\"socket_worker_started\":" .. tostring(state.socket_worker_started and true or false),
     "\"socket_worker_mode\":" .. json_string(state.socket_worker_mode or "unknown"),
+    "\"socket_worker_generation\":" .. tostring(state.socket_worker_generation or 0),
+    "\"socket_worker_watchdog_started\":" .. tostring(state.socket_worker_watchdog_started and true or false),
+    "\"socket_worker_watchdog_mode\":" .. json_string(state.socket_worker_watchdog_mode or "stopped"),
+    "\"socket_poll_count\":" .. tostring(state.socket.poll_count or 0),
+    "\"socket_last_poll_at\":" .. json_string(state.socket.last_poll_at or ""),
+    "\"socket_last_poll_age_ms\":" .. tostring(type(BMF_socket_poll_age_ms) == "function" and BMF_socket_poll_age_ms() or 0),
+    "\"socket_watchdog_checks\":" .. tostring(state.socket.watchdog_checks or 0),
+    "\"socket_watchdog_restarts\":" .. tostring(state.socket.watchdog_restarts or 0),
+    "\"socket_watchdog_consecutive_stale\":" .. tostring(state.socket.watchdog_consecutive_stale or 0),
+    "\"socket_watchdog_forced_delayed_recoveries\":" .. tostring(state.socket.watchdog_forced_delayed_recoveries or 0),
+    "\"socket_last_watchdog_at\":" .. json_string(state.socket.last_watchdog_at or ""),
+    "\"socket_last_watchdog_restart_at\":" .. json_string(state.socket.last_watchdog_restart_at or ""),
+    "\"socket_last_watchdog_error\":" .. json_string(state.socket.last_watchdog_error or ""),
+    "\"game_command_tunnel_supported\":true",
+    "\"game_command_tunnel_enabled\":" .. tostring(tunnel_ready),
+    "\"game_command_tunnel_configured\":" .. tostring(state.game_command_tunnel.enabled == true),
+    "\"game_command_tunnel_worker_started\":" .. tostring(state.game_command_tunnel.worker_started == true),
+    "\"game_command_tunnel_worker_mode\":" .. json_string(state.game_command_tunnel.worker_mode or "stopped"),
+    "\"game_command_tunnel_worker_ticks\":" .. tostring(state.game_command_tunnel.worker_ticks or 0),
+    "\"game_command_tunnel_worker_errors\":" .. tostring(state.game_command_tunnel.worker_errors or 0),
+    "\"game_command_tunnel_interval_ms\":" .. tostring(state.game_command_tunnel.interval_ms or 0),
+    "\"game_command_tunnel_queue_depth\":" .. tostring(state.game_command_tunnel.queued_count or 0),
+    "\"game_command_tunnel_queue_bytes\":" .. tostring(state.game_command_tunnel.queued_bytes or 0),
+    "\"game_command_tunnel_peak_depth\":" .. tostring(state.game_command_tunnel.peak_depth or 0),
+    "\"game_command_tunnel_accepted\":" .. tostring(state.game_command_tunnel.accepted or 0),
+    "\"game_command_tunnel_injected\":" .. tostring(state.game_command_tunnel.injected or 0),
+    "\"game_command_tunnel_rejected\":" .. tostring(state.game_command_tunnel.rejected or 0),
+    "\"game_command_tunnel_expired\":" .. tostring(state.game_command_tunnel.expired or 0),
+    "\"game_command_tunnel_outcome_unknown\":" .. tostring(state.game_command_tunnel.outcome_unknown or 0),
+    "\"game_command_tunnel_last_result_state\":" .. json_string(state.game_command_tunnel.last_result_state or ""),
+    "\"game_command_tunnel_last_result_code\":" .. json_string(state.game_command_tunnel.last_result_code or ""),
     "\"command_worker_poll_interval_ms\":" .. tostring(state.command_worker_poll_interval_ms or 0),
     "\"command_worker_fallback_poll_interval_ms\":" .. tostring(state.command_worker_fallback_poll_interval_ms or 0),
     "\"command_worker_max_files_per_poll\":" .. tostring(state.command_worker_max_files_per_poll or 0),
@@ -1493,7 +1755,50 @@ function BMF_socket_native_available()
     and type(BMFSocketReceive) == "function"
 end
 
+function BMF_socket_poll_age_ms()
+  local epoch = tonumber(state.socket.last_poll_epoch or 0) or 0
+  if epoch <= 0 then
+    epoch = tonumber(state.socket.last_started_epoch or 0) or 0
+  end
+  if epoch <= 0 then
+    return 0
+  end
+  return math.max(0, (os.time() - epoch) * 1000)
+end
+
+function BMF_socket_watchdog_enabled()
+  return BMF_env_bool("BMF_SOCKET_WORKER_WATCHDOG", true)
+end
+
+function BMF_socket_watchdog_interval_ms()
+  return math.max(1000, math.min(60000, BMF_env_number(
+    "BMF_SOCKET_WORKER_WATCHDOG_MS",
+    BMF_env_number("BMF_SOCKET_WATCHDOG_MS", 5000, 1000),
+    1000)))
+end
+
+function BMF_socket_watchdog_stale_ms()
+  local poll_interval = tonumber(state.socket.poll_interval_ms) or SOCKET_DEFAULT_POLL_MS
+  local default_stale = math.max(5000, poll_interval * 25)
+  return math.max(1000, math.min(120000, BMF_env_number(
+    "BMF_SOCKET_WORKER_STALE_MS",
+    BMF_env_number("BMF_SOCKET_WATCHDOG_STALE_MS", default_stale, 1000),
+    1000)))
+end
+
+function BMF_socket_watchdog_delayed_after_restarts()
+  return math.max(1, math.min(20, BMF_env_number(
+    "BMF_SOCKET_WORKER_DELAYED_AFTER_RESTARTS",
+    2,
+    1)))
+end
+
 local function BMF_socket_write_metadata()
+  local tunnel = state.game_command_tunnel
+  local tunnel_ready = tunnel.enabled == true
+    and tunnel.worker_started == true
+    and state.socket_worker_started == true
+    and state.socket_worker_mode == "LoopInGameThread"
   state.socket.metadata_last_write_epoch = os.time()
   write_file(RUNTIME_DIR .. "/socket.json", json_encode({
     enabled = state.socket.enabled,
@@ -1503,19 +1808,46 @@ local function BMF_socket_write_metadata()
     port = state.socket.port,
     token = state.socket.token,
     pollIntervalMs = state.socket.poll_interval_ms,
+    tunnelEnabled = tunnel_ready,
+    protocols = tunnel_ready and { "bmf-tunnel/1" } or {},
+    tunnelProtocolVersion = tunnel.protocol_version,
+    tunnelChannel = tunnel.channel,
+    maxPendingTunnelRequests = tunnel.max_queue,
+    maxTunnelLineBytes = tunnel.max_line_bytes,
+    tunnelCompletedRetention = tunnel.completed_retention,
+    tunnelWorkerStarted = tunnel.worker_started,
+    tunnelWorkerMode = tunnel.worker_mode,
+    tunnelWorkerTicks = tunnel.worker_ticks,
+    tunnelWorkerIdleTicks = tunnel.worker_idle_ticks,
+    tunnelWorkerErrors = tunnel.worker_errors,
+    tunnelLastWorkerTickAt = tunnel.last_worker_tick_at,
+    tunnelLastWorkerError = tunnel.last_worker_error,
     metadataHeartbeatIntervalSeconds = state.socket.metadata_heartbeat_interval_seconds,
     workerStarted = state.socket_worker_started,
     workerMode = state.socket_worker_mode,
+    workerGeneration = state.socket_worker_generation,
+    workerWatchdogStarted = state.socket_worker_watchdog_started,
+    workerWatchdogMode = state.socket_worker_watchdog_mode,
     sentEvents = state.socket.sent_events,
     sentResponses = state.socket.sent_responses,
     receivedCommands = state.socket.received_commands,
     receivedMessages = state.socket.received_messages,
     pollCount = state.socket.poll_count,
     lastPollAt = state.socket.last_poll_at,
+    lastPollAgeMs = BMF_socket_poll_age_ms(),
     lastDrainCount = state.socket.last_drain_count,
     lastError = state.socket.last_error,
     lastStatus = state.socket.last_status,
     lastStartedAt = state.socket.last_started_at,
+    watchdogIntervalMs = state.socket.watchdog_interval_ms,
+    watchdogStaleMs = state.socket.watchdog_stale_ms,
+    watchdogChecks = state.socket.watchdog_checks,
+    watchdogRestarts = state.socket.watchdog_restarts,
+    watchdogConsecutiveStale = state.socket.watchdog_consecutive_stale,
+    watchdogForcedDelayedRecoveries = state.socket.watchdog_forced_delayed_recoveries,
+    lastWatchdogAt = state.socket.last_watchdog_at,
+    lastWatchdogRestartAt = state.socket.last_watchdog_restart_at,
+    lastWatchdogError = state.socket.last_watchdog_error,
     updatedAt = os.date("!%Y-%m-%dT%H:%M:%SZ"),
   }))
 end
@@ -1535,6 +1867,43 @@ local function BMF_socket_metadata_heartbeat(force)
   return true
 end
 
+function BMF_game_command_tunnel_configure_from_env()
+  local tunnel = state.game_command_tunnel
+  tunnel.enabled = BMF_env_bool("BMF_GAME_COMMAND_TUNNEL_ENABLED", true)
+  tunnel.interval_ms = math.max(10, math.min(1000, BMF_env_number(
+    "BMF_GAME_COMMAND_TUNNEL_INTERVAL_MS",
+    GAME_COMMAND_TUNNEL_DEFAULT_INTERVAL_MS,
+    10)))
+  tunnel.max_queue = math.max(1, math.min(512, BMF_env_number(
+    "BMF_GAME_COMMAND_TUNNEL_MAX_QUEUE",
+    GAME_COMMAND_TUNNEL_DEFAULT_MAX_QUEUE,
+    1)))
+  tunnel.max_interactive_queue = math.max(1, math.min(tunnel.max_queue, BMF_env_number(
+    "BMF_GAME_COMMAND_TUNNEL_MAX_INTERACTIVE_QUEUE",
+    GAME_COMMAND_TUNNEL_DEFAULT_MAX_INTERACTIVE_QUEUE,
+    1)))
+  tunnel.max_bulk_queue = math.max(1, math.min(tunnel.max_queue, BMF_env_number(
+    "BMF_GAME_COMMAND_TUNNEL_MAX_BULK_QUEUE",
+    GAME_COMMAND_TUNNEL_DEFAULT_MAX_BULK_QUEUE,
+    1)))
+  tunnel.max_bytes = math.max(1024, math.min(1048576, BMF_env_number(
+    "BMF_GAME_COMMAND_TUNNEL_MAX_BYTES",
+    GAME_COMMAND_TUNNEL_DEFAULT_MAX_BYTES,
+    1024)))
+  tunnel.max_line_bytes = math.max(64, math.min(tunnel.max_bytes, BMF_env_number(
+    "BMF_GAME_COMMAND_TUNNEL_MAX_LINE_BYTES",
+    GAME_COMMAND_TUNNEL_DEFAULT_MAX_LINE_BYTES,
+    64)))
+  tunnel.interactive_burst = math.max(1, math.min(64, BMF_env_number(
+    "BMF_GAME_COMMAND_TUNNEL_INTERACTIVE_BURST",
+    GAME_COMMAND_TUNNEL_DEFAULT_INTERACTIVE_BURST,
+    1)))
+  tunnel.completed_retention = math.max(64, math.min(8192, BMF_env_number(
+    "BMF_GAME_COMMAND_TUNNEL_COMPLETED_RETENTION",
+    GAME_COMMAND_TUNNEL_COMPLETED_RETENTION,
+    64)))
+end
+
 function BMF_socket_configure_from_env()
   state.socket.enabled = BMF_socket_enabled_from_env()
   state.socket.available = BMF_socket_native_available()
@@ -1545,9 +1914,12 @@ function BMF_socket_configure_from_env()
   state.socket.port = tonumber(BMF_socket_env("OMEGGA_BMF_SOCKET_PORT")) or 0
   state.socket.token = BMF_socket_env("OMEGGA_BMF_SOCKET_TOKEN")
   state.socket.poll_interval_ms = math.max(5, tonumber(BMF_socket_env("OMEGGA_BMF_SOCKET_POLL_MS")) or SOCKET_DEFAULT_POLL_MS)
+  state.socket.watchdog_interval_ms = BMF_socket_watchdog_interval_ms()
+  state.socket.watchdog_stale_ms = BMF_socket_watchdog_stale_ms()
   if type(BMF_status_heartbeat_interval_seconds) == "function" then
     state.socket.metadata_heartbeat_interval_seconds = BMF_status_heartbeat_interval_seconds()
   end
+  BMF_game_command_tunnel_configure_from_env()
   BMF_socket_write_metadata()
 end
 
@@ -1599,12 +1971,25 @@ function BMF_socket_status_snapshot()
     receivedMessages = state.socket.received_messages,
     pollCount = state.socket.poll_count,
     lastPollAt = state.socket.last_poll_at,
+    lastPollAgeMs = BMF_socket_poll_age_ms(),
     lastDrainCount = state.socket.last_drain_count,
     workerStarted = state.socket_worker_started,
     workerMode = state.socket_worker_mode,
+    workerGeneration = state.socket_worker_generation,
+    workerWatchdogStarted = state.socket_worker_watchdog_started,
+    workerWatchdogMode = state.socket_worker_watchdog_mode,
     lastError = state.socket.last_error,
     lastStatus = state.socket.last_status,
     lastStartedAt = state.socket.last_started_at,
+    watchdogIntervalMs = state.socket.watchdog_interval_ms,
+    watchdogStaleMs = state.socket.watchdog_stale_ms,
+    watchdogChecks = state.socket.watchdog_checks,
+    watchdogRestarts = state.socket.watchdog_restarts,
+    watchdogConsecutiveStale = state.socket.watchdog_consecutive_stale,
+    watchdogForcedDelayedRecoveries = state.socket.watchdog_forced_delayed_recoveries,
+    lastWatchdogAt = state.socket.last_watchdog_at,
+    lastWatchdogRestartAt = state.socket.last_watchdog_restart_at,
+    lastWatchdogError = state.socket.last_watchdog_error,
     nativeStatus = native_status,
   }
 end
@@ -1787,42 +2172,73 @@ function BMF_start_async_loop(prefix, interval_ms, callback, default_enabled)
   return false
 end
 
-function BMF_start_game_thread_loop(prefix, interval_ms, callback)
+function BMF_start_game_thread_loop(prefix, interval_ms, callback, default_enabled)
   if type(callback) ~= "function" then
     return false
   end
-  if not BMF_env_bool("BMF_ALLOW_GAME_THREAD_LOOP", false) then
+  local explicit_game_thread_loop = BMF_env_string("BMF_ALLOW_GAME_THREAD_LOOP")
+  local allow_game_thread_loop = default_enabled == true
+  if explicit_game_thread_loop ~= "" then
+    allow_game_thread_loop = BMF_env_bool("BMF_ALLOW_GAME_THREAD_LOOP", false)
+  end
+  if not allow_game_thread_loop then
     return false
   end
 
   local key = "game_loop:" .. tostring(prefix or "worker")
+  if state.delayed_callbacks[key] ~= nil or state.game_thread_loop_handles[key] ~= nil then
+    return false
+  end
   local interval = tonumber(interval_ms) or 250
   local wrapped
+  local function cancel_loop()
+    local handle = state.game_thread_loop_handles[key]
+    if type(handle) == "number" and type(CancelDelayedAction) == "function" then
+      pcall(CancelDelayedAction, handle)
+    end
+  end
   wrapped = function()
     local ok, should_stop_or_error = pcall(callback)
     if not ok then
       log("error", tostring(prefix or "worker") .. " game-thread loop failed: " .. tostring(should_stop_or_error))
+      cancel_loop()
       return true
     end
     if should_stop_or_error == true then
+      -- Handle-based UE4SS loops do not use the callback return value to
+      -- stop. Cancel explicitly while retaining the once-only guard.
+      cancel_loop()
       return true
     end
     return false
   end
 
   state.delayed_callbacks[key] = wrapped
-  if type(LoopInGameThreadWithDelay) == "function" then
-    local scheduled = pcall(LoopInGameThreadWithDelay, interval, wrapped)
+  if type(LoopInGameThreadAfterFrames) == "function" and EngineTickAvailable == true then
+    local frames = math.max(1, math.floor((interval / 16) + 0.5))
+    local scheduled, handle_or_error = pcall(LoopInGameThreadAfterFrames, frames, wrapped)
     if scheduled then
-      return true
+      if type(handle_or_error) == "number" then
+        state.game_thread_loop_handles[key] = handle_or_error
+        return true, "LoopInGameThreadAfterFrames"
+      end
+      -- A successful call with no usable handle is ambiguous: the loop may
+      -- already be registered. Keep the callback/guard and fail closed rather
+      -- than attempting a second scheduler and risking duplicate pumps.
+      state.game_thread_loop_handles[key] = "unknown"
+      return false
     end
   end
 
-  if type(LoopInGameThreadAfterFrames) == "function" then
-    local frames = math.max(1, math.floor((interval / 16) + 0.5))
-    local scheduled = pcall(LoopInGameThreadAfterFrames, frames, wrapped)
+  if type(LoopInGameThreadWithDelay) == "function" then
+    local scheduled, handle_or_error = pcall(LoopInGameThreadWithDelay, interval, wrapped)
     if scheduled then
-      return true
+      if type(handle_or_error) == "number" then
+        state.game_thread_loop_handles[key] = handle_or_error
+        return true, "LoopInGameThreadWithDelay"
+      end
+      state.game_thread_loop_handles[key] = "unknown"
+      return false
     end
   end
 
@@ -1904,6 +2320,7 @@ API_REGISTRY = {
   { name = "BMF.chat.broadcast", namespace = "chat", kind = "function", stability = "experimental", risk = "medium", validation = "L3 Live Player UI confirmed", requiresPlayer = false, capability = "chat.broadcast", summary = "Broadcasts by fanning out ClientPushChatMessage once per live player controller." },
   { name = "BMF.chat.whisper", namespace = "chat", kind = "function", stability = "experimental", risk = "live-player", validation = "L3 Live Player UI confirmed with one local player; two-player targeting pending", requiresPlayer = true, capability = "chat.whisper", summary = "Sends ClientPushChatMessage to one matched live player controller." },
   { name = "BMF.chat.statusMessage", namespace = "chat", kind = "function", stability = "scaffold", risk = "live-player", validation = "L2 Headless + L0 Fixture; L3 Live Player for delivery", requiresPlayer = true, capability = "chat.statusMessage", summary = "Private status-message scaffold; visible delivery unproven." },
+  { name = "BMF.chat.playerMessageImplementationProbe", namespace = "chat", kind = "function", stability = "diagnostic", risk = "unsafe-native", validation = "L3 Live Server marker-required", requiresPlayer = true, capability = "chat.command", summary = "Invokes the native BRPlayerController ServerPushChatMessage implementation for one explicit chat message." },
   { name = "BMF.players.sync", namespace = "players", kind = "function", stability = "experimental", risk = "low", validation = "L0 Static + L2 Headless; optional adapter cache path", requiresPlayer = false, capability = "", summary = "Sync optional external player identity records into the BMF cache." },
   { name = "BMF.players.list", namespace = "players", kind = "function", stability = "experimental", risk = "low", validation = "L2 Headless empty adapter; L3 Live Player for native Brickadia log identity", requiresPlayer = false, capability = "", summary = "List safe player identity records and live controller count." },
   { name = "BMF.players.normalize", namespace = "players", kind = "function", stability = "stable", risk = "low", validation = "L0 Fixture", requiresPlayer = false, capability = "", summary = "Normalize synthetic/player record shape." },
@@ -1917,7 +2334,7 @@ API_REGISTRY = {
   { name = "BMF.permissions.describeRole", namespace = "permissions", kind = "function", stability = "stable", risk = "low", validation = "L0 Fixture + L2 Headless", requiresPlayer = false, capability = "", summary = "Normalize a RoleSetup2-style role permission map." },
   { name = "BMF.permissions.evaluateNoSpawnItemApplicator", namespace = "permissions", kind = "function", stability = "stable", risk = "medium", validation = "L0 Fixture + L2 Headless; L3 Live Player + L5 Negative for runtime exploit denial", requiresPlayer = false, capability = "", summary = "Evaluate the default-role policy that keeps applicator access but forbids spawn items." },
   { name = "BMF.permissions.evaluateApplicatorComponentAccess", namespace = "permissions", kind = "function", stability = "stable", risk = "low", validation = "L2 Headless + L5 Negative; L3 Live Player when wired into a live applicator hook", requiresPlayer = false, capability = "", summary = "Evaluate global allow/deny policy for an applicator component name." },
-  { name = "BMF.permissions.evaluateInteractConsolePrefixAccess", namespace = "permissions", kind = "function", stability = "stable", risk = "medium", validation = "L2 Headless + L5 Negative; L3 Live Player + native ServerModifyComponent hook for save-time Interactable prefix blocking", requiresPlayer = false, capability = "", summary = "Evaluate Interactable Print-to-Console prefix policy with Owner/Admin bypass and a whitelist for everyone else." },
+  { name = "BMF.permissions.evaluateInteractConsolePrefixAccess", namespace = "permissions", kind = "function", stability = "stable", risk = "medium", validation = "L2 Headless + L5 Negative; L3 Live Player + native ServerModifyComponent hook for save-time Interactable prefix blocking", requiresPlayer = false, capability = "", summary = "Evaluate Interactable Print-to-Console prefix policy with Moderator/Admin/Owner bypass and a whitelist for everyone else." },
   { name = "BMF.permissions.evaluateBrickAssetAccess", namespace = "permissions", kind = "function", stability = "stable", risk = "low", validation = "L0 Archive Fixture + L2 Headless; L3 Live Player when wired into a live placement hook", requiresPlayer = false, capability = "", summary = "Evaluate role-aware allow/deny policy for Brickadia brick asset names such as B_Joint_Wheel_Micro." },
   { name = "BMF.permissions.enforceNoSpawnItemApplicator", namespace = "permissions", kind = "function", stability = "file-backed", risk = "high", validation = "L2 Headless copied RoleSetup2 patching; L3 Live Player + L5 Negative for live tool denial", requiresPlayer = false, capability = "", summary = "Patch RoleSetup2 so applicator access stays allowed while SpawnItems is denied by default and named roles cannot override it." },
   { name = "BMF.tools.onApplicatorComponentApply", namespace = "tools", kind = "function", stability = "experimental", risk = "unsafe-native", validation = "L2 Headless registration shape; L3 Live Player + L5 Negative for denied component mutation", requiresPlayer = true, capability = "tools.applicator", summary = "Register a Lua handler for live applicator ServerAddComponent attempts." },
@@ -1926,6 +2343,7 @@ API_REGISTRY = {
   { name = "BMF.tools.applicator.scanObjects", namespace = "tools", kind = "function", stability = "experimental", risk = "low", validation = "L3 Live Server read-only reflection scan", requiresPlayer = false, capability = "", summary = "Scan live UE objects for applicator/component function discovery." },
   { name = "BMF.tools.applicator.refreshComponentCache", namespace = "tools", kind = "function", stability = "experimental", risk = "unsafe-native", validation = "L2 Headless safe failure; L3 Live Player for reflected component type addresses", requiresPlayer = false, capability = "", summary = "Resolve denied Brickadia component type objects such as ItemSpawn for live applicator enforcement." },
   { name = "BMF.tools.uobject.describe", namespace = "tools", kind = "function", stability = "diagnostic", risk = "low", validation = "L3 Live Server address-only native diagnostic", requiresPlayer = false, capability = "", summary = "Describe one explicit live UObject pointer without global scans; used to decode native trace context pointers." },
+  { name = "BMF.tools.ufunction.describe", namespace = "tools", kind = "function", stability = "diagnostic", risk = "low", validation = "L3 Live Server bounded UFunction signature diagnostic", requiresPlayer = false, capability = "", summary = "Describe one reflected UFunction signature through the native socket helper." },
   { name = "BMF.tools.uobject.findNear", namespace = "tools", kind = "function", stability = "diagnostic", risk = "unsafe-native", validation = "L3 Live Server bounded native location scan", requiresPlayer = false, capability = "uobject-physical-state", summary = "Find live actor/component UObject targets near one world coordinate with explicit scan/time caps." },
   { name = "BMF.tools.uobject.physicalAddress", namespace = "tools", kind = "function", stability = "experimental", risk = "unsafe-native", validation = "L3 Live Server explicit address actor visibility/collision toggle", requiresPlayer = false, capability = "uobject-physical-state", summary = "Toggle actor visibility/collision from one explicit live UObject address without global scans." },
   { name = "BMF.tools.uobject.physical", namespace = "tools", kind = "function", stability = "experimental", risk = "unsafe-native", validation = "L3 Live Server target UObject visibility/collision toggle", requiresPlayer = false, capability = "uobject-physical-state", summary = "Toggle visibility/collision for one resolved UObject target and a bounded outer chain." },
@@ -1952,6 +2370,16 @@ API_REGISTRY = {
   { name = "BMF.tools.resourceNative.refreshTargets", namespace = "tools", kind = "function", stability = "diagnostic", risk = "unsafe-native", validation = "Disabled by default; manual native diagnostics only", requiresPlayer = false, capability = "", summary = "Opt-in unsafe native resource target cache refresh for diagnostics; CityRPG should prefer bounded runtime anchors." },
   { name = "BMF.tools.resourceNative.findTag", namespace = "tools", kind = "function", stability = "diagnostic", risk = "unsafe-native", validation = "L3 Live Server bounded exact ConsoleTag lookup", requiresPlayer = false, capability = "", summary = "Find cached native target candidates that directly carry a specific resource lookup ConsoleTag." },
   { name = "BMF.tools.resourceNative.drain", namespace = "tools", kind = "function", stability = "experimental", risk = "medium", validation = "L3 Live Player socket relay", requiresPlayer = false, capability = "", summary = "Drain queued native resource hit events and emit them into the BMF event bus." },
+  { name = "BMF.tools.zoneNative.start", namespace = "tools", kind = "function", stability = "diagnostic", risk = "unsafe-native", validation = "L3 Live Player projection-zone overlap trace", requiresPlayer = true, capability = "", summary = "Install and enable native overlap tracing for Brickadia character/projection zone event discovery." },
+  { name = "BMF.tools.zoneNative.stop", namespace = "tools", kind = "function", stability = "diagnostic", risk = "unsafe-native", validation = "L3 Live Server cleanup", requiresPlayer = false, capability = "", summary = "Disable native character/projection zone overlap tracing without unloading detours." },
+  { name = "BMF.tools.zoneNative.status", namespace = "tools", kind = "function", stability = "diagnostic", risk = "low", validation = "L2 Headless safe failure; L3 Live Player event counts", requiresPlayer = false, capability = "", summary = "Inspect native zone trace install state, counters, queue depth, and last matched objects." },
+  { name = "BMF.tools.zoneNative.drain", namespace = "tools", kind = "function", stability = "diagnostic", risk = "medium", validation = "L3 Live Player socket relay", requiresPlayer = false, capability = "", summary = "Drain queued native zone overlap events and emit them into the BMF event bus." },
+  { name = "BMF.tools.zoneWireTrace.start", namespace = "tools", kind = "function", stability = "diagnostic", risk = "unsafe-native", validation = "L3 Live Player wire PrintToConsole marker trace", requiresPlayer = true, capability = "", summary = "Install and enable bounded native tracing for the Brickadia wire PrintToConsole marker path." },
+  { name = "BMF.tools.zoneWireTrace.status", namespace = "tools", kind = "function", stability = "diagnostic", risk = "low", validation = "L2 Headless safe failure; L3 Live Player event counts", requiresPlayer = false, capability = "", summary = "Inspect wire PrintToConsole trace install state, counters, queue depth, and last captured marker." },
+  { name = "BMF.tools.zoneWireTrace.drain", namespace = "tools", kind = "function", stability = "diagnostic", risk = "medium", validation = "L3 Live Player socket relay", requiresPlayer = false, capability = "", summary = "Drain queued wire PrintToConsole marker events and emit them into the BMF event bus." },
+  { name = "BMF.tools.zoneProcessTrace.start", namespace = "tools", kind = "function", stability = "diagnostic", risk = "unsafe-native", validation = "L3 Live Player projection-zone ProcessEvent discovery", requiresPlayer = true, capability = "", summary = "Temporarily install bounded, filtered UObject ProcessEvent tracing for CharacterZoneEvent and wire graph discovery." },
+  { name = "BMF.tools.zoneProcessTrace.status", namespace = "tools", kind = "function", stability = "diagnostic", risk = "low", validation = "L2 Headless safe failure; L3 Live Player event counts", requiresPlayer = false, capability = "", summary = "Inspect filtered ProcessEvent trace install state, filters, counters, queue depth, and last matched function/context." },
+  { name = "BMF.tools.zoneProcessTrace.drain", namespace = "tools", kind = "function", stability = "diagnostic", risk = "medium", validation = "L3 Live Player socket relay", requiresPlayer = false, capability = "", summary = "Drain queued filtered ProcessEvent trace events and emit them into the BMF event bus." },
   { name = "BMF.tools.treeCutNative.start", namespace = "tools", kind = "function", stability = "compatibility", risk = "unsafe-native", validation = "L3 Live Player handaxe/tree hit event", requiresPlayer = true, capability = "", summary = "Compatibility alias for BMF.tools.resourceNative.start." },
   { name = "BMF.tools.treeCutNative.stop", namespace = "tools", kind = "function", stability = "compatibility", risk = "unsafe-native", validation = "L3 Live Server cleanup", requiresPlayer = false, capability = "", summary = "Compatibility alias for BMF.tools.resourceNative.stop." },
   { name = "BMF.tools.treeCutNative.status", namespace = "tools", kind = "function", stability = "compatibility", risk = "low", validation = "L2 Headless safe failure; L3 Live Player event counts", requiresPlayer = false, capability = "", summary = "Compatibility alias for BMF.tools.resourceNative.status." },
@@ -2011,6 +2439,11 @@ API_REGISTRY = {
   { name = "BMF.prefabs.planLoadBrz", namespace = "prefabs", kind = "function", stability = "experimental", risk = "medium", validation = "L2 Headless after staging", requiresPlayer = false, capability = "", summary = "Plan staged BRZ-derived world load." },
   { name = "BMF.prefabs.loadBrdb", namespace = "prefabs", kind = "function", stability = "experimental", risk = "high", validation = "L2 Headless; L3 Live Player for visual behavior", requiresPlayer = false, capability = "prefabs.loadBrdb", summary = "Load staged BRDB world bundle." },
   { name = "BMF.prefabs.loadBrz", namespace = "prefabs", kind = "function", stability = "experimental", risk = "high", validation = "L2 Headless after staging; L3 Live Player for drivable behavior", requiresPlayer = false, capability = "prefabs.loadBrz", summary = "Load BRZ-derived staged world bundle; raw BRZ conversion stays outside Lua." },
+  { name = "BMF.prefabs.saveRegionProbe", namespace = "prefabs", kind = "function", stability = "diagnostic", risk = "world-edit", validation = "Env-gated L3 Live Server br.Prefab.SaveRegion plus BRZ file proof", requiresPlayer = false, capability = "", summary = "Save one bounded EA3 prefab region and report whether the expected BRZ file appears." },
+  { name = "BMF.prefabs.saveRegionStatus", namespace = "prefabs", kind = "function", stability = "diagnostic", risk = "low", validation = "L3 Live Server result inspection", requiresPlayer = false, capability = "", summary = "Inspect the last EA3 prefab save-region probe result." },
+  { name = "BMF.prefabs.transferRegionOwnership", namespace = "prefabs", kind = "function", stability = "scaffold", risk = "world-edit", validation = "L2 Headless fail-closed; L3 Live Server pending native prefab executor", requiresPlayer = false, capability = "", summary = "Transfer a calibrated prefab region to a new owner through the validated native prefab executor, or fail closed when unavailable." },
+  { name = "BMF.prefabs.transferRegionStatus", namespace = "prefabs", kind = "function", stability = "scaffold", risk = "low", validation = "L2 Headless", requiresPlayer = false, capability = "", summary = "Inspect the last property prefab transfer attempt." },
+  { name = "BMF.prefabs.transferRegionRollback", namespace = "prefabs", kind = "function", stability = "scaffold", risk = "world-edit", validation = "L2 Headless fail-closed; L3 Live Server pending native prefab executor", requiresPlayer = false, capability = "", summary = "Rollback a completed property prefab transfer when a rollback command was issued by transferRegionOwnership." },
   { name = "BMF.vehicles.planSpawnSet", namespace = "vehicles", kind = "function", stability = "experimental", risk = "medium", validation = "L2 Headless", requiresPlayer = false, capability = "", summary = "Plan staged vehicle-copy load set." },
   { name = "BMF.vehicles.spawnSet", namespace = "vehicles", kind = "function", stability = "experimental", risk = "high", validation = "L2 Headless; L3 Live Player for drivable behavior", requiresPlayer = false, capability = "vehicles.spawnSet", summary = "Load staged remapped vehicle copies and prove saved graph counts." },
 }
@@ -2198,9 +2631,11 @@ local RATE_LIMIT_POLICIES = {
   ["server.shutdown"] = { limit = 1, windowSeconds = 60 },
   ["world.loadAdditive"] = { limit = 30, windowSeconds = 30 },
   ["world.saveAs"] = { limit = 10, windowSeconds = 30 },
+  ["prefabs.saveRegionProbe"] = { limit = 3, windowSeconds = 30 },
   ["chat.broadcast"] = { limit = 10, windowSeconds = 10 },
   ["chat.whisper"] = { limit = 20, windowSeconds = 10 },
   ["chat.statusMessage"] = { limit = 20, windowSeconds = 10 },
+  ["chat.playerMessageImplementationProbe"] = { limit = 24, windowSeconds = 10 },
 }
 
 local rate_limit_context_stack = {}
@@ -3207,6 +3642,19 @@ local function percent_decode(value)
   end))
 end
 
+local function parse_key_value_lines(text)
+  local lines = {}
+  local fields = {}
+  for line in tostring(text or ""):gmatch("[^\r\n]+") do
+    lines[#lines + 1] = line
+    local key, value = line:match("^([A-Za-z0-9_%.]+)=(.*)$")
+    if key ~= nil then
+      fields[key] = value or ""
+    end
+  end
+  return lines, fields
+end
+
 local function option_number(options, key, default)
   local value = options[key]
   if value == nil or value == "" then
@@ -4001,9 +4449,22 @@ local function register_builtin_commands()
         "received_messages=" .. tostring(status.receivedMessages),
         "poll_count=" .. tostring(status.pollCount),
         "last_poll_at=" .. tostring(status.lastPollAt),
+        "last_poll_age_ms=" .. tostring(status.lastPollAgeMs),
         "last_drain_count=" .. tostring(status.lastDrainCount),
         "worker_started=" .. tostring(status.workerStarted),
         "worker_mode=" .. tostring(status.workerMode),
+        "worker_generation=" .. tostring(status.workerGeneration),
+        "watchdog_started=" .. tostring(status.workerWatchdogStarted),
+        "watchdog_mode=" .. tostring(status.workerWatchdogMode),
+        "watchdog_interval_ms=" .. tostring(status.watchdogIntervalMs),
+        "watchdog_stale_ms=" .. tostring(status.watchdogStaleMs),
+        "watchdog_checks=" .. tostring(status.watchdogChecks),
+        "watchdog_restarts=" .. tostring(status.watchdogRestarts),
+        "watchdog_consecutive_stale=" .. tostring(status.watchdogConsecutiveStale),
+        "watchdog_forced_delayed_recoveries=" .. tostring(status.watchdogForcedDelayedRecoveries),
+        "last_watchdog_at=" .. tostring(status.lastWatchdogAt),
+        "last_watchdog_restart_at=" .. tostring(status.lastWatchdogRestartAt),
+        "last_watchdog_error=" .. tostring(status.lastWatchdogError),
         "last_error=" .. tostring(status.lastError),
         "native_status=" .. tostring(status.nativeStatus),
       },
@@ -4013,6 +4474,11 @@ local function register_builtin_commands()
   BMF.commands.register("bmf.tools.uobject.describe", "Describe one explicit live UObject pointer without scanning.", function(args)
     local options = parse_command_options(args)
     return BMF.tools.uobject.describe(options)
+  end)
+
+  BMF.commands.register("bmf.tools.ufunction.describe", "Describe one reflected UFunction signature.", function(args)
+    local options = parse_command_options(args)
+    return BMF.tools.ufunction.describe(options)
   end)
 
   BMF.commands.register("bmf.tools.uobject.find-near", "Find live actor/component UObject targets near one world coordinate.", function(args)
@@ -4057,11 +4523,11 @@ local function register_builtin_commands()
     return refreshed
   end)
 
-  BMF.commands.register("bmf.tools.applicator.native-targets", "Resolve native ServerAddComponent blocker targets.", function(args)
+  BMF.commands.register("bmf.tools.applicator.native-targets", "Read cached native targets or explicitly run unsafe discovery.", function(args)
     local options = parse_command_options(args)
-    local refresh = tostring(options.refresh or "true"):lower()
     return BMF.tools.applicator.nativeTargets({
-      refresh = not (refresh == "0" or refresh == "false" or refresh == "no"),
+      refresh = option_boolean(options, "refresh", false),
+      unsafe = option_boolean(options, "unsafe", false),
     })
   end)
 
@@ -4158,6 +4624,117 @@ local function register_builtin_commands()
   BMF.commands.register("bmf.tools.resource.native.drain", "Drain native CityRPG resource hit events into the BMF event bus.", function(args)
     local options = parse_command_options(args)
     return BMF.tools.resourceNative.drain({
+      limit = option_number(options, "limit", 64),
+    })
+  end)
+
+  BMF.commands.register("bmf.tools.zone.native.start", "Start native character/projection zone event tracing.", function(args)
+    local options = parse_command_options(args)
+    return BMF.tools.zoneNative.start({
+      reason = options.reason or "command",
+      captureAll = option_boolean(options, "captureall", option_boolean(options, "all", false)),
+      scanLocalObjects = option_boolean(options, "scanlocalobjects", option_boolean(options, "scanlocals", false)),
+    })
+  end)
+
+  BMF.commands.register("bmf.tools.zone.native.stop", "Stop native character/projection zone event tracing.", function(args)
+    local options = parse_command_options(args)
+    return BMF.tools.zoneNative.stop({
+      reason = options.reason or "command",
+    })
+  end)
+
+  BMF.commands.register("bmf.tools.zone.native.status", "Show native character/projection zone event trace status.", function()
+    return BMF.tools.zoneNative.status()
+  end)
+
+  BMF.commands.register("bmf.tools.zone.native.drain", "Drain native character/projection zone events into the BMF event bus.", function(args)
+    local options = parse_command_options(args)
+    return BMF.tools.zoneNative.drain({
+      limit = option_number(options, "limit", 64),
+    })
+  end)
+
+  BMF.commands.register("bmf.tools.zone.console.start", "Start marker-filtered console stack tracing for zone discovery.", function(args)
+    local options = parse_command_options(args)
+    local positional = type(options._positional) == "table" and options._positional or {}
+    return BMF.tools.zoneConsoleTrace.start({
+      reason = options.reason or "command",
+      filter = options.filter or options.marker or positional[1] or "BMF_ZONE_TRACE",
+      limit = option_number(options, "limit", option_number(options, "max", 16)),
+    })
+  end)
+
+  BMF.commands.register("bmf.tools.zone.console.stop", "Stop marker-filtered console stack tracing for zone discovery.", function(args)
+    local options = parse_command_options(args)
+    return BMF.tools.zoneConsoleTrace.stop({
+      reason = options.reason or "command",
+    })
+  end)
+
+  BMF.commands.register("bmf.tools.zone.console.status", "Show marker-filtered console stack trace status.", function()
+    return BMF.tools.zoneConsoleTrace.status()
+  end)
+
+  BMF.commands.register("bmf.tools.zone.console.drain", "Drain marker-filtered console stack trace events into the BMF event bus.", function(args)
+    local options = parse_command_options(args)
+    return BMF.tools.zoneConsoleTrace.drain({
+      limit = option_number(options, "limit", 64),
+    })
+  end)
+
+  BMF.commands.register("bmf.tools.zone.wire.start", "Start native wire PrintToConsole marker tracing for zone discovery.", function(args)
+    local options = parse_command_options(args)
+    return BMF.tools.zoneWireTrace.start({
+      reason = options.reason or "command",
+      limit = option_number(options, "limit", option_number(options, "max", 16)),
+    })
+  end)
+
+  BMF.commands.register("bmf.tools.zone.wire.stop", "Stop native wire PrintToConsole marker tracing.", function(args)
+    local options = parse_command_options(args)
+    return BMF.tools.zoneWireTrace.stop({
+      reason = options.reason or "command",
+    })
+  end)
+
+  BMF.commands.register("bmf.tools.zone.wire.status", "Show native wire PrintToConsole marker trace status.", function()
+    return BMF.tools.zoneWireTrace.status()
+  end)
+
+  BMF.commands.register("bmf.tools.zone.wire.drain", "Drain native wire PrintToConsole marker events into the BMF event bus.", function(args)
+    local options = parse_command_options(args)
+    return BMF.tools.zoneWireTrace.drain({
+      limit = option_number(options, "limit", 64),
+    })
+  end)
+
+  BMF.commands.register("bmf.tools.zone.process.start", "Start filtered UObject ProcessEvent tracing for zone discovery.", function(args)
+    local options = parse_command_options(args)
+    local positional = type(options._positional) == "table" and options._positional or {}
+    return BMF.tools.zoneProcessTrace.start({
+      reason = options.reason or "command",
+      filters = options.filters or options.filter or positional[1] or "CharacterZoneEvent PrintToConsole WireGraph",
+      limit = option_number(options, "limit", option_number(options, "max", 16)),
+      slot = option_number(options, "slot", option_number(options, "slotindex", 72)),
+      maxVTables = option_number(options, "maxvtables", option_number(options, "vtables", 256)),
+    })
+  end)
+
+  BMF.commands.register("bmf.tools.zone.process.stop", "Stop filtered UObject ProcessEvent tracing for zone discovery.", function(args)
+    local options = parse_command_options(args)
+    return BMF.tools.zoneProcessTrace.stop({
+      reason = options.reason or "command",
+    })
+  end)
+
+  BMF.commands.register("bmf.tools.zone.process.status", "Show filtered UObject ProcessEvent trace status.", function()
+    return BMF.tools.zoneProcessTrace.status()
+  end)
+
+  BMF.commands.register("bmf.tools.zone.process.drain", "Drain filtered UObject ProcessEvent trace events into the BMF event bus.", function(args)
+    local options = parse_command_options(args)
+    return BMF.tools.zoneProcessTrace.drain({
       limit = option_number(options, "limit", 64),
     })
   end)
@@ -4422,6 +4999,67 @@ local function register_builtin_commands()
     sent.data = sent.data or {}
     sent.data.lines = lines
     return sent
+  end)
+
+  BMF.commands.register("bmf.chat.player-message-impl", "Invoke native player chat-message implementation for one explicit message.", function(args)
+    local text = tostring(args or "")
+    local options = parse_command_options(text)
+    local message = percent_decode(options.message or options.messageenc or "")
+    local confirm = trim_string(options.confirm or options.confirmation or "")
+    local controller = percent_decode(options.controller or options.controllername or "")
+    if message == "" then
+      return result(false, "MESSAGE_REQUIRED", "message=... is required.", {
+        lines = {
+          "ok=false",
+          "code=MESSAGE_REQUIRED",
+        },
+      })
+    end
+    if confirm ~= "cityrpg-remote" then
+      return result(false, "CONFIRMATION_REQUIRED", "confirm=cityrpg-remote is required.", {
+        lines = {
+          "ok=false",
+          "code=CONFIRMATION_REQUIRED",
+        },
+      })
+    end
+    local invoked = BMF.chat.playerMessageImplementationProbe(message, controller)
+    invoked.data = invoked.data or {}
+    invoked.data.message = message
+    invoked.data.controllerHint = controller
+    invoked.data.lines = invoked.data.lines or {
+      "ok=" .. tostring(invoked.ok == true),
+      "code=" .. tostring(invoked.code or ""),
+      "message=" .. tostring(message),
+    }
+    return invoked
+  end)
+
+  BMF.commands.register("bmf.tunnel.status", "Report the bounded generic game-command tunnel capability and queue state.", function()
+    local snapshot = type(BMF_game_command_tunnel_snapshot) == "function"
+      and BMF_game_command_tunnel_snapshot()
+      or {
+        supported = true,
+        enabled = state.game_command_tunnel.enabled == true,
+        protocolVersion = 1,
+        channel = "cityrpg.command.v1",
+      }
+    snapshot.lines = {
+      "supported=" .. tostring(snapshot.supported == true),
+      "enabled=" .. tostring(snapshot.enabled == true),
+      "protocol_version=" .. tostring(snapshot.protocolVersion or 1),
+      "channel=" .. tostring(snapshot.channel or "cityrpg.command.v1"),
+      "interval_ms=" .. tostring(snapshot.intervalMs or state.game_command_tunnel.interval_ms or 0),
+      "queue_depth=" .. tostring(snapshot.queueDepth or state.game_command_tunnel.queued_count or 0),
+      "interactive_depth=" .. tostring(snapshot.interactiveDepth or 0),
+      "bulk_depth=" .. tostring(snapshot.bulkDepth or 0),
+      "accepted=" .. tostring(snapshot.accepted or 0),
+      "injected=" .. tostring(snapshot.injected or 0),
+      "rejected=" .. tostring(snapshot.rejected or 0),
+      "expired=" .. tostring(snapshot.expired or 0),
+      "outcome_unknown=" .. tostring(snapshot.outcomeUnknown or 0),
+    }
+    return result(true, "OK", "Game command tunnel status", snapshot)
   end)
 
   BMF.commands.register("bmf.players.list", "List known BMF player records.", function(args)
@@ -5714,11 +6352,13 @@ local function register_builtin_commands()
   local function minigame_assign_team_command(args)
     local options = parse_command_options(args)
     local positional = type(options._positional) == "table" and options._positional or {}
-    local player_query = options.player or options.query or options.name or positional[1] or ""
-    local team_index = options.teamindex or options.team or options.index or positional[2] or ""
+    local player_query = percent_decode(options.player or options.query or options.name or positional[1] or "")
+    local team_index = percent_decode(options.teamindex or options.team or options.index or positional[2] or "")
+    local team_name = percent_decode(options.teamname or options.teamlabel or options.teamquery or positional[3] or "")
     local assigned = BMF.minigames.assignTeam(player_query, team_index, {
       dryRun = option_boolean(options, "dryrun", false),
       method = options.method or options.assignmethod or options.nativemethod,
+      teamName = team_name,
       flag1 = option_boolean(options, "flag1", true),
       flag2 = option_boolean(options, "flag2", true),
     })
@@ -5775,6 +6415,30 @@ local function register_builtin_commands()
     end
     save.data.lines = lines
     return save
+  end)
+
+  BMF.commands.register("bmf.prefabs.save-region-probe", "Save one bounded EA3 prefab region and prove the expected BRZ appears.", function(args)
+    local options = parse_command_options(args)
+    return BMF.prefabs.saveRegionProbe(options)
+  end)
+
+  BMF.commands.register("bmf.prefabs.save-region-status", "Show the last EA3 prefab save-region probe result.", function()
+    return BMF.prefabs.saveRegionStatus()
+  end)
+
+  BMF.commands.register("bmf.prefabs.transfer-region-ownership", "Transfer one calibrated property prefab region to a new owner.", function(args)
+    local options = parse_command_options(args)
+    return BMF.prefabs.transferRegionOwnership(options)
+  end)
+
+  BMF.commands.register("bmf.prefabs.transfer-region-status", "Show the last property prefab transfer result.", function(args)
+    local options = parse_command_options(args)
+    return BMF.prefabs.transferRegionStatus(options)
+  end)
+
+  BMF.commands.register("bmf.prefabs.transfer-rollback", "Rollback one completed property prefab transfer.", function(args)
+    local options = parse_command_options(args)
+    return BMF.prefabs.transferRegionRollback(options)
   end)
 
   BMF.commands.register("bmf.prefabs.loadbrz", "Load a staged BRZ-derived prefab world.", function(args)
@@ -6058,6 +6722,7 @@ BMF.permissions.APPLICATOR_DENIED_COMPONENTS = {
 BMF.permissions.INTERACT_CONSOLE_ADMIN_ROLES = {
   "Owner",
   "Admin",
+  "Moderator",
 }
 BMF.permissions.INTERACT_CONSOLE_ALLOWED_PREFIXES = {}
 BMF.permissions.BRICK_ASSET_ADMIN_ROLES = {
@@ -6884,7 +7549,10 @@ local function role_assignments_path_from_options(options)
     return explicit:gsub("\\", "/"), nil
   end
 
-  local saved_dir = first_string(options.savedDir, state.config.brickadiaSavedDir)
+  local saved_dir = first_string(
+    options.savedDir,
+    BMF_env_string("BMF_BRICKADIA_SAVED_DIR"),
+    state.config.brickadiaSavedDir)
   if not saved_dir then
     return nil, "brickadiaSavedDir is not configured"
   end
@@ -6965,7 +7633,10 @@ local function role_setup_path_from_options(options)
     return explicit:gsub("\\", "/"), nil
   end
 
-  local saved_dir = first_string(options.savedDir, state.config.brickadiaSavedDir)
+  local saved_dir = first_string(
+    options.savedDir,
+    BMF_env_string("BMF_BRICKADIA_SAVED_DIR"),
+    state.config.brickadiaSavedDir)
   if not saved_dir then
     return nil, "brickadiaSavedDir is not configured"
   end
@@ -7871,10 +8542,15 @@ local remove_tool_handlers_for_owner
 BMF.bricks = {}
 BMF.tools = {}
 BMF.tools.uobject = {}
+BMF.tools.ufunction = {}
 BMF.tools.applicator = {}
 BMF.tools.treeCutTrace = {}
 BMF.tools.treeCutNative = {}
 BMF.tools.resourceNative = {}
+BMF.tools.zoneNative = {}
+BMF.tools.zoneConsoleTrace = {}
+BMF.tools.zoneWireTrace = {}
+BMF.tools.zoneProcessTrace = {}
 BMF.tools.treeCutProbe = {}
 
 (function()
@@ -7933,6 +8609,53 @@ function BMF.tools.uobject.describe(options)
   local describe_ok = tostring(fields.ok or "") == "true"
   return result(describe_ok, describe_ok and "OK" or "NATIVE_UOBJECT_DESCRIBE_FAILED", tostring(fields.detail or "Native UObject description"), {
     address = address,
+    fields = fields,
+    lines = lines,
+  })
+end
+
+function BMF.tools.ufunction.describe(options)
+  options = type(options) == "table" and options or {}
+  local positional = type(options._positional) == "table" and options._positional or {}
+  local function_name = trim_string(options.name or options.functionname or options.function_name or options.path or positional[1] or "")
+  if function_name == "" then
+    return result(false, "NATIVE_UFUNCTION_NAME_REQUIRED", "Provide name=FunctionName or a reflected function path.", {
+      lines = {
+        "ok=false",
+        "code=NATIVE_UFUNCTION_NAME_REQUIRED",
+      },
+    })
+  end
+
+  if type(BMFSocketDescribeUFunction) ~= "function" then
+    return result(false, "NATIVE_UFUNCTION_DESCRIBE_UNAVAILABLE", "BMFSocketDescribeUFunction native helper is unavailable.", {
+      name = function_name,
+      lines = {
+        "ok=false",
+        "code=NATIVE_UFUNCTION_DESCRIBE_UNAVAILABLE",
+        "name=" .. tostring(function_name),
+      },
+    })
+  end
+
+  local max_params = option_number(options, "maxparams", option_number(options, "limit", 16))
+  local ok, response = pcall(BMFSocketDescribeUFunction, function_name, max_params)
+  if not ok then
+    return result(false, "NATIVE_UFUNCTION_DESCRIBE_FAILED", tostring(response or "native helper failed"), {
+      name = function_name,
+      lines = {
+        "ok=false",
+        "code=NATIVE_UFUNCTION_DESCRIBE_FAILED",
+        "name=" .. tostring(function_name),
+        "detail=" .. tostring(response or "native helper failed"),
+      },
+    })
+  end
+
+  local lines, fields = native_uobject_parse_lines(response)
+  local describe_ok = tostring(fields.ok or "") == "true"
+  return result(describe_ok, describe_ok and "OK" or "NATIVE_UFUNCTION_DESCRIBE_FAILED", tostring(fields.detail or "Native UFunction description"), {
+    name = function_name,
     fields = fields,
     lines = lines,
   })
@@ -8092,7 +8815,7 @@ end
 
 local function tool_object_address_from_string(object)
   local hex = tostring(object or ""):match("UObject:%s*([0-9A-Fa-f]+)")
-  if hex and hex ~= "" then
+  if hex and hex ~= "" and not hex:match("^0+$") then
     return "0x" .. hex
   end
   return ""
@@ -8106,12 +8829,12 @@ local function tool_object_address(object)
     local ok, address = pcall(function()
       return object:GetAddress()
     end)
-    if ok and type(address) == "number" then
+    if ok and type(address) == "number" and address > 0 then
       return string.format("0x%X", address)
     end
     if ok and type(address) == "string" then
       local hex = address:match("0x[0-9A-Fa-f]+") or address:match("([0-9A-Fa-f]+)")
-      if hex and hex ~= "" then
+      if hex and hex ~= "" and not hex:match("^0x?0+$") then
         if hex:match("^0x") then
           return hex
         end
@@ -8407,7 +9130,7 @@ end
 
 local function tool_object_address_from_string(object)
   local hex = tostring(object or ""):match("UObject:%s*([0-9A-Fa-f]+)")
-  if hex and hex ~= "" then
+  if hex and hex ~= "" and not hex:match("^0+$") then
     return "0x" .. hex
   end
   return ""
@@ -8421,12 +9144,12 @@ local function tool_object_address(object)
     local ok, address = pcall(function()
       return object:GetAddress()
     end)
-    if ok and type(address) == "number" then
+    if ok and type(address) == "number" and address > 0 then
       return string.format("0x%X", address)
     end
     if ok and type(address) == "string" then
       local hex = address:match("0x[0-9A-Fa-f]+") or address:match("([0-9A-Fa-f]+)")
-      if hex and hex ~= "" then
+      if hex and hex ~= "" and not hex:match("^0x?0+$") then
         if hex:match("^0x") then
           return hex
         end
@@ -9020,9 +9743,53 @@ end
 
 function BMF.tools.applicator.nativeTargets(options)
   options = type(options) == "table" and options or {}
-  if options.refresh ~= false then
-    BMF.tools.applicator.refreshComponentCache(options)
+  local app = state.tools.applicator
+  app.native_targets_requests = (tonumber(app.native_targets_requests) or 0) + 1
+
+  if options.refresh ~= true then
+    if type(app.native_targets_cache) ~= "table" then
+      app.native_targets_rejected_requests = (tonumber(app.native_targets_rejected_requests) or 0) + 1
+      return result(false, "NATIVE_TARGETS_NOT_CACHED", "Native target discovery has not been run; explicit refresh=true unsafe=true is required", {
+        cached = false,
+        cachedAt = tostring(app.native_targets_cached_at or ""),
+        refreshCount = tonumber(app.native_targets_refresh_count) or 0,
+        lines = {
+          "ok=false",
+          "code=NATIVE_TARGETS_NOT_CACHED",
+          "cached=false",
+          "discovery=explicit-unsafe-only",
+        },
+      })
+    end
+
+    app.native_targets_cache_reads = (tonumber(app.native_targets_cache_reads) or 0) + 1
+    local cached = copy_table(app.native_targets_cache)
+    cached.cached = true
+    cached.cachedAt = tostring(app.native_targets_cached_at or "")
+    cached.refreshCount = tonumber(app.native_targets_refresh_count) or 0
+    cached.lines = copy_table(cached.lines or {})
+    cached.lines[#cached.lines + 1] = "cached=true"
+    cached.lines[#cached.lines + 1] = "cached_at=" .. cached.cachedAt
+    cached.lines[#cached.lines + 1] = "refresh_count=" .. tostring(cached.refreshCount)
+    cached.lines[#cached.lines + 1] = "discovery=explicit-unsafe-only"
+    return result(cached.ok == true, cached.code or (cached.ok and "OK" or "NATIVE_TARGETS_INCOMPLETE"), "Cached Applicator native targets returned", cached)
   end
+
+  if options.unsafe ~= true then
+    app.native_targets_rejected_requests = (tonumber(app.native_targets_rejected_requests) or 0) + 1
+    return result(false, "UNSAFE_DISCOVERY_CONFIRMATION_REQUIRED", "Live UObject discovery requires refresh=true unsafe=true", {
+      cached = type(app.native_targets_cache) == "table",
+      cachedAt = tostring(app.native_targets_cached_at or ""),
+      refreshCount = tonumber(app.native_targets_refresh_count) or 0,
+      lines = {
+        "ok=false",
+        "code=UNSAFE_DISCOVERY_CONFIRMATION_REQUIRED",
+        "discovery=explicit-unsafe-only",
+      },
+    })
+  end
+
+  BMF.tools.applicator.refreshComponentCache(options)
 
   local function_object, function_source, function_errors = applicator_find_server_add_component_function()
   local function_address = tool_object_address(function_object)
@@ -9076,7 +9843,11 @@ function BMF.tools.applicator.nativeTargets(options)
     lines[#lines + 1] = "interact_component_error_" .. tostring(index) .. "=" .. tostring(item)
   end
 
-  return result(ok, ok and "OK" or "NATIVE_TARGETS_INCOMPLETE", "Applicator native targets resolved", {
+  local code = ok and "OK" or "NATIVE_TARGETS_INCOMPLETE"
+  local data = {
+    ok = ok,
+    code = code,
+    cached = false,
     functionAddress = function_address,
     functionSource = function_source or "",
     modifyFunctionAddress = modify_function_address,
@@ -9094,7 +9865,17 @@ function BMF.tools.applicator.nativeTargets(options)
     modifyFunctionErrors = modify_function_errors or {},
     interactComponentErrors = interact_component_errors or {},
     lines = lines,
-  })
+  }
+  app.native_targets_cache = copy_table(data)
+  app.native_targets_cached_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+  app.native_targets_refresh_count = (tonumber(app.native_targets_refresh_count) or 0) + 1
+  data.cachedAt = app.native_targets_cached_at
+  data.refreshCount = app.native_targets_refresh_count
+  data.lines[#data.lines + 1] = "cached=false"
+  data.lines[#data.lines + 1] = "cached_at=" .. data.cachedAt
+  data.lines[#data.lines + 1] = "refresh_count=" .. tostring(data.refreshCount)
+  data.lines[#data.lines + 1] = "discovery=explicit-unsafe-only"
+  return result(ok, code, "Applicator native targets resolved", data)
 end
 
 local function applicator_recent_events(limit)
@@ -9450,6 +10231,11 @@ function BMF.tools.applicator.status(options)
     "last_decision=" .. tostring(last.decision or ""),
     "last_block_mode=" .. tostring(last.blockMode or ""),
     "cache_count=" .. tostring(cache_count),
+    "native_targets_requests=" .. tostring(app.native_targets_requests or 0),
+    "native_targets_cache_reads=" .. tostring(app.native_targets_cache_reads or 0),
+    "native_targets_rejected_requests=" .. tostring(app.native_targets_rejected_requests or 0),
+    "native_targets_refresh_count=" .. tostring(app.native_targets_refresh_count or 0),
+    "native_targets_cached_at=" .. tostring(app.native_targets_cached_at or ""),
     "trace_path=" .. tostring(APPLICATOR_TRACE_PATH),
     "last_error=" .. tostring(app.last_error or ""),
   }
@@ -9474,6 +10260,11 @@ function BMF.tools.applicator.status(options)
     lastEvent = copy_table(last),
     componentCache = copy_table(app.component_cache or {}),
     componentCacheNotes = copy_table(app.component_cache_notes or {}),
+    nativeTargetsRequests = app.native_targets_requests or 0,
+    nativeTargetsCacheReads = app.native_targets_cache_reads or 0,
+    nativeTargetsRejectedRequests = app.native_targets_rejected_requests or 0,
+    nativeTargetsRefreshCount = app.native_targets_refresh_count or 0,
+    nativeTargetsCachedAt = app.native_targets_cached_at or "",
     tracePath = APPLICATOR_TRACE_PATH,
     lastError = app.last_error or "",
     lines = lines,
@@ -10200,6 +10991,34 @@ local function tree_cut_native_available()
     and type(BMFSocketResourceNativeDrain or BMFSocketTreeCutDrain) == "function"
 end
 
+local function zone_native_available()
+  return type(BMFSocketZoneNativeStart) == "function"
+    and type(BMFSocketZoneNativeStop) == "function"
+    and type(BMFSocketZoneNativeStatus) == "function"
+    and type(BMFSocketZoneNativeDrain) == "function"
+end
+
+local function zone_console_trace_available()
+  return type(BMFSocketZoneConsoleTraceStart) == "function"
+    and type(BMFSocketZoneConsoleTraceStop) == "function"
+    and type(BMFSocketZoneConsoleTraceStatus) == "function"
+    and type(BMFSocketZoneNativeDrain) == "function"
+end
+
+local function zone_wire_trace_available()
+  return type(BMFSocketZoneWirePrintTraceStart) == "function"
+    and type(BMFSocketZoneWirePrintTraceStop) == "function"
+    and type(BMFSocketZoneWirePrintTraceStatus) == "function"
+    and type(BMFSocketZoneNativeDrain) == "function"
+end
+
+local function zone_process_trace_available()
+  return type(BMFSocketZoneProcessTraceStart) == "function"
+    and type(BMFSocketZoneProcessTraceStop) == "function"
+    and type(BMFSocketZoneProcessTraceStatus) == "function"
+    and type(BMFSocketZoneNativeDrain) == "function"
+end
+
 local function tree_cut_handaxe_resolver_available()
   return type(BMFSocketResourceNativeResolveTools or BMFSocketTreeCutResolveHandaxe) == "function"
     and type(BMFSocketTreeCutSetHandaxeClass) == "function"
@@ -10281,6 +11100,55 @@ local function tree_cut_native_update_status(status_text)
   native.last_status = tostring(status_text or "")
   native.last_error = tostring(fields.last_error or "")
   native.total_events = tonumber(fields.events) or native.total_events or 0
+  return lines, fields
+end
+
+local function zone_native_update_status(status_text)
+  local native = state.tools.zone_native
+  local lines, fields = tree_cut_native_status_lines(status_text)
+  native.available = zone_native_available()
+  native.enabled = tostring(fields.enabled or "") == "true"
+  native.started = (tonumber(fields.installed) or 0) > 0
+  native.capture_all = tostring(fields.capture_all or "") == "true"
+  native.scan_local_objects = tostring(fields.scan_local_objects or "") == "true"
+  native.last_status = tostring(status_text or "")
+  native.last_error = tostring(fields.last_error or "")
+  native.total_events = tonumber(fields.events) or native.total_events or 0
+  return lines, fields
+end
+
+local function zone_console_trace_update_status(status_text)
+  local trace = state.tools.zone_console_trace
+  local lines, fields = tree_cut_native_status_lines(status_text)
+  trace.available = zone_console_trace_available()
+  trace.enabled = tostring(fields.enabled or "") == "true"
+  trace.filter = tostring(fields.filter or trace.filter or "")
+  trace.last_status = tostring(status_text or "")
+  trace.last_error = tostring(fields.last_error or "")
+  trace.total_events = tonumber(fields.events) or trace.total_events or 0
+  return lines, fields
+end
+
+local function zone_wire_trace_update_status(status_text)
+  local trace = state.tools.zone_wire_trace
+  local lines, fields = tree_cut_native_status_lines(status_text)
+  trace.available = zone_wire_trace_available()
+  trace.enabled = tostring(fields.enabled or "") == "true"
+  trace.last_status = tostring(status_text or "")
+  trace.last_error = tostring(fields.last_error or "")
+  trace.total_events = tonumber(fields.events) or trace.total_events or 0
+  return lines, fields
+end
+
+local function zone_process_trace_update_status(status_text)
+  local trace = state.tools.zone_process_trace
+  local lines, fields = tree_cut_native_status_lines(status_text)
+  trace.available = zone_process_trace_available()
+  trace.enabled = tostring(fields.enabled or "") == "true"
+  trace.filters = tostring(fields.filters or trace.filters or "")
+  trace.last_status = tostring(status_text or "")
+  trace.last_error = tostring(fields.last_error or "")
+  trace.total_events = tonumber(fields.events) or trace.total_events or 0
   return lines, fields
 end
 
@@ -13062,6 +13930,646 @@ function BMF.tools.treeCutNative.drain(options)
   return BMF_tree_cut_native_emit_raw(raw_events, options)
 end
 
+local function zone_native_option_bool(options, camel_key, lower_key, default_value)
+  options = type(options) == "table" and options or {}
+  local value = options[camel_key]
+  if value == nil then
+    value = options[lower_key]
+  end
+  if value == nil then
+    return option_boolean(options, lower_key, default_value)
+  end
+  if type(value) == "boolean" then
+    return value
+  end
+  if type(value) == "number" then
+    return value ~= 0
+  end
+  if type(value) == "string" then
+    local normalized = trim_string(value):lower()
+    if normalized == "1" or normalized == "true" or normalized == "yes" or normalized == "on" then
+      return true
+    end
+    if normalized == "0" or normalized == "false" or normalized == "no" or normalized == "off" then
+      return false
+    end
+  end
+  return default_value == true
+end
+
+function BMF.tools.zoneNative.start(options)
+  options = type(options) == "table" and options or {}
+  local native = state.tools.zone_native
+  native.available = zone_native_available()
+  if not native.available then
+    native.last_error = "BMFSocket zone native helpers are unavailable"
+    return result(false, "ZONE_NATIVE_UNAVAILABLE", native.last_error, {
+      lines = {
+        "available=false",
+        "enabled=false",
+        "started=false",
+        "last_error=" .. native.last_error,
+      },
+    })
+  end
+
+  local capture_all = zone_native_option_bool(options, "captureAll", "captureall", false)
+  local scan_local_objects = zone_native_option_bool(options, "scanLocalObjects", "scanlocalobjects", false)
+  local ok, started_or_error, status = pcall(BMFSocketZoneNativeStart, capture_all, scan_local_objects)
+  if not ok or started_or_error == false then
+    native.last_error = tostring(status or started_or_error or "BMFSocketZoneNativeStart failed")
+    return result(false, "ZONE_NATIVE_START_FAILED", native.last_error, {
+      lines = {
+        "available=true",
+        "enabled=false",
+        "started=false",
+        "last_error=" .. native.last_error,
+      },
+    })
+  end
+
+  native.last_started_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+  local lines, fields = zone_native_update_status(status or "")
+  log(
+    "info",
+    "zone native capture started reason="
+      .. tostring(options.reason or "manual")
+      .. " capture_all="
+      .. tostring(capture_all)
+      .. " scan_local_objects="
+      .. tostring(scan_local_objects)
+  )
+  write_status()
+  return result(true, "OK", "Zone native capture started", {
+    fields = fields,
+    lines = lines,
+  })
+end
+
+function BMF.tools.zoneNative.stop(options)
+  options = type(options) == "table" and options or {}
+  local native = state.tools.zone_native
+  if not zone_native_available() then
+    native.available = false
+    native.enabled = false
+    native.last_error = "BMFSocket zone native helpers are unavailable"
+    return result(false, "ZONE_NATIVE_UNAVAILABLE", native.last_error, {
+      lines = {
+        "available=false",
+        "enabled=false",
+        "started=false",
+      },
+    })
+  end
+
+  local ok, stopped_or_error, status = pcall(BMFSocketZoneNativeStop)
+  if not ok or stopped_or_error == false then
+    native.last_error = tostring(status or stopped_or_error or "BMFSocketZoneNativeStop failed")
+    return result(false, "ZONE_NATIVE_STOP_FAILED", native.last_error, {
+      lines = {
+        "available=true",
+        "last_error=" .. native.last_error,
+      },
+    })
+  end
+
+  local lines, fields = zone_native_update_status(status or "")
+  log("info", "zone native capture stopped reason=" .. tostring(options.reason or "manual"))
+  write_status()
+  return result(true, "OK", "Zone native capture stopped", {
+    fields = fields,
+    lines = lines,
+  })
+end
+
+function BMF.tools.zoneNative.status()
+  local native = state.tools.zone_native
+  native.available = zone_native_available()
+  if not native.available then
+    return result(false, "ZONE_NATIVE_UNAVAILABLE", "BMFSocket zone native helpers are unavailable", {
+      lines = {
+        "available=false",
+        "enabled=false",
+        "started=false",
+      },
+    })
+  end
+
+  local ok, status_or_error = pcall(BMFSocketZoneNativeStatus)
+  if not ok then
+    native.last_error = tostring(status_or_error or "BMFSocketZoneNativeStatus failed")
+    return result(false, "ZONE_NATIVE_STATUS_FAILED", native.last_error, {
+      lines = {
+        "available=true",
+        "last_error=" .. native.last_error,
+      },
+    })
+  end
+
+  local lines, fields = zone_native_update_status(status_or_error or "")
+  return result(true, "OK", "Zone native status collected", {
+    fields = fields,
+    lines = lines,
+  })
+end
+
+function BMF_zone_native_normalize_drain_limit(value)
+  return BMF_tree_cut_native_normalize_drain_limit(value)
+end
+
+function BMF_zone_native_should_drain()
+  return (state.tools.zone_native and state.tools.zone_native.enabled == true)
+    or (state.tools.zone_console_trace and state.tools.zone_console_trace.enabled == true)
+    or (state.tools.zone_wire_trace and state.tools.zone_wire_trace.enabled == true)
+end
+
+function BMF_zone_native_drain_raw(limit)
+  local native = state.tools.zone_native
+  native.available = zone_native_available()
+  if not native.available then
+    native.last_error = "BMFSocket zone native helpers are unavailable"
+    return false, "ZONE_NATIVE_UNAVAILABLE", native.last_error, {}
+  end
+
+  local ok, events_or_error = pcall(BMFSocketZoneNativeDrain, BMF_zone_native_normalize_drain_limit(limit))
+  if not ok or type(events_or_error) ~= "table" then
+    native.last_error = tostring(events_or_error or "BMFSocketZoneNativeDrain failed")
+    return false, "ZONE_NATIVE_DRAIN_FAILED", native.last_error, {}
+  end
+
+  local raw_events = {}
+  for _, raw in ipairs(events_or_error) do
+    if trim_string(raw) ~= "" then
+      raw_events[#raw_events + 1] = raw
+    end
+  end
+
+  return true, "OK", "Zone native queue drained", raw_events
+end
+
+function BMF_zone_native_emit_raw(raw_events, options)
+  options = type(options) == "table" and options or {}
+  raw_events = type(raw_events) == "table" and raw_events or {}
+  local native = state.tools.zone_native
+  local console_trace = state.tools.zone_console_trace
+  local wire_trace = state.tools.zone_wire_trace
+  local process_trace = state.tools.zone_process_trace
+  local drained = 0
+  local emitted = 0
+  local decode_errors = 0
+  local console_drained = 0
+  local console_emitted = 0
+  local wire_drained = 0
+  local wire_emitted = 0
+  local process_drained = 0
+  local process_emitted = 0
+  for _, raw in ipairs(raw_events) do
+    if trim_string(raw) ~= "" then
+      drained = drained + 1
+      local decoded, err = json_decode(raw)
+      if type(decoded) == "table" then
+        local event_source = tostring(decoded.source or "")
+        local is_console_trace = event_source == "BMFSocketZoneConsoleTrace"
+        local is_wire_trace = event_source == "BMFSocketZoneWirePrintTrace"
+        local is_process_trace = event_source == "BMFSocketZoneProcessEventTrace"
+        if is_console_trace then
+          console_drained = console_drained + 1
+        elseif is_wire_trace then
+          wire_drained = wire_drained + 1
+        elseif is_process_trace then
+          process_drained = process_drained + 1
+        end
+        decoded._bmf = decoded._bmf or {}
+        decoded._bmf.emittedAt = os.date("!%Y-%m-%dT%H:%M:%SZ")
+        decoded._bmf.source = event_source ~= "" and event_source or "BMFSocketZoneNative"
+        local event_name = tostring(decoded.event or "zones.character.unknown")
+        BMF.events.emit(event_name, decoded)
+        emitted = emitted + 1
+        if is_console_trace and console_trace then
+          console_emitted = console_emitted + 1
+          console_trace.last_event = copy_table(decoded)
+        elseif is_wire_trace and wire_trace then
+          wire_emitted = wire_emitted + 1
+          wire_trace.last_event = copy_table(decoded)
+        elseif is_process_trace and process_trace then
+          process_emitted = process_emitted + 1
+          process_trace.last_event = copy_table(decoded)
+        else
+          native.last_event = copy_table(decoded)
+        end
+      else
+        decode_errors = decode_errors + 1
+        native.last_error = tostring(err or "native zone event decode failed")
+      end
+    end
+  end
+
+  native.drained_events = (tonumber(native.drained_events) or 0) + drained
+  native.emitted_events = (tonumber(native.emitted_events) or 0) + emitted
+  native.decode_errors = (tonumber(native.decode_errors) or 0) + decode_errors
+  if console_trace then
+    console_trace.drained_events = (tonumber(console_trace.drained_events) or 0) + console_drained
+    console_trace.emitted_events = (tonumber(console_trace.emitted_events) or 0) + console_emitted
+    console_trace.decode_errors = (tonumber(console_trace.decode_errors) or 0) + decode_errors
+  end
+  if wire_trace then
+    wire_trace.drained_events = (tonumber(wire_trace.drained_events) or 0) + wire_drained
+    wire_trace.emitted_events = (tonumber(wire_trace.emitted_events) or 0) + wire_emitted
+    wire_trace.decode_errors = (tonumber(wire_trace.decode_errors) or 0) + decode_errors
+  end
+  if process_trace then
+    process_trace.drained_events = (tonumber(process_trace.drained_events) or 0) + process_drained
+    process_trace.emitted_events = (tonumber(process_trace.emitted_events) or 0) + process_emitted
+    process_trace.decode_errors = (tonumber(process_trace.decode_errors) or 0) + decode_errors
+  end
+  if drained > 0 and options.silent ~= true then
+    log("info", "zone native drained events=" .. tostring(drained) .. " emitted=" .. tostring(emitted))
+  end
+  return result(decode_errors == 0, decode_errors == 0 and "OK" or "ZONE_NATIVE_DECODE_ERRORS", "Zone native queue drained", {
+    drained = drained,
+    emitted = emitted,
+    decodeErrors = decode_errors,
+    lines = {
+      "available=true",
+      "drained=" .. tostring(drained),
+      "emitted=" .. tostring(emitted),
+      "decode_errors=" .. tostring(decode_errors),
+      "total_drained=" .. tostring(native.drained_events or 0),
+      "total_emitted=" .. tostring(native.emitted_events or 0),
+    },
+  })
+end
+
+function BMF.tools.zoneNative.drain(options)
+  options = type(options) == "table" and options or {}
+  local ok, code, message, raw_events = BMF_zone_native_drain_raw(options.limit or options.max or 64)
+  if not ok then
+    local available = code ~= "ZONE_NATIVE_UNAVAILABLE"
+    return result(false, code, message, {
+      drained = 0,
+      emitted = 0,
+      lines = {
+        "available=" .. tostring(available),
+        "drained=0",
+        "emitted=0",
+        "last_error=" .. tostring(message or ""),
+      },
+    })
+  end
+
+  return BMF_zone_native_emit_raw(raw_events, options)
+end
+
+function BMF.tools.zoneConsoleTrace.start(options)
+  options = type(options) == "table" and options or {}
+  local trace = state.tools.zone_console_trace
+  trace.available = zone_console_trace_available()
+  if not trace.available then
+    trace.last_error = "BMFSocket zone console trace helpers are unavailable"
+    return result(false, "ZONE_CONSOLE_TRACE_UNAVAILABLE", trace.last_error, {
+      lines = {
+        "available=false",
+        "enabled=false",
+        "last_error=" .. trace.last_error,
+      },
+    })
+  end
+
+  local filter = tostring(options.filter or options.marker or "BMF_ZONE_TRACE")
+  local limit = tonumber(options.limit or options.max or options.maxCaptures or 16) or 16
+  local ok, started_or_error, status = pcall(BMFSocketZoneConsoleTraceStart, filter, limit)
+  if not ok or started_or_error == false then
+    trace.last_error = tostring(status or started_or_error or "BMFSocketZoneConsoleTraceStart failed")
+    return result(false, "ZONE_CONSOLE_TRACE_START_FAILED", trace.last_error, {
+      lines = {
+        "available=true",
+        "enabled=false",
+        "last_error=" .. trace.last_error,
+      },
+    })
+  end
+
+  trace.last_started_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+  local lines, fields = zone_console_trace_update_status(status or "")
+  log(
+    "info",
+    "zone console trace started reason="
+      .. tostring(options.reason or "manual")
+      .. " filter_configured=true"
+      .. " limit="
+      .. tostring(limit)
+  )
+  write_status()
+  return result(true, "OK", "Zone console trace started", {
+    fields = fields,
+    lines = lines,
+  })
+end
+
+function BMF.tools.zoneConsoleTrace.stop(options)
+  options = type(options) == "table" and options or {}
+  local trace = state.tools.zone_console_trace
+  if not zone_console_trace_available() then
+    trace.available = false
+    trace.enabled = false
+    trace.last_error = "BMFSocket zone console trace helpers are unavailable"
+    return result(false, "ZONE_CONSOLE_TRACE_UNAVAILABLE", trace.last_error, {
+      lines = {
+        "available=false",
+        "enabled=false",
+      },
+    })
+  end
+
+  local ok, stopped_or_error, status = pcall(BMFSocketZoneConsoleTraceStop)
+  if not ok or stopped_or_error == false then
+    trace.last_error = tostring(status or stopped_or_error or "BMFSocketZoneConsoleTraceStop failed")
+    return result(false, "ZONE_CONSOLE_TRACE_STOP_FAILED", trace.last_error, {
+      lines = {
+        "available=true",
+        "last_error=" .. trace.last_error,
+      },
+    })
+  end
+
+  local lines, fields = zone_console_trace_update_status(status or "")
+  log("info", "zone console trace stopped reason=" .. tostring(options.reason or "manual"))
+  write_status()
+  return result(true, "OK", "Zone console trace stopped", {
+    fields = fields,
+    lines = lines,
+  })
+end
+
+function BMF.tools.zoneConsoleTrace.status()
+  local trace = state.tools.zone_console_trace
+  trace.available = zone_console_trace_available()
+  if not trace.available then
+    return result(false, "ZONE_CONSOLE_TRACE_UNAVAILABLE", "BMFSocket zone console trace helpers are unavailable", {
+      lines = {
+        "available=false",
+        "enabled=false",
+      },
+    })
+  end
+
+  local ok, status_or_error = pcall(BMFSocketZoneConsoleTraceStatus)
+  if not ok then
+    trace.last_error = tostring(status_or_error or "BMFSocketZoneConsoleTraceStatus failed")
+    return result(false, "ZONE_CONSOLE_TRACE_STATUS_FAILED", trace.last_error, {
+      lines = {
+        "available=true",
+        "last_error=" .. trace.last_error,
+      },
+    })
+  end
+
+  local lines, fields = zone_console_trace_update_status(status_or_error or "")
+  return result(true, "OK", "Zone console trace status collected", {
+    fields = fields,
+    lines = lines,
+  })
+end
+
+function BMF.tools.zoneConsoleTrace.drain(options)
+  options = type(options) == "table" and options or {}
+  return BMF.tools.zoneNative.drain(options)
+end
+
+function BMF.tools.zoneWireTrace.start(options)
+  options = type(options) == "table" and options or {}
+  local trace = state.tools.zone_wire_trace
+  trace.available = zone_wire_trace_available()
+  if not trace.available then
+    trace.last_error = "BMFSocket zone wire PrintToConsole trace helpers are unavailable"
+    return result(false, "ZONE_WIRE_TRACE_UNAVAILABLE", trace.last_error, {
+      lines = {
+        "available=false",
+        "enabled=false",
+        "last_error=" .. trace.last_error,
+      },
+    })
+  end
+
+  local limit = tonumber(options.limit or options.max or options.maxCaptures or 16) or 16
+  local ok, started_or_error, status = pcall(BMFSocketZoneWirePrintTraceStart, limit)
+  if not ok or started_or_error == false then
+    trace.last_error = tostring(status or started_or_error or "BMFSocketZoneWirePrintTraceStart failed")
+    return result(false, "ZONE_WIRE_TRACE_START_FAILED", trace.last_error, {
+      lines = {
+        "available=true",
+        "enabled=false",
+        "last_error=" .. trace.last_error,
+      },
+    })
+  end
+
+  trace.last_started_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+  local lines, fields = zone_wire_trace_update_status(status or "")
+  log(
+    "info",
+    "zone wire trace started reason="
+      .. tostring(options.reason or "manual")
+      .. " limit="
+      .. tostring(limit)
+  )
+  write_status()
+  return result(true, "OK", "Zone wire PrintToConsole trace started", {
+    fields = fields,
+    lines = lines,
+  })
+end
+
+function BMF.tools.zoneWireTrace.stop(options)
+  options = type(options) == "table" and options or {}
+  local trace = state.tools.zone_wire_trace
+  if not zone_wire_trace_available() then
+    trace.available = false
+    trace.enabled = false
+    trace.last_error = "BMFSocket zone wire PrintToConsole trace helpers are unavailable"
+    return result(false, "ZONE_WIRE_TRACE_UNAVAILABLE", trace.last_error, {
+      lines = {
+        "available=false",
+        "enabled=false",
+      },
+    })
+  end
+
+  local ok, stopped_or_error, status = pcall(BMFSocketZoneWirePrintTraceStop)
+  if not ok or stopped_or_error == false then
+    trace.last_error = tostring(status or stopped_or_error or "BMFSocketZoneWirePrintTraceStop failed")
+    return result(false, "ZONE_WIRE_TRACE_STOP_FAILED", trace.last_error, {
+      lines = {
+        "available=true",
+        "last_error=" .. trace.last_error,
+      },
+    })
+  end
+
+  local lines, fields = zone_wire_trace_update_status(status or "")
+  log("info", "zone wire trace stopped reason=" .. tostring(options.reason or "manual"))
+  write_status()
+  return result(true, "OK", "Zone wire PrintToConsole trace stopped", {
+    fields = fields,
+    lines = lines,
+  })
+end
+
+function BMF.tools.zoneWireTrace.status()
+  local trace = state.tools.zone_wire_trace
+  trace.available = zone_wire_trace_available()
+  if not trace.available then
+    return result(false, "ZONE_WIRE_TRACE_UNAVAILABLE", "BMFSocket zone wire PrintToConsole trace helpers are unavailable", {
+      lines = {
+        "available=false",
+        "enabled=false",
+      },
+    })
+  end
+
+  local ok, status_or_error = pcall(BMFSocketZoneWirePrintTraceStatus)
+  if not ok then
+    trace.last_error = tostring(status_or_error or "BMFSocketZoneWirePrintTraceStatus failed")
+    return result(false, "ZONE_WIRE_TRACE_STATUS_FAILED", trace.last_error, {
+      lines = {
+        "available=true",
+        "last_error=" .. trace.last_error,
+      },
+    })
+  end
+
+  local lines, fields = zone_wire_trace_update_status(status_or_error or "")
+  return result(true, "OK", "Zone wire PrintToConsole trace status collected", {
+    fields = fields,
+    lines = lines,
+  })
+end
+
+function BMF.tools.zoneWireTrace.drain(options)
+  options = type(options) == "table" and options or {}
+  return BMF.tools.zoneNative.drain(options)
+end
+
+function BMF.tools.zoneProcessTrace.start(options)
+  options = type(options) == "table" and options or {}
+  local trace = state.tools.zone_process_trace
+  trace.available = zone_process_trace_available()
+  if not trace.available then
+    trace.last_error = "BMFSocket zone ProcessEvent trace helpers are unavailable"
+    return result(false, "ZONE_PROCESS_TRACE_UNAVAILABLE", trace.last_error, {
+      lines = {
+        "available=false",
+        "enabled=false",
+        "last_error=" .. trace.last_error,
+      },
+    })
+  end
+
+  local filters = tostring(options.filters or options.filter or "CharacterZoneEvent PrintToConsole WireGraph")
+  local limit = tonumber(options.limit or options.max or options.maxCaptures or 16) or 16
+  local slot = tonumber(options.slot or options.slotIndex or 72) or 72
+  local max_vtables = tonumber(options.maxVTables or options.maxvtables or options.vtables or 256) or 256
+  local ok, started_or_error, status = pcall(BMFSocketZoneProcessTraceStart, filters, limit, slot, max_vtables)
+  if not ok or started_or_error == false then
+    trace.last_error = tostring(status or started_or_error or "BMFSocketZoneProcessTraceStart failed")
+    return result(false, "ZONE_PROCESS_TRACE_START_FAILED", trace.last_error, {
+      lines = {
+        "available=true",
+        "enabled=false",
+        "last_error=" .. trace.last_error,
+      },
+    })
+  end
+
+  trace.last_started_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+  local lines, fields = zone_process_trace_update_status(status or "")
+  log(
+    "warn",
+    "zone ProcessEvent trace started reason="
+      .. tostring(options.reason or "manual")
+      .. " filters_configured=true"
+      .. " limit="
+      .. tostring(limit)
+      .. " max_vtables="
+      .. tostring(max_vtables)
+  )
+  write_status()
+  return result(true, "OK", "Zone ProcessEvent trace started", {
+    fields = fields,
+    lines = lines,
+  })
+end
+
+function BMF.tools.zoneProcessTrace.stop(options)
+  options = type(options) == "table" and options or {}
+  local trace = state.tools.zone_process_trace
+  if not zone_process_trace_available() then
+    trace.available = false
+    trace.enabled = false
+    trace.last_error = "BMFSocket zone ProcessEvent trace helpers are unavailable"
+    return result(false, "ZONE_PROCESS_TRACE_UNAVAILABLE", trace.last_error, {
+      lines = {
+        "available=false",
+        "enabled=false",
+      },
+    })
+  end
+
+  local ok, stopped_or_error, status = pcall(BMFSocketZoneProcessTraceStop)
+  if not ok or stopped_or_error == false then
+    trace.last_error = tostring(status or stopped_or_error or "BMFSocketZoneProcessTraceStop failed")
+    return result(false, "ZONE_PROCESS_TRACE_STOP_FAILED", trace.last_error, {
+      lines = {
+        "available=true",
+        "last_error=" .. trace.last_error,
+      },
+    })
+  end
+
+  local lines, fields = zone_process_trace_update_status(status or "")
+  log("info", "zone ProcessEvent trace stopped reason=" .. tostring(options.reason or "manual"))
+  write_status()
+  return result(true, "OK", "Zone ProcessEvent trace stopped", {
+    fields = fields,
+    lines = lines,
+  })
+end
+
+function BMF.tools.zoneProcessTrace.status()
+  local trace = state.tools.zone_process_trace
+  trace.available = zone_process_trace_available()
+  if not trace.available then
+    return result(false, "ZONE_PROCESS_TRACE_UNAVAILABLE", "BMFSocket zone ProcessEvent trace helpers are unavailable", {
+      lines = {
+        "available=false",
+        "enabled=false",
+      },
+    })
+  end
+
+  local ok, status_or_error = pcall(BMFSocketZoneProcessTraceStatus)
+  if not ok then
+    trace.last_error = tostring(status_or_error or "BMFSocketZoneProcessTraceStatus failed")
+    return result(false, "ZONE_PROCESS_TRACE_STATUS_FAILED", trace.last_error, {
+      lines = {
+        "available=true",
+        "last_error=" .. trace.last_error,
+      },
+    })
+  end
+
+  local lines, fields = zone_process_trace_update_status(status_or_error or "")
+  return result(true, "OK", "Zone ProcessEvent trace status collected", {
+    fields = fields,
+    lines = lines,
+  })
+end
+
+function BMF.tools.zoneProcessTrace.drain(options)
+  options = type(options) == "table" and options or {}
+  return BMF.tools.zoneNative.drain(options)
+end
+
 BMF.tools.resourceNative.start = function(options)
   return BMF.tools.treeCutNative.start(options)
 end
@@ -14266,7 +15774,91 @@ function minigame_live_resolve_ruleset_for_assignment(player_state)
   return nil, ""
 end
 
-function minigame_native_assign_team_param_hex(team, method, first_flag, second_flag, player_state)
+function minigame_team_lookup_key(value)
+  return trim_string(value or ""):lower():gsub("[^a-z0-9]+", "")
+end
+
+function minigame_game_mode_team_candidate_text(record)
+  return table.concat({
+    tostring(record.name or ""),
+    tostring(record.objectName or ""),
+    tostring(record.fullName or ""),
+    tostring(record.address or ""),
+  }, "|")
+end
+
+function minigame_live_game_mode_team_candidates(limit)
+  local objects = minigame_find_objects("BRGameModeTeam", limit or 64)
+  local records = {}
+  for index, object in ipairs(objects) do
+    records[#records + 1] = {
+      object = object,
+      index = index - 1,
+      findIndex = index,
+      source = "FindAllOf(BRGameModeTeam)[" .. tostring(index) .. "]",
+      address = minigame_object_address(object),
+      objectName = minigame_object_name(object),
+      fullName = minigame_object_full_name(object),
+      name = minigame_object_property(object, "TeamName"),
+      color = minigame_object_property(object, "TeamColor"),
+    }
+  end
+  return records
+end
+
+function minigame_live_resolve_game_mode_team_for_assignment(team, team_name)
+  local records = minigame_live_game_mode_team_candidates(64)
+  local query = minigame_team_lookup_key(team_name or "")
+  if query ~= "" then
+    for _, record in ipairs(records) do
+      if minigame_team_lookup_key(record.name) == query then
+        return record, "BRGameModeTeam.TeamName.exact"
+      end
+    end
+    for _, record in ipairs(records) do
+      local candidate = minigame_team_lookup_key(minigame_game_mode_team_candidate_text(record))
+      if candidate ~= "" and candidate:find(query, 1, true) ~= nil then
+        return record, "BRGameModeTeam.lookup.partial"
+      end
+    end
+  end
+
+  local index = tonumber(team)
+  if index ~= nil then
+    index = math.floor(index)
+    for _, record in ipairs(records) do
+      if tonumber(record.index) == index then
+        return record, "BRGameModeTeam.index"
+      end
+    end
+  end
+
+  local candidates = {}
+  for _, record in ipairs(records) do
+    candidates[#candidates + 1] = tostring(record.index)
+      .. ":"
+      .. tostring(record.name or "")
+      .. ":"
+      .. tostring(record.objectName or "")
+      .. ":"
+      .. tostring(record.address or "")
+  end
+  return nil, "no BRGameModeTeam matched team=" .. tostring(team or "") .. " teamName=" .. tostring(team_name or "") .. " candidates=" .. table.concat(candidates, "|")
+end
+
+function minigame_team_assignment_uses_game_mode_team(method)
+  return method == "serverjoingamemodeteam" or method == "serverrequestjoingamemodeteam"
+end
+
+function minigame_native_assign_team_param_hex(team, method, first_flag, second_flag, player_state, game_mode_team)
+  if method == "serverjoingamemodeteam" then
+    return minigame_int32_le_hex(team), 4, "ServerJoinGameModeTeam", ""
+  end
+
+  if method == "serverrequestjoingamemodeteam" then
+    return minigame_int32_le_hex(team), 4, "ServerRequestJoinGameModeTeam", ""
+  end
+
   if method == "serverrpc" then
     return minigame_int32_le_hex(team), 4, "ServerJoinRulesetTeam", ""
   end
@@ -14326,6 +15918,181 @@ function minigame_live_player_assignment_candidates(player_state)
   end
 
   return candidates
+end
+
+local function minigame_cached_player_record(query)
+  local needle = trim_string(query or ""):lower()
+  if needle == "" or type(read_file) ~= "function" or type(json_decode) ~= "function" then
+    return nil, ""
+  end
+
+  local raw = read_file(PLAYER_CACHE_PATH)
+  if not raw or trim_string(raw) == "" then
+    return nil, ""
+  end
+  local ok, decoded = pcall(json_decode, raw)
+  if not ok or type(decoded) ~= "table" then
+    return nil, ""
+  end
+  local players = type(decoded.players) == "table" and decoded.players or decoded
+  if type(players) ~= "table" then
+    return nil, ""
+  end
+
+  for _, player in ipairs(players) do
+    if type(player) == "table" then
+      for _, field in ipairs({
+        "uuid", "id", "playerId", "playerID", "username", "userName",
+        "displayName", "playerName", "originalName", "name",
+        "controllerPath", "playerStatePath",
+      }) do
+        local text = trim_string(tostring(player[field] or "")):lower()
+        if text ~= "" and (text == needle or text:find(needle, 1, true) ~= nil) then
+          return player, field
+        end
+      end
+    end
+  end
+  return nil, ""
+end
+
+local function minigame_find_cached_object(object_name, class_names)
+  local name = trim_string(tostring(object_name or ""))
+  if name == "" then
+    return nil
+  end
+
+  if type(FindObject) == "function" then
+    local ok, object = pcall(FindObject, nil, name, nil, nil)
+    if ok and minigame_object_valid(object) then
+      return object
+    end
+    for _, class_name in ipairs(class_names or {}) do
+      ok, object = pcall(FindObject, class_name, name, nil, nil)
+      if ok and minigame_object_valid(object) then
+        return object
+      end
+    end
+  end
+
+  if type(StaticFindObject) == "function" then
+    local ok, object = pcall(StaticFindObject, name)
+    if ok and minigame_object_valid(object) then
+      return object
+    end
+  end
+  return nil
+end
+
+local minigame_player_state_path_by_controller_cache = {}
+
+local function minigame_native_player_state_from_controller(controller)
+  if not minigame_object_valid(controller) then
+    return nil, ""
+  end
+  local controller_address = minigame_object_address(controller)
+  if controller_address == "" then
+    return nil, ""
+  end
+
+  local cached_path = minigame_player_state_path_by_controller_cache[controller_address]
+  local cached = minigame_find_cached_object(
+    cached_path,
+    { "BP_PlayerState_C", "BRPlayerState", "PlayerState" }
+  )
+  if minigame_object_valid(cached) then
+    return cached, "native.controller.PlayerState.path-cache"
+  end
+  minigame_player_state_path_by_controller_cache[controller_address] = nil
+
+  if type(BMFSocketDescribeUObject) ~= "function" then
+    return nil, ""
+  end
+  local ok, response = pcall(BMFSocketDescribeUObject, controller_address)
+  if not ok or type(response) ~= "string" then
+    return nil, ""
+  end
+
+  for line in response:gmatch("[^\r\n]+") do
+    local object_name = line:match("^memory_ref_%d+_name=(.+)$")
+    if object_name and object_name:lower():find("playerstate", 1, true) then
+      local player_state = minigame_find_cached_object(
+        object_name,
+        { "BP_PlayerState_C", "BRPlayerState", "PlayerState" }
+      )
+      if minigame_object_valid(player_state) then
+        minigame_player_state_path_by_controller_cache[controller_address] = minigame_object_full_name(player_state)
+        return player_state, "native.BMFSocketDescribeUObject.controller.PlayerState"
+      end
+    end
+    local full_name = line:match("^memory_ref_%d+_full_name=(.+)$")
+    if full_name and full_name:lower():find("playerstate", 1, true) then
+      local player_state = minigame_find_cached_object(
+        full_name,
+        { "BP_PlayerState_C", "BRPlayerState", "PlayerState" }
+      )
+      if minigame_object_valid(player_state) then
+        minigame_player_state_path_by_controller_cache[controller_address] = minigame_object_full_name(player_state)
+        return player_state, "native.BMFSocketDescribeUObject.controller.PlayerState"
+      end
+    end
+  end
+  return nil, ""
+end
+
+local function minigame_cached_player_state_for_assignment(query)
+  local player, match_field = minigame_cached_player_record(query)
+  if type(player) ~= "table" then
+    return nil, {}, nil
+  end
+
+  local candidates = {}
+  for _, field in ipairs({
+    "uuid", "id", "username", "userName", "displayName", "playerName",
+    "originalName", "name", "controllerPath", "playerStatePath",
+  }) do
+    local text = trim_string(tostring(player[field] or ""))
+    if text ~= "" then
+      candidates[#candidates + 1] = text
+    end
+  end
+
+  local player_state = minigame_find_cached_object(
+    player.playerStatePath,
+    { "BP_PlayerState_C", "BRPlayerState", "PlayerState" }
+  )
+  local source = "player_cache.playerStatePath"
+  if not minigame_object_valid(player_state) then
+    local controller = minigame_find_cached_object(
+      player.controllerPath,
+      { "BP_PlayerController_C", "BRPlayerController", "PlayerController" }
+    )
+    if minigame_object_valid(controller) then
+      player_state = minigame_try_property(controller, "PlayerState")
+      source = "player_cache.controllerPath.PlayerState"
+      if not minigame_object_valid(player_state) then
+        player_state, source = minigame_native_player_state_from_controller(controller)
+      end
+    end
+  end
+
+  if not minigame_object_valid(player_state) then
+    return nil, candidates, {
+      source = "player_cache",
+      fastPath = "player_cache." .. tostring(match_field or "") .. ".unresolved",
+      errors = { "cached controller did not expose a valid PlayerState" },
+    }
+  end
+
+  return {
+    object = player_state,
+    index = 1,
+    source = source,
+  }, candidates, {
+    source = source,
+    fastPath = "player_cache." .. tostring(match_field or "") .. ".controller_player_state",
+    errors = {},
+  }
 end
 
 function minigame_cached_single_player_match(query)
@@ -14560,6 +16327,11 @@ end
 
 function minigame_live_resolve_player_state_for_assignment(query)
   local needle = trim_string(query or ""):lower()
+  local cached_item, cached_candidates, cached_meta =
+    minigame_cached_player_state_for_assignment(query)
+  if cached_item and minigame_object_valid(cached_item.object) then
+    return cached_item, cached_candidates, cached_meta
+  end
   local single_cached_player, cache_source = minigame_cached_single_player_match(query)
   local player_states, meta = minigame_live_player_states({
     fallbackFindAll = true,
@@ -14657,10 +16429,15 @@ BMF.minigames.assignTeam = function(player_query, team_index, options)
   local controller_source = "player_state.Owner"
   local controller_fallback = ""
   local ruleset, ruleset_source = minigame_live_resolve_ruleset_for_assignment(player_state)
+  local team_name = trim_string(opts.teamName or opts.teamname or opts.teamLabel or opts.teamlabel or opts.teamQuery or opts.teamquery or "")
   local requested_method = trim_string(opts.method or opts.assignMethod or opts.nativeMethod or ""):lower()
   local method = requested_method
   if method == "" or method == "local" or method == "join" or method == "joinrulesetteam" or method == "join-ruleset-team" then
     method = "joinrulesetteam"
+  elseif method == "gamemode" or method == "game-mode" or method == "servergamemode" or method == "server-game-mode" or method == "serverjoingamemodeteam" or method == "server-join-game-mode-team" or method == "joingamemodeteam" or method == "join-game-mode-team" then
+    method = "serverjoingamemodeteam"
+  elseif method == "requestgamemode" or method == "request-game-mode" or method == "serverrequestgamemode" or method == "server-request-game-mode" or method == "serverrequestjoingamemodeteam" or method == "server-request-join-game-mode-team" or method == "requestjoingamemodeteam" or method == "request-join-game-mode-team" then
+    method = "serverrequestjoingamemodeteam"
   elseif method == "server" or method == "rpc" or method == "server-rpc" or method == "serverjoinrulesetteam" or method == "server-join-ruleset-team" then
     method = "serverrpc"
   elseif method == "handle" or method == "switch" or method == "ruleset" or method == "handleplayerswitchteam" or method == "handle-player-switch-team" then
@@ -14679,7 +16456,7 @@ BMF.minigames.assignTeam = function(player_query, team_index, options)
         "player=" .. query,
         "team_index=" .. tostring(team),
         "method=" .. tostring(requested_method),
-        "supported_methods=joinrulesetteam|serverrpc|handleplayerswitchteam|servercallbyname|joincallbyname",
+        "supported_methods=serverjoingamemodeteam|serverrequestjoingamemodeteam|joinrulesetteam|serverrpc|handleplayerswitchteam|servercallbyname|joincallbyname",
       },
     })
   end
@@ -14701,6 +16478,12 @@ BMF.minigames.assignTeam = function(player_query, team_index, options)
   if flag2 == nil then
     flag2 = true
   end
+  local game_mode_team_record = nil
+  local game_mode_team_source = ""
+  if minigame_team_assignment_uses_game_mode_team(method) then
+    game_mode_team_record, game_mode_team_source = minigame_live_resolve_game_mode_team_for_assignment(team, team_name)
+  end
+  local game_mode_team = game_mode_team_record and game_mode_team_record.object or nil
   local call_context = controller
   local call_context_kind = "controller"
   if method == "handleplayerswitchteam" then
@@ -14724,13 +16507,14 @@ BMF.minigames.assignTeam = function(player_query, team_index, options)
     end
     buffer_hex = ""
   else
-    buffer_hex, param_bytes, function_name, param_error = minigame_native_assign_team_param_hex(team, method, flag1 == true, flag2 == true, player_state)
+    buffer_hex, param_bytes, function_name, param_error = minigame_native_assign_team_param_hex(team, method, flag1 == true, flag2 == true, player_state, game_mode_team)
   end
   local dry_run = opts.dryRun == true
   local lines = {
     "code=OK",
     "player=" .. query,
     "team_index=" .. tostring(team),
+    "team_name=" .. tostring(team_name or ""),
     "method=" .. method,
     "function=" .. function_name,
     "param_bytes=" .. tostring(param_bytes),
@@ -14751,6 +16535,13 @@ BMF.minigames.assignTeam = function(player_query, team_index, options)
     "ruleset=" .. minigame_object_address(ruleset),
     "ruleset_name=" .. minigame_object_name(ruleset),
     "ruleset_source=" .. tostring(ruleset_source or ""),
+    "team_object=" .. minigame_object_address(game_mode_team),
+    "team_object_name=" .. minigame_object_name(game_mode_team),
+    "team_object_full=" .. minigame_object_full_name(game_mode_team),
+    "team_object_label=" .. tostring(game_mode_team_record and game_mode_team_record.name or ""),
+    "team_object_color=" .. tostring(game_mode_team_record and game_mode_team_record.color or ""),
+    "team_object_index=" .. tostring(game_mode_team_record and game_mode_team_record.index or ""),
+    "team_object_source=" .. tostring(game_mode_team_source or ""),
     "context_kind=" .. tostring(call_context_kind),
     "context=" .. minigame_object_address(call_context),
     "call_command=" .. tostring(call_by_name_command or ""),
@@ -14793,6 +16584,10 @@ BMF.minigames.assignTeam = function(player_query, team_index, options)
       controllerSource = controller_source,
       controllerFallback = controller_fallback,
       ruleset = minigame_object_address(ruleset),
+      teamObject = minigame_object_address(game_mode_team),
+      teamObjectName = minigame_object_name(game_mode_team),
+      teamObjectLabel = tostring(game_mode_team_record and game_mode_team_record.name or ""),
+      teamObjectSource = tostring(game_mode_team_source or ""),
       context = minigame_object_address(call_context),
       contextKind = call_context_kind,
       method = method,
@@ -14844,6 +16639,10 @@ BMF.minigames.assignTeam = function(player_query, team_index, options)
       controllerSource = controller_source,
       controllerFallback = controller_fallback,
       ruleset = minigame_object_address(ruleset),
+      teamObject = minigame_object_address(game_mode_team),
+      teamObjectName = minigame_object_name(game_mode_team),
+      teamObjectLabel = tostring(game_mode_team_record and game_mode_team_record.name or ""),
+      teamObjectSource = tostring(game_mode_team_source or ""),
       context = minigame_object_address(call_context),
       contextKind = call_context_kind,
       method = method,
@@ -14894,6 +16693,10 @@ BMF.minigames.assignTeam = function(player_query, team_index, options)
       controllerSource = controller_source,
       controllerFallback = controller_fallback,
       ruleset = minigame_object_address(ruleset),
+      teamObject = minigame_object_address(game_mode_team),
+      teamObjectName = minigame_object_name(game_mode_team),
+      teamObjectLabel = tostring(game_mode_team_record and game_mode_team_record.name or ""),
+      teamObjectSource = tostring(game_mode_team_source or ""),
       context = minigame_object_address(call_context),
       contextKind = call_context_kind,
     method = method,
@@ -17500,8 +19303,802 @@ local function normalize_staged_prefab_world(options)
   return normalize_world_name(options.stagedWorld or options.stage or options.name or options.bundle or options.world)
 end
 
-local function has_staged_prefab_world_option(options)
+function has_staged_prefab_world_option(options)
   return options.stagedWorld ~= nil or options.stage ~= nil or options.name ~= nil or options.bundle ~= nil or options.world ~= nil
+end
+
+local function prefab_save_region_enabled()
+  return BMF_env_bool("BMF_PREFAB_SAVE_REGION_ENABLED", BMF_env_bool("BMF_BRICK_WORLD_REGION_SCAN_ENABLED", false))
+end
+
+local function prefab_save_region_next_sequence()
+  local store = state.tools.prefab_region
+  store.sequence = (tonumber(store.sequence) or 0) + 1
+  return store.sequence
+end
+
+local function prefab_save_region_prefabs_dir()
+  local configured = first_string(
+    BMF_env_string("BMF_PREFAB_SAVE_REGION_PREFABS_DIR"),
+    BMF_env_string("BMF_BRICKADIA_PREFABS_DIR"))
+  if configured then
+    return configured:gsub("\\", "/"):gsub("/+$", "")
+  end
+
+  local saved_dir = first_string(
+    BMF_env_string("BMF_BRICKADIA_SAVED_DIR"),
+    state.config and state.config.brickadiaSavedDir or "")
+  if saved_dir then
+    return join_path(saved_dir:gsub("\\", "/"), "Prefabs")
+  end
+
+  local builds_dir = first_string(
+    BMF_env_string("BMF_BRICK_WORLD_REGION_SCAN_BUILDS_DIR"),
+    BMF_env_string("BMF_BRICKADIA_BUILDS_DIR"))
+  if builds_dir then
+    local parent = builds_dir:gsub("\\", "/"):gsub("/+$", ""):match("^(.*)/Builds$")
+    if parent and parent ~= "" then
+      return join_path(parent, "Prefabs")
+    end
+  end
+
+  return ""
+end
+
+local function prefab_save_region_normalize_path(value, sequence)
+  local text = trim_string(value or "")
+  if text == "" then
+    text = "BMFRegionProbe_" .. tostring(sequence) .. "_" .. tostring(os.time())
+  end
+  text = text:gsub("\\", "/")
+  if text:lower():match("%.brz$") then
+    text = text:sub(1, #text - 4)
+  end
+
+  local relative, relative_err = safe_relative_path(text, "prefab path")
+  if not relative then
+    return nil, relative_err
+  end
+  if not relative:match("^[A-Za-z0-9_/%-%.]+$") then
+    return nil, "prefab path may only contain letters, numbers, slash, dash, underscore, and dot"
+  end
+  return relative
+end
+
+local function prefab_save_region_file_exists(path)
+  local handle = io.open(path, "rb")
+  if not handle then
+    return false
+  end
+  handle:close()
+  return true
+end
+
+local function prefab_save_region_exec_once(command, executor)
+  if executor == "native" then
+    if type(_G.BMFSocketPrefabSaveRegion) ~= "function" then
+      return result(false, "EXECUTOR_UNAVAILABLE", "Native prefab save-region executor is unavailable", {
+        executor = executor,
+        required_native = "BMFSocketPrefabSaveRegion",
+      })
+    end
+    return result(false, "NATIVE_EXEC_NOT_IMPLEMENTED", "Native prefab save-region executor has not been wired for this build", {
+      executor = executor,
+      required_native = "BMFSocketPrefabSaveRegion",
+    })
+  end
+
+  if executor == "console_manager_probe" then
+    if type(_G.BMFSocketConsoleManagerInputProbe) ~= "function" then
+      return result(false, "EXECUTOR_UNAVAILABLE", "Native console-manager probe is unavailable", {
+        executor = executor,
+        required_native = "BMFSocketConsoleManagerInputProbe",
+      })
+    end
+    local ok, output = pcall(_G.BMFSocketConsoleManagerInputProbe, command, "console-manager-input-probe", "0xE0", "world")
+    if not ok then
+      return result(false, "CONSOLE_EXEC_FAILED", tostring(output or "native console-manager probe failed"), {
+        executor = executor,
+      })
+    end
+    output = tostring(output or "")
+    local success = output:match("\nok=true") ~= nil or output:match("^ok=true") ~= nil
+    local detail = output:match("\ndetail=([^\r\n]*)") or output:match("^detail=([^\r\n]*)") or ""
+    return result(success, success and "OK" or "CONSOLE_EXEC_FAILED", detail, {
+      executor = executor,
+      output = output,
+    })
+  end
+
+  if executor == "console_manager" then
+    if type(OmeggaExecuteConsoleManagerInput) ~= "function" then
+      return result(false, "CONSOLE_EXEC_UNAVAILABLE", "OmeggaExecuteConsoleManagerInput is unavailable", { executor = executor })
+    end
+    local ok, success, output = pcall(OmeggaExecuteConsoleManagerInput, command)
+    if ok and success then
+      return result(true, "OK", "Command executed", { executor = executor, output = output or "" })
+    end
+    return result(false, "CONSOLE_EXEC_FAILED", tostring(output or success), { executor = executor })
+  end
+
+  if executor == "kismet" then
+    if type(OmeggaExecuteKismetConsoleCommand) ~= "function" then
+      return result(false, "CONSOLE_EXEC_UNAVAILABLE", "OmeggaExecuteKismetConsoleCommand is unavailable", { executor = executor })
+    end
+    local ok, success, output = pcall(OmeggaExecuteKismetConsoleCommand, command)
+    if ok and success then
+      return result(true, "OK", "Command executed", { executor = executor, output = output or "" })
+    end
+    return result(false, "CONSOLE_EXEC_FAILED", tostring(output or success), { executor = executor })
+  end
+
+  if executor == "cached_console" then
+    if type(OmeggaExecuteCachedConsoleExec) ~= "function" then
+      return result(false, "CONSOLE_EXEC_UNAVAILABLE", "OmeggaExecuteCachedConsoleExec is unavailable", { executor = executor })
+    end
+    local ok, success, output = pcall(OmeggaExecuteCachedConsoleExec, command)
+    if ok and success then
+      return result(true, "OK", "Command executed", { executor = executor, output = output or "" })
+    end
+    return result(false, "CONSOLE_EXEC_FAILED", tostring(output or success), { executor = executor })
+  end
+
+  return result(false, "CONSOLE_EXEC_UNAVAILABLE", "Unknown prefab save-region executor", { executor = executor })
+end
+
+local function prefab_save_region_exec_command(command, requested_executor)
+  local requested = trim_string(requested_executor or ""):lower()
+  requested = requested:gsub("%-", "_")
+  if requested == "" or requested == "all" or requested == "auto" then
+    requested = "all"
+  elseif requested == "manager" or requested == "consolemanager" then
+    requested = "console_manager"
+  elseif requested == "probe" or requested == "consolemanagerprobe" or requested == "console_manager_input_probe" then
+    requested = "console_manager_probe"
+  elseif requested == "cached" or requested == "console" then
+    requested = "cached_console"
+  end
+
+  local executors = {}
+  if requested == "all" then
+    executors = { "console_manager", "kismet", "cached_console" }
+  else
+    executors = { requested }
+  end
+
+  local attempts = {}
+  local last_response = nil
+  for _, executor in ipairs(executors) do
+    local response = prefab_save_region_exec_once(command, executor)
+    attempts[#attempts + 1] = {
+      executor = executor,
+      ok = response.ok,
+      code = response.code,
+      message = response.message,
+    }
+    if response.ok then
+      response.data.attempts = attempts
+      return response
+    end
+    last_response = response
+  end
+
+  if #executors == 1 and last_response and last_response.code == "EXECUTOR_UNAVAILABLE" then
+    last_response.data = type(last_response.data) == "table" and last_response.data or {}
+    last_response.data.attempts = attempts
+    return last_response
+  end
+
+  local message = last_response and last_response.message or "No prefab save-region executor succeeded"
+  return result(false, "CONSOLE_EXEC_FAILED", message, {
+    executor = last_response and last_response.data and last_response.data.executor or requested,
+    attempts = attempts,
+  })
+end
+
+local function prefab_save_region_store_result(sequence, ok, code, message, lines, data)
+  local store = state.tools.prefab_region
+  store.last_result = {
+    sequence = sequence,
+    ok = ok and true or false,
+    code = tostring(code or (ok and "OK" or "ERROR")),
+    message = tostring(message or ""),
+    updated_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    lines = copy_table(lines or {}),
+    data = copy_table(data or {}),
+  }
+  store.last_error = ok and "" or store.last_result.message
+  return store.last_result
+end
+
+BMF.prefabs.saveRegionStatus = function()
+  local last = state.tools.prefab_region.last_result
+  if not last then
+    return result(false, "PREFAB_SAVE_REGION_NO_RESULT", "No prefab save-region probe has completed.", {
+      lines = {
+        "ok=false",
+        "code=PREFAB_SAVE_REGION_NO_RESULT",
+        "operation=prefab-save-region-status",
+      },
+    })
+  end
+
+  local data = copy_table(last.data or {})
+  data.sequence = last.sequence
+  data.updated_at = last.updated_at
+  data.lines = copy_table(last.lines or {})
+  return result(last.ok, last.code, last.message, data)
+end
+
+local function prefab_transfer_decode(value)
+  return trim_string(percent_decode(value or ""))
+end
+
+local function prefab_transfer_store_result(transfer_id, ok, code, message, lines, data)
+  local store = state.tools.prefab_region
+  transfer_id = trim_string(transfer_id or "")
+  if transfer_id == "" then
+    transfer_id = "transfer_" .. tostring(prefab_save_region_next_sequence()) .. "_" .. tostring(os.time())
+  end
+  local record = {
+    transfer_id = transfer_id,
+    ok = ok and true or false,
+    code = tostring(code or (ok and "OK" or "ERROR")),
+    message = tostring(message or ""),
+    updated_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    lines = copy_table(lines or {}),
+    data = copy_table(data or {}),
+  }
+  store.transfers = type(store.transfers) == "table" and store.transfers or {}
+  store.transfer_order = type(store.transfer_order) == "table" and store.transfer_order or {}
+  store.transfers[transfer_id] = record
+  store.transfer_order[#store.transfer_order + 1] = transfer_id
+  store.last_transfer_id = transfer_id
+  store.last_error = ok and "" or record.message
+  local max_records = math.max(1, BMF_env_number("BMF_PREFAB_TRANSFER_STATUS_RETENTION", 20, 1))
+  while #store.transfer_order > max_records do
+    local removed = table.remove(store.transfer_order, 1)
+    if removed and removed ~= transfer_id then
+      store.transfers[removed] = nil
+    end
+  end
+  return record
+end
+
+local function prefab_transfer_record_result(transfer_id, ok, code, message, data)
+  data = type(data) == "table" and data or {}
+  local lines = {
+    "ok=" .. tostring(ok and true or false),
+    "code=" .. tostring(code or (ok and "OK" or "ERROR")),
+    "operation=property-prefab-transfer",
+    "transfer_id=" .. tostring(transfer_id or ""),
+    "stage=" .. tostring(data.stage or ""),
+    "property_id=" .. tostring(data.propertyId or ""),
+    "owner_id=" .. tostring(data.ownerId or ""),
+    "source_prefab_path=" .. tostring(data.sourcePrefabPath or ""),
+    "owned_prefab_path=" .. tostring(data.ownedPrefabPath or ""),
+    "rollback_command=" .. tostring(data.rollbackCommand or ""),
+    "brick_count=" .. tostring(data.brickCount or 0),
+    "owner_count=" .. tostring(data.ownerCount or 0),
+    "detail=" .. tostring(message or ""),
+  }
+  if type(data.requiredNative) == "table" then
+    lines[#lines + 1] = "required_native=" .. table.concat(data.requiredNative, "|")
+  end
+  if data.nativeAvailable ~= nil then
+    lines[#lines + 1] = "native_available=" .. tostring(data.nativeAvailable == true)
+  end
+  if data.center then
+    lines[#lines + 1] = "x=" .. tostring(data.center.x or "")
+    lines[#lines + 1] = "y=" .. tostring(data.center.y or "")
+    lines[#lines + 1] = "z=" .. tostring(data.center.z or "")
+  end
+  if data.extent then
+    lines[#lines + 1] = "extent_x=" .. tostring(data.extent.x or "")
+    lines[#lines + 1] = "extent_y=" .. tostring(data.extent.y or "")
+    lines[#lines + 1] = "extent_z=" .. tostring(data.extent.z or "")
+  end
+  data.lines = lines
+  prefab_transfer_store_result(transfer_id, ok, code, message, lines, data)
+  audit_record("prefabs.transferRegionOwnership", data, {
+    source = "framework",
+    severity = ok and "info" or "warn",
+    ok = ok and true or false,
+    code = tostring(code or ""),
+  })
+  return result(ok, code, message, data)
+end
+
+local function prefab_transfer_native_status()
+  local required = {
+    "BMFSocketPrefabSaveRegion",
+    "BMFSocketWorldClearRegion",
+    "BMFSocketPrefabLoad",
+  }
+  local missing = {}
+  for _, name in ipairs(required) do
+    if type(_G[name]) ~= "function" then
+      missing[#missing + 1] = name
+    end
+  end
+  return #missing == 0, required, missing
+end
+
+local function prefab_transfer_validate_region(options)
+  local positional = type(options._positional) == "table" and options._positional or {}
+  local x = tonumber(options.x or options.centerx or options.center_x or positional[1])
+  local y = tonumber(options.y or options.centery or options.center_y or positional[2])
+  local z = tonumber(options.z or options.centerz or options.center_z or positional[3])
+  local extent_x = tonumber(options.ex or options.extentx or options.extent_x or positional[4])
+  local extent_y = tonumber(options.ey or options.extenty or options.extent_y or positional[5])
+  local extent_z = tonumber(options.ez or options.extentz or options.extent_z or positional[6])
+  if not (x and y and z and extent_x and extent_y and extent_z) then
+    return nil, "PREFAB_TRANSFER_REGION_REQUIRED", "x y z ex ey ez are required"
+  end
+
+  local max_extent = BMF_env_number("BMF_PREFAB_TRANSFER_MAX_EXTENT", 512, 1)
+  local max_extent_z = BMF_env_number("BMF_PREFAB_TRANSFER_MAX_EXTENT_Z", 1024, 1)
+  x = math.floor(x)
+  y = math.floor(y)
+  z = math.floor(z)
+  extent_x = math.floor(extent_x)
+  extent_y = math.floor(extent_y)
+  extent_z = math.floor(extent_z)
+  if extent_x <= 0 or extent_y <= 0 or extent_z <= 0 then
+    return nil, "PREFAB_TRANSFER_REGION_INVALID", "lot extents must be positive"
+  end
+  if extent_x > max_extent or extent_y > max_extent or extent_z > max_extent_z then
+    return nil, "PREFAB_TRANSFER_EXTENT_TOO_LARGE", "lot extents exceed configured maximum"
+  end
+
+  return {
+    center = { x = x, y = y, z = z },
+    extent = { x = extent_x, y = extent_y, z = extent_z },
+  }
+end
+
+local function prefab_transfer_prefab_paths(property_id, path_prefix, sequence)
+  local base_path = path_prefix
+  if trim_string(base_path or "") == "" then
+    base_path = "CityRPGTransfers/" .. tostring(property_id or "property") .. "/" .. tostring(sequence) .. "_" .. tostring(os.time())
+  end
+  local source_path, source_err = prefab_save_region_normalize_path(base_path .. "_source", sequence)
+  if not source_path then
+    return nil, nil, source_err
+  end
+  local owned_path, owned_err = prefab_save_region_normalize_path(base_path .. "_owned", sequence)
+  if not owned_path then
+    return nil, nil, owned_err
+  end
+  local prefabs_dir = prefab_save_region_prefabs_dir()
+  return join_path(prefabs_dir, source_path .. ".brz"), join_path(prefabs_dir, owned_path .. ".brz"), nil, source_path, owned_path
+end
+
+BMF.prefabs.transferRegionStatus = function(options)
+  options = type(options) == "table" and options or {}
+  local transfer_id = prefab_transfer_decode(options.transferid or options.transfer_id or "")
+  local store = state.tools.prefab_region
+  if transfer_id == "" then
+    transfer_id = trim_string(store.last_transfer_id or "")
+  end
+  local record = transfer_id ~= "" and store.transfers and store.transfers[transfer_id] or nil
+  if type(record) ~= "table" then
+    return result(false, "PREFAB_TRANSFER_NO_RESULT", "No property prefab transfer result is available.", {
+      lines = {
+        "ok=false",
+        "code=PREFAB_TRANSFER_NO_RESULT",
+        "operation=property-prefab-transfer-status",
+        "transfer_id=" .. tostring(transfer_id or ""),
+      },
+    })
+  end
+
+  local data = copy_table(record.data or {})
+  data.transferId = transfer_id
+  data.updatedAt = record.updated_at
+  data.lines = copy_table(record.lines or {})
+  return result(record.ok, record.code, record.message, data)
+end
+
+BMF.prefabs.transferRegionRollback = function(options)
+  options = type(options) == "table" and options or {}
+  local transfer_id = prefab_transfer_decode(options.transferid or options.transfer_id or "")
+  if tostring(options.confirm or options.confirmation or "") ~= "property-transfer" then
+    return result(false, "PREFAB_TRANSFER_CONFIRM_REQUIRED", "confirm=property-transfer is required for prefab transfer rollback", {
+      lines = {
+        "ok=false",
+        "code=PREFAB_TRANSFER_CONFIRM_REQUIRED",
+        "operation=property-prefab-transfer-rollback",
+        "transfer_id=" .. transfer_id,
+        "required_confirm=property-transfer",
+      },
+    })
+  end
+  if transfer_id == "" then
+    return result(false, "PREFAB_TRANSFER_ID_REQUIRED", "transfer_id is required for prefab transfer rollback", {
+      lines = {
+        "ok=false",
+        "code=PREFAB_TRANSFER_ID_REQUIRED",
+        "operation=property-prefab-transfer-rollback",
+      },
+    })
+  end
+
+  local native_available, required_native, missing_native = prefab_transfer_native_status()
+  if not native_available then
+    local message = "Native prefab rollback executor is unavailable."
+    return prefab_transfer_record_result(transfer_id, false, "EXECUTOR_UNAVAILABLE", message, {
+      stage = "rollback",
+      transferId = transfer_id,
+      nativeAvailable = false,
+      requiredNative = required_native,
+      missingNative = missing_native,
+    })
+  end
+
+  return prefab_transfer_record_result(transfer_id, false, "ROLLBACK_NOT_IMPLEMENTED", "Native prefab rollback executor has not been wired for this build.", {
+    stage = "rollback",
+    transferId = transfer_id,
+    nativeAvailable = true,
+    requiredNative = required_native,
+  })
+end
+
+BMF.prefabs.transferRegionOwnership = function(options)
+  options = type(options) == "table" and options or {}
+  local sequence = prefab_save_region_next_sequence()
+  local property_id = prefab_transfer_decode(options.propertyid or options.property_id or options.lot or options.lotid or options.id)
+  local owner_id = prefab_transfer_decode(options.ownerid or options.owner_id or options.userid or options.user_id)
+  local owner_name = prefab_transfer_decode(options.ownername or options.owner_name or options.name)
+  local owner_display_name = prefab_transfer_decode(options.ownerdisplayname or options.owner_display_name or options.displayname or options.display_name)
+  local transfer_id = prefab_transfer_decode(options.transferid or options.transfer_id)
+  if transfer_id == "" then
+    transfer_id = tostring(property_id ~= "" and property_id or "property") .. "_" .. tostring(sequence) .. "_" .. tostring(os.time())
+  end
+
+  if tostring(options.confirm or options.confirmation or "") ~= "property-transfer" then
+    return prefab_transfer_record_result(transfer_id, false, "PREFAB_TRANSFER_CONFIRM_REQUIRED", "confirm=property-transfer is required for property prefab transfers", {
+      stage = "validate",
+      propertyId = property_id,
+      ownerId = owner_id,
+      transferId = transfer_id,
+    })
+  end
+  if property_id == "" then
+    return prefab_transfer_record_result(transfer_id, false, "PREFAB_TRANSFER_PROPERTY_REQUIRED", "property_id is required for property prefab transfers", {
+      stage = "validate",
+      ownerId = owner_id,
+      transferId = transfer_id,
+    })
+  end
+  if owner_id == "" then
+    return prefab_transfer_record_result(transfer_id, false, "PREFAB_TRANSFER_OWNER_REQUIRED", "owner_id is required for property prefab transfers", {
+      stage = "validate",
+      propertyId = property_id,
+      transferId = transfer_id,
+    })
+  end
+
+  local region, region_code, region_message = prefab_transfer_validate_region(options)
+  if not region then
+    return prefab_transfer_record_result(transfer_id, false, region_code, region_message, {
+      stage = "validate",
+      propertyId = property_id,
+      ownerId = owner_id,
+      transferId = transfer_id,
+    })
+  end
+
+  local prefabs_dir = prefab_save_region_prefabs_dir()
+  if prefabs_dir == "" then
+    return prefab_transfer_record_result(transfer_id, false, "PREFAB_TRANSFER_PREFABS_DIR_REQUIRED", "BMF_PREFAB_SAVE_REGION_PREFABS_DIR or BMF_BRICKADIA_SAVED_DIR is required", {
+      stage = "validate",
+      propertyId = property_id,
+      ownerId = owner_id,
+      transferId = transfer_id,
+      center = region.center,
+      extent = region.extent,
+    })
+  end
+
+  local source_file, owned_file, path_error, source_relative, owned_relative = prefab_transfer_prefab_paths(property_id, prefab_transfer_decode(options.pathprefix or options.path_prefix), sequence)
+  if path_error then
+    return prefab_transfer_record_result(transfer_id, false, "PREFAB_TRANSFER_PATH_INVALID", path_error, {
+      stage = "validate",
+      propertyId = property_id,
+      ownerId = owner_id,
+      transferId = transfer_id,
+      center = region.center,
+      extent = region.extent,
+    })
+  end
+
+  local native_available, required_native, missing_native = prefab_transfer_native_status()
+  if not native_available then
+    local message = "Native prefab transfer executor is unavailable."
+    return prefab_transfer_record_result(transfer_id, false, "EXECUTOR_UNAVAILABLE", message, {
+      stage = "save_region",
+      propertyId = property_id,
+      ownerId = owner_id,
+      ownerName = owner_name,
+      ownerDisplayName = owner_display_name,
+      transferId = transfer_id,
+      sourcePrefabPath = source_file,
+      ownedPrefabPath = owned_file,
+      sourcePrefab = source_relative,
+      ownedPrefab = owned_relative,
+      center = region.center,
+      extent = region.extent,
+      includeEntities = option_boolean({ include_entities = options.includeentities or options.include_entities or options.entities }, "include_entities", false),
+      nativeAvailable = false,
+      requiredNative = required_native,
+      missingNative = missing_native,
+    })
+  end
+
+  if not BMF_env_bool("BMF_PREFAB_TRANSFER_ENABLED", false) then
+    return prefab_transfer_record_result(transfer_id, false, "PREFAB_TRANSFER_DISABLED", "Set BMF_PREFAB_TRANSFER_ENABLED=1 after native prefab transfer helpers are validated.", {
+      stage = "validate",
+      propertyId = property_id,
+      ownerId = owner_id,
+      transferId = transfer_id,
+      sourcePrefabPath = source_file,
+      ownedPrefabPath = owned_file,
+      center = region.center,
+      extent = region.extent,
+      nativeAvailable = true,
+      requiredNative = required_native,
+    })
+  end
+
+  return prefab_transfer_record_result(transfer_id, false, "TRANSFER_NOT_IMPLEMENTED", "Native prefab transfer executor exists but has not been wired for this build.", {
+    stage = "save_region",
+    propertyId = property_id,
+    ownerId = owner_id,
+    transferId = transfer_id,
+    sourcePrefabPath = source_file,
+    ownedPrefabPath = owned_file,
+    center = region.center,
+    extent = region.extent,
+    nativeAvailable = true,
+    requiredNative = required_native,
+  })
+end
+
+BMF.prefabs.saveRegionProbe = function(options)
+  options = type(options) == "table" and options or {}
+  local positional = type(options._positional) == "table" and options._positional or {}
+  local confirm = tostring(options.confirm or options.confirmation or positional[8] or "")
+  if confirm ~= "prefab-save-region" then
+    return result(false, "PREFAB_SAVE_REGION_CONFIRM_REQUIRED", "confirm=prefab-save-region is required for EA3 prefab save-region probes", {
+      lines = {
+        "ok=false",
+        "code=PREFAB_SAVE_REGION_CONFIRM_REQUIRED",
+        "required_confirm=prefab-save-region",
+      },
+    })
+  end
+  if not prefab_save_region_enabled() then
+    return result(false, "PREFAB_SAVE_REGION_DISABLED", "EA3 prefab save-region probes are disabled", {
+      lines = {
+        "ok=false",
+        "code=PREFAB_SAVE_REGION_DISABLED",
+        "required_env=BMF_PREFAB_SAVE_REGION_ENABLED=1",
+      },
+    })
+  end
+
+  local x = tonumber(options.x or options.centerx or options.centerX or positional[1])
+  local y = tonumber(options.y or options.centery or options.centerY or positional[2])
+  local z = tonumber(options.z or options.centerz or options.centerZ or positional[3])
+  local extent_x = tonumber(options.ex or options.extentx or options.extentX or options.halfx or options.halfX or positional[4])
+  local extent_y = tonumber(options.ey or options.extenty or options.extentY or options.halfy or options.halfY or positional[5])
+  local extent_z = tonumber(options.ez or options.extentz or options.extentZ or options.halfz or options.halfZ or positional[6])
+  if not (x and y and z and extent_x and extent_y and extent_z) then
+    return result(false, "PREFAB_SAVE_REGION_ARGUMENTS_REQUIRED", "x y z ex ey ez are required for EA3 prefab save-region probes", {
+      lines = {
+        "ok=false",
+        "code=PREFAB_SAVE_REGION_ARGUMENTS_REQUIRED",
+      },
+    })
+  end
+
+  x = math.floor(x)
+  y = math.floor(y)
+  z = math.floor(z)
+  extent_x = math.max(0, math.floor(extent_x))
+  extent_y = math.max(0, math.floor(extent_y))
+  extent_z = math.max(0, math.floor(extent_z))
+
+  local max_extent = BMF_env_number("BMF_PREFAB_SAVE_REGION_MAX_EXTENT", 512, 1)
+  local max_extent_z = BMF_env_number("BMF_PREFAB_SAVE_REGION_MAX_EXTENT_Z", 1024, 1)
+  if extent_x > max_extent or extent_y > max_extent or extent_z > max_extent_z then
+    return result(false, "PREFAB_SAVE_REGION_EXTENT_TOO_LARGE", "prefab save-region extent exceeds configured maximum", {
+      lines = {
+        "ok=false",
+        "code=PREFAB_SAVE_REGION_EXTENT_TOO_LARGE",
+        "extent_x=" .. tostring(extent_x),
+        "extent_y=" .. tostring(extent_y),
+        "extent_z=" .. tostring(extent_z),
+        "max_extent=" .. tostring(max_extent),
+        "max_extent_z=" .. tostring(max_extent_z),
+      },
+    })
+  end
+
+  local prefabs_dir = prefab_save_region_prefabs_dir()
+  if prefabs_dir == "" then
+    return result(false, "PREFAB_SAVE_REGION_PREFABS_DIR_REQUIRED", "BMF_PREFAB_SAVE_REGION_PREFABS_DIR or BMF_BRICKADIA_SAVED_DIR is required", {
+      lines = {
+        "ok=false",
+        "code=PREFAB_SAVE_REGION_PREFABS_DIR_REQUIRED",
+      },
+    })
+  end
+
+  local sequence = prefab_save_region_next_sequence()
+  local relative_path, relative_err = prefab_save_region_normalize_path(options.path or options.name or options.prefab or options.save or positional[7], sequence)
+  if not relative_path then
+    return result(false, "PREFAB_SAVE_REGION_PATH_INVALID", relative_err, {
+      lines = {
+        "ok=false",
+        "code=PREFAB_SAVE_REGION_PATH_INVALID",
+        "detail=" .. tostring(relative_err or ""),
+      },
+    })
+  end
+
+  local save_path = join_path(prefabs_dir, relative_path .. ".brz")
+  os.remove(save_path)
+
+  local include_entities = option_boolean({
+    includeentities = options.includeentities or options.includeEntities or options.entities,
+  }, "includeentities", false)
+  local cleanup = option_boolean({ cleanup = options.cleanup or options.delete }, "cleanup", false)
+  local command = table.concat({
+    "br.Prefab.SaveRegion",
+    quote_console_string(relative_path),
+    tostring(x),
+    tostring(y),
+    tostring(z),
+    tostring(extent_x),
+    tostring(extent_y),
+    tostring(extent_z),
+    include_entities and "true" or "false",
+  }, " ")
+
+  local executor = options.executor or options.route or options.mode or "all"
+  local response = prefab_save_region_exec_command(command, executor)
+  audit_record("prefabs.saveRegionProbe", {
+    command = command,
+    path = relative_path,
+    save_path = save_path,
+    executor = tostring(executor or "all"),
+  }, {
+    source = "framework",
+    severity = response.ok and "info" or "warn",
+    ok = response.ok,
+    code = response.code,
+  })
+  if not response.ok then
+    local failure_code = response.code == "EXECUTOR_UNAVAILABLE" and "EXECUTOR_UNAVAILABLE" or "PREFAB_SAVE_REGION_COMMAND_FAILED"
+    local failure_message = response.message or "br.Prefab.SaveRegion command failed"
+    local lines = {
+      "ok=false",
+      "code=" .. failure_code,
+      "operation=prefab-save-region",
+      "sequence=" .. tostring(sequence),
+      "executor=" .. tostring(response.data and response.data.executor or ""),
+      "detail=" .. tostring(failure_message),
+      "command=" .. command,
+      "save_path=" .. save_path,
+    }
+    if response.data and response.data.required_native then
+      lines[#lines + 1] = "required_native=" .. tostring(response.data.required_native)
+    end
+    for index, attempt in ipairs(response.data and response.data.attempts or {}) do
+      lines[#lines + 1] = "executor_attempt_" .. tostring(index) .. "="
+        .. tostring(attempt.executor or "")
+        .. "|ok=" .. tostring(attempt.ok and true or false)
+        .. "|code=" .. tostring(attempt.code or "")
+        .. "|detail=" .. tostring(attempt.message or "")
+    end
+    prefab_save_region_store_result(sequence, false, failure_code, failure_message, lines, {
+      command = command,
+      path = relative_path,
+      save_path = save_path,
+      executor = response.data and response.data.executor or "",
+      attempts = response.data and response.data.attempts or {},
+      required_native = response.data and response.data.required_native or "",
+    })
+    return result(false, failure_code, failure_message, {
+      sequence = sequence,
+      lines = lines,
+    })
+  end
+
+  local poll_ms = math.max(50, BMF_env_number("BMF_PREFAB_SAVE_REGION_POLL_MS", 100, 50))
+  local timeout_ms = math.max(poll_ms, BMF_env_number("BMF_PREFAB_SAVE_REGION_TIMEOUT_MS", 5000, poll_ms))
+  local max_attempts = math.max(1, math.floor((timeout_ms + poll_ms - 1) / poll_ms))
+  local attempts = 0
+
+  local function finish(ok, code, message)
+    if cleanup and ok then
+      os.remove(save_path)
+    end
+    local lines = {
+      "ok=" .. tostring(ok and true or false),
+      "code=" .. tostring(code),
+      "operation=prefab-save-region",
+      "sequence=" .. tostring(sequence),
+      "path=" .. relative_path,
+      "save_path=" .. save_path,
+      "prefabs_dir=" .. prefabs_dir,
+      "x=" .. tostring(x),
+      "y=" .. tostring(y),
+      "z=" .. tostring(z),
+      "extent_x=" .. tostring(extent_x),
+      "extent_y=" .. tostring(extent_y),
+      "extent_z=" .. tostring(extent_z),
+      "include_entities=" .. tostring(include_entities),
+      "attempts=" .. tostring(attempts),
+      "poll_ms=" .. tostring(poll_ms),
+      "timeout_ms=" .. tostring(timeout_ms),
+    }
+    prefab_save_region_store_result(sequence, ok, code, message, lines, {
+      command = command,
+      path = relative_path,
+      save_path = save_path,
+      prefabs_dir = prefabs_dir,
+      attempts = attempts,
+      cleanup = cleanup,
+    })
+  end
+
+  local function attempt()
+    attempts = attempts + 1
+    if prefab_save_region_file_exists(save_path) then
+      finish(true, "OK", "Prefab save-region probe created the expected BRZ file.")
+      return
+    end
+    if attempts >= max_attempts then
+      finish(false, "PREFAB_SAVE_REGION_FILE_TIMEOUT", "br.Prefab.SaveRegion did not produce the expected BRZ file before timeout.")
+      return
+    end
+    if not BMF.timers.after(poll_ms, attempt) then
+      finish(false, "PREFAB_SAVE_REGION_TIMER_UNAVAILABLE", "BMF timer unavailable while waiting for prefab save-region output.")
+    end
+  end
+
+  if not BMF.timers.after(poll_ms, attempt) then
+    attempt()
+  end
+
+  return result(true, "OK", "Prefab save-region probe queued", {
+    queued = true,
+    sequence = sequence,
+    path = relative_path,
+    save_path = save_path,
+    lines = {
+      "ok=true",
+      "code=OK",
+      "queued=true",
+      "operation=prefab-save-region",
+      "sequence=" .. tostring(sequence),
+      "path=" .. relative_path,
+      "save_path=" .. save_path,
+      "prefabs_dir=" .. prefabs_dir,
+      "x=" .. tostring(x),
+      "y=" .. tostring(y),
+      "z=" .. tostring(z),
+      "extent_x=" .. tostring(extent_x),
+      "extent_y=" .. tostring(extent_y),
+      "extent_z=" .. tostring(extent_z),
+      "include_entities=" .. tostring(include_entities),
+      "poll_ms=" .. tostring(poll_ms),
+      "timeout_ms=" .. tostring(timeout_ms),
+    },
+  })
 end
 
 BMF.prefabs.planLoadBrz = function(options)
@@ -17589,7 +20186,7 @@ end
 
 BMF.vehicles = {}
 
-local function vehicle_spawn_position(options, fallback)
+function vehicle_spawn_position(options, fallback)
   options = options or {}
   fallback = fallback or {}
   local position = options.position
@@ -17605,7 +20202,7 @@ local function vehicle_spawn_position(options, fallback)
   }
 end
 
-local function vehicle_spawn_load(name, position, index)
+function vehicle_spawn_load(name, position, index)
   local load_options = {
     name = name,
     position = { x = position.x, y = position.y, z = position.z },
@@ -17751,10 +20348,208 @@ end
 
 BMF.chat = {}
 
+local function BMF_player_message_implementation_probe(message, controller_hint, probe_options)
+  probe_options = type(probe_options) == "table" and probe_options or {}
+  local text = trim_string(message or "")
+  local requested_controller = trim_string(controller_hint or "")
+  local preferred_controller_address = trim_string(probe_options.controllerAddress or "")
+  if text == "" then
+    return result(false, "INVALID_OPTIONS", "message is required", {
+      lines = {
+        "ok=false",
+        "code=INVALID_OPTIONS",
+      },
+    })
+  end
+  if probe_options.skipRateLimit ~= true then
+    local limited = rate_limit_check("chat.playerMessageImplementationProbe")
+    if not limited.ok then
+      return limited
+    end
+  end
+  if type(BMFSocketPlayerChatMessageImplementationProbe) ~= "function" then
+    return result(false, "NATIVE_PLAYER_CHAT_IMPL_UNAVAILABLE", "BMFSocketPlayerChatMessageImplementationProbe native helper is unavailable.", {
+      message = text,
+      lines = {
+        "ok=false",
+        "code=NATIVE_PLAYER_CHAT_IMPL_UNAVAILABLE",
+        "message=" .. tostring(text),
+      },
+    })
+  end
+
+  local candidates = {}
+  local seen_candidates = {}
+
+  local function add_candidate(controller, label)
+    if controller == nil or
+        type(live_chat_is_valid_object) ~= "function" or
+        not live_chat_is_valid_object(controller) then
+      return
+    end
+    if type(live_chat_object_key) ~= "function" then
+      return
+    end
+
+    local address = trim_string(live_chat_object_key(controller, ""))
+    if address == "" or seen_candidates[address] then
+      return
+    end
+    seen_candidates[address] = true
+    candidates[#candidates + 1] = {
+      address = address,
+      label = tostring(label or address),
+    }
+  end
+
+  if preferred_controller_address ~= "" then
+    seen_candidates[preferred_controller_address] = true
+    candidates[#candidates + 1] = {
+      address = preferred_controller_address,
+      label = "cached-controller",
+    }
+  end
+
+  if requested_controller ~= "" then
+    local controller = nil
+    if type(live_chat_find_controller_by_name) == "function" then
+      controller = live_chat_find_controller_by_name(requested_controller)
+    end
+    if controller == nil or
+        type(live_chat_is_valid_object) ~= "function" or
+        not live_chat_is_valid_object(controller) then
+      return result(false, "PLAYER_CONTROLLER_NOT_FOUND", "Requested live player controller was not found.", {
+        message = text,
+        controllerHint = requested_controller,
+        lines = {
+          "ok=false",
+          "code=PLAYER_CONTROLLER_NOT_FOUND",
+          "message=" .. tostring(text),
+          "controller_hint=" .. tostring(requested_controller),
+        },
+      })
+    end
+    add_candidate(controller, requested_controller)
+    if #candidates == 0 then
+      return result(false, "PLAYER_CONTROLLER_NOT_FOUND", "Requested live player controller address was unavailable.", {
+        message = text,
+        controllerHint = requested_controller,
+        lines = {
+          "ok=false",
+          "code=PLAYER_CONTROLLER_NOT_FOUND",
+          "message=" .. tostring(text),
+          "controller_hint=" .. tostring(requested_controller),
+        },
+      })
+    end
+  elseif preferred_controller_address == "" and type(FindAllOf) == "function" then
+    -- FindAllOf returns controller instances in creation order. Trying the
+    -- newest Brickadia controller first avoids the short window where a
+    -- disconnected controller still passes UObject lifecycle checks.
+    for _, class_name in ipairs({ "BP_PlayerController_C", "BRPlayerController" }) do
+      local ok, controllers = pcall(FindAllOf, class_name)
+      if ok and type(controllers) == "table" then
+        for index = #controllers, 1, -1 do
+          add_candidate(
+            controllers[index],
+            "FindAllOf(" .. class_name .. ")[" .. tostring(index) .. "]"
+          )
+          if #candidates >= 64 then
+            break
+          end
+        end
+      end
+      if #candidates > 0 then
+        break
+      end
+    end
+  end
+
+  if #candidates == 0 then
+    -- Preserve the native resolver as a bounded fallback for startup builds
+    -- where FindAllOf is unavailable or no controller has been published yet.
+    candidates[1] = {
+      address = "",
+      label = "native-fallback",
+    }
+  end
+
+  local attempt_lines = {}
+  local last_lines = {}
+  local last_fields = {}
+  local last_detail = "Native player chat implementation probe"
+  local controller_strategy = preferred_controller_address ~= "" and "cached-then-newest-live" or "newest-live-first"
+  for index, candidate in ipairs(candidates) do
+    local ok, response = pcall(
+      BMFSocketPlayerChatMessageImplementationProbe,
+      text,
+      "player-chat-message-implementation-probe",
+      candidate.address
+    )
+    if ok then
+      local lines, fields = parse_key_value_lines(response)
+      last_lines = lines
+      last_fields = fields
+      last_detail = tostring(fields.detail or last_detail)
+      attempt_lines[#attempt_lines + 1] =
+        "controller_attempt_" .. tostring(index) .. "=" .. tostring(candidate.label) ..
+        "|ok=" .. tostring(fields.ok or "false") ..
+        "|stage=" .. tostring(fields.stage or "") ..
+        "|exception_code=" .. tostring(fields.exception_code or "")
+      if tostring(fields.ok or "") == "true" then
+        lines[#lines + 1] = "controller_strategy=" .. controller_strategy
+        lines[#lines + 1] = "controller_candidate_count=" .. tostring(#candidates)
+        lines[#lines + 1] = "controller_attempt_count=" .. tostring(index)
+        for _, attempt_line in ipairs(attempt_lines) do
+          lines[#lines + 1] = attempt_line
+        end
+        return result(true, "OK", last_detail, {
+          message = text,
+          controllerHint = requested_controller,
+          controllerAddress = candidate.address,
+          controllerStrategy = controller_strategy,
+          controllerCandidateCount = #candidates,
+          controllerAttemptCount = index,
+          executor = "native.player_controller.server_push_chat_message_implementation",
+          fields = fields,
+          lines = lines,
+        })
+      end
+    else
+      last_detail = tostring(response or "native helper failed")
+      attempt_lines[#attempt_lines + 1] =
+        "controller_attempt_" .. tostring(index) .. "=" .. tostring(candidate.label) ..
+        "|ok=false|stage=pcall|detail=" .. last_detail
+    end
+  end
+
+  last_lines[#last_lines + 1] = "controller_strategy=" .. controller_strategy
+  last_lines[#last_lines + 1] = "controller_candidate_count=" .. tostring(#candidates)
+  last_lines[#last_lines + 1] = "controller_attempt_count=" .. tostring(#candidates)
+  for _, attempt_line in ipairs(attempt_lines) do
+    last_lines[#last_lines + 1] = attempt_line
+  end
+  return result(false, "NATIVE_PLAYER_CHAT_IMPL_FAILED", last_detail, {
+    message = text,
+    controllerHint = requested_controller,
+    controllerAddress = "",
+    controllerStrategy = controller_strategy,
+    controllerCandidateCount = #candidates,
+    controllerAttemptCount = #candidates,
+    executor = "native.player_controller.server_push_chat_message_implementation",
+    fields = last_fields,
+    lines = last_lines,
+  })
+end
+
+function BMF.chat.playerMessageImplementationProbe(message, controller_hint)
+  return BMF_player_message_implementation_probe(message, controller_hint, {})
+end
+
 local LIVE_CHAT_CONTROLLER_CLASSES = { "BP_PlayerController_C", "BRPlayerController", "PlayerController" }
 local LIVE_CHAT_MAX_CONTROLLER_TARGETS = 64
 
-local function live_chat_is_valid_object(object)
+function live_chat_is_valid_object(object)
   if object == nil then
     return false
   end
@@ -17767,7 +20562,7 @@ local function live_chat_is_valid_object(object)
   return ok and is_valid == true
 end
 
-local function live_chat_object_key(object, fallback)
+function live_chat_object_key(object, fallback)
   if live_chat_is_valid_object(object) and type(object.GetAddress) == "function" then
     local ok, address = pcall(function()
       return object:GetAddress()
@@ -17779,7 +20574,7 @@ local function live_chat_object_key(object, fallback)
   return tostring(fallback or object or "")
 end
 
-local function live_chat_object_label(object, fallback)
+function live_chat_object_label(object, fallback)
   local address = live_chat_object_key(object, "")
   if address ~= "" then
     return tostring(fallback or "object") .. "@" .. address
@@ -17787,7 +20582,7 @@ local function live_chat_object_label(object, fallback)
   return tostring(fallback or "object")
 end
 
-local function live_chat_object_full_name(object)
+function live_chat_object_full_name(object)
   if live_chat_is_valid_object(object) and type(object.GetFullName) == "function" then
     local ok, full_name = pcall(function()
       return object:GetFullName()
@@ -17799,7 +20594,7 @@ local function live_chat_object_full_name(object)
   return ""
 end
 
-local function live_chat_find_controller_by_name(object_name)
+function live_chat_find_controller_by_name(object_name)
   local name = trim_string(tostring(object_name or ""))
   if name == "" then
     return nil
@@ -17829,7 +20624,7 @@ local function live_chat_find_controller_by_name(object_name)
   return nil
 end
 
-local function live_chat_first_property_text(values, names)
+function live_chat_first_property_text(values, names)
   values = type(values) == "table" and values or {}
   for _, name in ipairs(names or {}) do
     local record = values[name]
@@ -17847,7 +20642,7 @@ local function live_chat_first_property_text(values, names)
   return ""
 end
 
-local function live_chat_controller_metadata(controller)
+function live_chat_controller_metadata(controller)
   local metadata = {}
   if not minigame_object_valid(controller) then
     return metadata
@@ -17886,7 +20681,7 @@ local function live_chat_controller_metadata(controller)
   return metadata
 end
 
-local function live_chat_cached_players()
+function live_chat_cached_players()
   local raw = read_file(PLAYER_CACHE_PATH)
   if not raw or trim_string(raw) == "" then
     return {}
@@ -17899,7 +20694,7 @@ local function live_chat_cached_players()
   return cache.players
 end
 
-local function live_chat_collect_targets()
+function live_chat_collect_targets()
   local targets = {}
   local seen = {}
 
@@ -17974,7 +20769,7 @@ local function live_chat_collect_targets()
   return targets
 end
 
-local function live_chat_target_summary(target)
+function live_chat_target_summary(target)
   return {
     name = tostring(target.name or ""),
     userName = tostring(target.userName or ""),
@@ -17989,7 +20784,7 @@ local function live_chat_target_summary(target)
   }
 end
 
-local function live_chat_target_matches(target, query)
+function live_chat_target_matches(target, query)
   local normalized = trim_string(tostring(query or "")):lower()
   if normalized == "" then
     return false
@@ -18011,7 +20806,7 @@ local function live_chat_target_matches(target, query)
   return false
 end
 
-local function live_chat_query_text(player)
+function live_chat_query_text(player)
   if type(player) == "table" then
     return first_string(
       player.uuid,
@@ -18032,7 +20827,7 @@ local function live_chat_query_text(player)
   return tostring(player or "")
 end
 
-local function live_chat_resolve_target(player)
+function live_chat_resolve_target(player)
   local query = live_chat_query_text(player)
   local targets = live_chat_collect_targets()
   if trim_string(query) ~= "" and #targets == 1 then
@@ -18046,7 +20841,7 @@ local function live_chat_resolve_target(player)
   return nil, targets
 end
 
-local function live_chat_send_to_controller(controller, message)
+function live_chat_send_to_controller(controller, message)
   if type(OmeggaCallFunctionByNameWithArguments) ~= "function" then
     return false, "OmeggaCallFunctionByNameWithArguments is unavailable"
   end
@@ -18065,7 +20860,7 @@ local function live_chat_send_to_controller(controller, message)
   return false, tostring(success), command
 end
 
-local function live_chat_send_to_targets(targets, message)
+function live_chat_send_to_targets(targets, message)
   local delivered = {}
   local failed = {}
   local command = ""
@@ -18152,7 +20947,7 @@ end
 
 BMF.players = {}
 
-local function external_player_record(record)
+function external_player_record(record)
   if type(record) ~= "table" then
     return record
   end
@@ -18174,7 +20969,7 @@ local function external_player_record(record)
   return record
 end
 
-local function load_player_cache()
+function load_player_cache()
   local raw = read_file(PLAYER_CACHE_PATH)
   if raw == nil or trim_string(raw) == "" then
     state.player_cache = nil
@@ -18194,7 +20989,7 @@ local function load_player_cache()
   return decoded, ""
 end
 
-local function write_player_cache(cache)
+function write_player_cache(cache)
   local ok = write_file(PLAYER_CACHE_PATH, json_encode(cache or {}) .. "\n")
   if ok then
     state.player_cache = cache
@@ -18203,7 +20998,7 @@ local function write_player_cache(cache)
   return ok
 end
 
-local function configured_saved_dir()
+function configured_saved_dir()
   local saved_dir = trim_string(state.config.brickadiaSavedDir or "")
   if saved_dir == "" then
     return ""
@@ -18211,7 +21006,7 @@ local function configured_saved_dir()
   return saved_dir:gsub("\\", "/"):gsub("/+$", "")
 end
 
-local function load_player_name_cache(saved_dir)
+function load_player_name_cache(saved_dir)
   local path = join_path(saved_dir, "Server/PlayerNameCache.json")
   local raw = read_file(path)
   if not raw or trim_string(raw) == "" then
@@ -18225,14 +21020,14 @@ local function load_player_name_cache(saved_dir)
   return decoded.savedPlayerNames, path, ""
 end
 
-local function player_name_cache_lookup(name_cache, uuid)
+function player_name_cache_lookup(name_cache, uuid)
   if type(name_cache) ~= "table" then
     return ""
   end
   return tostring(name_cache[tostring(uuid or "")] or "")
 end
 
-local function record_from_pending_login(pending, name_cache)
+function record_from_pending_login(pending, name_cache)
   if type(pending) ~= "table" or not is_uuid(pending.uuid) then
     return nil
   end
@@ -18251,7 +21046,7 @@ local function record_from_pending_login(pending, name_cache)
   }
 end
 
-local function remove_active_player_by_name(active, order, player_name)
+function remove_active_player_by_name(active, order, player_name)
   local lowered = trim_string(player_name):lower()
   if lowered == "" then
     return
@@ -18271,7 +21066,7 @@ local function remove_active_player_by_name(active, order, player_name)
   end
 end
 
-local function parse_brickadia_log_players(saved_dir)
+function parse_brickadia_log_players(saved_dir)
   local path = join_path(saved_dir, "Logs/Brickadia.log")
   local raw = read_file(path)
   if not raw or trim_string(raw) == "" then
@@ -18342,7 +21137,7 @@ local function parse_brickadia_log_players(saved_dir)
   }
 end
 
-local function native_player_records()
+function native_player_records()
   local saved_dir = configured_saved_dir()
   if saved_dir == "" then
     return {}, {
@@ -18359,12 +21154,12 @@ local function native_player_records()
   return players, detail
 end
 
-local function live_player_controller_count()
+function live_player_controller_count()
   local targets = live_chat_collect_targets()
   return #targets, targets
 end
 
-local function player_cache_records(cache)
+function player_cache_records(cache)
   if type(cache) ~= "table" then
     return {}
   end
@@ -18824,8 +21619,58 @@ function player_position_native_attempt(fields, source_value, source_label, raw)
   }
 end
 
-function player_position_native_position_from_attempt(attempt, fields)
+function player_position_native_observed_memory_source_is_usable(attempt, fields)
+  fields = type(fields) == "table" and fields or {}
+  local source_kind = tostring(
+    (attempt and (attempt.sourceKind or attempt.source_kind)) or
+    fields.source_kind or
+    fields.sourceKind or
+    ""
+  )
+  local source_kind_lower = source_kind:lower()
+  if source_kind_lower:find("observed_memory", 1, true) == nil then
+    return true
+  end
+
+  local root_component = tostring(
+    (attempt and (attempt.rootComponent or attempt.root_component)) or
+    fields.root_component or
+    fields.rootComponent or
+    ""
+  ):lower()
+  local root_component_full_name = tostring(
+    (attempt and (attempt.rootComponentFullName or attempt.root_component_full_name)) or
+    fields.root_component_full_name or
+    fields.rootComponentFullName or
+    ""
+  ):lower()
+
+  local known_component_root =
+    root_component:find("collisioncylinder", 1, true) ~= nil or
+    root_component_full_name:find("capsulecomponent", 1, true) ~= nil
+  local measured_component_vector =
+    source_kind_lower:find("root_component.memberoffset.observed_memory.vector3d", 1, true) ~= nil
+
+  return known_component_root and measured_component_vector
+end
+
+function player_position_native_attempt_is_usable(attempt, fields)
   if not (attempt and attempt.ok == true) then
+    return false
+  end
+  fields = type(fields) == "table" and fields or {}
+  local source_kind = tostring(attempt.sourceKind or attempt.source_kind or fields.source_kind or "")
+  if source_kind:lower():find("observed_memory", 1, true) ~= nil and
+      not player_position_native_observed_memory_source_is_usable(attempt, fields) then
+    attempt.ok = false
+    attempt.detail = "observed-memory vector is diagnostic-only"
+    return false
+  end
+  return true
+end
+
+function player_position_native_position_from_attempt(attempt, fields)
+  if not player_position_native_attempt_is_usable(attempt, fields) then
     return nil
   end
   local position = {
@@ -18971,7 +21816,9 @@ function player_position_native_from_controller(controller, query)
       }
       attempts[#attempts + 1] = attempt
 
-      if attempt.ok then
+      if attempt.ok and not player_position_native_attempt_is_usable(attempt, fields) then
+        last_detail = attempt.detail
+      elseif attempt.ok then
         local position = {
           x = finite_number(fields.x, nil),
           y = finite_number(fields.y, nil),
@@ -19014,6 +21861,11 @@ end
 function player_position_add_native_scan_record(players, fields, limit)
   fields = type(fields) == "table" and fields or {}
   if #players >= limit or tostring(fields.ok or "") ~= "true" then
+    return false
+  end
+  local source_kind = tostring(fields.source_kind or fields.sourceKind or "")
+  if source_kind:lower():find("observed_memory", 1, true) ~= nil and
+      not player_position_native_observed_memory_source_is_usable(fields, fields) then
     return false
   end
 
@@ -19129,7 +21981,7 @@ function player_position_native_scan_snapshot(opts, query, limit)
   return data
 end
 
-local function player_position_controller_cache_ttl_seconds()
+function player_position_controller_cache_ttl_seconds()
   local configured = tonumber(os.getenv("BMF_PLAYERS_POSITIONS_CONTROLLER_CACHE_TTL_SECONDS") or "")
   if configured ~= nil and configured > 0 then
     return configured
@@ -19137,7 +21989,7 @@ local function player_position_controller_cache_ttl_seconds()
   return tonumber(state.player_position_controller_cache.ttl_seconds) or 120
 end
 
-local function player_position_controller_cache_key(value)
+function player_position_controller_cache_key(value)
   local text = trim_string(tostring(value or ""))
   if text == "" then
     return ""
@@ -19145,7 +21997,7 @@ local function player_position_controller_cache_key(value)
   return string.lower(text)
 end
 
-local function player_position_prefixed_source(prefix, value)
+function player_position_prefixed_source(prefix, value)
   local text = trim_string(tostring(value or ""))
   if text == "" then
     return ""
@@ -19156,7 +22008,7 @@ local function player_position_prefixed_source(prefix, value)
   return tostring(prefix or "uobject") .. ":" .. text
 end
 
-local function player_position_controller_cache_keys(record)
+function player_position_controller_cache_keys(record)
   local keys = {}
   local seen = {}
   local function add(value)
@@ -19181,7 +22033,7 @@ local function player_position_controller_cache_keys(record)
   return keys
 end
 
-local function player_position_controller_cache_lookup(player)
+function player_position_controller_cache_lookup(player)
   local cache = state.player_position_controller_cache
   local records = cache and cache.records or {}
   local ttl_seconds = player_position_controller_cache_ttl_seconds()
@@ -19199,7 +22051,24 @@ local function player_position_controller_cache_lookup(player)
   return nil
 end
 
-local function player_position_controller_cache_upsert(identity, target, native_detail)
+function player_position_from_cached_record(player)
+  if type(player) ~= "table" or type(player.position) ~= "table" then
+    return nil
+  end
+
+  local position = {
+    x = finite_number(player.position.x or player.position.X or player.position[1], nil),
+    y = finite_number(player.position.y or player.position.Y or player.position[2], nil),
+    z = finite_number(player.position.z or player.position.Z or player.position[3], nil),
+  }
+  if position.x ~= nil and position.y ~= nil and position.z ~= nil then
+    return position
+  end
+
+  return nil
+end
+
+function player_position_controller_cache_upsert(identity, target, native_detail)
   if type(native_detail) ~= "table" then
     return
   end
@@ -19280,6 +22149,7 @@ function player_position_known_records_snapshot(opts, query, limit)
 
   local players = {}
   local positioned = 0
+  local cached_positioned = 0
   local max_count = math.min(limit, #(selected or {}))
   local native_available = type(BMFSocketPlayerLocation) == "function"
 
@@ -19295,6 +22165,14 @@ function player_position_known_records_snapshot(opts, query, limit)
     local player_state_path = trim_string(player and player.playerStatePath or "")
     local pawn_path = trim_string(player and (player.pawnPath or player.pawnAddress) or "")
     local root_component_path = trim_string(player and (player.rootComponentPath or player.rootComponentAddress) or "")
+    position = player_position_from_cached_record(player)
+    if position ~= nil then
+      cached_positioned = cached_positioned + 1
+      source = trim_string(player and (player.positionSource or player.position_source) or "")
+      if source == "" then
+        source = "cache.position"
+      end
+    end
     local controller_cache_record = player_position_controller_cache_lookup(player)
     if root_component_path == "" and controller_cache_record ~= nil then
       root_component_path = trim_string(controller_cache_record.rootComponentAddress or controller_cache_record.rootComponentPath or "")
@@ -19308,37 +22186,39 @@ function player_position_known_records_snapshot(opts, query, limit)
     if player_state_path == "" and controller_cache_record ~= nil then
       player_state_path = trim_string(controller_cache_record.playerStatePath or "")
     end
-    if root_component_path ~= "" then
-      source_values[#source_values + 1] = {
-        value = player_position_prefixed_source("component", root_component_path),
-        label = "fast-cache.rootComponentAddress",
-      }
-    end
-    if pawn_path ~= "" then
-      source_values[#source_values + 1] = {
-        value = player_position_prefixed_source("pawn", pawn_path),
-        label = "fast-cache.pawnAddress",
-      }
-    end
-    if controller_path ~= "" then
-      source_values[#source_values + 1] = {
-        value = player_position_prefixed_source("controller", controller_path),
-        label = controller_cache_record ~= nil and "fast-cache.controllerAddress" or "cache.controllerPath",
-      }
-    end
-    if player_state_path ~= "" then
-      source_values[#source_values + 1] = { value = player_state_path, label = "cache.playerStatePath" }
-    end
+    if position == nil then
+      if root_component_path ~= "" then
+        source_values[#source_values + 1] = {
+          value = player_position_prefixed_source("component", root_component_path),
+          label = "fast-cache.rootComponentAddress",
+        }
+      end
+      if pawn_path ~= "" then
+        source_values[#source_values + 1] = {
+          value = player_position_prefixed_source("pawn", pawn_path),
+          label = "fast-cache.pawnAddress",
+        }
+      end
+      if controller_path ~= "" then
+        source_values[#source_values + 1] = {
+          value = player_position_prefixed_source("controller", controller_path),
+          label = controller_cache_record ~= nil and "fast-cache.controllerAddress" or "cache.controllerPath",
+        }
+      end
+      if player_state_path ~= "" then
+        source_values[#source_values + 1] = { value = player_state_path, label = "cache.playerStatePath" }
+      end
 
-    for _, source_value in ipairs(source_values) do
-      position, source, native_detail = player_position_native_from_source(
-        source_value.value,
-        query ~= "" and query or player and (player.username or player.playerName or player.displayName or player.uuid) or "",
-        source_value.label
-      )
-      attempts[#attempts + 1] = native_detail
-      if position ~= nil then
-        break
+      for _, source_value in ipairs(source_values) do
+        position, source, native_detail = player_position_native_from_source(
+          source_value.value,
+          query ~= "" and query or player and (player.username or player.playerName or player.displayName or player.uuid) or "",
+          source_value.label
+        )
+        attempts[#attempts + 1] = native_detail
+        if position ~= nil then
+          break
+        end
       end
     end
 
@@ -19387,6 +22267,7 @@ function player_position_known_records_snapshot(opts, query, limit)
     "players=" .. tostring(#(selected or {})),
     "returned=" .. tostring(#players),
     "positioned=" .. tostring(positioned),
+    "cached_positioned=" .. tostring(cached_positioned),
     "known_players=" .. tostring(#known_players),
     "native_available=" .. tostring(native_available),
     "adapter=" .. tostring((listed.data and listed.data.adapter) or ""),
@@ -19860,11 +22741,11 @@ BMF.players.positions = function(options)
   return result(ok, ok and "OK" or "POSITION_UNAVAILABLE", ok and "Live player positions collected" or "Live player positions were unavailable", data)
 end
 
-local function player_position_snapshot_enabled()
+function player_position_snapshot_enabled()
   return BMF_env_bool("BMF_PLAYERS_POSITIONS_SNAPSHOT_ENABLED", false)
 end
 
-local function player_position_snapshot_path()
+function player_position_snapshot_path()
   local configured = trim_string(BMF_env_string("BMF_PLAYERS_POSITIONS_SNAPSHOT_PATH"))
   if configured ~= "" then
     return configured
@@ -19872,17 +22753,78 @@ local function player_position_snapshot_path()
   return PLAYER_POSITIONS_SNAPSHOT_PATH
 end
 
-local function player_position_snapshot_interval_ms()
+function player_position_snapshot_interval_ms()
   local configured = BMF_env_number("BMF_PLAYERS_POSITIONS_SNAPSHOT_MS", 2000, 250)
   return math.max(1000, math.min(60000, math.floor(tonumber(configured) or 2000)))
 end
 
-local function player_position_snapshot_limit()
+function player_position_snapshot_limit()
   local configured = BMF_env_number("BMF_PLAYERS_POSITIONS_SNAPSHOT_LIMIT", 64, 1)
   return math.max(1, math.min(128, math.floor(tonumber(configured) or 64)))
 end
 
-local function write_player_position_snapshot(reason)
+function write_player_position_snapshot_file(path, value)
+  local suffix = tostring(os.time()) .. "." .. tostring(math.random(100000, 999999))
+  local temp_path = tostring(path or "") .. ".tmp." .. suffix
+  if not write_file(temp_path, value) then
+    return false
+  end
+
+  os.remove(path)
+  if os.rename(temp_path, path) then
+    return true
+  end
+
+  os.remove(temp_path)
+  return write_file(path, value)
+end
+
+function player_position_snapshot_record_has_identity(record)
+  local player = type(record) == "table" and type(record.player) == "table" and record.player or {}
+  for _, value in ipairs({ player.id, player.uuid, player.name, player.username, player.displayName }) do
+    if trim_string(value or "") ~= "" then
+      return true
+    end
+  end
+  return false
+end
+
+function player_position_snapshot_record_has_position(record)
+  if type(record) ~= "table" or record.ok ~= true or type(record.position) ~= "table" then
+    return false
+  end
+  return finite_number(record.position.x, nil) ~= nil
+    and finite_number(record.position.y, nil) ~= nil
+    and finite_number(record.position.z, nil) ~= nil
+end
+
+function sanitize_player_position_snapshot(data)
+  data = type(data) == "table" and data or {}
+  local source_players = type(data.players) == "table" and data.players or {}
+  local usable = {}
+  local dropped = 0
+  for _, record in ipairs(source_players) do
+    if player_position_snapshot_record_has_position(record) and player_position_snapshot_record_has_identity(record) then
+      usable[#usable + 1] = record
+    else
+      dropped = dropped + 1
+    end
+  end
+
+  data.players = usable
+  data.counts = type(data.counts) == "table" and data.counts or {}
+  data.counts.returned = #usable
+  data.counts.positioned = #usable
+  data.counts.droppedUnusable = dropped
+  if dropped > 0 then
+    data.lines = type(data.lines) == "table" and data.lines or {}
+    data.lines[#data.lines + 1] = "dropped_unusable=" .. tostring(dropped)
+    data.lines[#data.lines + 1] = "usable_position_records=" .. tostring(#usable)
+  end
+  return data, #usable, dropped
+end
+
+function write_player_position_snapshot(reason)
   local snapshot_state = state.player_position_snapshot
   snapshot_state.path = player_position_snapshot_path()
   snapshot_state.interval_ms = player_position_snapshot_interval_ms()
@@ -19891,7 +22833,7 @@ local function write_player_position_snapshot(reason)
   local started_clock = os.clock()
   local ok, snapshot_result = pcall(BMF.players.positions, {
     limit = snapshot_state.limit,
-    nativeCache = true,
+    nativeCache = false,
     liveController = true,
     allowLivePawnRead = false,
     unsafe = false,
@@ -19912,6 +22854,18 @@ local function write_player_position_snapshot(reason)
     end
   else
     result_message = tostring(snapshot_result or "snapshot call failed")
+  end
+
+  local usable_count = 0
+  data, usable_count = sanitize_player_position_snapshot(data)
+  if usable_count <= 0 then
+    if result_code == "OK" then
+      result_code = "POSITION_UNAVAILABLE"
+    end
+    result_ok = false
+    if result_message == "" or result_message == "Live controller player positions collected" then
+      result_message = "No usable player identity and position records are available"
+    end
   end
 
   local generated_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
@@ -19944,8 +22898,8 @@ local function write_player_position_snapshot(reason)
   snapshot_state.last_code = result_code
 
   local written = false
-  if ok then
-    written = write_file(snapshot_state.path, json_encode(data) .. "\n")
+  if snapshot_state.path ~= "" then
+    written = write_player_position_snapshot_file(snapshot_state.path, json_encode(data) .. "\n")
   end
 
   if written then
@@ -19961,7 +22915,7 @@ local function write_player_position_snapshot(reason)
   return written
 end
 
-local function ensure_player_position_snapshot_worker()
+function ensure_player_position_snapshot_worker()
   if state.player_position_snapshot_timer_id ~= nil then
     return
   end
@@ -20145,7 +23099,7 @@ BMF.players.sync = function(records, options)
   return response
 end
 
-local function player_query_text(query)
+function player_query_text(query)
   if type(query) == "table" then
     return first_string(
       query.uuid,
@@ -20165,7 +23119,7 @@ local function player_query_text(query)
   return tostring(query or "")
 end
 
-local function player_matches_query(player, needle)
+function player_matches_query(player, needle)
   local lowered = tostring(needle or ""):lower()
   if lowered == "" then
     return false, ""
@@ -20686,7 +23640,7 @@ end
 
 BMF.interact = {}
 
-local function interact_event_player(event)
+function interact_event_player(event)
   local player = event.player
   if type(player) == "table" then
     return {
@@ -20767,7 +23721,7 @@ BMF.interact.handleConsoleMessage = function(event)
   })
 end
 
-local function private_chat_result(kind, player, message)
+function private_chat_result(kind, player, message)
   local text = tostring(message or "")
   if trim_string(text) == "" then
     return result(false, "INVALID_OPTIONS", "message is required")
@@ -20947,7 +23901,7 @@ BMF.timers.activeCount = function()
   return count
 end
 
-local function list_command_request_files()
+function list_command_request_files()
   local command_dir = COMMAND_DIR:gsub("/", "\\")
   if not state.command_dir_ensured then
     os.execute('if not exist "' .. command_dir .. '" mkdir "' .. command_dir .. '"')
@@ -21026,7 +23980,7 @@ function BMF_dispatch_bmf_command_text(request_id, command_text, transport)
   return table.concat(response, "\n") .. "\n", ok, detail
 end
 
-local function process_command_request(file_name)
+function process_command_request(file_name)
   local request_id = tostring(file_name or ""):match("^(.*)%.request%.txt$")
   if not request_id or request_id == "" then
     return false
@@ -21054,7 +24008,7 @@ local function process_command_request(file_name)
   return true
 end
 
-local poll_command_requests
+poll_command_requests = nil
 
 function BMF_command_worker_poll_interval_ms()
   return BMF_env_number(
@@ -21092,7 +24046,7 @@ function BMF_status_heartbeat_interval_seconds()
   )
 end
 
-local function write_status_heartbeat(force)
+function write_status_heartbeat(force)
   if type(write_status) ~= "function" then
     return false
   end
@@ -21112,38 +24066,58 @@ function BMF_drain_command_worker_native_events(limit, defer_emit)
   if state.socket.started then
     return true, 0
   end
-  if not state.tools.tree_cut_native or state.tools.tree_cut_native.enabled ~= true then
-    return true, 0
-  end
 
-  local native_ok, native_code, native_message, raw_events = BMF_tree_cut_native_drain_raw(limit or 64)
-  if not native_ok then
-    state.tools.tree_cut_native.last_error = tostring(native_message or native_code or "native tree-cut drain failed")
-    return false, 0
-  end
-  if type(raw_events) ~= "table" or #raw_events == 0 then
-    return true, 0
-  end
+  local drain_limit = limit or 64
+  local native_drained = 0
+  local native_ok_all = true
 
-  local native_drained = #raw_events
-  local function emit_native_events()
-    local emitted, err = pcall(BMF_tree_cut_native_emit_raw, raw_events, {
-      silent = true,
-    })
-    if not emitted then
-      state.tools.tree_cut_native.last_error = "native tree-cut emit failed: " .. tostring(err)
+  local function emit_native_events(raw_events, emit_fn, on_error)
+    local function emit_now()
+      local emitted, err = pcall(emit_fn, raw_events, {
+        silent = true,
+      })
+      if not emitted then
+        on_error(err)
+      end
+    end
+
+    if defer_emit then
+      run_on_game_thread(emit_now)
+    else
+      emit_now()
     end
   end
 
-  if defer_emit then
-    run_on_game_thread(emit_native_events)
-  else
-    emit_native_events()
+  if state.tools.tree_cut_native and state.tools.tree_cut_native.enabled == true then
+    local tree_ok, tree_code, tree_message, tree_raw_events = BMF_tree_cut_native_drain_raw(drain_limit)
+    if not tree_ok then
+      native_ok_all = false
+      state.tools.tree_cut_native.last_error = tostring(tree_message or tree_code or "native tree-cut drain failed")
+    elseif type(tree_raw_events) == "table" and #tree_raw_events > 0 then
+      native_drained = native_drained + #tree_raw_events
+      emit_native_events(tree_raw_events, BMF_tree_cut_native_emit_raw, function(err)
+        state.tools.tree_cut_native.last_error = "native tree-cut emit failed: " .. tostring(err)
+      end)
+    end
   end
-  return true, native_drained
+
+  if BMF_zone_native_should_drain() then
+    local zone_ok, zone_code, zone_message, zone_raw_events = BMF_zone_native_drain_raw(drain_limit)
+    if not zone_ok then
+      native_ok_all = false
+      state.tools.zone_native.last_error = tostring(zone_message or zone_code or "native zone drain failed")
+    elseif type(zone_raw_events) == "table" and #zone_raw_events > 0 then
+      native_drained = native_drained + #zone_raw_events
+      emit_native_events(zone_raw_events, BMF_zone_native_emit_raw, function(err)
+        state.tools.zone_native.last_error = "native zone emit failed: " .. tostring(err)
+      end)
+    end
+  end
+
+  return native_ok_all, native_drained
 end
 
-local function schedule_command_worker_poll(delay_ms)
+function schedule_command_worker_poll(delay_ms)
   local delay = tonumber(delay_ms) or state.command_worker_fallback_poll_interval_ms or BMF_COMMAND_WORKER_FALLBACK_POLL_MS
   return BMF_schedule_delayed_callback("command_worker", delay, function()
     run_on_game_thread(function()
@@ -21260,7 +24234,7 @@ function BMF_poll_command_requests_async()
   return false
 end
 
-local function start_command_worker()
+function start_command_worker()
   if state.command_worker_started then
     return
   end
@@ -21332,6 +24306,641 @@ local function start_command_worker()
   end
 end
 
+local BMF_game_command_tunnel_schedule
+local BMF_game_command_tunnel_drain_once
+local BMF_game_command_tunnel_pump
+local BMF_process_game_command_tunnel_request
+
+function BMF_game_command_tunnel_snapshot()
+  local tunnel = state.game_command_tunnel
+  local dispatch_count = tonumber(tunnel.dispatch_count) or 0
+  local tunnel_ready = tunnel.enabled == true
+    and tunnel.worker_started == true
+    and state.socket_worker_started == true
+    and state.socket_worker_mode == "LoopInGameThread"
+  return {
+    supported = true,
+    enabled = tunnel_ready,
+    configured = tunnel.enabled == true,
+    protocolVersion = tonumber(tunnel.protocol_version) or 1,
+    channel = tostring(tunnel.channel or "cityrpg.command.v1"),
+    intervalMs = tonumber(tunnel.interval_ms) or 0,
+    maxQueue = tonumber(tunnel.max_queue) or 0,
+    maxInteractiveQueue = tonumber(tunnel.max_interactive_queue) or 0,
+    maxBulkQueue = tonumber(tunnel.max_bulk_queue) or 0,
+    maxBytes = tonumber(tunnel.max_bytes) or 0,
+    maxLineBytes = tonumber(tunnel.max_line_bytes) or 0,
+    completedRetention = tonumber(tunnel.completed_retention) or 0,
+    interactiveBurst = tonumber(tunnel.interactive_burst) or 0,
+    queueDepth = tonumber(tunnel.queued_count) or 0,
+    interactiveDepth = #(tunnel.queues.interactive or {}),
+    bulkDepth = #(tunnel.queues.bulk or {}),
+    queuedBytes = tonumber(tunnel.queued_bytes) or 0,
+    peakDepth = tonumber(tunnel.peak_depth) or 0,
+    peakBytes = tonumber(tunnel.peak_bytes) or 0,
+    accepted = tonumber(tunnel.accepted) or 0,
+    injected = tonumber(tunnel.injected) or 0,
+    rejected = tonumber(tunnel.rejected) or 0,
+    expired = tonumber(tunnel.expired) or 0,
+    outcomeUnknown = tonumber(tunnel.outcome_unknown) or 0,
+    duplicateRequests = tonumber(tunnel.duplicate_requests) or 0,
+    schedulerFailures = tonumber(tunnel.scheduler_failures) or 0,
+    workerStarted = tunnel.worker_started == true,
+    workerMode = tostring(tunnel.worker_mode or "stopped"),
+    workerTicks = tonumber(tunnel.worker_ticks) or 0,
+    workerIdleTicks = tonumber(tunnel.worker_idle_ticks) or 0,
+    workerErrors = tonumber(tunnel.worker_errors) or 0,
+    cooldownTicks = tonumber(tunnel.cooldown_ticks) or 0,
+    lastWorkerTickAt = tostring(tunnel.last_worker_tick_at or ""),
+    lastWorkerError = tostring(tunnel.last_worker_error or ""),
+    controllerCacheHits = tonumber(tunnel.controller_cache_hits) or 0,
+    controllerCacheRefreshes = tonumber(tunnel.controller_cache_refreshes) or 0,
+    dispatchCount = dispatch_count,
+    dispatchMsAverage = dispatch_count > 0 and ((tonumber(tunnel.dispatch_ms_sum) or 0) / dispatch_count) or 0,
+    lastDispatchMs = tonumber(tunnel.last_dispatch_ms) or 0,
+    maxDispatchMs = tonumber(tunnel.max_dispatch_ms) or 0,
+    scheduled = tunnel.scheduled == true,
+    running = tunnel.running == true,
+    lastResultState = tostring(tunnel.last_result_state or ""),
+    lastResultCode = tostring(tunnel.last_result_code or ""),
+    lastError = tostring(tunnel.last_error or ""),
+  }
+end
+
+local function BMF_game_command_tunnel_send_json(record)
+  local sent = BMF_socket_send_json(record)
+  if sent then
+    state.socket.sent_responses = (tonumber(state.socket.sent_responses) or 0) + 1
+  end
+  return sent
+end
+
+local function BMF_game_command_tunnel_remember_result(record, request)
+  local tunnel = state.game_command_tunnel
+  local request_id = trim_string(record and record.id or "")
+  if request_id == "" then
+    return
+  end
+  if tunnel.completed_by_id[request_id] == nil then
+    tunnel.completed_order[#tunnel.completed_order + 1] = request_id
+  end
+  local entry = {
+    record = copy_table(record),
+    requestId = request_id,
+    line = trim_string(request and request.line or ""),
+    idempotencyKey = trim_string(request and request.idempotencyKey or ""),
+  }
+  tunnel.completed_by_id[request_id] = entry
+  if entry.idempotencyKey ~= "" then
+    tunnel.completed_by_idempotency_key[entry.idempotencyKey] = entry
+  end
+  local retention = math.max(1, tonumber(tunnel.completed_retention) or GAME_COMMAND_TUNNEL_COMPLETED_RETENTION)
+  while #tunnel.completed_order > retention do
+    local expired_id = table.remove(tunnel.completed_order, 1)
+    local expired_entry = tunnel.completed_by_id[expired_id]
+    tunnel.completed_by_id[expired_id] = nil
+    if expired_entry ~= nil
+        and expired_entry.idempotencyKey ~= ""
+        and tunnel.completed_by_idempotency_key[expired_entry.idempotencyKey] == expired_entry then
+      tunnel.completed_by_idempotency_key[expired_entry.idempotencyKey] = nil
+    end
+  end
+end
+
+local function BMF_game_command_tunnel_send_terminal(request, result_state, code, detail, response, dispatch_ms)
+  local tunnel = state.game_command_tunnel
+  local request_id = trim_string(request and request.id or "")
+  local normalized_state = tostring(result_state or "rejected")
+  local record = {
+    type = "tunnel.result",
+    source = "bmf",
+    v = tonumber(tunnel.protocol_version) or 1,
+    ts = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    id = request_id,
+    state = normalized_state,
+    code = tostring(code or "UNKNOWN"),
+    detail = tostring(detail or ""),
+    response = type(response) == "string" and response or nil,
+    dispatchMs = tonumber(dispatch_ms) or 0,
+    queueDepth = tonumber(tunnel.queued_count) or 0,
+  }
+
+  local active_request = tunnel.active_by_id[request_id]
+  tunnel.active_by_id[request_id] = nil
+  local idempotency_key = trim_string(request and request.idempotencyKey or "")
+  if idempotency_key ~= "" and tunnel.active_by_idempotency_key[idempotency_key] == active_request then
+    tunnel.active_by_idempotency_key[idempotency_key] = nil
+  end
+  tunnel.last_result_state = normalized_state
+  tunnel.last_result_code = record.code
+  if normalized_state == "injected" then
+    tunnel.injected = (tonumber(tunnel.injected) or 0) + 1
+  elseif normalized_state == "expired" then
+    tunnel.expired = (tonumber(tunnel.expired) or 0) + 1
+  elseif normalized_state == "outcome_unknown" then
+    tunnel.outcome_unknown = (tonumber(tunnel.outcome_unknown) or 0) + 1
+  else
+    tunnel.rejected = (tonumber(tunnel.rejected) or 0) + 1
+  end
+
+  BMF_game_command_tunnel_remember_result(record, request)
+  if not BMF_game_command_tunnel_send_json(record) then
+    tunnel.last_error = "failed to send terminal result id=" .. request_id .. " state=" .. normalized_state
+  end
+  return record
+end
+
+local function BMF_game_command_tunnel_send_rejection(request_id, result_state, code, detail)
+  local tunnel = state.game_command_tunnel
+  local normalized_id = trim_string(request_id or "")
+  if normalized_id == "" then
+    state.game_command_tunnel.last_error = tostring(code or "INVALID_REQUEST") .. ": " .. tostring(detail or "")
+    return false
+  end
+  local normalized_state = tostring(result_state or "rejected")
+  if normalized_state == "expired" then
+    tunnel.expired = (tonumber(tunnel.expired) or 0) + 1
+  else
+    tunnel.rejected = (tonumber(tunnel.rejected) or 0) + 1
+  end
+  tunnel.last_result_state = normalized_state
+  tunnel.last_result_code = tostring(code or "UNKNOWN")
+  BMF_game_command_tunnel_send_json({
+    type = "tunnel.result",
+    source = "bmf",
+    v = tonumber(tunnel.protocol_version) or 1,
+    ts = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    id = normalized_id,
+    state = normalized_state,
+    code = tostring(code or "UNKNOWN"),
+    detail = tostring(detail or ""),
+    dispatchMs = 0,
+    queueDepth = tonumber(tunnel.queued_count) or 0,
+  })
+  return false
+end
+
+local function BMF_game_command_tunnel_line_allowed(line)
+  local normalized = trim_string(line or ""):lower()
+  return normalized == "/cityrpgremote"
+    or normalized:match("^/cityrpgremote%s") ~= nil
+    or normalized == "/cityrpgroute"
+    or normalized:match("^/cityrpgroute%s") ~= nil
+end
+
+local function BMF_game_command_tunnel_dequeue()
+  local tunnel = state.game_command_tunnel
+  local interactive = tunnel.queues.interactive
+  local bulk = tunnel.queues.bulk
+  local request = nil
+
+  if #interactive > 0 and (#bulk == 0 or tunnel.interactive_since_bulk < tunnel.interactive_burst) then
+    request = table.remove(interactive, 1)
+    tunnel.interactive_since_bulk = (tonumber(tunnel.interactive_since_bulk) or 0) + 1
+  elseif #bulk > 0 then
+    request = table.remove(bulk, 1)
+    tunnel.interactive_since_bulk = 0
+  elseif #interactive > 0 then
+    request = table.remove(interactive, 1)
+    tunnel.interactive_since_bulk = (tonumber(tunnel.interactive_since_bulk) or 0) + 1
+  end
+
+  if request ~= nil then
+    tunnel.queued_count = math.max(0, (tonumber(tunnel.queued_count) or 0) - 1)
+    tunnel.queued_bytes = math.max(0, (tonumber(tunnel.queued_bytes) or 0) - (tonumber(request.retainedBytes) or tonumber(request.lineBytes) or 0))
+  end
+  return request
+end
+
+local function BMF_game_command_tunnel_request_expired(request)
+  local deadline_at_ms = tonumber(request and request.deadlineMs) or 0
+  if deadline_at_ms <= 0 then
+    return true
+  end
+  return (os.time() * 1000) >= deadline_at_ms
+end
+
+local function BMF_game_command_tunnel_classify_failure(invoked)
+  local fields = invoked and invoked.data and invoked.data.fields or {}
+  local stage = tostring(fields.stage or "")
+  if stage == "implementation_call"
+      or (stage == "" and tostring(invoked and invoked.code or "") == "NATIVE_PLAYER_CHAT_IMPL_FAILED") then
+    return "outcome_unknown", "INJECTION_OUTCOME_UNKNOWN"
+  end
+  return "rejected", tostring(invoked and invoked.code or "INJECTION_REJECTED")
+end
+
+local function BMF_game_command_tunnel_compact_response(invoked)
+  local output = {}
+  local lines = invoked and invoked.data and invoked.data.lines or nil
+  if type(lines) == "table" then
+    for _, line in ipairs(lines) do
+      output[#output + 1] = tostring(line)
+      if #output >= 64 then
+        break
+      end
+    end
+  end
+  if #output == 0 then
+    output = {
+      "ok=" .. tostring(invoked and invoked.ok == true),
+      "code=" .. tostring(invoked and invoked.code or ""),
+    }
+  end
+  return table.concat(output, "\n") .. "\n"
+end
+
+BMF_game_command_tunnel_schedule = function(delay_ms)
+  local tunnel = state.game_command_tunnel
+  if (tonumber(tunnel.queued_count) or 0) <= 0 then
+    tunnel.scheduled = false
+    return true
+  end
+  if tunnel.worker_started == true
+      and state.socket_worker_started == true
+      and state.socket_worker_mode == "LoopInGameThread" then
+    tunnel.scheduled = true
+    return true
+  end
+
+  tunnel.scheduled = false
+  tunnel.scheduler_failures = (tonumber(tunnel.scheduler_failures) or 0) + 1
+  tunnel.last_error = "game command tunnel scheduler unavailable"
+  while (tonumber(tunnel.queued_count) or 0) > 0 do
+    local request = BMF_game_command_tunnel_dequeue()
+    if request == nil then
+      break
+    end
+    BMF_game_command_tunnel_send_terminal(
+      request,
+      "rejected",
+      "SCHEDULER_UNAVAILABLE",
+      tunnel.last_error,
+      nil,
+      0)
+  end
+  return false
+end
+
+BMF_game_command_tunnel_drain_once = function()
+  local tunnel = state.game_command_tunnel
+  if tunnel.running then
+    return
+  end
+  local request = BMF_game_command_tunnel_dequeue()
+  if request == nil then
+    return
+  end
+
+  tunnel.running = true
+  local injection_started = false
+  local processing_ok, processing_error = pcall(function()
+  if BMF_game_command_tunnel_request_expired(request) then
+    BMF_game_command_tunnel_send_terminal(
+      request,
+      "expired",
+      "DEADLINE_EXPIRED",
+      "request deadline elapsed before injection",
+      nil,
+      0)
+  else
+    local dispatch_started_clock = os.clock()
+    local cached_address = trim_string(tunnel.cached_controller_address or "")
+    injection_started = true
+    local invoked = BMF_player_message_implementation_probe(request.line, "", {
+      skipRateLimit = true,
+      controllerAddress = cached_address,
+    })
+
+    if cached_address ~= "" and invoked.ok == true then
+      tunnel.controller_cache_hits = (tonumber(tunnel.controller_cache_hits) or 0) + 1
+    elseif cached_address ~= "" then
+      local cached_failure_state = BMF_game_command_tunnel_classify_failure(invoked)
+      if cached_failure_state ~= "outcome_unknown" then
+        tunnel.cached_controller_address = ""
+        tunnel.controller_cache_refreshes = (tonumber(tunnel.controller_cache_refreshes) or 0) + 1
+        invoked = BMF_player_message_implementation_probe(request.line, "", {
+          skipRateLimit = true,
+        })
+      end
+    else
+      tunnel.controller_cache_refreshes = (tonumber(tunnel.controller_cache_refreshes) or 0) + 1
+    end
+
+    local dispatch_ms = BMF_telemetry_duration_ms(dispatch_started_clock)
+    tunnel.dispatch_count = (tonumber(tunnel.dispatch_count) or 0) + 1
+    tunnel.last_dispatch_ms = dispatch_ms
+    tunnel.max_dispatch_ms = math.max(tonumber(tunnel.max_dispatch_ms) or 0, dispatch_ms)
+    tunnel.dispatch_ms_sum = (tonumber(tunnel.dispatch_ms_sum) or 0) + dispatch_ms
+    local resolved_address = trim_string(invoked and invoked.data and invoked.data.controllerAddress or "")
+    if invoked.ok == true and resolved_address ~= "" then
+      tunnel.cached_controller_address = resolved_address
+    end
+
+    if invoked.ok == true then
+      BMF_game_command_tunnel_send_terminal(
+        request,
+        "injected",
+        "OK",
+        tostring(invoked.message or "command injected"),
+        BMF_game_command_tunnel_compact_response(invoked),
+        dispatch_ms)
+    else
+      local result_state, code = BMF_game_command_tunnel_classify_failure(invoked)
+      BMF_game_command_tunnel_send_terminal(
+        request,
+        result_state,
+        code,
+        tostring(invoked and invoked.message or "command injection failed"),
+        BMF_game_command_tunnel_compact_response(invoked),
+        dispatch_ms)
+    end
+  end
+  end)
+  tunnel.running = false
+
+  if not processing_ok then
+    tunnel.last_error = "game command tunnel drain failed id="
+      .. tostring(request.id or "")
+      .. ": "
+      .. tostring(processing_error)
+    if tunnel.active_by_id[request.id] ~= nil then
+      local failure_state = injection_started and "outcome_unknown" or "rejected"
+      local failure_code = injection_started and "DRAIN_OUTCOME_UNKNOWN" or "DRAIN_FAILED"
+      local terminal_ok, terminal_error = pcall(
+        BMF_game_command_tunnel_send_terminal,
+        request,
+        failure_state,
+        failure_code,
+        tunnel.last_error,
+        nil,
+        0)
+      if not terminal_ok then
+        tunnel.last_error = tunnel.last_error .. "; terminal send failed: " .. tostring(terminal_error)
+      end
+    end
+  end
+
+  tunnel.scheduled = (tonumber(tunnel.queued_count) or 0) > 0
+end
+
+BMF_game_command_tunnel_pump = function()
+  local tunnel = state.game_command_tunnel
+  if tunnel.worker_started ~= true
+      or state.socket_worker_started ~= true
+      or state.socket_worker_mode ~= "LoopInGameThread" then
+    return 0
+  end
+
+  tunnel.worker_ticks = (tonumber(tunnel.worker_ticks) or 0) + 1
+  if (tunnel.worker_ticks % 40) == 1 then
+    tunnel.last_worker_tick_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+  end
+
+  local cooldown_ticks = math.max(0, tonumber(tunnel.cooldown_ticks) or 0)
+  if cooldown_ticks > 0 then
+    cooldown_ticks = cooldown_ticks - 1
+    tunnel.cooldown_ticks = cooldown_ticks
+  end
+
+  if (tonumber(tunnel.queued_count) or 0) <= 0 then
+    tunnel.worker_idle_ticks = (tonumber(tunnel.worker_idle_ticks) or 0) + 1
+    tunnel.scheduled = false
+    return 0
+  end
+
+  tunnel.scheduled = true
+  if cooldown_ticks > 0 or tunnel.running == true then
+    return 0
+  end
+
+  tunnel.scheduled = false
+  BMF_game_command_tunnel_drain_once()
+  local poll_ms = math.max(1, tonumber(state.socket.poll_interval_ms) or SOCKET_DEFAULT_POLL_MS)
+  local interval_ms = math.max(1, tonumber(tunnel.interval_ms) or GAME_COMMAND_TUNNEL_DEFAULT_INTERVAL_MS)
+  tunnel.cooldown_ticks = math.max(1, math.ceil(interval_ms / poll_ms))
+  return 1
+end
+
+BMF_process_game_command_tunnel_request = function(decoded)
+  local tunnel = state.game_command_tunnel
+  state.socket.received_commands = (tonumber(state.socket.received_commands) or 0) + 1
+  local request_id = trim_string(decoded and decoded.id or "")
+  if request_id == "" or #request_id > 128 then
+    return BMF_game_command_tunnel_send_rejection(request_id, "rejected", "INVALID_ID", "id must contain 1-128 bytes")
+  end
+
+  local line = trim_string(decoded.line or "")
+  local idempotency_key = trim_string(decoded.idempotencyKey or "")
+  local completed = tunnel.completed_by_id[request_id]
+  if completed ~= nil then
+    tunnel.duplicate_requests = (tonumber(tunnel.duplicate_requests) or 0) + 1
+    if tostring(completed.line or "") ~= line
+        or tostring(completed.idempotencyKey or "") ~= idempotency_key then
+      BMF_game_command_tunnel_send_json({
+        type = "tunnel.result",
+        source = "bmf",
+        v = tonumber(tunnel.protocol_version) or 1,
+        ts = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+        id = request_id,
+        state = "rejected",
+        code = "DUPLICATE_ID_CONFLICT",
+        detail = "id was already completed with a different command or idempotency key",
+        queueDepth = tonumber(tunnel.queued_count) or 0,
+      })
+      return false
+    end
+    BMF_game_command_tunnel_send_json(completed.record)
+    return true
+  end
+
+  local active = tunnel.active_by_id[request_id]
+  if active ~= nil then
+    tunnel.duplicate_requests = (tonumber(tunnel.duplicate_requests) or 0) + 1
+    if active.line ~= line or tostring(active.idempotencyKey or "") ~= idempotency_key then
+      BMF_game_command_tunnel_send_json({
+        type = "tunnel.result",
+        source = "bmf",
+        v = tonumber(tunnel.protocol_version) or 1,
+        ts = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+        id = request_id,
+        state = "rejected",
+        code = "DUPLICATE_ID_CONFLICT",
+        detail = "id is already active with a different command",
+        queueDepth = tonumber(tunnel.queued_count) or 0,
+      })
+      return false
+    end
+    BMF_game_command_tunnel_send_json({
+      type = "tunnel.ack",
+      source = "bmf",
+      v = tonumber(tunnel.protocol_version) or 1,
+      ts = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+      id = request_id,
+      state = "accepted",
+      duplicate = true,
+      queueDepth = tonumber(tunnel.queued_count) or 0,
+    })
+    return true
+  end
+
+  if #idempotency_key > GAME_COMMAND_TUNNEL_MAX_IDEMPOTENCY_KEY_BYTES then
+    return BMF_game_command_tunnel_send_rejection(
+      request_id,
+      "rejected",
+      "IDEMPOTENCY_KEY_TOO_LARGE",
+      "idempotencyKey exceeds 128 bytes")
+  end
+  if idempotency_key ~= "" then
+    local completed_key = tunnel.completed_by_idempotency_key[idempotency_key]
+    if completed_key ~= nil then
+      if tostring(completed_key.line or "") ~= line then
+        BMF_game_command_tunnel_send_json({
+          type = "tunnel.result",
+          source = "bmf",
+          v = tonumber(tunnel.protocol_version) or 1,
+          ts = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+          id = request_id,
+          state = "rejected",
+          code = "IDEMPOTENCY_KEY_CONFLICT",
+          detail = "idempotencyKey was already completed with a different command",
+          queueDepth = tonumber(tunnel.queued_count) or 0,
+        })
+        return false
+      end
+      local replay = copy_table(completed_key.record)
+      replay.id = request_id
+      replay.replayed = true
+      replay.originalId = completed_key.requestId
+      BMF_game_command_tunnel_send_json(replay)
+      return true
+    end
+
+    local active_key = tunnel.active_by_idempotency_key[idempotency_key]
+    if active_key ~= nil then
+      BMF_game_command_tunnel_send_json({
+        type = "tunnel.result",
+        source = "bmf",
+        v = tonumber(tunnel.protocol_version) or 1,
+        ts = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+        id = request_id,
+        state = "rejected",
+        code = active_key.line == line and "IDEMPOTENCY_KEY_ACTIVE" or "IDEMPOTENCY_KEY_CONFLICT",
+        detail = active_key.line == line
+          and "idempotent command is already accepted under another request id"
+          or "idempotencyKey is active with a different command",
+        queueDepth = tonumber(tunnel.queued_count) or 0,
+      })
+      return false
+    end
+  end
+
+  if tunnel.enabled ~= true then
+    return BMF_game_command_tunnel_send_rejection(request_id, "rejected", "TUNNEL_DISABLED", "game command tunnel is disabled")
+  end
+  if tunnel.worker_started ~= true
+      or state.socket_worker_started ~= true
+      or state.socket_worker_mode ~= "LoopInGameThread" then
+    return BMF_game_command_tunnel_send_rejection(
+      request_id,
+      "rejected",
+      "TUNNEL_UNAVAILABLE",
+      "persistent game-thread socket tunnel worker is unavailable")
+  end
+  if tonumber(decoded.v) ~= tonumber(tunnel.protocol_version) then
+    return BMF_game_command_tunnel_send_rejection(request_id, "rejected", "UNSUPPORTED_VERSION", "only tunnel protocol v1 is supported")
+  end
+  if tostring(decoded.channel or "") ~= tostring(tunnel.channel) then
+    return BMF_game_command_tunnel_send_rejection(request_id, "rejected", "UNSUPPORTED_CHANNEL", "channel must be " .. tostring(tunnel.channel))
+  end
+  if line == "" or line:find("\n", 1, true) or line:find("\r", 1, true) then
+    return BMF_game_command_tunnel_send_rejection(request_id, "rejected", "INVALID_LINE", "line must be one non-empty command")
+  end
+  if #line > tunnel.max_line_bytes then
+    return BMF_game_command_tunnel_send_rejection(request_id, "rejected", "LINE_TOO_LARGE", "line exceeds configured byte limit")
+  end
+  if not BMF_game_command_tunnel_line_allowed(line) then
+    return BMF_game_command_tunnel_send_rejection(request_id, "rejected", "COMMAND_NOT_ALLOWED", "only /cityrpgRemote and /cityrpgroute are allowed")
+  end
+
+  local service_class = tostring(decoded.serviceClass or "interactive"):lower()
+  if service_class ~= "interactive" and service_class ~= "bulk" then
+    return BMF_game_command_tunnel_send_rejection(request_id, "rejected", "INVALID_SERVICE_CLASS", "serviceClass must be interactive or bulk")
+  end
+  local now_ms = os.time() * 1000
+  local issued_at_ms = tonumber(decoded.issuedAtMs) or now_ms
+  local deadline_ms = tonumber(decoded.deadlineMs) or (issued_at_ms + 5000)
+  if deadline_ms <= now_ms or deadline_ms <= issued_at_ms then
+    return BMF_game_command_tunnel_send_rejection(request_id, "expired", "DEADLINE_EXPIRED", "absolute deadlineMs has elapsed")
+  end
+
+  local queue = tunnel.queues[service_class]
+  local class_limit = service_class == "bulk" and tunnel.max_bulk_queue or tunnel.max_interactive_queue
+  if (tonumber(tunnel.queued_count) or 0) >= tunnel.max_queue then
+    return BMF_game_command_tunnel_send_rejection(request_id, "rejected", "QUEUE_FULL", "game command tunnel queue is full")
+  end
+  if #queue >= class_limit then
+    return BMF_game_command_tunnel_send_rejection(request_id, "rejected", "SERVICE_CLASS_FULL", service_class .. " queue budget is full")
+  end
+  local retained_bytes = #line + #request_id + #idempotency_key
+  if ((tonumber(tunnel.queued_bytes) or 0) + retained_bytes) > tunnel.max_bytes then
+    return BMF_game_command_tunnel_send_rejection(request_id, "rejected", "QUEUE_BYTES_FULL", "game command tunnel byte budget is full")
+  end
+  local estimated_wait_ms = ((tonumber(tunnel.queued_count) or 0) + 1) * tunnel.interval_ms
+  if (now_ms + estimated_wait_ms) >= deadline_ms then
+    return BMF_game_command_tunnel_send_rejection(request_id, "expired", "DEADLINE_EXPIRED", "estimated queue wait exceeds deadline")
+  end
+
+  local request = {
+    id = request_id,
+    line = line,
+    lineBytes = #line,
+    retainedBytes = retained_bytes,
+    channel = tostring(decoded.channel),
+    serviceClass = service_class,
+    deadlineMs = deadline_ms,
+    issuedAtMs = issued_at_ms,
+    acceptedAtMs = now_ms,
+    idempotencyKey = idempotency_key,
+  }
+  queue[#queue + 1] = request
+  tunnel.active_by_id[request_id] = request
+  if idempotency_key ~= "" then
+    tunnel.active_by_idempotency_key[idempotency_key] = request
+  end
+  tunnel.queued_count = (tonumber(tunnel.queued_count) or 0) + 1
+  tunnel.queued_bytes = (tonumber(tunnel.queued_bytes) or 0) + retained_bytes
+  tunnel.peak_depth = math.max(tonumber(tunnel.peak_depth) or 0, tunnel.queued_count)
+  tunnel.peak_bytes = math.max(tonumber(tunnel.peak_bytes) or 0, tunnel.queued_bytes)
+  tunnel.accepted = (tonumber(tunnel.accepted) or 0) + 1
+
+  local ack_sent = BMF_game_command_tunnel_send_json({
+    type = "tunnel.ack",
+    source = "bmf",
+    v = tonumber(tunnel.protocol_version) or 1,
+    ts = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    id = request_id,
+    state = "accepted",
+    queueDepth = tonumber(tunnel.queued_count) or 0,
+  })
+  if not ack_sent then
+    table.remove(queue, #queue)
+    tunnel.active_by_id[request_id] = nil
+    if idempotency_key ~= "" and tunnel.active_by_idempotency_key[idempotency_key] == request then
+      tunnel.active_by_idempotency_key[idempotency_key] = nil
+    end
+    tunnel.queued_count = math.max(0, tunnel.queued_count - 1)
+    tunnel.queued_bytes = math.max(0, tunnel.queued_bytes - retained_bytes)
+    tunnel.rejected = (tonumber(tunnel.rejected) or 0) + 1
+    tunnel.accepted = math.max(0, (tonumber(tunnel.accepted) or 0) - 1)
+    tunnel.last_error = "failed to send tunnel acknowledgement id=" .. request_id
+    return false
+  end
+
+  tunnel.scheduled = true
+  return true
+end
+
 function BMF_process_socket_message(line)
   local trimmed = trim_string(line)
   if trimmed == "" then
@@ -21353,6 +24962,11 @@ function BMF_process_socket_message(line)
       ts = os.date("!%Y-%m-%dT%H:%M:%SZ"),
       id = decoded.id,
     })
+    return
+  end
+
+  if message_type == "tunnel.request" then
+    BMF_process_game_command_tunnel_request(decoded)
     return
   end
 
@@ -21394,6 +25008,7 @@ function BMF_drain_socket_messages(max_count)
   local drain_ok = true
   local requested_count = math.max(1, tonumber(max_count) or 64)
   state.socket.poll_count = (tonumber(state.socket.poll_count) or 0) + 1
+  state.socket.last_poll_epoch = os.time()
   state.socket.last_poll_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
 
   local ok, messages_or_error = pcall(BMFSocketReceive, requested_count)
@@ -21423,6 +25038,18 @@ function BMF_drain_socket_messages(max_count)
         state.tools.tree_cut_native.last_error = "native tree-cut drain failed: " .. tostring(native_result)
       end
     end
+    if BMF_zone_native_should_drain() then
+      local zone_ok, zone_result = pcall(BMF.tools.zoneNative.drain, {
+        limit = 64,
+        silent = true,
+      })
+      if zone_ok and zone_result and zone_result.data then
+        native_drained = native_drained + (tonumber(zone_result.data.drained) or 0)
+      elseif not zone_ok then
+        drain_ok = false
+        state.tools.zone_native.last_error = "native zone drain failed: " .. tostring(zone_result)
+      end
+    end
     if drained > 0 or native_drained > 0 or not drain_ok then
       BMF_telemetry_record_worker("socket_drains", BMF_telemetry_duration_ms(drain_started_clock), drain_ok, "messages", drained + native_drained)
     end
@@ -21441,10 +25068,13 @@ function BMF_drain_socket_messages(max_count)
   return 0
 end
 
-function BMF_schedule_socket_worker_poll(delay_ms)
+function BMF_schedule_socket_worker_poll(delay_ms, generation)
   local delay = tonumber(delay_ms) or state.socket.poll_interval_ms or SOCKET_DEFAULT_POLL_MS
   return BMF_schedule_delayed_callback("socket_worker", delay, function()
     run_on_game_thread(function()
+      if generation ~= nil and state.socket_worker_generation ~= generation then
+        return
+      end
       if BMF_poll_socket_messages then
         BMF_poll_socket_messages()
       end
@@ -21462,7 +25092,7 @@ function BMF_poll_socket_messages()
   BMF_drain_socket_messages(64)
 
   if state.socket_worker_started then
-    if not BMF_schedule_socket_worker_poll(state.socket.poll_interval_ms) then
+    if not BMF_schedule_socket_worker_poll(state.socket.poll_interval_ms, state.socket_worker_generation) then
       state.socket_worker_started = false
       state.socket_worker_mode = "stopped"
       log("error", "socket worker stopped: no game-thread scheduler available")
@@ -21484,6 +25114,7 @@ function BMF_poll_socket_messages_async()
 
   local drain_started_clock = os.clock()
   state.socket.poll_count = (tonumber(state.socket.poll_count) or 0) + 1
+  state.socket.last_poll_epoch = os.time()
   state.socket.last_poll_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
   local queued_messages = 0
   local native_drained = 0
@@ -21523,6 +25154,23 @@ function BMF_poll_socket_messages_async()
       end)
     elseif not native_ok then
       state.tools.tree_cut_native.last_error = tostring(native_message or native_code or "native tree-cut drain failed")
+    end
+  end
+
+  if BMF_zone_native_should_drain() then
+    local zone_ok, zone_code, zone_message, zone_raw_events = BMF_zone_native_drain_raw(64)
+    if zone_ok and type(zone_raw_events) == "table" and #zone_raw_events > 0 then
+      native_drained = native_drained + #zone_raw_events
+      run_on_game_thread(function()
+        local emitted, err = pcall(BMF_zone_native_emit_raw, zone_raw_events, {
+          silent = true,
+        })
+        if not emitted then
+          state.tools.zone_native.last_error = "native zone emit failed: " .. tostring(err)
+        end
+      end)
+    elseif not zone_ok then
+      state.tools.zone_native.last_error = tostring(zone_message or zone_code or "native zone drain failed")
     end
   end
 
@@ -21578,12 +25226,295 @@ function BMF_schedule_resource_native_tool_resolve(reason, attempt)
   end
 end
 
+function BMF_start_socket_worker(reason, options)
+  options = type(options) == "table" and options or {}
+  if not state.socket.started or type(BMFSocketReceive) ~= "function" then
+    state.socket_worker_started = false
+    state.socket_worker_mode = "stopped"
+    return false, "socket transport is not started"
+  end
+
+  local generation = (tonumber(state.socket_worker_generation) or 0) + 1
+  state.socket_worker_generation = generation
+  state.socket_worker_started = true
+  state.socket_worker_mode = "starting"
+  local force_delayed = options.forceDelayed == true
+  local tunnel = state.game_command_tunnel
+  local prefer_game_thread = tunnel.enabled == true
+    and BMF_env_bool("BMF_GAME_COMMAND_TUNNEL_PERSISTENT_PUMP", true)
+  local ingress_per_tick = math.max(1, math.min(16, BMF_env_number(
+    "BMF_GAME_COMMAND_TUNNEL_INGRESS_PER_TICK",
+    16,
+    1)))
+
+  local function start_game_thread_pump(default_enabled)
+    tunnel.worker_started = false
+    tunnel.worker_mode = "starting"
+    tunnel.last_worker_error = ""
+    local function game_thread_poll()
+      if state.socket_worker_generation ~= generation then
+        return true
+      end
+      if not state.socket_worker_started then
+        return true
+      end
+      if not state.socket.started or type(BMFSocketReceive) ~= "function" then
+        state.socket_worker_started = false
+        tunnel.worker_started = false
+        tunnel.worker_mode = "stopped"
+        return true
+      end
+
+      local activating = tunnel.worker_started ~= true
+      if activating then
+        tunnel.worker_started = true
+        tunnel.worker_mode = "SocketGameThreadLoop"
+        tunnel.last_worker_error = ""
+      end
+      local pump_ok, pump_error = pcall(function()
+        BMF_drain_socket_messages(ingress_per_tick)
+        if type(BMF_game_command_tunnel_pump) == "function" then
+          BMF_game_command_tunnel_pump()
+        end
+      end)
+      if not pump_ok then
+        state.socket_worker_started = false
+        state.socket_worker_mode = "failed"
+        tunnel.worker_started = false
+        tunnel.worker_mode = "failed"
+        tunnel.worker_errors = (tonumber(tunnel.worker_errors) or 0) + 1
+        tunnel.last_worker_error = tostring(pump_error or "persistent tunnel pump failed")
+        tunnel.last_error = tunnel.last_worker_error
+        log("error", "persistent socket tunnel pump failed closed: " .. tunnel.last_worker_error)
+        BMF_game_command_tunnel_schedule(0)
+        BMF_socket_metadata_heartbeat(true)
+        return true
+      end
+      if activating then
+        log(
+          "info",
+          "socket and tunnel worker active on persistent game-thread pump"
+            .. " generation=" .. tostring(generation))
+        BMF_socket_metadata_heartbeat(true)
+      end
+      return false
+    end
+
+    local loop_started, loop_scheduler = BMF_start_game_thread_loop(
+      "socket_worker",
+      state.socket.poll_interval_ms,
+      game_thread_poll,
+      default_enabled)
+    if loop_started then
+      state.socket_worker_mode = "LoopInGameThread"
+      tunnel.worker_mode = "starting"
+      log(
+        "info",
+        "socket and tunnel worker scheduled via one persistent LoopInGameThread"
+          .. " reason=" .. tostring(reason or "start")
+          .. " generation=" .. tostring(generation)
+          .. " scheduler=" .. tostring(loop_scheduler or "unknown")
+          .. " ingress_per_tick=" .. tostring(ingress_per_tick))
+      BMF_socket_metadata_heartbeat(true)
+      return true, "LoopInGameThread"
+    end
+
+    tunnel.worker_started = false
+    tunnel.worker_mode = "unavailable"
+    tunnel.scheduler_failures = (tonumber(tunnel.scheduler_failures) or 0) + 1
+    tunnel.last_worker_error = "persistent game-thread loop scheduler unavailable"
+    return false, tunnel.last_worker_error
+  end
+
+  local function start_async_worker()
+    tunnel.worker_started = false
+    tunnel.worker_mode = "unavailable"
+    local function async_poll()
+      if state.socket_worker_generation ~= generation then
+        return true
+      end
+      return BMF_poll_socket_messages_async()
+    end
+    if BMF_start_async_loop("socket_worker", state.socket.poll_interval_ms, async_poll) then
+      state.socket_worker_mode = "LoopAsync"
+      log("info", "socket worker polling via LoopAsync reason=" .. tostring(reason or "start") .. " generation=" .. tostring(generation))
+      BMF_socket_metadata_heartbeat(true)
+      return true, "LoopAsync"
+    end
+    return false, "LoopAsync unavailable"
+  end
+
+  if not force_delayed then
+    if prefer_game_thread then
+      local game_thread_started, game_thread_mode = start_game_thread_pump(true)
+      if game_thread_started then
+        return true, game_thread_mode
+      end
+    end
+
+    local async_started, async_mode = start_async_worker()
+    if async_started then
+      return true, async_mode
+    end
+
+    if not prefer_game_thread then
+      local game_thread_started, game_thread_mode = start_game_thread_pump(false)
+      if game_thread_started then
+        return true, game_thread_mode
+      end
+    end
+  end
+
+  if not force_delayed and not BMF_allow_delayed_worker_fallback() then
+    state.socket_worker_started = false
+    state.socket_worker_mode = "stopped"
+    log("error", "socket worker unavailable: delayed fallback disabled and no loop scheduler available")
+    BMF_socket_metadata_heartbeat(true)
+    return false, "delayed fallback disabled"
+  end
+
+  state.socket_worker_mode = force_delayed and "WatchdogDelayed" or "ExecuteInGameThreadWithDelay"
+  log("warn", "socket worker using delayed poller interval_ms=" .. tostring(state.socket.poll_interval_ms) .. " reason=" .. tostring(reason or "start") .. " generation=" .. tostring(generation))
+  if BMF_schedule_socket_worker_poll(state.socket.poll_interval_ms, generation) then
+    BMF_socket_metadata_heartbeat(true)
+    return true, state.socket_worker_mode
+  end
+
+  state.socket_worker_started = false
+  state.socket_worker_mode = "stopped"
+  log("error", "socket worker unavailable: no delayed scheduler available")
+  BMF_socket_metadata_heartbeat(true)
+  return false, "no delayed scheduler available"
+end
+
+function BMF_restart_socket_worker(reason, options)
+  if state.socket_worker_mode == "LoopInGameThread"
+      and state.game_command_tunnel.worker_started == true then
+    state.socket.last_watchdog_error = "persistent game-thread socket tunnel pump requires a process restart"
+    return false, state.socket.last_watchdog_error
+  end
+  state.socket_worker_started = false
+  state.socket_worker_mode = "restarting"
+  return BMF_start_socket_worker(reason or "restart", options)
+end
+
+function BMF_socket_worker_is_stale()
+  if not state.socket.started then
+    return false, "socket transport is not started"
+  end
+  if not state.socket_worker_started then
+    return true, "socket worker is stopped"
+  end
+  local age_ms = BMF_socket_poll_age_ms()
+  local stale_ms = tonumber(state.socket.watchdog_stale_ms) or BMF_socket_watchdog_stale_ms()
+  if age_ms > stale_ms then
+    return true, "socket poll heartbeat stale age_ms=" .. tostring(age_ms) .. " stale_ms=" .. tostring(stale_ms)
+  end
+  return false, ""
+end
+
+function BMF_schedule_socket_worker_watchdog(delay_ms)
+  local delay = tonumber(delay_ms) or state.socket.watchdog_interval_ms or BMF_socket_watchdog_interval_ms()
+  return BMF_schedule_delayed_callback("socket_worker_watchdog", delay, function()
+    if type(BMF_socket_worker_watchdog_poll) == "function" then
+      BMF_socket_worker_watchdog_poll()
+    end
+  end)
+end
+
+function BMF_socket_worker_watchdog_poll()
+  if not state.socket_worker_watchdog_started then
+    state.socket_worker_watchdog_mode = "stopped"
+    return
+  end
+
+  state.socket.watchdog_checks = (tonumber(state.socket.watchdog_checks) or 0) + 1
+  state.socket.last_watchdog_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+  state.socket.watchdog_interval_ms = BMF_socket_watchdog_interval_ms()
+  state.socket.watchdog_stale_ms = BMF_socket_watchdog_stale_ms()
+
+  local stale, detail = BMF_socket_worker_is_stale()
+  if stale then
+    state.socket.watchdog_restarts = (tonumber(state.socket.watchdog_restarts) or 0) + 1
+    state.socket.watchdog_consecutive_stale = (tonumber(state.socket.watchdog_consecutive_stale) or 0) + 1
+    state.socket.last_watchdog_restart_at = state.socket.last_watchdog_at
+    state.socket.last_watchdog_error = tostring(detail or "socket worker stale")
+    state.socket.last_error = "socket worker watchdog restarting: " .. state.socket.last_watchdog_error
+    local force_delayed = state.socket.watchdog_consecutive_stale >= BMF_socket_watchdog_delayed_after_restarts()
+    if force_delayed then
+      state.socket.watchdog_forced_delayed_recoveries = (tonumber(state.socket.watchdog_forced_delayed_recoveries) or 0) + 1
+    end
+    log("warn", state.socket.last_error .. " force_delayed=" .. tostring(force_delayed))
+    local restarted, mode_or_error = BMF_restart_socket_worker("watchdog", {
+      forceDelayed = force_delayed,
+    })
+    if not restarted then
+      state.socket.last_watchdog_error = "restart failed: " .. tostring(mode_or_error or "unknown")
+      state.socket.last_error = state.socket.last_watchdog_error
+      log("error", "socket worker watchdog restart failed: " .. tostring(mode_or_error or "unknown"))
+    end
+  else
+    state.socket.watchdog_consecutive_stale = 0
+    state.socket.last_watchdog_error = ""
+  end
+
+  BMF_socket_metadata_heartbeat(false)
+  if state.socket_worker_watchdog_started then
+    if not BMF_schedule_socket_worker_watchdog(state.socket.watchdog_interval_ms) then
+      state.socket_worker_watchdog_started = false
+      state.socket_worker_watchdog_mode = "stopped"
+      state.socket.last_watchdog_error = "watchdog scheduler unavailable"
+      log("error", "socket worker watchdog stopped: scheduler unavailable")
+      BMF_socket_metadata_heartbeat(true)
+    end
+  end
+end
+
+function BMF_start_socket_worker_watchdog()
+  if state.socket_worker_mode == "LoopInGameThread"
+      and state.game_command_tunnel.worker_started == true then
+    state.socket_worker_watchdog_started = false
+    state.socket_worker_watchdog_mode = "disabled-persistent-pump"
+    return false, "persistent game-thread pump is registered once per process"
+  end
+  if not BMF_socket_watchdog_enabled() then
+    state.socket_worker_watchdog_started = false
+    state.socket_worker_watchdog_mode = "disabled"
+    return false, "disabled"
+  end
+  if state.socket_worker_watchdog_started then
+    return true, state.socket_worker_watchdog_mode
+  end
+  state.socket.watchdog_interval_ms = BMF_socket_watchdog_interval_ms()
+  state.socket.watchdog_stale_ms = BMF_socket_watchdog_stale_ms()
+  state.socket_worker_watchdog_started = true
+  state.socket_worker_watchdog_mode = "ExecuteWithDelay"
+  if BMF_schedule_socket_worker_watchdog(math.min(1000, state.socket.watchdog_interval_ms)) then
+    log("info", "socket worker watchdog started interval_ms=" .. tostring(state.socket.watchdog_interval_ms) .. " stale_ms=" .. tostring(state.socket.watchdog_stale_ms))
+    BMF_socket_metadata_heartbeat(true)
+    return true, state.socket_worker_watchdog_mode
+  end
+
+  state.socket_worker_watchdog_started = false
+  state.socket_worker_watchdog_mode = "stopped"
+  state.socket.last_watchdog_error = "watchdog scheduler unavailable"
+  log("warn", "socket worker watchdog could not start: scheduler unavailable")
+  BMF_socket_metadata_heartbeat(true)
+  return false, state.socket.last_watchdog_error
+end
+
 function BMF_start_socket_transport()
   BMF_socket_configure_from_env()
   if not state.socket.enabled then
     return
   end
   if state.socket.started then
+    if not state.socket_worker_started then
+      BMF_start_socket_worker("socket-start-existing")
+    end
+    if not state.socket_worker_watchdog_started then
+      BMF_start_socket_worker_watchdog()
+    end
     return
   end
   if not state.socket.available then
@@ -21608,8 +25539,9 @@ function BMF_start_socket_transport()
   state.socket.last_error = ""
   state.socket.last_status = tostring(status or "")
   state.socket.last_started_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
-  state.socket_worker_started = true
-  state.socket_worker_mode = "starting"
+  state.socket.last_started_epoch = os.time()
+  state.socket.last_poll_epoch = 0
+  state.socket.last_poll_at = ""
   BMF_socket_write_metadata()
   log("info", "socket transport started host=" .. tostring(state.socket.host) .. " port=" .. tostring(state.socket.port) .. " poll_ms=" .. tostring(state.socket.poll_interval_ms))
   if BMF_env_bool("BMF_RESOURCE_NATIVE_ENABLED", BMF_env_bool("BMF_TREECUT_NATIVE_ENABLED", true)) then
@@ -21632,44 +25564,13 @@ function BMF_start_socket_transport()
       end
     end
   end
-  if BMF_start_async_loop("socket_worker", state.socket.poll_interval_ms, BMF_poll_socket_messages_async) then
-    state.socket_worker_mode = "LoopAsync"
-    log("info", "socket worker polling via LoopAsync")
-    return
-  end
-  if BMF_start_game_thread_loop("socket_worker", state.socket.poll_interval_ms, function()
-    if not state.socket_worker_started then
-      return true
-    end
-    if not state.socket.started or type(BMFSocketReceive) ~= "function" then
-      state.socket_worker_started = false
-      return true
-    end
-    BMF_drain_socket_messages(64)
-    return false
-  end) then
-    state.socket_worker_mode = "LoopInGameThread"
-    log("info", "socket worker polling via LoopInGameThread")
-    return
-  end
-  if not BMF_allow_delayed_worker_fallback() then
-    state.socket_worker_started = false
-    state.socket_worker_mode = "stopped"
-    log("error", "socket worker unavailable: delayed fallback disabled and no loop scheduler available")
-    return
-  end
-  state.socket_worker_mode = "ExecuteInGameThreadWithDelay"
-  log("warn", "socket worker using game-thread delayed fallback interval_ms=" .. tostring(state.socket.poll_interval_ms))
-  if not BMF_schedule_socket_worker_poll(state.socket.poll_interval_ms) then
-    state.socket_worker_started = false
-    state.socket_worker_mode = "stopped"
-    log("error", "socket worker unavailable: no game-thread scheduler available")
-  end
+  BMF_start_socket_worker("socket-start")
+  BMF_start_socket_worker_watchdog()
 end
 
 (function()
 
-local function sorted_loaded_plugin_names()
+function sorted_loaded_plugin_names()
   local names = {}
   for name in pairs(state.plugins) do
     names[#names + 1] = name
@@ -21678,7 +25579,7 @@ local function sorted_loaded_plugin_names()
   return names
 end
 
-local function loaded_plugin_with_tick_count()
+function loaded_plugin_with_tick_count()
   local count = 0
   for name, plugin in pairs(state.plugins) do
     if type(plugin) == "table" and type(plugin.onTick) == "function" and not plugin_watchdog_isolated(name) then
@@ -21688,14 +25589,14 @@ local function loaded_plugin_with_tick_count()
   return count
 end
 
-local function dispatch_server_ready_hooks(data)
+function dispatch_server_ready_hooks(data)
   local ready_data = copy_table(data or state.server_ready_data or {})
   for _, name in ipairs(sorted_loaded_plugin_names()) do
     run_plugin_hook(name, state.plugins[name], "onServerReady", ready_data)
   end
 end
 
-local function ensure_plugin_tick_worker()
+function ensure_plugin_tick_worker()
   if state.plugin_tick_timer_id ~= nil then
     return
   end
@@ -21729,7 +25630,7 @@ local function ensure_plugin_tick_worker()
   end
 end
 
-local function mark_server_ready(data)
+function mark_server_ready(data)
   state.server_ready = true
   state.server_ready_data = copy_table(data or {})
   BMF.events.emit("serverReady", state.server_ready_data)
@@ -21738,7 +25639,7 @@ local function mark_server_ready(data)
   write_status()
 end
 
-local function list_plugin_dirs()
+function list_plugin_dirs()
   local command = 'dir /b /ad "' .. PLUGINS_DIR:gsub("/", "\\") .. '" 2>nul'
   local handle = io.popen(command)
   if not handle then
@@ -21755,7 +25656,7 @@ local function list_plugin_dirs()
   return names
 end
 
-local function parse_json_string_field(raw, field)
+function parse_json_string_field(raw, field)
   if type(raw) ~= "string" then
     return nil
   end
@@ -21763,7 +25664,7 @@ local function parse_json_string_field(raw, field)
   return raw:match(pattern)
 end
 
-local function parse_json_string_array_field(raw, field)
+function parse_json_string_array_field(raw, field)
   if type(raw) ~= "string" then
     return {}
   end
@@ -21778,7 +25679,7 @@ local function parse_json_string_array_field(raw, field)
   return values
 end
 
-local function parse_json_boolean_field(raw, field)
+function parse_json_boolean_field(raw, field)
   if type(raw) ~= "string" then
     return nil
   end
@@ -21796,7 +25697,7 @@ local function parse_json_boolean_field(raw, field)
   return nil
 end
 
-local function parse_json_number_field(raw, field)
+function parse_json_number_field(raw, field)
   if type(raw) ~= "string" then
     return nil
   end
@@ -21807,7 +25708,7 @@ local function parse_json_number_field(raw, field)
   return tonumber(token)
 end
 
-local function read_framework_config()
+function read_framework_config()
   local raw = read_file(CONFIG_PATH) or ""
   local jsonl_logs = parse_json_boolean_field(raw, "jsonlLogs")
   if jsonl_logs == nil then
@@ -21836,7 +25737,7 @@ local function read_framework_config()
   }
 end
 
-local function read_plugin_manifest(name)
+function read_plugin_manifest(name)
   local path = PLUGINS_DIR .. "/" .. name .. "/bmf.json"
   local raw = read_file(path)
   if not raw then
@@ -21857,7 +25758,7 @@ local function read_plugin_manifest(name)
   }
 end
 
-local function has_manifest_capability(manifest, capability)
+function has_manifest_capability(manifest, capability)
   local capabilities = {}
   if type(manifest) == "table" and type(manifest.capabilities) == "table" then
     capabilities = manifest.capabilities
@@ -21873,7 +25774,7 @@ local function has_manifest_capability(manifest, capability)
   return false
 end
 
-local function plugin_can_access_unsafe_global(plugin_name, manifest, key)
+function plugin_can_access_unsafe_global(plugin_name, manifest, key)
   local global_name = tostring(key or "")
   if not UNSAFE_PLUGIN_GLOBALS[global_name] then
     return true
@@ -21914,14 +25815,14 @@ local function plugin_can_access_unsafe_global(plugin_name, manifest, key)
   return false
 end
 
-local function plugin_global_lookup(plugin_name, manifest, key)
+function plugin_global_lookup(plugin_name, manifest, key)
   if not plugin_can_access_unsafe_global(plugin_name, manifest, key) then
     return nil
   end
   return _G[key]
 end
 
-local function capability_denied(plugin_name, capability, manifest)
+function capability_denied(plugin_name, capability, manifest)
   audit_record("capability.denied", {
     plugin = plugin_name,
     capability = capability,
@@ -21940,7 +25841,7 @@ local function capability_denied(plugin_name, capability, manifest)
   })
 end
 
-local function config_opt_in_denied(plugin_name, option)
+function config_opt_in_denied(plugin_name, option)
   audit_record("config.opt_in_denied", {
     plugin = plugin_name,
     option = option,
@@ -21959,21 +25860,21 @@ local function config_opt_in_denied(plugin_name, option)
   })
 end
 
-local function require_capability(plugin_name, manifest, capability, callback)
+function require_capability(plugin_name, manifest, capability, callback)
   if not has_manifest_capability(manifest, capability) then
     return capability_denied(plugin_name, capability, manifest)
   end
   return callback()
 end
 
-local function plugin_storage_args(plugin_name, a, b, c)
+function plugin_storage_args(plugin_name, a, b, c)
   if c ~= nil then
     return tostring(a or ""), b, c
   end
   return plugin_name, a, b
 end
 
-local function create_plugin_api(plugin_name, manifest)
+function create_plugin_api(plugin_name, manifest)
   local api = {}
   for key, value in pairs(BMF) do
     api[key] = value
@@ -22072,6 +25973,14 @@ local function create_plugin_api(plugin_name, manifest)
   for key, value in pairs(BMF.tools.resourceNative) do
     api.tools.resourceNative[key] = value
   end
+  api.tools.zoneNative = {}
+  for key, value in pairs(BMF.tools.zoneNative) do
+    api.tools.zoneNative[key] = value
+  end
+  api.tools.zoneWireTrace = {}
+  for key, value in pairs(BMF.tools.zoneWireTrace) do
+    api.tools.zoneWireTrace[key] = value
+  end
   api.tools.treeCutTrace = {}
   for key, value in pairs(BMF.tools.treeCutTrace) do
     api.tools.treeCutTrace[key] = value
@@ -22142,6 +26051,13 @@ local function create_plugin_api(plugin_name, manifest)
     return require_capability(plugin_name, manifest, "chat.statusMessage", function()
       return run_plugin_action(function()
         return BMF.chat.statusMessage(player, message)
+      end)
+    end)
+  end
+  api.chat.playerMessageImplementationProbe = function(message, controller_hint)
+    return require_capability(plugin_name, manifest, "chat.command", function()
+      return run_plugin_action(function()
+        return BMF.chat.playerMessageImplementationProbe(message, controller_hint)
       end)
     end)
   end
@@ -22384,7 +26300,7 @@ local function create_plugin_api(plugin_name, manifest)
   return api
 end
 
-local function unload_plugin(name, plugin, reason)
+function unload_plugin(name, plugin, reason)
   if type(plugin) == "table" and type(plugin.onUnload) == "function" then
     local api = plugin.bmf_api or BMF
     local ok, err = pcall(plugin.onUnload, api, reason or "unload")
@@ -22426,7 +26342,7 @@ local function unload_plugin(name, plugin, reason)
   return true, nil
 end
 
-local function load_plugin(name)
+function load_plugin(name)
   local plugin_path = PLUGINS_DIR .. "/" .. name .. "/main.lua"
   local manifest = read_plugin_manifest(name)
   local plugin_api = create_plugin_api(name, manifest)

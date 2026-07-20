@@ -15,6 +15,18 @@ if (!$OutJson) {
   $OutJson = Join-Path $Root 'artifacts/local/bmf-permission-policy-canary.json'
 }
 
+$otherServers = @(
+  Get-CimInstance Win32_Process |
+    Where-Object {
+      $_.Name -eq 'BrickadiaServer-Win64-Shipping.exe' -and
+      $_.CommandLine -notlike "*-port=`"$Port`"*"
+    }
+)
+if ($otherServers.Count -gt 0) {
+  $otherPids = @($otherServers | Select-Object -ExpandProperty ProcessId) -join ','
+  throw "Refusing permission-policy canary while another Brickadia server is active (pid=$otherPids); the shared UE4SS Mods directory would collide."
+}
+
 $errors = New-Object System.Collections.Generic.List[string]
 $evidence = New-Object System.Collections.Generic.List[object]
 $commandResults = New-Object System.Collections.Generic.List[object]
@@ -27,8 +39,8 @@ New-Item -ItemType Directory -Force -Path $caseRoot | Out-Null
 $startServerScript = Join-Path $BrickadiaRoot 'brickadia-ue4ss-re/scripts/start-bridge-test-server.ps1'
 $sendRpcScript = Join-Path $BrickadiaRoot 'brickadia-ue4ss-re/scripts/send-bridge-rpc.js'
 $sourceBmfDir = Join-Path $Root 'framework/ue4ss/Mods/BMF'
-$sourceNoSpawnItemPluginDir = Join-Path $Root 'examples/NoSpawnItemApplicator'
-$sourceInteractPrefixPluginDir = Join-Path $Root 'examples/InteractConsolePrefixGuard'
+$sourceNoSpawnItemPluginDir = Join-Path $Root 'framework/ue4ss/Mods/BMF/plugins/NoSpawnItemApplicator'
+$sourceInteractPrefixPluginDir = Join-Path $Root 'framework/ue4ss/Mods/BMF/plugins/InteractConsolePrefixGuard'
 $runtimeBmfDir = Join-Path $RuntimeModsDir 'BMF'
 $runtimePluginDir = Join-Path $runtimeBmfDir 'plugins/PermissionPolicyCanary'
 $runtimeNoSpawnItemPluginDir = Join-Path $runtimeBmfDir 'plugins/NoSpawnItemApplicator'
@@ -255,25 +267,31 @@ return {
         tag = "buyweapon:ak",
         actor = { uuid = "player-default", roles = { "Default" } },
         allowedPrefixes = { "buyweapon:" },
-        adminRoles = { "Owner", "Admin" },
+        adminRoles = { "Owner", "Admin", "Moderator" },
       })
       local interact_teleport_default = BMF.permissions.evaluateInteractConsolePrefixAccess({
         tag = "teleport:spawn",
         actor = { uuid = "player-default", roles = { "Default" } },
         allowedPrefixes = { "buyweapon:" },
-        adminRoles = { "Owner", "Admin" },
+        adminRoles = { "Owner", "Admin", "Moderator" },
       })
       local interact_teleport_admin = BMF.permissions.evaluateInteractConsolePrefixAccess({
         tag = "teleport:spawn",
         actor = { uuid = "player-admin", roles = { "Admin" } },
         allowedPrefixes = { "buyweapon:" },
-        adminRoles = { "Owner", "Admin" },
+        adminRoles = { "Owner", "Admin", "Moderator" },
+      })
+      local interact_teleport_moderator = BMF.permissions.evaluateInteractConsolePrefixAccess({
+        tag = "teleport:spawn",
+        actor = { uuid = "player-moderator", roles = { "Moderator" } },
+        allowedPrefixes = { "buyweapon:" },
+        adminRoles = { "Owner", "Admin", "Moderator" },
       })
       local interact_empty = BMF.permissions.evaluateInteractConsolePrefixAccess({
         tag = "",
         actor = { uuid = "player-default", roles = { "Default" } },
         allowedPrefixes = { "buyweapon:" },
-        adminRoles = { "Owner", "Admin" },
+        adminRoles = { "Owner", "Admin", "Moderator" },
       })
       local api = BMF.apis.get("BMF.permissions.evaluateNoSpawnItemApplicator")
       local api_label = api.data and api.data.api or {}
@@ -325,6 +343,9 @@ return {
           "interact_teleport_admin_allowed=" .. tostring(interact_teleport_admin.data and interact_teleport_admin.data.allowed),
           "interact_teleport_admin_decision=" .. tostring(interact_teleport_admin.data and interact_teleport_admin.data.decision or ""),
           "interact_teleport_admin_matched_role=" .. tostring(interact_teleport_admin.data and interact_teleport_admin.data.matchedRole or ""),
+          "interact_teleport_moderator_allowed=" .. tostring(interact_teleport_moderator.data and interact_teleport_moderator.data.allowed),
+          "interact_teleport_moderator_decision=" .. tostring(interact_teleport_moderator.data and interact_teleport_moderator.data.decision or ""),
+          "interact_teleport_moderator_matched_role=" .. tostring(interact_teleport_moderator.data and interact_teleport_moderator.data.matchedRole or ""),
           "interact_empty_allowed=" .. tostring(interact_empty.data and interact_empty.data.allowed),
           "interact_empty_decision=" .. tostring(interact_empty.data and interact_empty.data.decision or ""),
           "api_stability=" .. tostring(api_label.stability or ""),
@@ -363,7 +384,7 @@ return {
     }
   }
 
-  $startOutput = & $startServerScript -BridgeDir $bridgeDir -Port $Port -VerifyWaitSeconds 30
+  $startOutput = & $startServerScript -RuntimeModsDir $RuntimeModsDir -BridgeDir $bridgeDir -Port $Port -VerifyWaitSeconds 30
   $startOutput | Set-Content -LiteralPath $startPath -Encoding UTF8
   $start = $startOutput | ConvertFrom-Json
   $serverPid = [int]$start.pid
@@ -406,6 +427,9 @@ return {
       'interact_teleport_admin_allowed=true',
       'interact_teleport_admin_decision=admin-bypass',
       'interact_teleport_admin_matched_role=Admin',
+      'interact_teleport_moderator_allowed=true',
+      'interact_teleport_moderator_decision=admin-bypass',
+      'interact_teleport_moderator_matched_role=Moderator',
       'interact_empty_allowed=true',
       'interact_empty_decision=empty-allowed',
       'api_stability=stable',
@@ -504,7 +528,7 @@ return {
       'policy=interactConsolePrefixGuard',
       'enforcement=servermodifycomponent-native-prefix-policy',
       'save_time_hook=ufunction-func-native',
-      'admin_roles=Admin|Owner',
+      'admin_roles=Admin|Moderator|Owner',
       'allowed_prefixes=buyweapon:',
       'received=0',
       'allowed=0',
@@ -538,6 +562,16 @@ return {
       'allowed=true',
       'decision=admin-bypass',
       'matched_role=Admin'
+    )
+
+    Invoke-BmfConsoleCommand 'bmf.interactprefix.check tag=teleport%3Aspawn roles=Moderator' 'bmf-interactprefix-check-teleport-moderator' @(
+      'BMF bmf.interactprefix.check OK',
+      'code=OK',
+      'ok=true',
+      'tag=teleport:spawn',
+      'allowed=true',
+      'decision=admin-bypass',
+      'matched_role=Moderator'
     )
 
     Invoke-BmfConsoleCommand 'bmf.interact.console source=canary player=00000000-0000-0000-0000-000000000001 name=Canary message=buyweapon%3Aak' 'bmf-interact-console-buyweapon' @(

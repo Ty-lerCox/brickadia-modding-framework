@@ -19,15 +19,16 @@ needs a role-aware allow/deny decision.
 ## Lua API
 
 `BMF.permissions.evaluateInteractConsolePrefixAccess(options)` evaluates the
-Interactable component's Print-to-Console tag policy. Owner/Admin roles can use
-any prefix; everyone else must match the configured whitelist.
+Interactable component's Print-to-Console tag policy. Moderator, Admin, and
+Owner roles can use any prefix; everyone else must match the configured
+whitelist.
 
 ```lua
 local checked = BMF.permissions.evaluateInteractConsolePrefixAccess({
   tag = "buyweapon:ak",
   actor = { uuid = playerUuid, roles = { "Default" } },
   allowedPrefixes = { "buyweapon:" },
-  adminRoles = { "Owner", "Admin" },
+  adminRoles = { "Moderator", "Admin", "Owner" },
 })
 ```
 
@@ -45,13 +46,21 @@ Refresh it after restart:
 .\scripts\sync-interact-prefix-guard-native-hook.ps1
 ```
 
-`examples/InteractConsolePrefixGuard` writes whitelisted prefixes, allowed
+`framework/ue4ss/Mods/BMF/plugins/InteractConsolePrefixGuard` writes whitelisted prefixes, allowed
 contexts, denial mode, and feedback event paths into the native control file.
+
+With multiple players online, the plugin resolves the blocked Applicator actor
+against live controller positions and cached controller identities. A
+Moderator/Admin/Owner context is allowlisted only when it is within
+`contextPlayerMaxDistance` and no non-bypass player is close enough to make the
+match ambiguous. Ambiguous matches fail closed. Keep the Omegga BMF player-sync
+adapter enabled so controller UUIDs remain current.
 
 Related command route:
 
 ```text
 bmf.interact.console message=<tag> player=<uuid> name=<name>
+bmf.interactprefix.resolve-context context=0x...
 ```
 
 That command forwards Omegga-observed Interactable Print-to-Console messages

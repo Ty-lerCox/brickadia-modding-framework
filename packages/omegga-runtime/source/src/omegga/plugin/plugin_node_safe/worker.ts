@@ -29,6 +29,7 @@ const MAIN_FILE = 'omegga.plugin.js';
 const MAIN_FILE_TS = 'omegga.plugin.ts';
 const TS_BUILD_DIR = '.build';
 const TS_BUILD_FILE = 'plugin.js';
+const SAFE_VM_ENV_PREFIXES = ['OMEGGA_BMF_', 'OMEGGA_UE4SS_', 'CITYRPG_'];
 let vm: NodeVM,
   PluginClass: {
     new (
@@ -71,6 +72,19 @@ const emit = (action: string, ...args: any[]) => {
 // tell omegga to exec a command
 const exec = (cmd: string) => emit('exec', cmd);
 
+function getSafeVmEnv(): Record<string, string> {
+  const safeEnv: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (
+      typeof value === 'string' &&
+      SAFE_VM_ENV_PREFIXES.some(prefix => key.startsWith(prefix))
+    ) {
+      safeEnv[key] = value;
+    }
+  }
+  return safeEnv;
+}
+
 const execControlCommandWithOutput = async (
   command: string,
   timeoutMs?: number,
@@ -90,9 +104,22 @@ const execControlCommandWithOutput = async (
   return payload.output;
 };
 
+const getAllPlayerPositions = async () => {
+  const payload = (await emit('getAllPlayerPositions')) as
+    | { ok: true; positions: unknown }
+    | { ok: false; error: string }
+    | undefined;
+
+  if (!payload?.ok) {
+    throw new Error(payload?.error || 'getAllPlayerPositions failed');
+  }
+  return payload.positions;
+};
+
 // create the proxy omegga
 injectOmeggaPrototypes(ProxyOmegga, Omegga);
 const omegga = new ProxyOmegga(exec, execControlCommandWithOutput);
+omegga.getAllPlayerPositions = getAllPlayerPositions as any;
 
 // add plugin fetcher
 omegga.getPlugin = async name => {
@@ -305,6 +332,11 @@ async function createVm(
       root: pluginPath,
     },
   });
+  vm.freeze(getSafeVmEnv(), 'OMEGGA_SAFE_ENV');
+  vm.run(
+    `for (const [key, value] of Object.entries(OMEGGA_SAFE_ENV)) process.env[key] = value;`,
+    'omegga-safe-env-bootstrap.js',
+  );
 
   // plugin log generator function
   const ezLog =
@@ -420,19 +452,21 @@ parent.on('start', async (resp, config) => {
   try {
     pluginInstance = new PluginClass(omegga as any as Omegga, config, store);
     const result = await pluginInstance.init();
+    let registeredCommands: string[] = [];
     // if a plugin init returns a list of strings, treat them as the list of commands
     if (typeof result === 'object' && result) {
       // if registeredCommands is in the results, register the provided strings as commands
       const cmds = result.registeredCommands;
       if (
         cmds &&
-        cmds instanceof Array &&
+        Array.isArray(cmds) &&
         cmds.every(i => typeof i === 'string')
       ) {
+        registeredCommands = [...cmds];
         emit('command.registers', JSON.stringify(cmds));
       }
     }
-    emit(resp, true);
+    emit(resp, true, registeredCommands);
   } catch (err) {
     emit('error', 'error starting plugin', err?.stack ?? JSON.stringify(err));
     emit(resp, false);

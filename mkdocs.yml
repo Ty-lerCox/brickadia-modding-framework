@@ -81,6 +81,7 @@ nav:
       - Runtime Files: reference/runtime-files.md
   - Architecture:
       - Architecture Patterns: architecture/architecture-patterns.md
+      - Generic Game-Command Tunnel: architecture/game-command-tunnel.md
       - Omegga-Supported Runtime: architecture/omegga-supported-runtime.md
       - Observability and Performance: architecture/observability-performance.md
       - Omegga Requirement: architecture/standalone-runtime.md
@@ -141,6 +142,7 @@ nav:
           - Dynamic Actors: api/archives/dynamic-actors.md
   - Validation:
       - Canary Contract: validation/canary-contract.md
+      - Command Tunnel Benchmark: validation/command-tunnel-benchmark.md
       - API Validation Evidence: validation/api-validation.md
   - Maintainers:
       - Documentation Style Guide: maintainers/docs-style-guide.md

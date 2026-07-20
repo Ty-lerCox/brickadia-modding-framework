@@ -21,6 +21,16 @@ const ACCESS_FILE = 'access.json';
 const PLUGIN_FILE = 'plugin.json';
 const SAFE_WORKER_ENV_PREFIXES = ['OMEGGA_BMF_', 'OMEGGA_UE4SS_', 'CITYRPG_'];
 
+function normalizeRegisteredCommands(value: unknown): string[] | undefined {
+  if (
+    !Array.isArray(value) ||
+    value.some(command => typeof command !== 'string')
+  ) {
+    return undefined;
+  }
+  return [...value];
+}
+
 function getForwardedSafeWorkerEnv(): Record<string, string> {
   const forwarded: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
@@ -35,9 +45,7 @@ function getForwardedSafeWorkerEnv(): Record<string, string> {
 }
 
 export default class NodeVmPlugin extends Plugin {
-  #worker: Worker;
-  #outInterface: readline.Interface;
-  #errInterface: readline.Interface;
+  #worker?: Worker;
 
   // every node vm plugin requires a main file, a doc file, and an access file
   // may evolve this so it checks the contents of the doc file later
@@ -125,6 +133,19 @@ export default class NodeVmPlugin extends Plugin {
         }
       },
     );
+    this.plugin.on('getAllPlayerPositions', async resp => {
+      try {
+        this.notify(resp, {
+          ok: true,
+          positions: await omegga.getAllPlayerPositions(),
+        });
+      } catch (err) {
+        this.notify(resp, {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    });
 
     // storage interface
     this.plugin.on('store.get', async (resp, key) => {
@@ -238,17 +259,13 @@ export default class NodeVmPlugin extends Plugin {
     });
 
     // command registration
-    this.plugin.on('command.registers', async (_, blob) => {
+    this.plugin.on('command.registers', async (resp, blob) => {
       if (typeof blob !== 'string') return;
-      const registers = JSON.parse(blob);
-      // ensure registers is an array of strings
-      if (
-        !(registers instanceof Array) ||
-        registers.some(i => typeof i !== 'string')
-      )
-        return;
+      const registers = normalizeRegisteredCommands(JSON.parse(blob));
+      if (!registers) return;
 
       this.commands = registers;
+      this.notify(resp, true);
     });
 
     // listen on every message, post them to to the worker
@@ -289,6 +306,7 @@ export default class NodeVmPlugin extends Plugin {
     };
     this.commands = [];
 
+    let worker: Worker | undefined;
     try {
       const config = await this.storage.getConfig();
       if (this.pluginConfig?.emitConfig) {
@@ -297,7 +315,7 @@ export default class NodeVmPlugin extends Plugin {
           JSON.stringify(config),
         );
       }
-      this.createWorker();
+      worker = this.createWorker();
 
       // tell the worker its name :)
       await this.emit('name', this.getName());
@@ -312,7 +330,7 @@ export default class NodeVmPlugin extends Plugin {
       Logger.verbose('Sending initial data to safe plugin');
       for (const ev in initialData) {
         try {
-          (this.#worker as Worker).postMessage({
+          worker.postMessage({
             action: 'brickadiaEvent',
             args: [ev, ...initialData[ev]],
           });
@@ -325,13 +343,20 @@ export default class NodeVmPlugin extends Plugin {
       this.omegga.on('*', this.eventPassthrough);
       Logger.verbose('Starting safe plugin');
       // actually start the plugin
-      if (!(await this.emit('start', config))[0]) throw 'plugin failed start';
+      const startResult = await this.emit('start', config);
+      if (!startResult?.[0]) throw 'plugin failed start';
+
+      const registeredCommands = normalizeRegisteredCommands(startResult[1]);
+      if (registeredCommands) {
+        this.commands = registeredCommands;
+      }
 
       this.emitStatus();
       return true;
     } catch (e) {
-      // kill the worker
-      await this.emit('kill');
+      if (worker && worker.threadId !== -1) {
+        await worker.terminate();
+      }
 
       Logger.error(
         '!>'.red,
@@ -345,81 +370,52 @@ export default class NodeVmPlugin extends Plugin {
   }
 
   // disrequire the plugin into the system, run the stop func
-  unload() {
-    let frozen = true,
-      timed = false;
+  async unload() {
+    const worker = this.#worker;
+    if (!worker) return false;
 
-    return Promise.race([
-      (async () => {
-        // can't unload the plugin if it hasn't been loaded
-        if (typeof this.#worker === 'undefined') return false;
+    let timeout: NodeJS.Timeout | undefined;
+    let stopTimedOut = false;
+    try {
+      const stop = this.emit('stop');
+      if (stop) {
+        await Promise.race([
+          stop,
+          new Promise<never>((_, reject) => {
+            timeout = setTimeout(() => {
+              stopTimedOut = true;
+              reject(new Error('plugin stop timed out'));
+            }, 5000);
+          }),
+        ]);
+      }
+    } catch (e) {
+      Logger.error(
+        '!>'.red,
+        stopTimedOut
+          ? 'plugin stop timed out; terminating worker'
+          : 'error stopping node plugin; terminating worker',
+        this.getName().brightRed.underline,
+        e,
+      );
+    } finally {
+      if (timeout) clearTimeout(timeout);
+      this.omegga.off('*', this.eventPassthrough);
+      this.commands = [];
+    }
 
-        try {
-          // stop the plugin (cleanly)
-          await this.emit('stop');
-
-          // remove listeners
-          this.omegga.off('*', this.eventPassthrough);
-
-          // let the unload function wait for the worker to properly cleanup
-          const promise = new Promise(res => {
-            this.#worker.once('exit', res);
-          });
-
-          // kill the worker
-          await this.emit('kill');
-
-          // wait for the worker to exit
-          await promise;
-
-          frozen = false;
-          if (timed) return;
-          this.emitStatus();
-          this.commands = [];
-          return true;
-        } catch (e) {
-          frozen = false;
-          if (timed) return;
-
-          Logger.error(
-            '!>'.red,
-            'error unloading node plugin',
-            this.getName().brightRed.underline,
-            e,
-          );
-          this.emitStatus();
-          return false;
-        }
-      })(),
-      new Promise<boolean>(resolve => {
-        // check if the worker is frozen (while true)
-        setTimeout(() => {
-          if (!frozen) return;
-          this.plugin.emit(
-            'error',
-            0,
-            'I appear to be in an unresponsive state - terminating worker',
-          );
-
-          // remove listeners
-          this.omegga.off('*', this.eventPassthrough);
-
-          // tell the worker to exit
-          if (this.#worker) this.#worker.emit('exit');
-
-          // terminate the worker if it still exists
-          try {
-            if (this.#worker) this.#worker.terminate();
-          } catch (err) {
-            console.error('error terminating worker:', err);
-          }
-
-          timed = true;
-          resolve(true);
-          this.emitStatus();
-        }, 5000);
-      }),
-    ]);
+    try {
+      if (worker.threadId !== -1) await worker.terminate();
+      return true;
+    } catch (e) {
+      Logger.error(
+        '!>'.red,
+        'error terminating node plugin worker',
+        this.getName().brightRed.underline,
+        e,
+      );
+      return false;
+    }
   }
 
   // emit an action to the worker and return a promise with its response
@@ -464,7 +460,7 @@ export default class NodeVmPlugin extends Plugin {
 
   // create the worker for this plugin, attach emitter
   createWorker() {
-    this.#worker = new Worker(
+    const worker = new Worker(
       // vite transpiles worker.ts to dist/worker.js
       path.join(__dirname, '../../worker.js'),
       {
@@ -477,24 +473,26 @@ export default class NodeVmPlugin extends Plugin {
     );
 
     // pipe plugin output into omegga
-    this.#outInterface = readline.createInterface({
-      input: this.#worker.stdout,
+    this.#worker = worker;
+
+    const outInterface = readline.createInterface({
+      input: worker.stdout,
       terminal: false,
     });
-    this.#errInterface = readline.createInterface({
-      input: this.#worker.stderr,
+    const errInterface = readline.createInterface({
+      input: worker.stderr,
       terminal: false,
     });
-    this.#outInterface.on('line', Logger.log);
-    this.#errInterface.on('line', Logger.error);
+    outInterface.on('line', Logger.log);
+    errInterface.on('line', Logger.error);
 
     // attach message emitter
-    this.#worker.on('message', ({ action, args }) =>
-      this.plugin.emit(action, ...args),
-    );
+    worker.on('message', ({ action, args }) => {
+      if (this.#worker === worker) this.plugin.emit(action, ...args);
+    });
 
     // broadcast an error if there is one
-    this.#worker.on('error', err => {
+    worker.on('error', err => {
       Logger.error(
         '!>'.red,
         'error in plugin',
@@ -504,23 +502,22 @@ export default class NodeVmPlugin extends Plugin {
     });
 
     // when the worker exits - set its variable to undefined this knows it's stopped
-    this.#worker.on('exit', () => {
+    worker.on('exit', () => {
+      outInterface.removeAllListeners('line');
+      errInterface.removeAllListeners('line');
+      outInterface.close();
+      errInterface.close();
+
+      // A late exit from an old worker must not tear down its replacement.
+      if (this.#worker !== worker) return;
+
       this.omegga.off('*', this.eventPassthrough);
-      this.#outInterface.removeAllListeners('line');
-      this.#errInterface.removeAllListeners('line');
-      try {
-        if (this.#worker) this.#worker.terminate();
-      } catch (err) {
-        Logger.error(
-          '!>'.red,
-          'Error terminating worker for',
-          this.getName().brightRed.underline,
-          err,
-        );
-      }
       this.#worker = undefined;
+      this.commands = [];
       this.emitStatus();
     });
+
+    return worker;
   }
 
   eventPassthrough(...args: any[]) {

@@ -75,7 +75,7 @@ process:
 .\scripts\sync-applicator-blocker-native-hook.ps1
 ```
 
-`examples/NoSpawnItemApplicator` owns player/role feedback and writes allowed
+`framework/ue4ss/Mods/BMF/plugins/NoSpawnItemApplicator` owns player/role feedback and writes allowed
 contexts back into the native control file when policy permits a retry.
 
 !!! warning

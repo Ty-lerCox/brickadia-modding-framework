@@ -370,6 +370,7 @@ void write_status(const char* reason) {
         return;
     }
     std::fprintf(file, "reason=%s\n", reason ? reason : "");
+    std::fprintf(file, "pid=%lu\n", GetCurrentProcessId());
     std::fprintf(file, "installed=%d\n", g_installed.load() ? 1 : 0);
     std::fprintf(file, "enabled=%d\n", g_enabled.load() ? 1 : 0);
     std::fprintf(file, "block=%d\n", g_block.load() ? 1 : 0);

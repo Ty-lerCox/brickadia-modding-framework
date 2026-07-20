@@ -78,6 +78,14 @@ include `bmf_command_transport=socket`.
 | Runtime bricks | `bmf.bricks.runtime.scan-region ...` | Diagnostic runtime-local active brick scan; not a ClearRegion safety proof. | [Runtime Brick State](runtime-bricks.md) |
 | Runtime bricks | `bmf.bricks.world.scan-region ...` | World-space `Bricks.SaveRegion` proof required before a caller may use `Bricks.ClearRegion`; fails closed unless the region contains exactly the expected tree key and no untagged bricks. | [Runtime Brick State](runtime-bricks.md) |
 | Runtime bricks | `bmf.tools.resource.native.*` | Starts, drains, and inspects native CityRPG resource hit capture. | [Runtime Brick State](runtime-bricks.md) |
+| Diagnostics | `bmf.tools.zone.native.start [captureAll=true] [scanLocalObjects=true]` | Starts experimental native overlap tracing for projection-zone discovery. | [Events](events.md#native-zone-events) |
+| Diagnostics | `bmf.tools.zone.native.status|drain|stop` | Inspects, emits, or stops the native overlap trace. | [Events](events.md#native-zone-events) |
+| Diagnostics | `bmf.tools.zone.console.start filter=<marker> [limit=<n>]` | Starts marker-filtered console/log stack tracing for projection-zone discovery. | [Events](events.md#zone-console-trace-events) |
+| Diagnostics | `bmf.tools.zone.console.status|drain|stop` | Inspects, emits, or stops the marker-filtered zone console trace. | [Events](events.md#zone-console-trace-events) |
+| Diagnostics | `bmf.tools.zone.wire.start [limit=<n>]` | Starts bounded native tracing for Brickadia wire `PrintToConsole` marker output. | [Events](events.md#zone-wire-printto-console-events) |
+| Diagnostics | `bmf.tools.zone.wire.status|drain|stop` | Inspects, emits, or stops the wire `PrintToConsole` trace. | [Events](events.md#zone-wire-printto-console-events) |
+| Diagnostics | `bmf.tools.zone.process.start [filter=<text>] [limit=<n>]` | Starts bounded filtered `ProcessEvent` tracing for zone/wire discovery. | [Events](events.md) |
+| Diagnostics | `bmf.tools.zone.process.status|drain|stop` | Inspects, emits, or stops the filtered `ProcessEvent` trace. | [Events](events.md) |
 | Runtime bricks | `bmf.bricks.runtime.guid-status ...` | Prints opaque GUID binding state. | [Runtime Brick State](runtime-bricks.md) |
 | Runtime bricks | `bmf.bricks.runtime.status` | Prints the last queued runtime brick result. | [Runtime Brick State](runtime-bricks.md) |
 | Minigames | `bmf.minigames.*` | Desired definitions, events, data cache, and guarded unsafe wrappers. | [Minigames](minigames.md) |

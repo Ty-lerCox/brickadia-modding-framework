@@ -19,6 +19,13 @@ unless they are explicitly working on hook infrastructure.
 - Record `L6 Frame Time` evidence before promoting native mutation into normal
   gameplay.
 
+Current `Release-EA3-CL-14860` Applicator RPC exec-thunk RVAs:
+
+- `ServerAddComponent`: `0x5E93250`
+- `ServerModifyComponent`: `0x5E942D0`
+
+These values are build-specific and must be re-derived after a server update.
+
 ## Applicator Blocker
 
 The experimental `NoSpawnItemApplicator` live blocker depends on Brickadia
@@ -34,7 +41,8 @@ the running server for the Applicator component-add function, updates the native
 control file, builds/injects the native DLL if needed, and skips reinjection
 when the hook is already installed in that process.
 
-Player and role decisions remain owned by `examples/NoSpawnItemApplicator`,
+Player and role decisions remain owned by
+`framework/ue4ss/Mods/BMF/plugins/NoSpawnItemApplicator`,
 which can write allowed contexts back into the native control file when policy
 permits a retry.
 
@@ -47,7 +55,7 @@ Refresh it after restart:
 .\scripts\sync-interact-prefix-guard-native-hook.ps1
 ```
 
-`examples/InteractConsolePrefixGuard` owns whitelisted prefixes, allowed
+`framework/ue4ss/Mods/BMF/plugins/InteractConsolePrefixGuard` owns whitelisted prefixes, allowed
 contexts, denial mode, and feedback event paths.
 
 ## Runtime Brick State

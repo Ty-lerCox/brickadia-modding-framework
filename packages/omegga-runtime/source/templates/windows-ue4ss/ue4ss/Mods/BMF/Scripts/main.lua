@@ -231,6 +231,12 @@ local state = {
       allowed_events = 0,
       component_cache = {},
       component_cache_notes = {},
+      native_targets_cache = nil,
+      native_targets_cached_at = "",
+      native_targets_refresh_count = 0,
+      native_targets_requests = 0,
+      native_targets_cache_reads = 0,
+      native_targets_rejected_requests = 0,
       last_error = "",
       last_event = nil,
     },
@@ -4056,11 +4062,11 @@ local function register_builtin_commands()
     return refreshed
   end)
 
-  BMF.commands.register("bmf.tools.applicator.native-targets", "Resolve native ServerAddComponent blocker targets.", function(args)
+  BMF.commands.register("bmf.tools.applicator.native-targets", "Read cached native targets or explicitly run unsafe discovery.", function(args)
     local options = parse_command_options(args)
-    local refresh = tostring(options.refresh or "true"):lower()
     return BMF.tools.applicator.nativeTargets({
-      refresh = not (refresh == "0" or refresh == "false" or refresh == "no"),
+      refresh = option_boolean(options, "refresh", false),
+      unsafe = option_boolean(options, "unsafe", false),
     })
   end)
 
@@ -8069,7 +8075,7 @@ end
 
 local function tool_object_address_from_string(object)
   local hex = tostring(object or ""):match("UObject:%s*([0-9A-Fa-f]+)")
-  if hex and hex ~= "" then
+  if hex and hex ~= "" and not hex:match("^0+$") then
     return "0x" .. hex
   end
   return ""
@@ -8083,12 +8089,12 @@ local function tool_object_address(object)
     local ok, address = pcall(function()
       return object:GetAddress()
     end)
-    if ok and type(address) == "number" then
+    if ok and type(address) == "number" and address > 0 then
       return string.format("0x%X", address)
     end
     if ok and type(address) == "string" then
       local hex = address:match("0x[0-9A-Fa-f]+") or address:match("([0-9A-Fa-f]+)")
-      if hex and hex ~= "" then
+      if hex and hex ~= "" and not hex:match("^0x?0+$") then
         if hex:match("^0x") then
           return hex
         end
@@ -8384,7 +8390,7 @@ end
 
 local function tool_object_address_from_string(object)
   local hex = tostring(object or ""):match("UObject:%s*([0-9A-Fa-f]+)")
-  if hex and hex ~= "" then
+  if hex and hex ~= "" and not hex:match("^0+$") then
     return "0x" .. hex
   end
   return ""
@@ -8398,12 +8404,12 @@ local function tool_object_address(object)
     local ok, address = pcall(function()
       return object:GetAddress()
     end)
-    if ok and type(address) == "number" then
+    if ok and type(address) == "number" and address > 0 then
       return string.format("0x%X", address)
     end
     if ok and type(address) == "string" then
       local hex = address:match("0x[0-9A-Fa-f]+") or address:match("([0-9A-Fa-f]+)")
-      if hex and hex ~= "" then
+      if hex and hex ~= "" and not hex:match("^0x?0+$") then
         if hex:match("^0x") then
           return hex
         end
@@ -8997,9 +9003,53 @@ end
 
 function BMF.tools.applicator.nativeTargets(options)
   options = type(options) == "table" and options or {}
-  if options.refresh ~= false then
-    BMF.tools.applicator.refreshComponentCache(options)
+  local app = state.tools.applicator
+  app.native_targets_requests = (tonumber(app.native_targets_requests) or 0) + 1
+
+  if options.refresh ~= true then
+    if type(app.native_targets_cache) ~= "table" then
+      app.native_targets_rejected_requests = (tonumber(app.native_targets_rejected_requests) or 0) + 1
+      return result(false, "NATIVE_TARGETS_NOT_CACHED", "Native target discovery has not been run; explicit refresh=true unsafe=true is required", {
+        cached = false,
+        cachedAt = tostring(app.native_targets_cached_at or ""),
+        refreshCount = tonumber(app.native_targets_refresh_count) or 0,
+        lines = {
+          "ok=false",
+          "code=NATIVE_TARGETS_NOT_CACHED",
+          "cached=false",
+          "discovery=explicit-unsafe-only",
+        },
+      })
+    end
+
+    app.native_targets_cache_reads = (tonumber(app.native_targets_cache_reads) or 0) + 1
+    local cached = copy_table(app.native_targets_cache)
+    cached.cached = true
+    cached.cachedAt = tostring(app.native_targets_cached_at or "")
+    cached.refreshCount = tonumber(app.native_targets_refresh_count) or 0
+    cached.lines = copy_table(cached.lines or {})
+    cached.lines[#cached.lines + 1] = "cached=true"
+    cached.lines[#cached.lines + 1] = "cached_at=" .. cached.cachedAt
+    cached.lines[#cached.lines + 1] = "refresh_count=" .. tostring(cached.refreshCount)
+    cached.lines[#cached.lines + 1] = "discovery=explicit-unsafe-only"
+    return result(cached.ok == true, cached.code or (cached.ok and "OK" or "NATIVE_TARGETS_INCOMPLETE"), "Cached Applicator native targets returned", cached)
   end
+
+  if options.unsafe ~= true then
+    app.native_targets_rejected_requests = (tonumber(app.native_targets_rejected_requests) or 0) + 1
+    return result(false, "UNSAFE_DISCOVERY_CONFIRMATION_REQUIRED", "Live UObject discovery requires refresh=true unsafe=true", {
+      cached = type(app.native_targets_cache) == "table",
+      cachedAt = tostring(app.native_targets_cached_at or ""),
+      refreshCount = tonumber(app.native_targets_refresh_count) or 0,
+      lines = {
+        "ok=false",
+        "code=UNSAFE_DISCOVERY_CONFIRMATION_REQUIRED",
+        "discovery=explicit-unsafe-only",
+      },
+    })
+  end
+
+  BMF.tools.applicator.refreshComponentCache(options)
 
   local function_object, function_source, function_errors = applicator_find_server_add_component_function()
   local function_address = tool_object_address(function_object)
@@ -9053,7 +9103,11 @@ function BMF.tools.applicator.nativeTargets(options)
     lines[#lines + 1] = "interact_component_error_" .. tostring(index) .. "=" .. tostring(item)
   end
 
-  return result(ok, ok and "OK" or "NATIVE_TARGETS_INCOMPLETE", "Applicator native targets resolved", {
+  local code = ok and "OK" or "NATIVE_TARGETS_INCOMPLETE"
+  local data = {
+    ok = ok,
+    code = code,
+    cached = false,
     functionAddress = function_address,
     functionSource = function_source or "",
     modifyFunctionAddress = modify_function_address,
@@ -9071,7 +9125,17 @@ function BMF.tools.applicator.nativeTargets(options)
     modifyFunctionErrors = modify_function_errors or {},
     interactComponentErrors = interact_component_errors or {},
     lines = lines,
-  })
+  }
+  app.native_targets_cache = copy_table(data)
+  app.native_targets_cached_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+  app.native_targets_refresh_count = (tonumber(app.native_targets_refresh_count) or 0) + 1
+  data.cachedAt = app.native_targets_cached_at
+  data.refreshCount = app.native_targets_refresh_count
+  data.lines[#data.lines + 1] = "cached=false"
+  data.lines[#data.lines + 1] = "cached_at=" .. data.cachedAt
+  data.lines[#data.lines + 1] = "refresh_count=" .. tostring(data.refreshCount)
+  data.lines[#data.lines + 1] = "discovery=explicit-unsafe-only"
+  return result(ok, code, "Applicator native targets resolved", data)
 end
 
 local function applicator_recent_events(limit)
@@ -9427,6 +9491,11 @@ function BMF.tools.applicator.status(options)
     "last_decision=" .. tostring(last.decision or ""),
     "last_block_mode=" .. tostring(last.blockMode or ""),
     "cache_count=" .. tostring(cache_count),
+    "native_targets_requests=" .. tostring(app.native_targets_requests or 0),
+    "native_targets_cache_reads=" .. tostring(app.native_targets_cache_reads or 0),
+    "native_targets_rejected_requests=" .. tostring(app.native_targets_rejected_requests or 0),
+    "native_targets_refresh_count=" .. tostring(app.native_targets_refresh_count or 0),
+    "native_targets_cached_at=" .. tostring(app.native_targets_cached_at or ""),
     "trace_path=" .. tostring(APPLICATOR_TRACE_PATH),
     "last_error=" .. tostring(app.last_error or ""),
   }
@@ -9451,6 +9520,11 @@ function BMF.tools.applicator.status(options)
     lastEvent = copy_table(last),
     componentCache = copy_table(app.component_cache or {}),
     componentCacheNotes = copy_table(app.component_cache_notes or {}),
+    nativeTargetsRequests = app.native_targets_requests or 0,
+    nativeTargetsCacheReads = app.native_targets_cache_reads or 0,
+    nativeTargetsRejectedRequests = app.native_targets_rejected_requests or 0,
+    nativeTargetsRefreshCount = app.native_targets_refresh_count or 0,
+    nativeTargetsCachedAt = app.native_targets_cached_at or "",
     tracePath = APPLICATOR_TRACE_PATH,
     lastError = app.last_error or "",
     lines = lines,
@@ -18801,8 +18875,58 @@ function player_position_native_attempt(fields, source_value, source_label, raw)
   }
 end
 
-function player_position_native_position_from_attempt(attempt, fields)
+function player_position_native_observed_memory_source_is_usable(attempt, fields)
+  fields = type(fields) == "table" and fields or {}
+  local source_kind = tostring(
+    (attempt and (attempt.sourceKind or attempt.source_kind)) or
+    fields.source_kind or
+    fields.sourceKind or
+    ""
+  )
+  local source_kind_lower = source_kind:lower()
+  if source_kind_lower:find("observed_memory", 1, true) == nil then
+    return true
+  end
+
+  local root_component = tostring(
+    (attempt and (attempt.rootComponent or attempt.root_component)) or
+    fields.root_component or
+    fields.rootComponent or
+    ""
+  ):lower()
+  local root_component_full_name = tostring(
+    (attempt and (attempt.rootComponentFullName or attempt.root_component_full_name)) or
+    fields.root_component_full_name or
+    fields.rootComponentFullName or
+    ""
+  ):lower()
+
+  local known_component_root =
+    root_component:find("collisioncylinder", 1, true) ~= nil or
+    root_component_full_name:find("capsulecomponent", 1, true) ~= nil
+  local measured_component_vector =
+    source_kind_lower:find("root_component.memberoffset.observed_memory.vector3d", 1, true) ~= nil
+
+  return known_component_root and measured_component_vector
+end
+
+function player_position_native_attempt_is_usable(attempt, fields)
   if not (attempt and attempt.ok == true) then
+    return false
+  end
+  fields = type(fields) == "table" and fields or {}
+  local source_kind = tostring(attempt.sourceKind or attempt.source_kind or fields.source_kind or "")
+  if source_kind:lower():find("observed_memory", 1, true) ~= nil and
+      not player_position_native_observed_memory_source_is_usable(attempt, fields) then
+    attempt.ok = false
+    attempt.detail = "observed-memory vector is diagnostic-only"
+    return false
+  end
+  return true
+end
+
+function player_position_native_position_from_attempt(attempt, fields)
+  if not player_position_native_attempt_is_usable(attempt, fields) then
     return nil
   end
   local position = {
@@ -18948,7 +19072,9 @@ function player_position_native_from_controller(controller, query)
       }
       attempts[#attempts + 1] = attempt
 
-      if attempt.ok then
+      if attempt.ok and not player_position_native_attempt_is_usable(attempt, fields) then
+        last_detail = attempt.detail
+      elseif attempt.ok then
         local position = {
           x = finite_number(fields.x, nil),
           y = finite_number(fields.y, nil),
@@ -18991,6 +19117,11 @@ end
 function player_position_add_native_scan_record(players, fields, limit)
   fields = type(fields) == "table" and fields or {}
   if #players >= limit or tostring(fields.ok or "") ~= "true" then
+    return false
+  end
+  local source_kind = tostring(fields.source_kind or fields.sourceKind or "")
+  if source_kind:lower():find("observed_memory", 1, true) ~= nil and
+      not player_position_native_observed_memory_source_is_usable(fields, fields) then
     return false
   end
 
@@ -19176,6 +19307,23 @@ local function player_position_controller_cache_lookup(player)
   return nil
 end
 
+local function player_position_from_cached_record(player)
+  if type(player) ~= "table" or type(player.position) ~= "table" then
+    return nil
+  end
+
+  local position = {
+    x = finite_number(player.position.x or player.position.X or player.position[1], nil),
+    y = finite_number(player.position.y or player.position.Y or player.position[2], nil),
+    z = finite_number(player.position.z or player.position.Z or player.position[3], nil),
+  }
+  if position.x ~= nil and position.y ~= nil and position.z ~= nil then
+    return position
+  end
+
+  return nil
+end
+
 local function player_position_controller_cache_upsert(identity, target, native_detail)
   if type(native_detail) ~= "table" then
     return
@@ -19257,6 +19405,7 @@ function player_position_known_records_snapshot(opts, query, limit)
 
   local players = {}
   local positioned = 0
+  local cached_positioned = 0
   local max_count = math.min(limit, #(selected or {}))
   local native_available = type(BMFSocketPlayerLocation) == "function"
 
@@ -19272,6 +19421,14 @@ function player_position_known_records_snapshot(opts, query, limit)
     local player_state_path = trim_string(player and player.playerStatePath or "")
     local pawn_path = trim_string(player and (player.pawnPath or player.pawnAddress) or "")
     local root_component_path = trim_string(player and (player.rootComponentPath or player.rootComponentAddress) or "")
+    position = player_position_from_cached_record(player)
+    if position ~= nil then
+      cached_positioned = cached_positioned + 1
+      source = trim_string(player and (player.positionSource or player.position_source) or "")
+      if source == "" then
+        source = "cache.position"
+      end
+    end
     local controller_cache_record = player_position_controller_cache_lookup(player)
     if root_component_path == "" and controller_cache_record ~= nil then
       root_component_path = trim_string(controller_cache_record.rootComponentAddress or controller_cache_record.rootComponentPath or "")
@@ -19285,37 +19442,39 @@ function player_position_known_records_snapshot(opts, query, limit)
     if player_state_path == "" and controller_cache_record ~= nil then
       player_state_path = trim_string(controller_cache_record.playerStatePath or "")
     end
-    if root_component_path ~= "" then
-      source_values[#source_values + 1] = {
-        value = player_position_prefixed_source("component", root_component_path),
-        label = "fast-cache.rootComponentAddress",
-      }
-    end
-    if pawn_path ~= "" then
-      source_values[#source_values + 1] = {
-        value = player_position_prefixed_source("pawn", pawn_path),
-        label = "fast-cache.pawnAddress",
-      }
-    end
-    if controller_path ~= "" then
-      source_values[#source_values + 1] = {
-        value = player_position_prefixed_source("controller", controller_path),
-        label = controller_cache_record ~= nil and "fast-cache.controllerAddress" or "cache.controllerPath",
-      }
-    end
-    if player_state_path ~= "" then
-      source_values[#source_values + 1] = { value = player_state_path, label = "cache.playerStatePath" }
-    end
+    if position == nil then
+      if root_component_path ~= "" then
+        source_values[#source_values + 1] = {
+          value = player_position_prefixed_source("component", root_component_path),
+          label = "fast-cache.rootComponentAddress",
+        }
+      end
+      if pawn_path ~= "" then
+        source_values[#source_values + 1] = {
+          value = player_position_prefixed_source("pawn", pawn_path),
+          label = "fast-cache.pawnAddress",
+        }
+      end
+      if controller_path ~= "" then
+        source_values[#source_values + 1] = {
+          value = player_position_prefixed_source("controller", controller_path),
+          label = controller_cache_record ~= nil and "fast-cache.controllerAddress" or "cache.controllerPath",
+        }
+      end
+      if player_state_path ~= "" then
+        source_values[#source_values + 1] = { value = player_state_path, label = "cache.playerStatePath" }
+      end
 
-    for _, source_value in ipairs(source_values) do
-      position, source, native_detail = player_position_native_from_source(
-        source_value.value,
-        query ~= "" and query or player and (player.username or player.playerName or player.displayName or player.uuid) or "",
-        source_value.label
-      )
-      attempts[#attempts + 1] = native_detail
-      if position ~= nil then
-        break
+      for _, source_value in ipairs(source_values) do
+        position, source, native_detail = player_position_native_from_source(
+          source_value.value,
+          query ~= "" and query or player and (player.username or player.playerName or player.displayName or player.uuid) or "",
+          source_value.label
+        )
+        attempts[#attempts + 1] = native_detail
+        if position ~= nil then
+          break
+        end
       end
     end
 
@@ -19364,6 +19523,7 @@ function player_position_known_records_snapshot(opts, query, limit)
     "players=" .. tostring(#(selected or {})),
     "returned=" .. tostring(#players),
     "positioned=" .. tostring(positioned),
+    "cached_positioned=" .. tostring(cached_positioned),
     "known_players=" .. tostring(#known_players),
     "native_available=" .. tostring(native_available),
     "adapter=" .. tostring((listed.data and listed.data.adapter) or ""),
@@ -19859,6 +20019,67 @@ local function player_position_snapshot_limit()
   return math.max(1, math.min(128, math.floor(tonumber(configured) or 64)))
 end
 
+local function write_player_position_snapshot_file(path, value)
+  local suffix = tostring(os.time()) .. "." .. tostring(math.random(100000, 999999))
+  local temp_path = tostring(path or "") .. ".tmp." .. suffix
+  if not write_file(temp_path, value) then
+    return false
+  end
+
+  os.remove(path)
+  if os.rename(temp_path, path) then
+    return true
+  end
+
+  os.remove(temp_path)
+  return write_file(path, value)
+end
+
+local function player_position_snapshot_record_has_identity(record)
+  local player = type(record) == "table" and type(record.player) == "table" and record.player or {}
+  for _, value in ipairs({ player.id, player.uuid, player.name, player.username, player.displayName }) do
+    if trim_string(value or "") ~= "" then
+      return true
+    end
+  end
+  return false
+end
+
+local function player_position_snapshot_record_has_position(record)
+  if type(record) ~= "table" or record.ok ~= true or type(record.position) ~= "table" then
+    return false
+  end
+  return finite_number(record.position.x, nil) ~= nil
+    and finite_number(record.position.y, nil) ~= nil
+    and finite_number(record.position.z, nil) ~= nil
+end
+
+local function sanitize_player_position_snapshot(data)
+  data = type(data) == "table" and data or {}
+  local source_players = type(data.players) == "table" and data.players or {}
+  local usable = {}
+  local dropped = 0
+  for _, record in ipairs(source_players) do
+    if player_position_snapshot_record_has_position(record) and player_position_snapshot_record_has_identity(record) then
+      usable[#usable + 1] = record
+    else
+      dropped = dropped + 1
+    end
+  end
+
+  data.players = usable
+  data.counts = type(data.counts) == "table" and data.counts or {}
+  data.counts.returned = #usable
+  data.counts.positioned = #usable
+  data.counts.droppedUnusable = dropped
+  if dropped > 0 then
+    data.lines = type(data.lines) == "table" and data.lines or {}
+    data.lines[#data.lines + 1] = "dropped_unusable=" .. tostring(dropped)
+    data.lines[#data.lines + 1] = "usable_position_records=" .. tostring(#usable)
+  end
+  return data, #usable, dropped
+end
+
 local function write_player_position_snapshot(reason)
   local snapshot_state = state.player_position_snapshot
   snapshot_state.path = player_position_snapshot_path()
@@ -19868,7 +20089,7 @@ local function write_player_position_snapshot(reason)
   local started_clock = os.clock()
   local ok, snapshot_result = pcall(BMF.players.positions, {
     limit = snapshot_state.limit,
-    nativeCache = true,
+    nativeCache = false,
     liveController = true,
     allowLivePawnRead = false,
     unsafe = false,
@@ -19889,6 +20110,18 @@ local function write_player_position_snapshot(reason)
     end
   else
     result_message = tostring(snapshot_result or "snapshot call failed")
+  end
+
+  local usable_count = 0
+  data, usable_count = sanitize_player_position_snapshot(data)
+  if usable_count <= 0 then
+    if result_code == "OK" then
+      result_code = "POSITION_UNAVAILABLE"
+    end
+    result_ok = false
+    if result_message == "" or result_message == "Live controller player positions collected" then
+      result_message = "No usable player identity and position records are available"
+    end
   end
 
   local generated_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
@@ -19921,8 +20154,8 @@ local function write_player_position_snapshot(reason)
   snapshot_state.last_code = result_code
 
   local written = false
-  if ok then
-    written = write_file(snapshot_state.path, json_encode(data) .. "\n")
+  if snapshot_state.path ~= "" then
+    written = write_player_position_snapshot_file(snapshot_state.path, json_encode(data) .. "\n")
   end
 
   if written then

@@ -36,14 +36,30 @@ local Plugin = {
     lastEvent = "",
     lastDelivery = "",
   },
+  prime = {
+    enabled = true,
+    intervalSeconds = 2,
+    nextAt = 0,
+    attempts = 0,
+    successes = 0,
+    clears = 0,
+    lastAt = 0,
+    lastCode = "",
+    lastReason = "",
+    lastContext = "",
+    lastPlayer = "",
+  },
 }
 
 local POLICY = {
+  savedDir = "",
   deniedComponents = { "SpawnItem", "ItemSpawn" },
   allowedRoles = { "Admin" },
   allowedPlayers = {},
   allowedContexts = {},
   allowSinglePlayerContextLearning = true,
+  proactivePrimeAllowedContexts = false,
+  proactivePrimeIntervalSeconds = 2,
 }
 
 local DESIRED_DEFAULT_ROLE = {
@@ -224,7 +240,10 @@ local function loadPluginConfig(BMF)
   local allowed_players = normalizeList(policy.allowedPlayers or policy.players)
   local allowed_contexts = normalizeList(policy.allowedContexts or policy.contexts)
 
-  if #allowed_roles > 0 then
+  if type(policy.savedDir) == "string" and trim(policy.savedDir) ~= "" then
+    POLICY.savedDir = policy.savedDir
+  end
+  if policy.allowedRoles ~= nil or policy.roles ~= nil then
     POLICY.allowedRoles = allowed_roles
   end
   if #allowed_players > 0 then
@@ -235,6 +254,14 @@ local function loadPluginConfig(BMF)
   end
   if type(policy.allowSinglePlayerContextLearning) == "boolean" then
     POLICY.allowSinglePlayerContextLearning = policy.allowSinglePlayerContextLearning
+  end
+  -- Recurring live Applicator discovery can dereference stale UE4SS userdata.
+  -- This legacy setting is retained for config compatibility but is always disabled.
+  POLICY.proactivePrimeAllowedContexts = false
+  Plugin.prime.enabled = false
+  if tonumber(policy.proactivePrimeIntervalSeconds) then
+    POLICY.proactivePrimeIntervalSeconds = math.max(1, tonumber(policy.proactivePrimeIntervalSeconds) or 2)
+    Plugin.prime.intervalSeconds = POLICY.proactivePrimeIntervalSeconds
   end
 end
 
@@ -251,7 +278,11 @@ local function refreshRoleAssignments(BMF, force)
     return nil
   end
 
-  local loaded = BMF.permissions.loadRoleAssignments()
+  local options = {}
+  if trim(POLICY.savedDir or "") ~= "" then
+    options.savedDir = POLICY.savedDir
+  end
+  local loaded = BMF.permissions.loadRoleAssignments(options)
   Plugin.policy.roleAssignmentsLoadedAt = now
   Plugin.policy.roleAssignmentsCode = tostring(loaded and loaded.code or "")
   if loaded and loaded.ok and loaded.data then
@@ -412,7 +443,61 @@ local function collectAllowedContexts(BMF)
   return contexts
 end
 
-local function writeNativePolicy(BMF, reason)
+local writeNativePolicy
+
+local function bindSinglePlayerContext(BMF, context, reason)
+  context = normalizeContext(context)
+  if context == "" then
+    return BMF.result(false, "INVALID_CONTEXT", "context=0x... is required; live UObject discovery is disabled")
+  end
+
+  local players = playersList(BMF)
+  if #players ~= 1 then
+    return BMF.result(false, #players > 1 and "AMBIGUOUS_PLAYERS" or "NO_LIVE_PLAYER", "Exactly one live player is required to bind the current Applicator context.", {
+      lines = {
+        "live_player_count=" .. tostring(#players),
+        "reason=" .. tostring(reason or ""),
+      },
+    })
+  end
+
+  local player = players[1]
+  local allowed, decision = playerAllowed(BMF, player)
+  if not allowed then
+    Plugin.policy.lastDecision = tostring(decision and decision.decision or "denied-role-policy")
+    Plugin.policy.lastActor = idFromPlayer(player)
+    Plugin.policy.lastMatchedRole = tostring(decision and decision.matchedRole or "")
+    return BMF.result(false, "PLAYER_NOT_ALLOWED", "The live player does not satisfy the ItemSpawn allow policy.", {
+      lines = {
+        "player=" .. idFromPlayer(player),
+        "decision=" .. Plugin.policy.lastDecision,
+        "matched_role=" .. Plugin.policy.lastMatchedRole,
+      },
+    })
+  end
+
+  local uuid = idFromPlayer(player)
+  Plugin.policy.contextPlayers[context] = uuid
+  Plugin.policy.contextPlayerSources[context] = "manual-explicit-context"
+  Plugin.policy.lastDecision = tostring(decision and decision.decision or "")
+  Plugin.policy.lastActor = uuid
+  Plugin.policy.lastMatchedRole = tostring(decision and decision.matchedRole or "")
+  Plugin.policy.lastContext = context
+
+  local wrote = writeNativePolicy(BMF, tostring(reason or "prime-context"))
+  return BMF.result(wrote, wrote and "OK" or tostring(Plugin.native.lastWriteCode or "CONTROL_WRITE_FAILED"), wrote and "Explicit Applicator context is allowed for the live player's policy." or "Could not persist the explicit Applicator context.", {
+    lines = {
+      "context=" .. context,
+      "player=" .. uuid,
+      "decision=" .. Plugin.policy.lastDecision,
+      "matched_role=" .. Plugin.policy.lastMatchedRole,
+      "native_policy_write_code=" .. tostring(Plugin.native.lastWriteCode or ""),
+      "allowed_context_count=" .. tostring(Plugin.policy.allowedContextCount or 0),
+    },
+  })
+end
+
+writeNativePolicy = function(BMF, reason)
   local raw = readText(Plugin.native.controlPath)
   if not raw or trim(raw) == "" then
     Plugin.native.lastWriteCode = "CONTROL_NOT_FOUND"
@@ -506,6 +591,23 @@ local function deliverFeedback(BMF, event, decision)
   local players = playersList(BMF)
   local target = decision and decision.player or nil
 
+  local function broadcastFallback(reason)
+    if BMF.chat and type(BMF.chat.broadcast) == "function" then
+      local broadcast = BMF.chat.broadcast(message)
+      if broadcast.ok then
+        Plugin.feedback.broadcast = Plugin.feedback.broadcast + 1
+        Plugin.feedback.lastDelivery = "broadcast:" .. tostring(reason or "") .. ":" ..
+          tostring(broadcast.data and broadcast.data.deliveredCount or #players)
+      else
+        Plugin.feedback.missed = Plugin.feedback.missed + 1
+        Plugin.feedback.lastDelivery = "broadcast_failed:" .. tostring(reason or "") .. ":" ..
+          tostring(broadcast.code or "")
+      end
+      return broadcast
+    end
+    return nil
+  end
+
   Plugin.feedback.lastEvent = "block_id=" .. tostring(event.block_id or event.policy_id or "") ..
     " component=" .. tostring(event.component or "") ..
     " reason=" .. tostring(event.reason or "") ..
@@ -519,6 +621,10 @@ local function deliverFeedback(BMF, event, decision)
     else
       Plugin.feedback.missed = Plugin.feedback.missed + 1
       Plugin.feedback.lastDelivery = "whisper_failed:" .. tostring(whispered.code or "")
+      local fallback = broadcastFallback("whisper_failed")
+      if fallback and fallback.ok then
+        return fallback
+      end
     end
     return whispered
   end
@@ -531,19 +637,16 @@ local function deliverFeedback(BMF, event, decision)
     else
       Plugin.feedback.missed = Plugin.feedback.missed + 1
       Plugin.feedback.lastDelivery = "whisper_failed:" .. tostring(whispered.code or "")
+      local fallback = broadcastFallback("single_player_whisper_failed")
+      if fallback and fallback.ok then
+        return fallback
+      end
     end
     return whispered
   end
 
-  if BMF.chat and type(BMF.chat.broadcast) == "function" then
-    local broadcast = BMF.chat.broadcast(message)
-    if broadcast.ok then
-      Plugin.feedback.broadcast = Plugin.feedback.broadcast + 1
-      Plugin.feedback.lastDelivery = "broadcast:" .. tostring(#players)
-    else
-      Plugin.feedback.missed = Plugin.feedback.missed + 1
-      Plugin.feedback.lastDelivery = "broadcast_failed:" .. tostring(broadcast.code or "")
-    end
+  local broadcast = broadcastFallback("no_private_target")
+  if broadcast then
     return broadcast
   end
 
@@ -642,9 +745,20 @@ local function statusLines(BMF)
 
   return {
     "policy=noSpawnItemApplicator",
+    "saved_dir=" .. tostring(POLICY.savedDir or ""),
     "allowed_roles=" .. listText(POLICY.allowedRoles),
     "allowed_players=" .. listText(POLICY.allowedPlayers),
     "allow_single_player_context_learning=" .. tostring(POLICY.allowSinglePlayerContextLearning == true),
+    "proactive_prime_enabled=false",
+    "context_discovery_mode=explicit-address-only",
+    "proactive_prime_interval_seconds=" .. tostring(Plugin.prime.intervalSeconds or 0),
+    "proactive_prime_attempts=" .. tostring(Plugin.prime.attempts or 0),
+    "proactive_prime_successes=" .. tostring(Plugin.prime.successes or 0),
+    "proactive_prime_clears=" .. tostring(Plugin.prime.clears or 0),
+    "proactive_prime_last_code=" .. tostring(Plugin.prime.lastCode or ""),
+    "proactive_prime_last_reason=" .. tostring(Plugin.prime.lastReason or ""),
+    "proactive_prime_last_context=" .. tostring(Plugin.prime.lastContext or ""),
+    "proactive_prime_last_player=" .. tostring(Plugin.prime.lastPlayer or ""),
     "allowed_context_count=" .. tostring(Plugin.policy.allowedContextCount or 0),
     "allowed_contexts=" .. listText(Plugin.policy.allowedContexts),
     "context_player_count=" .. tostring((function()
@@ -737,11 +851,14 @@ end
 
 function Plugin.onLoad(BMF)
   loadPluginConfig(BMF)
+  Plugin.prime.enabled = false
+  Plugin.prime.intervalSeconds = POLICY.proactivePrimeIntervalSeconds
   refreshRoleAssignments(BMF, true)
   Plugin.feedback.cursor = fileSize(Plugin.feedback.path)
 
   Plugin.enforcement = BMF.permissions.enforceNoSpawnItemApplicator({
     backup = true,
+    savedDir = POLICY.savedDir,
   })
   if type(BMF.tools) == "table" and type(BMF.tools.onApplicatorComponentApply) == "function" then
     Plugin.liveHook = BMF.tools.onApplicatorComponentApply(function(event)
@@ -754,7 +871,7 @@ function Plugin.onLoad(BMF)
 
   BMF.commands.register("bmf.nospawnitem.status", "Show no-spawn-item applicator guard status.", function()
     refreshRoleAssignments(BMF, true)
-    writeNativePolicy(BMF, "status")
+    pollNativeFeedback(BMF)
     return BMF.result(true, "OK", "NoSpawnItemApplicator status", {
       lines = statusLines(BMF),
     })
@@ -800,6 +917,22 @@ function Plugin.onLoad(BMF)
     })
   end)
 
+  BMF.commands.register("bmf.nospawnitem.prime-context", "Bind an explicit Applicator context after checking the single live player's policy.", function(raw)
+    local args = parseArgs(raw)
+    Plugin.prime.attempts = Plugin.prime.attempts + 1
+    local context = normalizeContext(args.context or args.address)
+    local response = bindSinglePlayerContext(BMF, context, args.reason or "manual-explicit-context")
+    Plugin.prime.lastAt = os.time()
+    Plugin.prime.lastCode = tostring(response.code or "")
+    Plugin.prime.lastReason = tostring(args.reason or "manual-explicit-context")
+    Plugin.prime.lastContext = context
+    Plugin.prime.lastPlayer = tostring(Plugin.policy.lastActor or "")
+    if response.ok then
+      Plugin.prime.successes = Plugin.prime.successes + 1
+    end
+    return response
+  end)
+
   local role = evaluateRolePolicy(BMF)
   local spawn_item = evaluateComponent(BMF, "SpawnItem")
   BMF.log("NoSpawnItemApplicator loaded role_compliant=" ..
@@ -813,9 +946,10 @@ function Plugin.onLoad(BMF)
 end
 
 function Plugin.onTick(BMF)
-  refreshRoleAssignments(BMF, false)
-  pollNativeFeedback(BMF)
-  writeNativePolicy(BMF, "tick")
+  local size = fileSize(Plugin.feedback.path)
+  if size > 0 and size ~= Plugin.feedback.cursor then
+    pollNativeFeedback(BMF)
+  end
 end
 
 return Plugin

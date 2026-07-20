@@ -1,7 +1,7 @@
 local Plugin = {
   name = "InteractConsolePrefixGuard",
   policy = {
-    adminRoles = { "Owner", "Admin" },
+    adminRoles = { "Owner", "Admin", "Moderator" },
     ownerIds = {},
     savedDir = "",
     allowedPrefixes = { "buyweapon:" },
@@ -9,7 +9,9 @@ local Plugin = {
     denyUnknown = true,
     allowEmpty = true,
     allowSinglePlayerContextLearning = true,
-    proactivePrimeAllowedContexts = true,
+    contextPlayerMaxDistance = 1000,
+    contextPlayerAmbiguityMargin = 256,
+    proactivePrimeAllowedContexts = false,
     proactivePrimeIntervalSeconds = 2,
   },
   native = {
@@ -55,6 +57,9 @@ local Plugin = {
     lastMatchedPrefix = "",
     lastMatchedRole = "",
     lastContext = "",
+    lastContextResolution = "",
+    lastContextDistance = "",
+    lastContextNonAdminDistance = "",
     roleAssignmentsCode = "",
     roleAssignmentsPlayerCount = 0,
   },
@@ -218,7 +223,7 @@ local function loadConfig(BMF)
   local owner_ids = normalizeList(policy.ownerIds or policy.ownerUUIDs or policy.adminIds)
   local allowed_prefixes = normalizeList(policy.allowedPrefixes or policy.prefixes)
   local allowed_contexts = normalizeList(policy.allowedContexts or policy.contexts)
-  if #admin_roles > 0 then
+  if policy.adminRoles ~= nil or policy.bypassRoles ~= nil then
     Plugin.policy.adminRoles = admin_roles
   end
   Plugin.policy.ownerIds = owner_ids
@@ -240,9 +245,15 @@ local function loadConfig(BMF)
   if type(policy.allowSinglePlayerContextLearning) == "boolean" then
     Plugin.policy.allowSinglePlayerContextLearning = policy.allowSinglePlayerContextLearning
   end
-  if type(policy.proactivePrimeAllowedContexts) == "boolean" then
-    Plugin.policy.proactivePrimeAllowedContexts = policy.proactivePrimeAllowedContexts
+  if tonumber(policy.contextPlayerMaxDistance) then
+    Plugin.policy.contextPlayerMaxDistance = math.max(0, tonumber(policy.contextPlayerMaxDistance) or 1000)
   end
+  if tonumber(policy.contextPlayerAmbiguityMargin) then
+    Plugin.policy.contextPlayerAmbiguityMargin = math.max(0, tonumber(policy.contextPlayerAmbiguityMargin) or 256)
+  end
+  -- Live Applicator UObject discovery is never safe from a recurring plugin path.
+  -- Keep this legacy setting readable, but do not allow configuration to re-enable it.
+  Plugin.policy.proactivePrimeAllowedContexts = false
   if tonumber(policy.proactivePrimeIntervalSeconds) then
     Plugin.policy.proactivePrimeIntervalSeconds = math.max(1, tonumber(policy.proactivePrimeIntervalSeconds) or 2)
   end
@@ -388,6 +399,132 @@ local function findPlayerById(players, uuid)
   return nil
 end
 
+local function finiteNumber(value)
+  local number = tonumber(value)
+  if number == nil or number ~= number or number == math.huge or number == -math.huge then
+    return nil
+  end
+  return number
+end
+
+local function controllerKey(value)
+  return trim(value):lower():match("([%w_]+)$") or ""
+end
+
+local function playerForPosition(players, positioned)
+  local embedded = type(positioned.player) == "table" and positioned.player or {}
+  local embedded_id = playerId(embedded)
+  if embedded_id ~= "" then
+    local matched = findPlayerById(players, embedded_id)
+    if matched then
+      return matched
+    end
+  end
+
+  local wanted = controllerKey(
+    positioned.controllerFullName
+      or positioned.controllerName
+      or positioned.controllerPath
+      or embedded.controllerPath
+  )
+  if wanted == "" then
+    return nil
+  end
+  for _, player in ipairs(players or {}) do
+    if controllerKey(player.controllerPath or player.controllerFullName or player.controllerName) == wanted then
+      return player
+    end
+  end
+  return nil
+end
+
+local function resolveContextPlayerByPosition(BMF, players, context)
+  if not (BMF.tools and BMF.tools.uobject and BMF.tools.uobject.describe) then
+    return nil, "context-describe-unavailable"
+  end
+  if not (BMF.players and BMF.players.positions) then
+    return nil, "player-positions-unavailable"
+  end
+
+  local described = BMF.tools.uobject.describe({ address = context })
+  local fields = described and described.data and described.data.fields or {}
+  local context_position = {
+    x = finiteNumber(fields.object_location_x),
+    y = finiteNumber(fields.object_location_y),
+    z = finiteNumber(fields.object_location_z),
+  }
+  if not described or not described.ok
+    or context_position.x == nil
+    or context_position.y == nil
+    or context_position.z == nil then
+    return nil, "context-position-unavailable"
+  end
+
+  local positioned = BMF.players.positions({
+    limit = 128,
+    nativeCache = false,
+    nativeController = true,
+    liveController = true,
+    includeMissing = false,
+  })
+  local items = positioned and positioned.data and positioned.data.players or {}
+  local candidates = {}
+  for _, item in ipairs(items or {}) do
+    local player = playerForPosition(players, item)
+    local position = type(item.position) == "table" and item.position or {}
+    local x = finiteNumber(position.x or position.X or position[1])
+    local y = finiteNumber(position.y or position.Y or position[2])
+    local z = finiteNumber(position.z or position.Z or position[3])
+    if player and x ~= nil and y ~= nil and z ~= nil then
+      local dx = x - context_position.x
+      local dy = y - context_position.y
+      local dz = z - context_position.z
+      local is_admin = playerIsAdmin(BMF, player)
+      candidates[#candidates + 1] = {
+        player = player,
+        distance = math.sqrt((dx * dx) + (dy * dy) + (dz * dz)),
+        isAdmin = is_admin == true,
+      }
+    end
+  end
+  table.sort(candidates, function(left, right)
+    return left.distance < right.distance
+  end)
+
+  local closest = candidates[1]
+  if not closest then
+    return nil, "context-position-player-unmatched"
+  end
+  Plugin.stats.lastContextDistance = tostring(math.floor((closest.distance * 100) + 0.5) / 100)
+  local max_distance = tonumber(Plugin.policy.contextPlayerMaxDistance) or 1000
+  if closest.distance > max_distance then
+    return nil, "context-position-too-far"
+  end
+
+  if closest.isAdmin then
+    local nearest_non_admin = nil
+    for _, candidate in ipairs(candidates) do
+      if not candidate.isAdmin then
+        nearest_non_admin = candidate
+        break
+      end
+    end
+    if nearest_non_admin then
+      Plugin.stats.lastContextNonAdminDistance = tostring(
+        math.floor((nearest_non_admin.distance * 100) + 0.5) / 100
+      )
+      local ambiguity_margin = tonumber(Plugin.policy.contextPlayerAmbiguityMargin) or 256
+      if nearest_non_admin.distance <= closest.distance + ambiguity_margin then
+        return nil, "context-position-ambiguous-near-non-admin"
+      end
+    else
+      Plugin.stats.lastContextNonAdminDistance = ""
+    end
+  end
+
+  return closest.player, closest.isAdmin and "context-position-admin" or "context-position-non-admin"
+end
+
 local function resolveContextPlayer(BMF, context)
   local players = playersList(BMF)
   local normalized = normalizeContext(context)
@@ -406,22 +543,15 @@ local function resolveContextPlayer(BMF, context)
     end
   end
 
+  if normalized ~= "" and #players > 1 then
+    local player, source = resolveContextPlayerByPosition(BMF, players, normalized)
+    if player then
+      return player, source
+    end
+    return nil, source
+  end
+
   return nil, #players > 1 and "ambiguous-multiple-players" or "no-live-player"
-end
-
-local function currentApplicatorContext(BMF)
-  if not BMF.tools or not BMF.tools.applicator or type(BMF.tools.applicator.nativeTargets) ~= "function" then
-    return "", nil
-  end
-
-  local targets = BMF.tools.applicator.nativeTargets({
-    refresh = false,
-  })
-  local context = ""
-  if targets and targets.data then
-    context = normalizeContext(targets.data.processEventContextAddress)
-  end
-  return context, targets
 end
 
 local function collectAllowedContexts(BMF)
@@ -509,80 +639,6 @@ local function writeNativePolicy(BMF, reason)
   Plugin.native.lastWriteReason = tostring(reason or "")
   Plugin.native.writeCount = Plugin.native.writeCount + 1
   return true
-end
-
-local function proactivePrimeAllowedContext(BMF, reason, force)
-  if not Plugin.policy.proactivePrimeAllowedContexts then
-    Plugin.prime.lastCode = "DISABLED"
-    Plugin.prime.lastReason = tostring(reason or "")
-    return false
-  end
-  if not Plugin.policy.allowSinglePlayerContextLearning then
-    Plugin.prime.lastCode = "CONTEXT_LEARNING_DISABLED"
-    Plugin.prime.lastReason = tostring(reason or "")
-    return false
-  end
-
-  local now = os.time()
-  if not force and now < (Plugin.prime.nextAt or 0) then
-    return false
-  end
-  Plugin.prime.nextAt = now + math.max(1, tonumber(Plugin.policy.proactivePrimeIntervalSeconds) or 2)
-  Plugin.prime.attempts = Plugin.prime.attempts + 1
-
-  local players = playersList(BMF)
-  if #players ~= 1 then
-    if #players == 0 then
-      writeNativePolicy(BMF, "prime-no-live-player")
-      Plugin.prime.clears = Plugin.prime.clears + 1
-    end
-    Plugin.prime.lastCode = #players > 1 and "AMBIGUOUS_PLAYERS" or "NO_LIVE_PLAYER"
-    Plugin.prime.lastReason = tostring(reason or "")
-    return false
-  end
-
-  local player = players[1]
-  local is_admin, roles, matched_role = playerIsAdmin(BMF, player)
-  Plugin.stats.lastPlayer = playerId(player)
-  Plugin.stats.lastMatchedRole = tostring(matched_role or "")
-  if not is_admin then
-    writeNativePolicy(BMF, "prime-player-not-admin")
-    Plugin.prime.clears = Plugin.prime.clears + 1
-    Plugin.prime.lastCode = "PLAYER_NOT_ADMIN"
-    Plugin.prime.lastReason = tostring(reason or "")
-    Plugin.prime.lastPlayer = playerId(player)
-    Plugin.prime.lastContext = ""
-    return false
-  end
-
-  local context, targets = currentApplicatorContext(BMF)
-  if context == "" or context == "0x0" then
-    Plugin.prime.lastCode = "NO_APPLICATOR_CONTEXT:" .. tostring(targets and targets.code or "")
-    Plugin.prime.lastReason = tostring(reason or "")
-    Plugin.prime.lastPlayer = playerId(player)
-    Plugin.prime.lastContext = context
-    return false
-  end
-
-  local uuid = playerId(player)
-  Plugin.contextPlayers[context] = uuid
-  Plugin.contextPlayerSources[context] = "single-live-player-prime"
-  Plugin.stats.lastContext = context
-  Plugin.stats.lastMatchedRole = tostring(matched_role or "")
-  if writeNativePolicy(BMF, tostring(reason or "prime-context")) then
-    Plugin.prime.successes = Plugin.prime.successes + 1
-    Plugin.prime.lastCode = Plugin.native.lastWriteCode
-    Plugin.prime.lastReason = tostring(reason or "")
-    Plugin.prime.lastPlayer = uuid
-    Plugin.prime.lastContext = context
-    return true
-  end
-
-  Plugin.prime.lastCode = Plugin.native.lastWriteCode
-  Plugin.prime.lastReason = tostring(reason or "")
-  Plugin.prime.lastPlayer = uuid
-  Plugin.prime.lastContext = context
-  return false
 end
 
 local function evaluate(BMF, event, explicitRoles)
@@ -711,6 +767,7 @@ local function handleNativeEvent(BMF, event)
   Plugin.stats.nativeBlocked = Plugin.stats.nativeBlocked + 1
 
   local player, source = resolveContextPlayer(BMF, context)
+  Plugin.stats.lastContextResolution = tostring(source or "")
   local is_admin, roles, matched_role = false, {}, ""
   if player then
     is_admin, roles, matched_role = playerIsAdmin(BMF, player)
@@ -761,9 +818,6 @@ end
 
 local function statusLines(BMF)
   local native = nativeStatus()
-  local current_context = ""
-  local targets = nil
-  current_context, targets = currentApplicatorContext(BMF)
   local allowed_contexts = collectAllowedContexts(BMF)
   local context_player_count = 0
   for _ in pairs(Plugin.contextPlayers or {}) do
@@ -783,7 +837,10 @@ local function statusLines(BMF)
     "deny_unknown=" .. tostring(Plugin.policy.denyUnknown == true),
     "allow_empty=" .. tostring(Plugin.policy.allowEmpty == true),
     "allow_single_player_context_learning=" .. tostring(Plugin.policy.allowSinglePlayerContextLearning == true),
-    "proactive_prime_enabled=" .. tostring(Plugin.policy.proactivePrimeAllowedContexts == true),
+    "context_player_max_distance=" .. tostring(Plugin.policy.contextPlayerMaxDistance or 0),
+    "context_player_ambiguity_margin=" .. tostring(Plugin.policy.contextPlayerAmbiguityMargin or 0),
+    "proactive_prime_enabled=false",
+    "context_discovery_mode=explicit-address-only",
     "proactive_prime_interval_seconds=" .. tostring(Plugin.policy.proactivePrimeIntervalSeconds or 0),
     "proactive_prime_attempts=" .. tostring(Plugin.prime.attempts or 0),
     "proactive_prime_successes=" .. tostring(Plugin.prime.successes or 0),
@@ -791,8 +848,8 @@ local function statusLines(BMF)
     "proactive_prime_last_code=" .. tostring(Plugin.prime.lastCode or ""),
     "proactive_prime_last_context=" .. tostring(Plugin.prime.lastContext or ""),
     "proactive_prime_last_player=" .. tostring(Plugin.prime.lastPlayer or ""),
-    "current_applicator_context=" .. tostring(current_context or ""),
-    "current_native_targets_code=" .. tostring(targets and targets.code or ""),
+    "current_applicator_context=" .. tostring(Plugin.stats.lastContext or ""),
+    "current_native_targets_code=AUTOMATIC_DISCOVERY_DISABLED",
     "allowed_context_count=" .. tostring(#allowed_contexts),
     "allowed_contexts=" .. listText(allowed_contexts),
     "context_player_count=" .. tostring(context_player_count),
@@ -806,6 +863,9 @@ local function statusLines(BMF)
     "last_decision=" .. tostring(Plugin.stats.lastDecision),
     "last_player=" .. tostring(Plugin.stats.lastPlayer),
     "last_context=" .. tostring(Plugin.stats.lastContext),
+    "last_context_resolution=" .. tostring(Plugin.stats.lastContextResolution),
+    "last_context_distance=" .. tostring(Plugin.stats.lastContextDistance),
+    "last_context_non_admin_distance=" .. tostring(Plugin.stats.lastContextNonAdminDistance),
     "last_tag=" .. tostring(Plugin.stats.lastTag),
     "last_matched_prefix=" .. tostring(Plugin.stats.lastMatchedPrefix),
     "last_matched_role=" .. tostring(Plugin.stats.lastMatchedRole),
@@ -840,26 +900,53 @@ function Plugin.onLoad(BMF)
   end)
 
   writeNativePolicy(BMF, "plugin-load")
-  proactivePrimeAllowedContext(BMF, "plugin-load", true)
-  if BMF.timers and type(BMF.timers.after) == "function" then
-    BMF.timers.after(1000, function()
-      proactivePrimeAllowedContext(BMF, "plugin-load-delay", true)
-    end)
-  end
 
   BMF.commands.register("bmf.interactprefix.status", "Show Interactable console prefix guard status.", function()
     refreshRoleAssignments(BMF, true)
     pollNativeEvents(BMF)
-    proactivePrimeAllowedContext(BMF, "status", true)
-    writeNativePolicy(BMF, "status")
     return BMF.result(true, "OK", "Interact console prefix guard status", {
       lines = statusLines(BMF),
     })
   end)
 
-  BMF.commands.register("bmf.interactprefix.prime-context", "Bind the current Applicator context for an admin player.", function(raw)
+  BMF.commands.register("bmf.interactprefix.prime-context", "Bind an explicit Applicator context for an admin player.", function(raw)
     local args = parseArgs(raw)
-    local ok = proactivePrimeAllowedContext(BMF, args.reason or "manual-prime-context", true)
+    local context = normalizeContext(args.context or args.address)
+    if context == "" then
+      return BMF.result(false, "INVALID_CONTEXT", "context=0x... is required; live UObject discovery is disabled")
+    end
+
+    local players = playersList(BMF)
+    local requested_player = trim(args.player or args.uuid or args.id)
+    local player = requested_player ~= "" and findPlayerById(players, requested_player) or nil
+    if not player and requested_player == "" and #players == 1 then
+      player = players[1]
+    end
+    if not player then
+      return BMF.result(false, requested_player ~= "" and "PLAYER_NOT_FOUND" or "AMBIGUOUS_PLAYERS", "A unique live admin player is required")
+    end
+
+    local is_admin, _, matched_role = playerIsAdmin(BMF, player)
+    local uuid = playerId(player)
+    Plugin.prime.attempts = Plugin.prime.attempts + 1
+    Plugin.prime.lastReason = tostring(args.reason or "manual-explicit-context")
+    Plugin.prime.lastPlayer = uuid
+    Plugin.prime.lastContext = context
+    Plugin.stats.lastPlayer = uuid
+    Plugin.stats.lastMatchedRole = tostring(matched_role or "")
+    if not is_admin then
+      Plugin.prime.lastCode = "PLAYER_NOT_ADMIN"
+      return BMF.result(false, "PLAYER_NOT_ADMIN", "The selected player does not satisfy the Interact prefix admin policy")
+    end
+
+    Plugin.contextPlayers[context] = uuid
+    Plugin.contextPlayerSources[context] = "manual-explicit-context"
+    Plugin.stats.lastContext = context
+    local ok = writeNativePolicy(BMF, Plugin.prime.lastReason)
+    Plugin.prime.lastCode = tostring(Plugin.native.lastWriteCode or "")
+    if ok then
+      Plugin.prime.successes = Plugin.prime.successes + 1
+    end
     return BMF.result(ok, ok and "OK" or tostring(Plugin.prime.lastCode or "PRIME_FAILED"), "Interact prefix context prime attempted", {
       lines = {
         "ok=" .. tostring(ok),
@@ -906,6 +993,33 @@ function Plugin.onLoad(BMF)
     return checked
   end)
 
+  BMF.commands.register("bmf.interactprefix.resolve-context", "Resolve one explicit Applicator context to a live player.", function(raw)
+    local args = parseArgs(raw)
+    local context = normalizeContext(args.context or args.address)
+    if context == "" then
+      return BMF.result(false, "INVALID_CONTEXT", "context=0x... is required")
+    end
+    local player, source = resolveContextPlayer(BMF, context)
+    Plugin.stats.lastContext = context
+    Plugin.stats.lastContextResolution = tostring(source or "")
+    local is_admin, _, matched_role = false, {}, ""
+    if player then
+      is_admin, _, matched_role = playerIsAdmin(BMF, player)
+    end
+    return BMF.result(player ~= nil, player and "OK" or "PLAYER_UNRESOLVED", player and "Applicator context resolved" or "Applicator context could not be resolved safely", {
+      lines = {
+        "context=" .. context,
+        "resolved=" .. tostring(player ~= nil),
+        "source=" .. tostring(source or ""),
+        "player=" .. tostring(player and playerId(player) or ""),
+        "admin_bypass=" .. tostring(is_admin == true),
+        "matched_role=" .. tostring(matched_role or ""),
+        "distance=" .. tostring(Plugin.stats.lastContextDistance or ""),
+        "nearest_non_admin_distance=" .. tostring(Plugin.stats.lastContextNonAdminDistance or ""),
+      },
+    })
+  end)
+
   BMF.commands.register("bmf.interactprefix.handle", "Handle a forwarded Interactable console event.", function(raw)
     local args = parseArgs(raw)
     local roles = normalizeList(percentDecode(args.roles or ""))
@@ -944,7 +1058,6 @@ end
 
 function Plugin.onTick(BMF)
   pollNativeEvents(BMF)
-  proactivePrimeAllowedContext(BMF, "tick", false)
 end
 
 return Plugin

@@ -725,7 +725,7 @@ safe mutation points.
     `BR.Permission.SpawnItems` to `Forbidden` on `defaultRole` and preventing
     named roles from explicitly allowing it. Missing `SpawnItems` on named roles
     is treated as inherited denial because Brickadia normalizes redundant
-    forbids after restart. `examples/NoSpawnItemApplicator` calls this enforcer
+    forbids after restart. `framework/ue4ss/Mods/BMF/plugins/NoSpawnItemApplicator` calls this enforcer
     on load when `brickadiaSavedDir` is configured.
   - Progress: `BMF.tools.onApplicatorComponentApply()` can register
     `NoSpawnItemApplicator` policy handlers and cache reflected `ItemSpawn`
@@ -764,7 +764,7 @@ safe mutation points.
   - Progress: `BMF.permissions.evaluateInteractConsolePrefixAccess()` denies
     non-whitelisted prefixes such as `teleport:` for non-admin roles while
     allowing Owner/Admin bypass and whitelisted prefixes.
-  - Progress: `examples/InteractConsolePrefixGuard` writes the native policy
+  - Progress: `framework/ue4ss/Mods/BMF/plugins/InteractConsolePrefixGuard` writes the native policy
     control file, reads Brickadia/Omegga role assignments, primes one-player
     Owner/Admin Applicator contexts, polls native TSV events, and sends
     Omegga-backed whisper feedback on denied attempts.
@@ -820,7 +820,7 @@ safe mutation points.
   - Validation: `L3 Live Player`, `L5 Negative`.
   - Partial: `scripts/list-brick-assets.js` can inventory `.brdb`/`.brz`
     brick asset names and histograms. `BMF.permissions.evaluateBrickAssetAccess`
-    and `examples/BrickAssetPlacementGuard` provide role-aware allow/deny
+    and the deprecated `deprecated/plugins/BrickAssetPlacementGuard` provide role-aware allow/deny
     policy for names such as `B_Joint_Wheel_Micro`, `B_Seat`, and
     `B_1x1_Gate_WheelEngineSlim`.
   - Remaining: wire a cancellable placement/paste hook that resolves the

@@ -3516,9 +3516,9 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
     }
 
     this.writeln(
-      `Bricks.ClearRegion ${region.center.join(' ')} ${region.extent.join(
+      `br.World.ClearRegion ${region.center.join(' ')} ${region.extent.join(
         ' ',
-      )}${target}`,
+      )} 1 0${target}`,
     );
   }
 

@@ -3,8 +3,13 @@
   "description": "Feeds Omegga player identity records into the Brickadia Modding Framework player cache.",
   "author": "BMF",
   "config": {
-    "commandDir": {
-      "description": "Path to Mods/BMF/runtime/commands. If blank, OMEGGA_BMF_COMMAND_DIR or OMEGGA_BMF_RUNTIME_DIR is used.",
+    "runtimeDir": {
+      "description": "Path to Mods/BMF/runtime for players.json when direct cache mode is used. If blank, OMEGGA_BMF_RUNTIME_DIR is used.",
+      "default": "",
+      "type": "string"
+    },
+    "bridgePluginName": {
+      "description": "Name of the loaded BMF Bridge plugin used for socket command delivery.",
       "default": "",
       "type": "string"
     },
@@ -19,9 +24,29 @@
       "type": "number"
     },
     "brickadiaLogPath": {
-      "description": "Optional explicit Brickadia.log path used when Omegga's live player list is empty.",
+      "description": "Configurable explicit Brickadia.log path used when Omegga's live player list is empty.",
       "default": "",
       "type": "string"
+    },
+    "includePositions": {
+      "description": "Include player positions in the BMF player cache and player-positions.json. OMEGGA_BMF_PLAYER_SYNC_POSITIONS overrides this value. Uses Omegga bulk positions first, a bounded targeted controller/pawn fallback second, and the BMF player-position snapshot when those are empty.",
+      "default": false,
+      "type": "boolean"
+    },
+    "positionSnapshotPath": {
+      "description": "Optional explicit path for CityRPG/BMF player-positions.json. If blank, BMF_PLAYERS_POSITIONS_SNAPSHOT_PATH, CITYRPG_BMF_POSITION_SNAPSHOT_PATH, or runtimeDir/player-positions.json is used.",
+      "default": "",
+      "type": "string"
+    },
+    "positionLimit": {
+      "description": "Maximum number of Omegga-tracked players to probe with the targeted position fallback.",
+      "default": 64,
+      "type": "number"
+    },
+    "positionTimeoutMs": {
+      "description": "Per-command timeout for the targeted position fallback.",
+      "default": 1200,
+      "type": "number"
     },
     "forwardInteract": {
       "description": "Forward Omegga interact events into BMF as bmf.interact.console commands. This is game-thread sensitive and should stay disabled unless a BMF Lua handler explicitly needs it. OMEGGA_BMF_FORWARD_INTERACT overrides this value.",

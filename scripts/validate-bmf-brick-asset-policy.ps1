@@ -27,7 +27,7 @@ New-Item -ItemType Directory -Force -Path $caseRoot | Out-Null
 $startServerScript = Join-Path $BrickadiaRoot 'brickadia-ue4ss-re/scripts/start-bridge-test-server.ps1'
 $sendRpcScript = Join-Path $BrickadiaRoot 'brickadia-ue4ss-re/scripts/send-bridge-rpc.js'
 $sourceBmfDir = Join-Path $Root 'framework/ue4ss/Mods/BMF'
-$sourcePluginDir = Join-Path $Root 'examples/BrickAssetPlacementGuard'
+$sourcePluginDir = Join-Path $Root 'deprecated/plugins/BrickAssetPlacementGuard'
 $runtimeBmfDir = Join-Path $RuntimeModsDir 'BMF'
 $runtimePluginDir = Join-Path $runtimeBmfDir 'plugins/BrickAssetPlacementGuard'
 $runtimeLogPath = Join-Path $runtimeBmfDir 'runtime/bmf.log'

@@ -49,7 +49,7 @@ local ALLOW_UNSAFE_PROBES = os.getenv("OMEGGA_UE4SS_UNSAFE_PROBES") == "1"
 ALLOW_PREFAB_PASTE =
     ALLOW_UNSAFE_PROBES or os.getenv("OMEGGA_UE4SS_PREFAB_PASTE") == "1"
 local CHAT_TRACE_ENABLED = os.getenv("OMEGGA_UE4SS_CHAT_TRACE") == "1"
-local DEBUG_BRIDGE_HOOKS = os.getenv("OMEGGA_UE4SS_DEBUG_BRIDGE_HOOKS") == "1"
+local DEBUG_BRIDGE_HOOKS = true
 local ENABLE_CHAT_DISCOVERY_HOOKS = os.getenv("OMEGGA_UE4SS_ENABLE_CHAT_DISCOVERY_HOOKS") == "1"
 local ENABLE_REFLECTION_CHAT_DISCOVERY = os.getenv("OMEGGA_UE4SS_ENABLE_REFLECTION_CHAT_DISCOVERY") == "1"
 local PREFER_TYPED_CHAT_BROADCAST = os.getenv("OMEGGA_UE4SS_PREFER_TYPED_CHAT_BROADCAST") == "1"
@@ -1540,6 +1540,45 @@ local function get_chat_broadcast_objects()
         return cached_objects, nil
     end
 
+    -- Command hooks are opportunistic. Resolve the two bounded server objects
+    -- directly so typed chat also works immediately after startup or reconnect.
+    game_mode = find_first_valid("GameModeBase")
+    game_state = find_first_valid("GameStateBase")
+    if is_valid_object(game_mode) then
+        last_hook_game_mode = game_mode
+        remember_object_world(game_mode)
+        game_session = try_get_property_value(game_mode, "GameSession")
+        if is_valid_object(game_session) then
+            last_hook_game_session = game_session
+        end
+    end
+    if is_valid_object(game_state) then
+        last_hook_game_state = game_state
+        if not is_valid_object(last_hook_world) then
+            remember_object_world(game_state)
+        end
+    end
+    world = is_valid_object(last_hook_world) and last_hook_world or nil
+
+    if is_valid_object(world) or is_valid_object(game_mode) or is_valid_object(game_state) then
+        log_typed_chat_resolution(
+            "resolved via bounded discovery world="
+                .. tostring(is_valid_object(world))
+                .. " game_mode="
+                .. tostring(is_valid_object(game_mode))
+                .. " game_state="
+                .. tostring(is_valid_object(game_state))
+                .. " game_session="
+                .. tostring(is_valid_object(game_session))
+        )
+        return {
+            world = world,
+            game_mode = game_mode,
+            game_state = game_state,
+            game_session = game_session,
+        }, nil
+    end
+
     log_typed_chat_resolution("minimal resolution found nothing")
     return nil,
         "Minimal typed chat resolution found no cached world, game mode, or game state. "
@@ -2483,6 +2522,42 @@ local function collect_console_exec_candidates()
     end
 
     return candidates
+end
+
+function describe_console_exec_candidates()
+    local candidates = collect_console_exec_candidates()
+    local lines = { "Console exec candidates=" .. tostring(#candidates) }
+
+    for index, candidate in ipairs(candidates) do
+        local object = candidate.object
+        local class_name = "unknown"
+        local short_name = ""
+        if is_valid_object(object) then
+            short_name = get_object_short_name(object, "")
+            local class_ok, class_object = pcall(function()
+                return object:GetClass()
+            end)
+            if class_ok and is_valid_object(class_object) then
+                class_name = get_object_short_name(class_object, "unknown")
+            end
+        end
+
+        table.insert(
+            lines,
+            string.format(
+                "candidate[%d] label=%s addr=%s class=%s name=%s full_name=%s flags=%s",
+                index,
+                tostring(candidate.label or ""),
+                get_object_address_string(object) or "",
+                tostring(class_name),
+                tostring(short_name),
+                prefab_probe_compact(tostring(candidate.full_name or "")),
+                prefab_probe_object_flag_summary(object)
+            )
+        )
+    end
+
+    return table.concat(lines, "\n")
 end
 
 local function compact_probe_value(value)
@@ -4044,6 +4119,38 @@ function OmeggaForceConsoleExecutor(spec)
     return "unknown executor: " .. tostring(executor)
 end
 
+function OmeggaBridgeDispatchBmfCommand(spec)
+    local text = trim(tostring(spec or ""))
+    if text == "" then
+        return "dispatch_ok=false\ncode=BMF_COMMAND_REQUIRED\ndetail=usage: Omegga.Bridge.BmfDispatch <bmf.command> [args...]"
+    end
+    if type(BMF) ~= "table" or type(BMF.commands) ~= "table" or type(BMF.commands.dispatch) ~= "function" then
+        return "dispatch_ok=false\ncode=BMF_RUNTIME_UNAVAILABLE\ndetail=BMF.commands.dispatch is unavailable"
+    end
+
+    local command_name, args = text:match("^(%S+)%s*(.*)$")
+    command_name = string.lower(trim(command_name or ""))
+    if command_name == "" then
+        return "dispatch_ok=false\ncode=BMF_COMMAND_REQUIRED\ndetail=command name is required"
+    end
+
+    local lines = {}
+    local ar = {
+        NoEventLog = true,
+        Log = function(_, line)
+            table.insert(lines, tostring(line or ""))
+        end,
+    }
+    local ok, success_or_error = pcall(BMF.commands.dispatch, command_name, trim(args or ""), ar)
+    table.insert(lines, 1, "dispatch_ok=" .. tostring(ok))
+    if not ok then
+        table.insert(lines, "dispatch_error=" .. tostring(success_or_error))
+    else
+        table.insert(lines, "dispatch_return=" .. tostring(success_or_error))
+    end
+    return table.concat(lines, "\n")
+end
+
 function OmeggaClientTravel(spec)
     local url = trim(tostring(spec or ""))
     if url == "" then
@@ -5341,6 +5448,138 @@ local function try_emulate_command(command)
         return true, "emulated-describe-console-manager", "ok=" .. tostring(ok) .. " detail=" .. trim(tostring(output or ""))
     end
 
+    if command == "Omegga.Bridge.DescribeConsoleExecCandidates" then
+        return true, "emulated-describe-console-exec-candidates", describe_console_exec_candidates()
+    end
+
+    local describe_bmf_socket_ufunction = command:match("^Omegga%.Bridge%.DescribeBmfSocketUFunction%s+(.+)$")
+    if describe_bmf_socket_ufunction and trim(describe_bmf_socket_ufunction) ~= "" then
+        if type(BMFSocketDescribeUFunction) ~= "function" then
+            return true, "emulated-describe-bmf-socket-ufunction", "BMFSocketDescribeUFunction helper missing"
+        end
+        local ok, output = pcall(BMFSocketDescribeUFunction, trim(describe_bmf_socket_ufunction), 32)
+        return true,
+            "emulated-describe-bmf-socket-ufunction",
+            ok and tostring(output or "") or ("BMFSocketDescribeUFunction crashed: " .. tostring(output))
+    end
+
+    local bmf_chat_command_probe = command:match("^Omegga%.Bridge%.BmfChatCommandProbe%s+(.+)$")
+    if bmf_chat_command_probe and trim(bmf_chat_command_probe) ~= "" then
+        if type(BMFSocketChatCommandProbe) ~= "function" then
+            return true, "emulated-bmf-chat-command-probe", "BMFSocketChatCommandProbe helper missing"
+        end
+        local ok, output = pcall(BMFSocketChatCommandProbe, trim(bmf_chat_command_probe), "chat-command-probe")
+        return true,
+            "emulated-bmf-chat-command-probe",
+            ok and tostring(output or "") or ("BMFSocketChatCommandProbe crashed: " .. tostring(output))
+    end
+
+    local bmf_player_console_command_probe = command:match("^Omegga%.Bridge%.BmfPlayerConsoleCommandProbe%s+(.+)$")
+    if bmf_player_console_command_probe and trim(bmf_player_console_command_probe) ~= "" then
+        if type(BMFSocketPlayerConsoleCommandProbe) ~= "function" then
+            return true, "emulated-bmf-player-console-command-probe", "BMFSocketPlayerConsoleCommandProbe helper missing"
+        end
+        local ok, output = pcall(BMFSocketPlayerConsoleCommandProbe, trim(bmf_player_console_command_probe), "player-console-command-probe")
+        return true,
+            "emulated-bmf-player-console-command-probe",
+            ok and tostring(output or "") or ("BMFSocketPlayerConsoleCommandProbe crashed: " .. tostring(output))
+    end
+
+    local bmf_player_chat_message_probe = command:match("^Omegga%.Bridge%.BmfPlayerChatMessageProbe%s+(.+)$")
+    if bmf_player_chat_message_probe and trim(bmf_player_chat_message_probe) ~= "" then
+        if type(BMFSocketPlayerChatMessageProbe) ~= "function" then
+            return true, "emulated-bmf-player-chat-message-probe", "BMFSocketPlayerChatMessageProbe helper missing"
+        end
+        local ok, output = pcall(BMFSocketPlayerChatMessageProbe, trim(bmf_player_chat_message_probe), "player-chat-message-probe")
+        return true,
+            "emulated-bmf-player-chat-message-probe",
+            ok and tostring(output or "") or ("BMFSocketPlayerChatMessageProbe crashed: " .. tostring(output))
+    end
+
+    local bmf_kismet_console_command_probe = command:match("^Omegga%.Bridge%.BmfKismetConsoleCommandProbe%s+(.+)$")
+    if bmf_kismet_console_command_probe and trim(bmf_kismet_console_command_probe) ~= "" then
+        if type(BMFSocketKismetConsoleCommandProbe) ~= "function" then
+            return true, "emulated-bmf-kismet-console-command-probe", "BMFSocketKismetConsoleCommandProbe helper missing"
+        end
+        local probe_command = trim(bmf_kismet_console_command_probe)
+        local explicit_context, remaining_command = probe_command:match("^context=([^%s]+)%s+(.+)$")
+        local world_pointer = ""
+        if explicit_context and trim(remaining_command or "") ~= "" then
+            world_pointer = trim(explicit_context)
+            probe_command = trim(remaining_command)
+        end
+        local helpers = type(UEHelpers) == "table" and UEHelpers or nil
+        if world_pointer == "" and not helpers then
+            local helpers_ok, loaded_helpers = pcall(require, "UEHelpers")
+            if helpers_ok and type(loaded_helpers) == "table" then
+                helpers = loaded_helpers
+            end
+        end
+        if world_pointer == "" and helpers and type(helpers.GetWorld) == "function" then
+            local world_ok, world = pcall(helpers.GetWorld)
+            if world_ok and world then
+                world_pointer = OmeggaNormalizeObjectPointer(world) or ""
+            end
+        end
+        local ok, output = pcall(BMFSocketKismetConsoleCommandProbe, probe_command, "kismet-console-command-probe", world_pointer)
+        return true,
+            "emulated-bmf-kismet-console-command-probe",
+            ok and tostring(output or "") or ("BMFSocketKismetConsoleCommandProbe crashed: " .. tostring(output))
+    end
+
+    local bmf_process_console_exec_probe = command:match("^Omegga%.Bridge%.BmfProcessConsoleExecProbe%s+(.+)$")
+    if bmf_process_console_exec_probe and trim(bmf_process_console_exec_probe) ~= "" then
+        if type(BMFSocketProcessConsoleExecProbe) ~= "function" then
+            return true, "emulated-bmf-process-console-exec-probe", "BMFSocketProcessConsoleExecProbe helper missing"
+        end
+        local probe_command = trim(bmf_process_console_exec_probe)
+        local explicit_context, remaining_command = probe_command:match("^context=([^%s]+)%s+(.+)$")
+        local context_pointer = ""
+        if explicit_context and trim(remaining_command or "") ~= "" then
+            context_pointer = trim(explicit_context)
+            probe_command = trim(remaining_command)
+        end
+        local ok, output = pcall(BMFSocketProcessConsoleExecProbe, probe_command, "process-console-exec-probe", context_pointer)
+        return true,
+            "emulated-bmf-process-console-exec-probe",
+            ok and tostring(output or "") or ("BMFSocketProcessConsoleExecProbe crashed: " .. tostring(output))
+    end
+
+    local bmf_console_manager_input_probe = command:match("^Omegga%.Bridge%.BmfConsoleManagerInputProbe%s+(.+)$")
+    if bmf_console_manager_input_probe and trim(bmf_console_manager_input_probe) ~= "" then
+        if type(BMFSocketConsoleManagerInputProbe) ~= "function" then
+            return true, "emulated-bmf-console-manager-input-probe", "BMFSocketConsoleManagerInputProbe helper missing"
+        end
+        local probe_command = trim(bmf_console_manager_input_probe)
+        local offset_text = ""
+        local world_mode = ""
+        for _ = 1, 2 do
+            local key, value, rest = probe_command:match("^([%w_%-]+)=([^%s]+)%s+(.+)$")
+            if not key or trim(rest or "") == "" then
+                break
+            end
+            key = trim(key)
+            if key == "offset" then
+                offset_text = trim(value)
+                probe_command = trim(rest)
+            elseif key == "world" then
+                world_mode = trim(value)
+                probe_command = trim(rest)
+            else
+                break
+            end
+        end
+        local ok, output = pcall(BMFSocketConsoleManagerInputProbe, probe_command, "console-manager-input-probe", offset_text, world_mode)
+        return true,
+            "emulated-bmf-console-manager-input-probe",
+            ok and tostring(output or "") or ("BMFSocketConsoleManagerInputProbe crashed: " .. tostring(output))
+    end
+
+    local bmf_dispatch = command:match("^Omegga%.Bridge%.BmfDispatch%s+(.+)$")
+    if bmf_dispatch and trim(bmf_dispatch) ~= "" then
+        return true, "emulated-bmf-dispatch", OmeggaBridgeDispatchBmfCommand(trim(bmf_dispatch))
+    end
+
     local describe_name = command:match("^Omegga%.Bridge%.DescribeObjectName%s+(.+)$")
     if describe_name and trim(describe_name) ~= "" then
         return true, "emulated-describe-object-name", describe_named_object_hits(trim(describe_name), true)
@@ -5984,22 +6223,117 @@ end
 local function execute_command(id, command)
     set_status("executing", { last_command = command })
 
-    if command == "Chat.MessageForUnknownCommands 0" then
-        if type(OmeggaExecuteKismetConsoleCommand) == "function" then
-            local exec_ok, success, output = pcall(OmeggaExecuteKismetConsoleCommand, command)
-            if exec_ok and success then
-                finish_command_success(id, command, "kismet-message-for-unknown-commands", output or "")
+    if command == "Chat.MessageForUnknownCommands 0"
+        or command == "br.Chat.MessageForUnknownCommands 0" then
+        if type(BMFSocketSetUnknownCommandMessages) == "function" then
+            local call_ok, applied, output = pcall(BMFSocketSetUnknownCommandMessages, false)
+            if call_ok and applied then
+                finish_command_success(
+                    id,
+                    command,
+                    "bmf-native-unknown-command-flag",
+                    tostring(output or "")
+                )
                 return
             end
 
             bridge_log(
                 "warn",
-                "Kismet Chat.MessageForUnknownCommands bootstrap failed: " .. tostring(exec_ok and output or success)
+                "Native Chat.MessageForUnknownCommands backing-flag update failed: "
+                    .. tostring(call_ok and output or applied)
             )
+        else
+            bridge_log("warn", "BMFSocketSetUnknownCommandMessages helper is unavailable")
         end
 
-        bridge_log("info", "Skipping bootstrap command Chat.MessageForUnknownCommands 0 on Windows UE4SS bridge")
-        finish_command_success(id, command, "noop", "")
+        local has_engine_tick_scheduler = type(ExecuteInGameThread) == "function"
+            and type(EGameThreadMethod) == "table"
+            and EGameThreadMethod.EngineTick ~= nil
+        local has_delayed_scheduler = type(ExecuteInGameThreadWithDelay) == "function"
+        if not has_engine_tick_scheduler and not has_delayed_scheduler then
+            bridge_log("warn", "Cannot apply Chat.MessageForUnknownCommands without a game-thread scheduler")
+            finish_command_success(id, command, "noop", "")
+            return
+        end
+
+        local scheduled_ok, scheduled_error = pcall(function()
+            schedule_on_game_thread(function()
+                if type(IsInGameThread) == "function" then
+                    local thread_ok, on_game_thread = pcall(IsInGameThread)
+                    if not thread_ok or not on_game_thread then
+                        bridge_log("warn", "Refusing to apply Chat.MessageForUnknownCommands outside the game thread")
+                        finish_command_success(id, command, "noop", "")
+                        return
+                    end
+                end
+
+                if type(OmeggaExecuteKismetConsoleCommand) == "function" then
+                    local exec_ok, success, output = pcall(OmeggaExecuteKismetConsoleCommand, command)
+                    if exec_ok and success then
+                        finish_command_success(id, command, "kismet-message-for-unknown-commands", output or "")
+                        return
+                    end
+
+                    bridge_log(
+                        "warn",
+                        "Cached-context Kismet Chat.MessageForUnknownCommands bootstrap failed: "
+                            .. tostring(exec_ok and output or success)
+                    )
+                end
+
+                if type(BMFSocketKismetConsoleCommandProbe) == "function" then
+                    local world_pointer = ""
+                    local helpers = type(UEHelpers) == "table" and UEHelpers or nil
+                    if not helpers then
+                        local helpers_ok, loaded_helpers = pcall(require, "UEHelpers")
+                        if helpers_ok and type(loaded_helpers) == "table" then
+                            helpers = loaded_helpers
+                        end
+                    end
+                    if helpers and type(helpers.GetWorld) == "function" then
+                        local world_ok, world = pcall(helpers.GetWorld)
+                        if world_ok and world and type(OmeggaNormalizeObjectPointer) == "function" then
+                            local normalize_ok, normalized_world = pcall(OmeggaNormalizeObjectPointer, world)
+                            if normalize_ok then
+                                world_pointer = normalized_world or ""
+                            end
+                        end
+                    end
+                    local native_ok, native_output = pcall(
+                        BMFSocketKismetConsoleCommandProbe,
+                        command,
+                        "kismet-console-command-probe-fast",
+                        world_pointer
+                    )
+                    local output = tostring(native_output or "")
+                    local output_lines = "\n" .. output .. "\n"
+                    if native_ok and output_lines:find("\nok=true\n", 1, true) then
+                        finish_command_success(id, command, "bmf-kismet-message-for-unknown-commands", output)
+                        return
+                    end
+
+                    bridge_log(
+                        "warn",
+                        "Native Kismet Chat.MessageForUnknownCommands bootstrap failed: "
+                            .. tostring(native_ok and output or native_output)
+                    )
+                else
+                    bridge_log("warn", "BMFSocketKismetConsoleCommandProbe helper is unavailable")
+                end
+
+                finish_command_success(id, command, "noop", "")
+            end)
+        end)
+
+        if not scheduled_ok then
+            finish_command_error(
+                id,
+                command,
+                "Failed to schedule Chat.MessageForUnknownCommands on the game thread",
+                tostring(scheduled_error),
+                -32002
+            )
+        end
         return
     end
 
@@ -8749,9 +9083,13 @@ function OmeggaDescribePlayerLocation(spec)
     if type(BMFSocketPlayerLocation) == "function" then
         local native_ok, native_output = pcall(BMFSocketPlayerLocation, requested_name)
         if native_ok and type(native_output) == "string" and native_output ~= "" then
-            return native_output
+            if native_output:match("ok=true") then
+                return native_output
+            end
+            table.insert(lines, "native_detail=" .. tostring(native_output:gsub("[\r\n]+", " | ")))
+        else
+            table.insert(lines, "native_detail=" .. tostring(native_output or "native location helper returned empty output"))
         end
-        table.insert(lines, "native_detail=" .. tostring(native_output or "native location helper returned empty output"))
     end
 
     if os.getenv("OMEGGA_UE4SS_PLAYER_LOCATION_USE_LUA_UOBJECTS") ~= "1" then

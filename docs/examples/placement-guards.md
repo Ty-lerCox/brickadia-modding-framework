@@ -1,6 +1,6 @@
 # Placement Guards
 
-The placement guard examples are full policy plugins. They are documented as
+The managed placement guards are full policy plugins. They are documented as
 runnable workflows instead of inline snippets because each guard combines
 configuration, player policy, chat feedback, and native or hook-backed
 validation.
@@ -8,13 +8,17 @@ validation.
 **Maturity:** `Policy workflow`, `Experimental/native`
 **Required capabilities:** Varies by guard.
 
-Runnable sources:
+Managed sources:
 
-- [examples/NoSpawnItemApplicator](https://github.com/Ty-lerCox/brickadia-modding-framework/tree/main/examples/NoSpawnItemApplicator): blocks configured applicator components.
-- [examples/InteractConsolePrefixGuard](https://github.com/Ty-lerCox/brickadia-modding-framework/tree/main/examples/InteractConsolePrefixGuard): restricts Interactable console tag prefixes.
-- [examples/BrickAssetPlacementGuard](https://github.com/Ty-lerCox/brickadia-modding-framework/tree/main/examples/BrickAssetPlacementGuard): blocks configured placement assets and indexed prefab hashes.
+- [NoSpawnItemApplicator](https://github.com/Ty-lerCox/brickadia-modding-framework/tree/main/framework/ue4ss/Mods/BMF/plugins/NoSpawnItemApplicator): blocks configured applicator components.
+- [InteractConsolePrefixGuard](https://github.com/Ty-lerCox/brickadia-modding-framework/tree/main/framework/ue4ss/Mods/BMF/plugins/InteractConsolePrefixGuard): restricts Interactable console tag prefixes.
 
-The common command pattern for these policy examples is:
+`BrickAssetPlacementGuard` is retained under
+[`deprecated/plugins/BrickAssetPlacementGuard`](https://github.com/Ty-lerCox/brickadia-modding-framework/tree/main/deprecated/plugins/BrickAssetPlacementGuard)
+for historical validation only. Brickadia's built-in placement permissions are
+the supported replacement.
+
+The common command pattern for these policy plugins is:
 
 ```lua
 BMF.commands.register("bmf.guard.status", "Show guard status.", function()

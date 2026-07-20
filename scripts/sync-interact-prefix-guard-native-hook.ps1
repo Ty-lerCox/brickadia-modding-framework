@@ -12,7 +12,7 @@ param(
   [string]$InjectScript = '',
   [string]$SourcePath = '',
   [string]$DllName = '',
-  [UInt64[]]$ServerModifyComponentRvas = @([UInt64]0x428DD80, [UInt64]0x428DFF0),
+  [UInt64[]]$ServerModifyComponentRvas = @([UInt64]0x5E942D0),
   [string[]]$AllowedPrefix = @('buyweapon:'),
   [string[]]$AllowedContext = @(),
   [switch]$TrustExistingStatus,
@@ -89,6 +89,24 @@ function Find-LatestBridgeDir([string]$BrickadiaRootPath) {
 }
 
 function Invoke-BmfCommand([string]$Command) {
+  if ($script:SocketCommandScript -and (Test-Path -LiteralPath $script:SocketCommandScript)) {
+    $runtimeDir = Join-Path $script:RuntimeBmfDir 'runtime'
+    $timeoutMs = [Math]::Max(1000, $CommandTimeoutSeconds * 1000)
+    $output = & node $script:SocketCommandScript --runtime-dir $runtimeDir --command $Command --timeout-ms $timeoutMs
+    if ($LASTEXITCODE -ne 0) {
+      throw "BMF socket command failed: $Command"
+    }
+    $socket = ($output -join "`n") | ConvertFrom-Json
+    $lines = @([string]$socket.response -split "`r?`n")
+    return [ordered]@{
+      command = $Command
+      requestId = [string]$socket.id
+      responsePath = ''
+      lines = $lines
+      values = Convert-KeyValueLines $lines
+    }
+  }
+
   if (!$script:SendRpcScript -or !(Test-Path -LiteralPath $script:SendRpcScript)) {
     throw "send-bridge-rpc.js was not found: $script:SendRpcScript"
   }
@@ -143,7 +161,7 @@ function Resolve-InteractComponent {
     return $Component
   }
 
-  $response = Invoke-BmfCommand 'bmf.tools.applicator.native-targets'
+  $response = Invoke-BmfCommand 'bmf.tools.applicator.native-targets refresh=true unsafe=true'
   foreach ($key in @('interact_component', 'interactComponentAddress')) {
     if ($response.values.ContainsKey($key) -and [string]$response.values[$key]) {
       return [string]$response.values[$key]
@@ -268,6 +286,7 @@ if (!$OutJson) {
 $script:BridgeDir = [System.IO.Path]::GetFullPath($BridgeDir)
 $script:RuntimeBmfDir = [System.IO.Path]::GetFullPath($RuntimeBmfDir)
 $script:SendRpcScript = Join-Path $BrickadiaRoot 'brickadia-ue4ss-re/scripts/send-bridge-rpc.js'
+$script:SocketCommandScript = Join-Path $Root 'scripts/invoke-bmf-socket-command.js'
 
 if ($ProcessId -eq 0) {
   $serverProcess = Get-Process BrickadiaServer-Win64-Shipping -ErrorAction Stop |
@@ -280,6 +299,9 @@ if ($ProcessId -eq 0) {
 
 $componentText = Resolve-InteractComponent
 $componentValue = Convert-HexToUInt64 $componentText 'component'
+if ($componentValue -eq 0) {
+  throw 'BMF native target discovery returned a null Interact component; refusing to inject a non-enforcing hook.'
+}
 
 $caseRoot = Split-Path -Parent ([System.IO.Path]::GetFullPath($OutJson))
 New-Item -ItemType Directory -Force -Path $caseRoot | Out-Null

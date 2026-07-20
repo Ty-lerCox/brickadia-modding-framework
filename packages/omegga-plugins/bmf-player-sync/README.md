@@ -40,6 +40,6 @@ live `PlayerState` properties through UE4SS Lua.
 The adapter can also forward Omegga `interact` events into BMF as
 `bmf.interact.console` socket commands through BMF Bridge. Forwarded messages
 are percent-encoded so Interactable Print-to-Console tags with spaces remain one command token. The
-`examples/InteractConsolePrefixGuard` plugin consumes those events to audit and
+`framework/ue4ss/Mods/BMF/plugins/InteractConsolePrefixGuard` consumes those events to audit and
 message players when non-admin roles use a prefix outside the configured
 whitelist.

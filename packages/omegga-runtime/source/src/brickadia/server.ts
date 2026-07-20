@@ -72,6 +72,11 @@ const DEFAULT_WINDOWS_UE4SS_WRITE_SPACING_MS = 75;
 const SYNTHETIC_PLAYER_STATE_BASE = 2147483000;
 const SYNTHETIC_PLAYER_CONTROLLER_BASE = 2147484000;
 const SYNTHETIC_PATH_PREFIX = 'Omegga:PersistentLevel.';
+const UNKNOWN_COMMAND_MESSAGE_RETRY_DELAYS_MS = [1000, 2000, 4000, 8000];
+const UNKNOWN_COMMAND_MESSAGE_EXECUTORS = new Set([
+  'kismet-message-for-unknown-commands',
+  'bmf-kismet-message-for-unknown-commands',
+]);
 
 type SyntheticPlayerLookup = {
   name?: string;
@@ -167,12 +172,21 @@ const getBmfCommandFromOmeggaLine = (line: string) => {
   if (setTeamMatch) {
     const args = parseConsoleArgs(setTeamMatch[1] || '');
     if (args[0] && args[1]) {
-      return `bmf.minigames.live.assign-team player=${encodeBmfCommandArg(args[0])} team=${encodeBmfCommandArg(args[1])} method=servercallbyname`;
+      return `bmf.minigames.live.assign-team player=${encodeBmfCommandArg(args[0])} team=${encodeBmfCommandArg(args[1])} method=serverjoingamemodeteam`;
     }
   }
 
   return '';
 };
+
+export const isOmeggaBookkeepingCommand = (line: string) =>
+  /^(?:br\.)?Chat\.MessageForUnknownCommands\s+(?:0|false)$/i.test(line.trim());
+
+const DEGRADED_WORLD_COMMAND_PATTERN =
+  /^(?:BR\.World\.(?:SaveAs|LoadAdditive|ClearRegion|ClearAll)|Bricks\.(?:Save|SaveRegion|Load|ClearRegion)|br\.Prefab\.(?:SaveRegion|Load))\b.*$/i;
+
+export const isDegradedWorldCommand = (line: string) =>
+  DEGRADED_WORLD_COMMAND_PATTERN.test(line);
 
 const getWindowsUe4ssWriteSpacingMs = () => {
   const value = Number(
@@ -197,6 +211,9 @@ const isAllowedMinigameGetAllCommand = (line: string) =>
 const STAGED_PLAYER_MUTATION_COMMAND =
   /^Server\.Players\.(?:SetTeam|SetMinigame|SetLeaderboardValue|GiveItem|RemoveItem)\b/;
 
+const WINDOWS_CONTEXT_BOOTSTRAP_DELAYS_MS = [0, 1500, 5000] as const;
+const WINDOWS_CONTEXT_BOOTSTRAP_COMMAND = 'Server.Status\n';
+
 /** Start a brickadia server */
 export default class BrickadiaServer extends EventEmitter {
   #child: ChildProcessWithoutNullStreams = null;
@@ -219,6 +236,8 @@ export default class BrickadiaServer extends EventEmitter {
   #ue4ssCompatibilityCl: string = null;
   #ue4ssCompatibilityReportPath: string = null;
   #ue4ssStagedObjectControlOverride = false;
+  #unknownCommandMessageRetryTimer: NodeJS.Timeout = null;
+  #windowsContextBootstrapTimers = new Set<NodeJS.Timeout>();
   #writeQueue: Promise<void> = Promise.resolve();
 
   config: IConfig;
@@ -472,11 +491,109 @@ export default class BrickadiaServer extends EventEmitter {
   }
 
   cleanupUe4ssBridge() {
+    this.clearWindowsContextBootstrap();
+    this.clearUnknownCommandMessageRetry();
     if (!this.#ue4ssBridge) return;
 
     this.#ue4ssBridge.removeAllListeners();
     this.#ue4ssBridge.stop();
     this.#ue4ssBridge = null;
+  }
+
+  private clearWindowsContextBootstrap() {
+    for (const timer of this.#windowsContextBootstrapTimers) {
+      clearTimeout(timer);
+    }
+    this.#windowsContextBootstrapTimers.clear();
+  }
+
+  private bootstrapWindowsCommandContext() {
+    this.clearWindowsContextBootstrap();
+
+    for (const delayMs of WINDOWS_CONTEXT_BOOTSTRAP_DELAYS_MS) {
+      const bootstrap = () => {
+        if (
+          !this.#child ||
+          this.#child.exitCode !== null ||
+          this.#windowsBackend !== 'ue4ss'
+        ) {
+          return;
+        }
+
+        Logger.verbose(
+          'Priming UE4SS command context through Windows console bridge',
+          `delayMs=${delayMs}`,
+        );
+        this.writeToWindowsControl(WINDOWS_CONTEXT_BOOTSTRAP_COMMAND);
+      };
+
+      if (delayMs === 0) {
+        bootstrap();
+        continue;
+      }
+
+      const timer = setTimeout(() => {
+        this.#windowsContextBootstrapTimers.delete(timer);
+        bootstrap();
+      }, delayMs);
+      timer.unref?.();
+      this.#windowsContextBootstrapTimers.add(timer);
+    }
+  }
+
+  private clearUnknownCommandMessageRetry() {
+    if (!this.#unknownCommandMessageRetryTimer) return;
+    clearTimeout(this.#unknownCommandMessageRetryTimer);
+    this.#unknownCommandMessageRetryTimer = null;
+  }
+
+  private async applyUnknownCommandMessageSetting(
+    command: string,
+    attempt = 0,
+  ) {
+    const bridge = this.#ue4ssBridge;
+    if (!bridge) return;
+
+    this.clearUnknownCommandMessageRetry();
+
+    let executor = '';
+    let failure = '';
+    try {
+      const result = (await bridge.execCommand(command)) as
+        { executor?: unknown } | undefined;
+      executor = String(result?.executor ?? '');
+    } catch (error) {
+      failure = error instanceof Error ? error.message : String(error);
+    }
+
+    if (this.#ue4ssBridge !== bridge) return;
+    if (UNKNOWN_COMMAND_MESSAGE_EXECUTORS.has(executor)) {
+      Logger.verbose(
+        'Disabled Brickadia native unknown-command messages through Kismet.',
+      );
+      return;
+    }
+
+    if (attempt >= UNKNOWN_COMMAND_MESSAGE_RETRY_DELAYS_MS.length) {
+      Logger.warnp(
+        'Could not disable Brickadia native unknown-command messages'.yellow,
+        failure || `executor=${executor || 'unknown'}`,
+      );
+      return;
+    }
+
+    const delayMs = UNKNOWN_COMMAND_MESSAGE_RETRY_DELAYS_MS[attempt];
+    Logger.verbose(
+      'Retrying Brickadia unknown-command message setting',
+      `attempt=${attempt + 2}`,
+      `delayMs=${delayMs}`,
+      failure || `executor=${executor || 'unknown'}`,
+    );
+    this.#unknownCommandMessageRetryTimer = setTimeout(() => {
+      this.#unknownCommandMessageRetryTimer = null;
+      void this.applyUnknownCommandMessageSetting(command, attempt + 1);
+    }, delayMs);
+    this.#unknownCommandMessageRetryTimer.unref?.();
   }
 
   cleanupBmfSocketBridge() {
@@ -685,6 +802,11 @@ export default class BrickadiaServer extends EventEmitter {
         return true;
       }
 
+      if (isOmeggaBookkeepingCommand(normalizedLine)) {
+        await this.applyUnknownCommandMessageSetting(normalizedLine);
+        return true;
+      }
+
       const allowUnsafePlayersList =
         process.env.OMEGGA_UE4SS_ALLOW_UNSAFE_PLAYERS_LIST === '1';
       if (
@@ -726,10 +848,10 @@ export default class BrickadiaServer extends EventEmitter {
       const allowDegradedWorldCommands =
         process.env.OMEGGA_UE4SS_ALLOW_DEGRADED_WORLD_COMMANDS === '1';
       const forceWorldCommand = normalizedLine.match(
-        /^Omegga\.Bridge\.ForceConsoleExecutor\s+(?:consolemanager|console)\s+((?:BR\.World\.(?:SaveAs|LoadAdditive)|Bricks\.(?:Save|SaveRegion|Load|ClearRegion))\b.*)$/,
+        /^Omegga\.Bridge\.ForceConsoleExecutor\s+(?:consolemanager|console)\s+((?:BR\.World\.(?:SaveAs|LoadAdditive|ClearRegion|ClearAll)|Bricks\.(?:Save|SaveRegion|Load|ClearRegion)|br\.Prefab\.(?:SaveRegion|Load))\b.*)$/,
       );
       const directWorldCommand = normalizedLine.match(
-        /^(?:BR\.World\.(?:SaveAs|LoadAdditive)|Bricks\.(?:Save|SaveRegion|Load|ClearRegion))\b.*$/,
+        /^(?:BR\.World\.(?:SaveAs|LoadAdditive|ClearRegion|ClearAll)|Bricks\.(?:Save|SaveRegion|Load|ClearRegion)|br\.Prefab\.(?:SaveRegion|Load))\b.*$/,
       );
       if (
         allowDegradedWorldCommands &&
@@ -1226,10 +1348,7 @@ export default class BrickadiaServer extends EventEmitter {
     this.cleanupUe4ssBridge();
     this.cleanupBmfSocketBridge();
     this.#windowsBackend = IS_WINDOWS ? resolveWindowsControlBackend() : null;
-    this.#windowsControlPort =
-      IS_WINDOWS && this.#windowsBackend === 'bridge'
-        ? this.getWindowsControlPort()
-        : null;
+    this.#windowsControlPort = IS_WINDOWS ? this.getWindowsControlPort() : null;
     this.#ue4ssWin64Dir = IS_WINDOWS ? path.dirname(command) : null;
     this.#syntheticLogCounter = 0;
     this.#ue4ssDegraded = false;
@@ -1290,6 +1409,7 @@ export default class BrickadiaServer extends EventEmitter {
       );
       this.#ue4ssBridge.on('ready', info => {
         Logger.verbose('UE4SS bridge ready', info);
+        this.bootstrapWindowsCommandContext();
         this.emit('control:ready', {
           backend: 'ue4ss',
           transport: info.transport ?? 'file',
@@ -1352,8 +1472,16 @@ export default class BrickadiaServer extends EventEmitter {
         Object.assign(spawnEnv, bmfSocketEnv);
         Object.assign(process.env, bmfSocketEnv);
       }
-      spawnCommand = command;
-      spawnArgs = params;
+      spawnCommand = ensureWindowsConsoleBridgeBinary();
+      spawnArgs = [
+        '--control-port',
+        String(this.#windowsControlPort),
+        '--cwd',
+        process.cwd(),
+        '--',
+        command,
+        ...params,
+      ];
     } else if (IS_WINDOWS) {
       Logger.verbose(
         'Using Windows control backend',
@@ -1395,7 +1523,7 @@ export default class BrickadiaServer extends EventEmitter {
       throw new Error('Failed to spawn Brickadia server process');
 
     this.#child.stdin.setDefaultEncoding('utf8');
-    if (IS_WINDOWS && this.#windowsBackend === 'bridge')
+    if (IS_WINDOWS && this.#windowsControlPort)
       this.connectWindowsControlSocket(this.#windowsControlPort);
     this.#outInterface = readline.createInterface({
       input: this.#child.stdout,
@@ -1442,7 +1570,10 @@ export default class BrickadiaServer extends EventEmitter {
       if (this.#child) {
         Logger.verbose('WRITE'.green, line.replace(/\n$/, ''));
         if (IS_WINDOWS) {
-          if (this.#windowsBackend === 'ue4ss') {
+          if (
+            this.#windowsBackend === 'ue4ss' &&
+            !isDegradedWorldCommand(line.trim())
+          ) {
             await this.writeToUe4ssControl(line);
 
             const spacingMs = getWindowsUe4ssWriteSpacingMs();
@@ -1483,16 +1614,7 @@ export default class BrickadiaServer extends EventEmitter {
 
     Logger.verbose('Stopping server process');
     if (IS_WINDOWS && this.#windowsBackend === 'ue4ss') {
-      if (this.#ue4ssBridge) {
-        void this.#ue4ssBridge
-          .execCommand('exit', 2000)
-          .catch(error =>
-            Logger.verbose(
-              'UE4SS exit command failed',
-              error instanceof Error ? error.message : String(error),
-            ),
-          );
-      }
+      this.requestWindowsShutdown();
       void terminateChildProcess(this.#child, {
         forceAfterMs: 5000,
         immediateSignal: false,

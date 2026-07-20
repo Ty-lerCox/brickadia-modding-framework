@@ -43,7 +43,7 @@ rule.
 
 ## Example Commands
 
-`examples/BrickAssetPlacementGuard` exposes:
+The deprecated `deprecated/plugins/BrickAssetPlacementGuard` exposes:
 
 ```text
 bmf.brickassetguard.status
@@ -57,6 +57,5 @@ Run the policy and plugin command canary:
 ```
 
 !!! note
-    Brick asset enforcement is policy-ready, not live-enforced. The missing
-    layer is a cancellable placement/paste hook that can resolve the incoming
-    asset or uploaded prefab hash before Brickadia mutates the world.
+    This guard is retained for historical validation only. Use Brickadia's
+    built-in brick placement permissions for live enforcement.

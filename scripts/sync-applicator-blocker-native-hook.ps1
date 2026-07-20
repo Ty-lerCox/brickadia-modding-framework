@@ -10,7 +10,7 @@ param(
   [string]$InjectScript = '',
   [string]$DllName = '',
   [string]$DeniedComponent = '',
-  [UInt64[]]$ServerAddComponentRvas = @([UInt64]0x428D3F0, [UInt64]0x428D670),
+  [UInt64[]]$ServerAddComponentRvas = @([UInt64]0x5E93250),
   [int]$CommandTimeoutSeconds = 30,
   [int]$ResponseTimeoutSeconds = 20,
   [int]$VerificationTimeoutSeconds = 20,
@@ -71,6 +71,24 @@ function Find-LatestBridgeDir([string]$BrickadiaRootPath) {
 }
 
 function Invoke-BmfCommand([string]$Command) {
+  if ($script:SocketCommandScript -and (Test-Path -LiteralPath $script:SocketCommandScript)) {
+    $runtimeDir = Join-Path $script:RuntimeBmfDir 'runtime'
+    $timeoutMs = [Math]::Max(1000, $CommandTimeoutSeconds * 1000)
+    $output = & node $script:SocketCommandScript --runtime-dir $runtimeDir --command $Command --timeout-ms $timeoutMs
+    if ($LASTEXITCODE -ne 0) {
+      throw "BMF socket command failed: $Command"
+    }
+    $socket = ($output -join "`n") | ConvertFrom-Json
+    $lines = @([string]$socket.response -split "`r?`n")
+    return [ordered]@{
+      command = $Command
+      requestId = [string]$socket.id
+      responsePath = ''
+      lines = $lines
+      values = Convert-KeyValueLines $lines
+    }
+  }
+
   if (!$script:SendRpcScript -or !(Test-Path -LiteralPath $script:SendRpcScript)) {
     throw "send-bridge-rpc.js was not found: $script:SendRpcScript"
   }
@@ -463,6 +481,7 @@ if (!$BridgeDir) {
 $script:BridgeDir = [System.IO.Path]::GetFullPath($BridgeDir)
 $script:RuntimeBmfDir = [System.IO.Path]::GetFullPath($RuntimeBmfDir)
 $script:SendRpcScript = Join-Path $BrickadiaRoot 'brickadia-ue4ss-re/scripts/send-bridge-rpc.js'
+$script:SocketCommandScript = Join-Path $Root 'scripts/invoke-bmf-socket-command.js'
 
 if ($ProcessId -eq 0) {
   $serverProcess = Get-Process BrickadiaServer-Win64-Shipping -ErrorAction Stop |
@@ -492,13 +511,16 @@ $nativeTargetArray = [UInt64[]]$nativeTargets.ToArray()
 
 $nativeTargetResponse = $null
 if (!$DeniedComponent) {
-  $nativeTargetResponse = Invoke-BmfCommand 'bmf.tools.applicator.native-targets'
+  $nativeTargetResponse = Invoke-BmfCommand 'bmf.tools.applicator.native-targets refresh=true unsafe=true'
   if (!$nativeTargetResponse.values.ContainsKey('denied_component') -or !$nativeTargetResponse.values['denied_component']) {
     throw "BMF native target response did not include denied_component."
   }
   $DeniedComponent = [string]$nativeTargetResponse.values['denied_component']
 }
 $deniedComponentValue = Convert-HexToUInt64 $DeniedComponent 'denied_component'
+if ($deniedComponentValue -eq 0) {
+  throw 'BMF native target discovery returned a null denied_component; refusing to inject a non-enforcing hook.'
+}
 
 $functionValue = [UInt64]0
 $scanResult = Find-UFunctionCandidate $ProcessId $nativeTargetArray

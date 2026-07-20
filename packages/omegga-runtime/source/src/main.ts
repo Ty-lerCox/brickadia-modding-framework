@@ -38,6 +38,7 @@ import {
   steamcmdDownloadGame,
   steamcmdDownloadSelf,
 } from './updater';
+import { runLiveCommandCanary } from './validation/liveCommandCanary';
 import { PKG, VERSION } from './version';
 
 dotenv.config({ quiet: true });
@@ -334,6 +335,21 @@ const program = commander
     // start the server
     Logger.verbose('Starting Omegga');
     await server.start();
+
+    if (process.env.OMEGGA_LIVE_COMMAND_CANARY === '1') {
+      try {
+        await runLiveCommandCanary(server);
+      } catch (error) {
+        Logger.errorp(
+          'Live command canary failed',
+          error instanceof Error ? error.message : String(error),
+        );
+        if (process.env.OMEGGA_LIVE_COMMAND_CANARY_FAIL_FAST === '1') {
+          await server.stop();
+          process.exit(1);
+        }
+      }
+    }
   });
 
 program

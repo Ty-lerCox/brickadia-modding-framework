@@ -266,7 +266,7 @@
     {
       "id": 8,
       "type": "stat",
-      "title": "Frame FPS",
+      "title": "Frame FPS / Configured Target",
       "datasource": {
         "type": "prometheus",
         "uid": "$datasource"
@@ -285,16 +285,8 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "red",
+                "color": "blue",
                 "value": null
-              },
-              {
-                "color": "orange",
-                "value": 45
-              },
-              {
-                "color": "green",
-                "value": 58
               }
             ]
           }
@@ -311,12 +303,18 @@
         },
         "orientation": "auto",
         "textMode": "auto",
-        "colorMode": "value"
+        "colorMode": "none"
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "max(brickadia_frame_fps{scope=\"window\",statistic=\"avg\",environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\",brickadia_build=~\"$brickadia_build\"})"
+          "expr": "max(brickadia_frame_fps{scope=\"window\",statistic=\"avg\",environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\",brickadia_build=~\"$brickadia_build\"})",
+          "legendFormat": "Actual"
+        },
+        {
+          "refId": "B",
+          "expr": "max(brickadia_frame_pacing_target_fps{environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\",brickadia_build=~\"$brickadia_build\"})",
+          "legendFormat": "Configured target"
         }
       ]
     },

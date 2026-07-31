@@ -1936,6 +1936,132 @@ namespace
     static_assert(sizeof(PlayerChatMessageProcessEventParams) == 16, "Unexpected ServerPushChatMessage param packing");
 
     constexpr std::size_t kServerPushChatMessageImplementationVTableOffset{0x1018};
+    constexpr uintptr_t kUFunctionNativeFuncOffset{0xD8};
+
+    using ServerPushChatMessageImplementationFn = void(__fastcall*)(void*, const Unreal::FString&);
+    using ReservedChatExecFn = void(__fastcall*)(void*, void*, void*);
+    bool read_process_event_locals(void* stack, uintptr_t& out_locals);
+
+    std::atomic<ReservedChatExecFn> g_reserved_chat_guard_original{nullptr};
+    std::atomic<uintptr_t> g_reserved_chat_guard_function{0};
+    std::atomic<void**> g_reserved_chat_guard_slot{nullptr};
+    std::atomic<bool> g_reserved_chat_guard_installed{false};
+    std::atomic<uint64_t> g_reserved_chat_guard_denied{0};
+    std::atomic<uint64_t> g_reserved_chat_guard_inspection_failures{0};
+    std::mutex g_reserved_chat_guard_install_mutex;
+    std::mutex g_reserved_chat_guard_detail_mutex;
+    std::string g_reserved_chat_guard_target;
+    std::string g_reserved_chat_guard_last_command;
+    std::string g_reserved_chat_guard_last_error;
+
+    bool is_reserved_cityrpg_chat_command(std::string_view raw_message)
+    {
+        const std::string message = ascii_lower(trim_ascii(raw_message));
+        auto matches = [&](std::string_view command) {
+            if (message == command)
+            {
+                return true;
+            }
+            return message.size() > command.size() &&
+                   message.compare(0, command.size(), command) == 0 &&
+                   std::isspace(static_cast<unsigned char>(message[command.size()]));
+        };
+        return matches("/cityrpgremote") || matches("/cityrpgroute");
+    }
+
+    bool inspect_reserved_cityrpg_chat_message(const Unreal::FString& message)
+    {
+        return is_reserved_cityrpg_chat_command(narrow_string(StringType(*message)));
+    }
+
+    void reserved_chat_guard_set_error(std::string value)
+    {
+        std::lock_guard lock(g_reserved_chat_guard_detail_mutex);
+        g_reserved_chat_guard_last_error = std::move(value);
+    }
+
+    bool inspect_reserved_cityrpg_chat_stack(void* stack, bool& inspected)
+    {
+        uintptr_t locals = 0;
+        if (!read_process_event_locals(stack, locals) ||
+            !is_accessible_memory(locals, sizeof(Unreal::FString)))
+        {
+            inspected = false;
+            return false;
+        }
+
+        const auto* message = reinterpret_cast<const Unreal::FString*>(locals);
+        inspected = true;
+        return inspect_reserved_cityrpg_chat_message(*message);
+    }
+
+    bool inspect_reserved_cityrpg_chat_stack_guarded(void* stack,
+                                                      bool& inspected,
+                                                      unsigned long& exception_code)
+    {
+        bool reserved = false;
+        inspected = false;
+        exception_code = 0;
+        __try
+        {
+            reserved = inspect_reserved_cityrpg_chat_stack(stack, inspected);
+        }
+        __except ((exception_code = GetExceptionInformation()->ExceptionRecord->ExceptionCode), EXCEPTION_EXECUTE_HANDLER)
+        {
+            inspected = false;
+        }
+        return reserved;
+    }
+
+    void reserved_chat_guard_record_inspection_failure(unsigned long exception_code)
+    {
+        g_reserved_chat_guard_inspection_failures.fetch_add(1);
+        if (exception_code != 0)
+        {
+            reserved_chat_guard_set_error(
+                "message inspection exception=" + pointer_hex(static_cast<uintptr_t>(exception_code)));
+        }
+        else
+        {
+            reserved_chat_guard_set_error("message inspection could not resolve the UFunction parameter frame");
+        }
+    }
+
+    void reserved_chat_guard_record_denied()
+    {
+        g_reserved_chat_guard_denied.fetch_add(1);
+        std::lock_guard lock(g_reserved_chat_guard_detail_mutex);
+        g_reserved_chat_guard_last_command = "<redacted reserved command>";
+        g_reserved_chat_guard_last_error.clear();
+    }
+
+    void __fastcall reserved_chat_guard_detour(void* context, void* stack, void* result)
+    {
+        const auto original = g_reserved_chat_guard_original.load();
+        if (!original || original == &reserved_chat_guard_detour)
+        {
+            return;
+        }
+
+        bool inspected = false;
+        unsigned long exception_code = 0;
+        const bool reserved = inspect_reserved_cityrpg_chat_stack_guarded(
+            stack,
+            inspected,
+            exception_code);
+        if (!inspected)
+        {
+            reserved_chat_guard_record_inspection_failure(exception_code);
+            return;
+        }
+        if (reserved)
+        {
+            reserved_chat_guard_record_denied();
+            return;
+        }
+
+        original(context, stack, result);
+    }
 
     Unreal::UObject* find_chat_command_world_subsystem(uint32_t& scanned, std::string& detail)
     {
@@ -2073,7 +2199,6 @@ namespace
             return false;
         }
 
-        using ServerPushChatMessageImplementationFn = void(__fastcall*)(void*, const Unreal::FString&);
         const auto fn = reinterpret_cast<ServerPushChatMessageImplementationFn>(implementation);
         __try
         {
@@ -3137,6 +3262,140 @@ namespace
             detail = message.str();
         }
         return found;
+    }
+
+    bool install_reserved_chat_guard(std::string& detail)
+    {
+        std::lock_guard install_lock(g_reserved_chat_guard_install_mutex);
+        if (g_reserved_chat_guard_installed.load())
+        {
+            detail = "reserved chat guard is already installed";
+            return true;
+        }
+        const ReflectedFunctionCandidate server_push_chat_message{
+            STR("ServerPushChatMessage"),
+            STR("/Script/Brickadia.BRPlayerController:ServerPushChatMessage"),
+            STR("/Script/Brickadia.BRPlayerController.ServerPushChatMessage"),
+            "BRPlayerController.ServerPushChatMessage",
+        };
+        std::string function_detail;
+        Unreal::UFunction* function = find_reflected_function(
+            nullptr,
+            server_push_chat_message,
+            function_detail);
+        if (!is_live_uobject(function))
+        {
+            detail = function_detail;
+            return false;
+        }
+
+        const uintptr_t function_address = reinterpret_cast<uintptr_t>(function);
+        void** slot = reinterpret_cast<void**>(function_address + kUFunctionNativeFuncOffset);
+        if (!slot || !is_accessible_memory(reinterpret_cast<uintptr_t>(slot), sizeof(void*)))
+        {
+            detail = "ServerPushChatMessage UFunction native exec slot is inaccessible";
+            return false;
+        }
+
+        void* current = *slot;
+        if (current == reinterpret_cast<void*>(&reserved_chat_guard_detour))
+        {
+            g_reserved_chat_guard_slot.store(slot);
+            g_reserved_chat_guard_installed.store(true);
+            detail = "reserved chat guard detour was already present";
+            return true;
+        }
+        if (!is_executable_memory(reinterpret_cast<uintptr_t>(current)))
+        {
+            detail = "ServerPushChatMessage UFunction native exec entry is not executable";
+            return false;
+        }
+
+        const auto existing_original = g_reserved_chat_guard_original.load();
+        if (existing_original && existing_original != reinterpret_cast<ReservedChatExecFn>(current))
+        {
+            detail = "ServerPushChatMessage UFunction native exec changed after guard initialization";
+            return false;
+        }
+
+        DWORD old_protect = 0;
+        if (!VirtualProtect(slot, sizeof(void*), PAGE_EXECUTE_READWRITE, &old_protect))
+        {
+            detail = "VirtualProtect failed for ServerPushChatMessage UFunction native exec slot: " +
+                     std::to_string(GetLastError());
+            return false;
+        }
+        g_reserved_chat_guard_original.store(
+            reinterpret_cast<ReservedChatExecFn>(current));
+        void* previous = InterlockedCompareExchangePointer(
+            slot,
+            reinterpret_cast<void*>(&reserved_chat_guard_detour),
+            current);
+        DWORD ignored = 0;
+        VirtualProtect(slot, sizeof(void*), old_protect, &ignored);
+
+        if (previous != current && previous != reinterpret_cast<void*>(&reserved_chat_guard_detour))
+        {
+            auto expected_original = reinterpret_cast<ReservedChatExecFn>(current);
+            g_reserved_chat_guard_original.compare_exchange_strong(expected_original, nullptr);
+            detail = "ServerPushChatMessage UFunction native exec slot changed during guard install";
+            reserved_chat_guard_set_error(detail);
+            return false;
+        }
+        FlushInstructionCache(GetCurrentProcess(), slot, sizeof(void*));
+        g_reserved_chat_guard_function.store(function_address);
+        g_reserved_chat_guard_slot.store(slot);
+        g_reserved_chat_guard_installed.store(true);
+        {
+            std::lock_guard lock(g_reserved_chat_guard_detail_mutex);
+            g_reserved_chat_guard_target = object_full_name(function);
+            g_reserved_chat_guard_last_error.clear();
+        }
+        detail = "reserved chat guard installed on ServerPushChatMessage UFunction native exec slot; " +
+                 function_detail;
+        return true;
+    }
+
+    std::string reserved_chat_guard_status_text()
+    {
+        std::string target;
+        std::string last_command;
+        std::string last_error;
+        {
+            std::lock_guard lock(g_reserved_chat_guard_detail_mutex);
+            target = g_reserved_chat_guard_target;
+            last_command = g_reserved_chat_guard_last_command;
+            last_error = g_reserved_chat_guard_last_error;
+        }
+        std::ostringstream out;
+        out << "Reserved CityRPG chat command guard status\n"
+            << "source=BMFSocketReservedChatGuard\n"
+            << "available=true\n"
+            << "installed=" << (g_reserved_chat_guard_installed.load() ? "true" : "false") << "\n"
+            << "denied=" << g_reserved_chat_guard_denied.load() << "\n"
+            << "inspection_failures=" << g_reserved_chat_guard_inspection_failures.load() << "\n"
+            << "function=" << pointer_hex(g_reserved_chat_guard_function.load()) << "\n"
+            << "slot=" << pointer_hex(reinterpret_cast<uintptr_t>(g_reserved_chat_guard_slot.load())) << "\n"
+            << "original=" << pointer_hex(reinterpret_cast<uintptr_t>(g_reserved_chat_guard_original.load())) << "\n"
+            << "target=" << json_escape(target) << "\n"
+            << "last_command=" << json_escape(last_command) << "\n"
+            << "last_error=" << json_escape(last_error) << "\n";
+        return out.str();
+    }
+
+    std::string install_reserved_chat_guard_text()
+    {
+        std::string install_detail;
+        const bool installed = install_reserved_chat_guard(install_detail);
+        if (!installed)
+        {
+            reserved_chat_guard_set_error(install_detail);
+        }
+        std::ostringstream out;
+        out << reserved_chat_guard_status_text()
+            << "ok=" << (installed ? "true" : "false") << "\n"
+            << "detail=" << json_escape(install_detail) << "\n";
+        return out.str();
     }
 
     std::string execute_player_console_command_probe_text(std::string_view raw_command_line,
@@ -22948,6 +23207,20 @@ namespace
         return 1;
     }
 
+    int lua_socket_reserved_chat_guard_install(const LuaMadeSimple::Lua& lua)
+    {
+        const std::string status = install_reserved_chat_guard_text();
+        lua.set_bool(status.find("ok=true") != std::string::npos);
+        lua.set_string(status);
+        return 2;
+    }
+
+    int lua_socket_reserved_chat_guard_status(const LuaMadeSimple::Lua& lua)
+    {
+        lua.set_string(reserved_chat_guard_status_text());
+        return 1;
+    }
+
     int lua_socket_kismet_console_command_probe(const LuaMadeSimple::Lua& lua)
     {
         lua_State* state = lua.get_lua_state();
@@ -23915,6 +24188,8 @@ namespace
             lua.register_function("BMFSocketPlayerConsoleCommandProbe", lua_socket_player_console_command_probe);
             lua.register_function("BMFSocketPlayerChatMessageProbe", lua_socket_player_chat_message_probe);
             lua.register_function("BMFSocketPlayerChatMessageImplementationProbe", lua_socket_player_chat_message_implementation_probe);
+            lua.register_function("BMFSocketReservedChatGuardInstall", lua_socket_reserved_chat_guard_install);
+            lua.register_function("BMFSocketReservedChatGuardStatus", lua_socket_reserved_chat_guard_status);
             lua.register_function("BMFSocketKismetConsoleCommandProbe", lua_socket_kismet_console_command_probe);
             lua.register_function("BMFSocketProcessConsoleExecProbe", lua_socket_process_console_exec_probe);
             lua.register_function("BMFSocketConsoleManagerInputProbe", lua_socket_console_manager_input_probe);

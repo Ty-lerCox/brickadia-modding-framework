@@ -148,7 +148,7 @@ try {
     -Name 'BMFFrameTelemetry' `
     -ComponentId 'bmf-frame-telemetry' `
     -PackageRoot 'packages/bmf-frame-telemetry' `
-    -RequiredGuardrails @('optional-native-telemetry', 'low-rate-json-output') `
+    -RequiredGuardrails @('optional-native-telemetry', 'low-rate-json-output', 'one-time-process-timer-policy', 'target-fps-allowlist', '120-fps-explicit-opt-in', 'calibrated-layout-fail-closed', 'no-pacing-poll-loop') `
     -ManifestComponent (Get-Component 'bmf-frame-telemetry')
 
   Test-TextMarkers `
@@ -174,12 +174,17 @@ try {
   Test-TextMarkers `
     -Path (Join-Path $Root 'native/bmf_frame_telemetry/CMakeLists.txt') `
     -Name 'BMFFrameTelemetry CMake' `
-    -Markers @('set(TARGET BMFFrameTelemetry)', 'add_library(${TARGET} SHARED bmf_frame_telemetry.cpp)')
+    -Markers @('set(TARGET BMFFrameTelemetry)', 'add_library(${TARGET} SHARED bmf_frame_telemetry.cpp)', 'winmm')
+
+  Test-TextMarkers `
+    -Path (Join-Path $Root 'native/bmf_frame_telemetry/bmf_frame_telemetry.cpp') `
+    -Name 'BMFFrameTelemetry pacing policy' `
+    -Markers @('BMF_FRAME_PACING_ENABLED', 'BMF_FRAME_PACING_TARGET_FPS', '(parsed == 60 || parsed == 120)', 'SetProcessInformation', 'PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION', 'timeBeginPeriod', 'timeEndPeriod', 'RegisterEngineTickPreCallback', 'apply_target_once', 'TickInternal.get_function_address', 'matches_current_get_max_tick_rate', 'matches_current_get_max_fps', 'matches_current_set_max_fps', 'layout_calibrated', 'SetMaxFPS', 'schema_version\":2', '\"pacing\":')
 
   Test-TextMarkers `
     -Path (Join-Path $Root 'framework/ue4ss/Mods/BMFFrameTelemetry/README.md') `
     -Name 'BMFFrameTelemetry README' `
-    -Markers @('DeltaSeconds', 'Mods/BMF/runtime/frame-telemetry.json', 'brickadia_frame_delta_milliseconds')
+    -Markers @('DeltaSeconds', 'Mods/BMF/runtime/frame-telemetry.json', 'BMF_FRAME_PACING_ENABLED', 'BMF_FRAME_PACING_TARGET_FPS', 'schema version `2`', 'Omegga/server restart', 'brickadia_frame_pacing_target_fps', 'brickadia_frame_pacing_layout_calibrated', 'brickadia_frame_pacing_layout_adjustment_bytes', 'brickadia_frame_pacing_entry_signatures_valid', 'brickadia_frame_pacing_timer_policy_applied', 'brickadia_frame_pacing_timer_resolution_request_succeeded', 'brickadia_frame_delta_milliseconds')
 } catch {
   $errors.Add($_.Exception.Message)
 }

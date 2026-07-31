@@ -292,7 +292,9 @@ const frameTelemetryPathCandidates = (server: Webserver, statusPath = '') => {
 };
 
 const readBmfRuntimeStatus = (server: Webserver) => {
-  const runtime = readRuntimeJson<BmfRuntimeStatus>(statusPathCandidates(server));
+  const runtime = readRuntimeJson<BmfRuntimeStatus>(
+    statusPathCandidates(server),
+  );
   return {
     path: runtime.path,
     mtimeMs: runtime.mtimeMs,
@@ -433,6 +435,7 @@ export function buildPrometheusMetrics(server: Webserver) {
   const bmfFrameLifetime = objectRecord(bmfFrameTelemetryRecord.lifetime);
   const bmfFrameSpikes = objectRecord(bmfFrameTelemetryRecord.spikes);
   const bmfFrameLastSpike = objectRecord(bmfFrameSpikes.last);
+  const bmfFramePacing = objectRecord(bmfFrameTelemetryRecord.pacing);
   const bmfFrameLastSpikeAtMs = finiteNumber(
     bmfFrameLastSpike.observed_at_unix_ms,
     0,
@@ -544,18 +547,18 @@ export function buildPrometheusMetrics(server: Webserver) {
       ];
     },
   );
-  const bmfEventHandlerDurationLines = Object.entries(
-    bmfEventsByName,
-  ).flatMap(([key, value]) => {
-    const record = objectRecord(value);
-    const event = String(record.event ?? key);
-    return prefixedDurationMetricLines(
-      'bmf_event_handler_duration_milliseconds',
-      { event },
-      record,
-      'handler',
-    );
-  });
+  const bmfEventHandlerDurationLines = Object.entries(bmfEventsByName).flatMap(
+    ([key, value]) => {
+      const record = objectRecord(value);
+      const event = String(record.event ?? key);
+      return prefixedDurationMetricLines(
+        'bmf_event_handler_duration_milliseconds',
+        { event },
+        record,
+        'handler',
+      );
+    },
+  );
   const bmfPluginTotalLines = Object.entries(bmfPluginsByPlugin).flatMap(
     ([key, value]) => {
       const record = objectRecord(value);
@@ -613,19 +616,19 @@ export function buildPrometheusMetrics(server: Webserver) {
       );
     },
   );
-  const bmfSchedulerDurationLines = Object.entries(
-    bmfSchedulerByKey,
-  ).flatMap(([_key, value]) => {
-    const record = objectRecord(value);
-    return durationMetricLines(
-      'bmf_scheduler_callback_duration_milliseconds',
-      {
-        kind: String(record.kind ?? 'callback'),
-        name: String(record.name ?? 'unknown'),
-      },
-      record,
-    );
-  });
+  const bmfSchedulerDurationLines = Object.entries(bmfSchedulerByKey).flatMap(
+    ([_key, value]) => {
+      const record = objectRecord(value);
+      return durationMetricLines(
+        'bmf_scheduler_callback_duration_milliseconds',
+        {
+          kind: String(record.kind ?? 'callback'),
+          name: String(record.name ?? 'unknown'),
+        },
+        record,
+      );
+    },
+  );
   const bmfWorkerTotalLines = Object.entries(bmfWorkers).flatMap(
     ([key, value]) => {
       const record = objectRecord(value);
@@ -950,7 +953,9 @@ export function buildPrometheusMetrics(server: Webserver) {
       [
         {
           name: 'bmf_command_worker_max_files_per_poll',
-          value: finiteMetricValue(bmfStatus?.command_worker_max_files_per_poll),
+          value: finiteMetricValue(
+            bmfStatus?.command_worker_max_files_per_poll,
+          ),
         },
       ],
     ),
@@ -975,7 +980,12 @@ export function buildPrometheusMetrics(server: Webserver) {
     ...metricBlock(
       'brickadia_frame_telemetry_up',
       'Whether native BMF frame telemetry is readable.',
-      [{ name: 'brickadia_frame_telemetry_up', value: bmfFrameTelemetry ? 1 : 0 }],
+      [
+        {
+          name: 'brickadia_frame_telemetry_up',
+          value: bmfFrameTelemetry ? 1 : 0,
+        },
+      ],
     ),
     ...metricBlock(
       'brickadia_frame_telemetry_age_seconds',
@@ -994,6 +1004,161 @@ export function buildPrometheusMetrics(server: Webserver) {
         {
           name: 'brickadia_frame_telemetry_hook_registered',
           value: boolGauge(bmfFrameTelemetryRecord.hook_registered),
+        },
+      ],
+    ),
+    ...metricBlock(
+      'brickadia_frame_telemetry_schema_version',
+      'Native BMF frame telemetry schema version.',
+      [
+        {
+          name: 'brickadia_frame_telemetry_schema_version',
+          value: finiteMetricValue(bmfFrameTelemetryRecord.schema_version),
+        },
+      ],
+    ),
+    ...metricBlock(
+      'brickadia_frame_pacing_enabled',
+      'Whether native BMF server frame pacing is enabled.',
+      [
+        {
+          name: 'brickadia_frame_pacing_enabled',
+          value:
+            typeof bmfFramePacing.enabled === 'boolean'
+              ? boolGauge(bmfFramePacing.enabled)
+              : NaN,
+        },
+      ],
+    ),
+    ...metricBlock(
+      'brickadia_frame_pacing_config_valid',
+      'Whether the native BMF frame target configuration was valid.',
+      [
+        {
+          name: 'brickadia_frame_pacing_config_valid',
+          value:
+            typeof bmfFramePacing.config_valid === 'boolean'
+              ? boolGauge(bmfFramePacing.config_valid)
+              : NaN,
+        },
+      ],
+    ),
+    ...metricBlock(
+      'brickadia_frame_pacing_target_fps',
+      'Requested native BMF server frame target in frames per second.',
+      [
+        {
+          name: 'brickadia_frame_pacing_target_fps',
+          value: finiteMetricValue(bmfFramePacing.target_fps),
+        },
+      ],
+    ),
+    ...metricBlock(
+      'brickadia_frame_pacing_target_override_attempted',
+      'Whether BMF attempted its one-shot engine frame target override.',
+      [
+        {
+          name: 'brickadia_frame_pacing_target_override_attempted',
+          value:
+            typeof bmfFramePacing.target_override_attempted === 'boolean'
+              ? boolGauge(bmfFramePacing.target_override_attempted)
+              : NaN,
+        },
+      ],
+    ),
+    ...metricBlock(
+      'brickadia_frame_pacing_target_override_applied',
+      'Whether BMF verified the one-shot engine frame target override.',
+      [
+        {
+          name: 'brickadia_frame_pacing_target_override_applied',
+          value:
+            typeof bmfFramePacing.target_override_applied === 'boolean'
+              ? boolGauge(bmfFramePacing.target_override_applied)
+              : NaN,
+        },
+      ],
+    ),
+    ...metricBlock(
+      'brickadia_frame_pacing_layout_calibrated',
+      'Whether BMF calibrated the named engine layout against the independently scanned Tick function.',
+      [
+        {
+          name: 'brickadia_frame_pacing_layout_calibrated',
+          value:
+            typeof bmfFramePacing.layout_calibrated === 'boolean'
+              ? boolGauge(bmfFramePacing.layout_calibrated)
+              : NaN,
+        },
+      ],
+    ),
+    ...metricBlock(
+      'brickadia_frame_pacing_layout_adjustment_bytes',
+      'Signed byte adjustment from the named UE4SS engine layout to the live calibrated layout.',
+      [
+        {
+          name: 'brickadia_frame_pacing_layout_adjustment_bytes',
+          value: finiteMetricValue(bmfFramePacing.layout_adjustment_bytes),
+        },
+      ],
+    ),
+    ...metricBlock(
+      'brickadia_frame_pacing_entry_signatures_valid',
+      'Whether the calibrated t.MaxFPS getter and setter matched validated native signatures.',
+      [
+        {
+          name: 'brickadia_frame_pacing_entry_signatures_valid',
+          value:
+            typeof bmfFramePacing.entry_signatures_valid === 'boolean'
+              ? boolGauge(bmfFramePacing.entry_signatures_valid)
+              : NaN,
+        },
+      ],
+    ),
+    ...metricBlock(
+      'brickadia_frame_pacing_observed_max_fps',
+      'Engine t.MaxFPS read back after the BMF frame target override.',
+      [
+        {
+          name: 'brickadia_frame_pacing_observed_max_fps',
+          value: finiteMetricValue(bmfFramePacing.observed_max_fps),
+        },
+      ],
+    ),
+    ...metricBlock(
+      'brickadia_frame_pacing_observed_max_tick_rate',
+      'Engine max tick rate read back after the BMF frame target override.',
+      [
+        {
+          name: 'brickadia_frame_pacing_observed_max_tick_rate',
+          value: finiteMetricValue(bmfFramePacing.observed_max_tick_rate),
+        },
+      ],
+    ),
+    ...metricBlock(
+      'brickadia_frame_pacing_timer_policy_applied',
+      'Whether BMF made Windows honor process timer-resolution requests.',
+      [
+        {
+          name: 'brickadia_frame_pacing_timer_policy_applied',
+          value:
+            typeof bmfFramePacing.timer_policy_applied === 'boolean'
+              ? boolGauge(bmfFramePacing.timer_policy_applied)
+              : NaN,
+        },
+      ],
+    ),
+    ...metricBlock(
+      'brickadia_frame_pacing_timer_resolution_request_succeeded',
+      'Whether the BMF one-millisecond timer-resolution request succeeded.',
+      [
+        {
+          name: 'brickadia_frame_pacing_timer_resolution_request_succeeded',
+          value:
+            typeof bmfFramePacing.timer_resolution_request_succeeded ===
+            'boolean'
+              ? boolGauge(bmfFramePacing.timer_resolution_request_succeeded)
+              : NaN,
         },
       ],
     ),

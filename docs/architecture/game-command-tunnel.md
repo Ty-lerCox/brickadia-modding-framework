@@ -19,6 +19,41 @@ bounded queue, and the existing guarded
 `ServerPushChatMessage_Implementation` adapter injects the complete line on the
 game thread.
 
+## Server-Only Command Boundary
+
+`/cityrpgRemote` and `/cityrpgroute` are reserved server-only command prefixes.
+BMF installs a native detour on the validated
+`BRPlayerController.ServerPushChatMessage` UFunction exec slot at startup.
+Calls arriving through the ordinary player RPC path are inspected there and
+matching commands return before Brickadia's Wire command dispatcher. This
+applies to every player, including administrators.
+
+Authenticated tunnel delivery remains available because it calls the validated
+`ServerPushChatMessage_Implementation` entry directly after socket admission,
+bypassing the player-RPC UFunction exec slot. This distinction is the
+authorization boundary: knowing a reserved command's text is not enough to
+invoke it from a game client.
+
+Use `bmf.chat.reserved.status` to inspect hook installation, denied attempts,
+message-inspection failures, and the most recent denied command. If the native
+guard cannot install, treat the reserved command path as fail-open and do not
+expose privileged Wire actions until the guard is repaired. BMF does not fall
+back to the earlier Lua `RegisterHook` approach because that hook does not
+intercept this native RPC implementation path.
+
+Validate the boundary against the real network path. Record
+`bmf.chat.reserved.status`, submit `/cityrpgRemote guardCanary` once from a
+connected game client, and read the status again. The denial count must advance
+by exactly one, `inspection_failures` must remain unchanged, and the Wire
+command must not execute. A synthetic server-side `ProcessEvent` call is not a
+valid substitute for this test because it does not reproduce the client RPC
+path.
+
+Then send a harmless `/cityrpgRemote whisper:<player>:<marker>` through an
+authenticated `tunnel.request`. The marker must reach the game while the denial
+count remains unchanged. This proves both halves of the boundary: player RPCs
+are rejected and authenticated tunnel injection remains available.
+
 ## Protocol v1
 
 The advertised capability is `bmf-tunnel/1`. BMF writes it to

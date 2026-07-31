@@ -521,6 +521,21 @@ $deniedComponentValue = Convert-HexToUInt64 $DeniedComponent 'denied_component'
 if ($deniedComponentValue -eq 0) {
   throw 'BMF native target discovery returned a null denied_component; refusing to inject a non-enforcing hook.'
 }
+$deniedComponentDescribeResponse = Invoke-BmfCommand "bmf.tools.uobject.describe address=$DeniedComponent"
+$deniedComponentDescribe = $deniedComponentDescribeResponse.values
+$describedName = [string]$deniedComponentDescribe['object_name']
+$describedFullName = [string]$deniedComponentDescribe['object_full_name']
+$describedClass = [string]$deniedComponentDescribe['object_class']
+$describedClassFullName = [string]$deniedComponentDescribe['object_class_full_name']
+$deniedComponentVerified =
+  [string]$deniedComponentDescribe['ok'] -eq 'true' -and
+  $describedName -eq 'Component_ItemSpawn' -and
+  $describedFullName.Contains(':BRRegistry.Component_ItemSpawn') -and
+  $describedClass -eq 'Component_ItemSpawn_C' -and
+  $describedClassFullName.Contains('/Game/Bricks/ComponentTypes/Component_ItemSpawn.Component_ItemSpawn_C')
+if (!$deniedComponentVerified) {
+  throw "Refusing to inject: denied_component=$DeniedComponent is not the live BRRegistry Component_ItemSpawn object."
+}
 
 $functionValue = [UInt64]0
 $scanResult = Find-UFunctionCandidate $ProcessId $nativeTargetArray
@@ -602,6 +617,10 @@ $result = [ordered]@{
   bridgeDir = $script:BridgeDir
   runtimeBmfDir = $script:RuntimeBmfDir
   nativeTargetResponsePath = if ($nativeTargetResponse) { $nativeTargetResponse.responsePath } else { '' }
+  deniedComponentDescribeResponsePath = $deniedComponentDescribeResponse.responsePath
+  deniedComponentVerified = [bool]$deniedComponentVerified
+  deniedComponentObjectName = $describedName
+  deniedComponentObjectFullName = $describedFullName
   dllPath = $dllPath
   scan = @{
     hits = $scanResult.hits.Count

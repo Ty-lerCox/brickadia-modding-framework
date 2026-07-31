@@ -54,9 +54,31 @@ describe('buildPrometheusMetrics', () => {
     writeFileSync(
       bmfFrameTelemetryPath,
       JSON.stringify({
-        schema_version: 1,
+        schema_version: 2,
         source: 'BMFFrameTelemetry',
         hook_registered: true,
+        pacing: {
+          enabled: true,
+          config_valid: true,
+          target_fps: 120,
+          target_override_attempted: true,
+          target_override_applied: true,
+          target_override_result: 'applied',
+          target_exception_code: 0,
+          layout_calibrated: true,
+          layout_adjustment_bytes: -40,
+          entry_signatures_valid: true,
+          previous_max_fps: 60,
+          previous_max_tick_rate: 60,
+          observed_max_fps: 120,
+          observed_max_tick_rate: 120,
+          timer_policy_attempted: true,
+          timer_policy_applied: true,
+          timer_policy_error: 0,
+          timer_resolution_ms: 1,
+          timer_resolution_request_succeeded: true,
+          timer_resolution_result: 0,
+        },
         window: {
           samples: 60,
           idle_samples: 0,
@@ -261,9 +283,7 @@ describe('buildPrometheusMetrics', () => {
       'omegga_server_status_poll_duration_seconds 0.123',
     );
     expect(output).toContain('omegga_server_status_poll_enabled 1');
-    expect(output).toContain(
-      'omegga_server_status_poll_total{status="ok"} 2',
-    );
+    expect(output).toContain('omegga_server_status_poll_total{status="ok"} 2');
     expect(output).toContain(
       'omegga_server_status_poll_duration_stat_seconds{statistic="avg"} 0.125',
     );
@@ -278,6 +298,29 @@ describe('buildPrometheusMetrics', () => {
     expect(output).toContain('bmf_telemetry_schema_version 1');
     expect(output).toContain('brickadia_frame_telemetry_up 1');
     expect(output).toContain('brickadia_frame_telemetry_hook_registered 1');
+    expect(output).toContain('brickadia_frame_telemetry_schema_version 2');
+    expect(output).toContain('brickadia_frame_pacing_enabled 1');
+    expect(output).toContain('brickadia_frame_pacing_config_valid 1');
+    expect(output).toContain('brickadia_frame_pacing_target_fps 120');
+    expect(output).toContain(
+      'brickadia_frame_pacing_target_override_attempted 1',
+    );
+    expect(output).toContain(
+      'brickadia_frame_pacing_target_override_applied 1',
+    );
+    expect(output).toContain('brickadia_frame_pacing_layout_calibrated 1');
+    expect(output).toContain(
+      'brickadia_frame_pacing_layout_adjustment_bytes -40',
+    );
+    expect(output).toContain('brickadia_frame_pacing_entry_signatures_valid 1');
+    expect(output).toContain('brickadia_frame_pacing_observed_max_fps 120');
+    expect(output).toContain(
+      'brickadia_frame_pacing_observed_max_tick_rate 120',
+    );
+    expect(output).toContain('brickadia_frame_pacing_timer_policy_applied 1');
+    expect(output).toContain(
+      'brickadia_frame_pacing_timer_resolution_request_succeeded 1',
+    );
     expect(output).toContain(
       'brickadia_frame_delta_milliseconds{scope="window",statistic="avg"} 16.667',
     );
@@ -291,8 +334,12 @@ describe('buildPrometheusMetrics', () => {
     expect(output).toContain(
       'brickadia_frame_slow_total{threshold_ms="33.33"} 3',
     );
-    expect(output).toContain('brickadia_frame_spikes_total{threshold_ms="100"} 1');
-    expect(output).toContain('brickadia_frame_spike_last_delta_milliseconds 125.5');
+    expect(output).toContain(
+      'brickadia_frame_spikes_total{threshold_ms="100"} 1',
+    );
+    expect(output).toContain(
+      'brickadia_frame_spike_last_delta_milliseconds 125.5',
+    );
     expect(output).toContain('bmf_plugins_loaded 2');
     expect(output).toContain('bmf_plugin_errors_total 1');
     expect(output).toContain('bmf_plugin_tick_total 42');

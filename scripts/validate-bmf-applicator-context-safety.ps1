@@ -66,6 +66,11 @@ foreach ($deployment in $deployments) {
     Reject-Text $source 'writeNativePolicy(BMF, "status")' $label
     Require-Text $source 'context_discovery_mode=explicit-address-only' $label
     Require-Text $source 'live UObject discovery is disabled' $label
+    if ($case.name -eq 'NoSpawnItemApplicator') {
+      Require-Text $source 'BMF.tools.uobject.describe({ address = context })' "$label native context attribution"
+      Require-Text $source 'native-context-controller' "$label native context attribution"
+      Require-Text $source 'BP_PlayerController_C' "$label native context attribution"
+    }
     if ($source -notmatch $case.tickPattern) {
       $errors.Add("$label onTick is not the expected bounded file-only implementation.")
     }
@@ -91,6 +96,12 @@ foreach ($deployment in $deployments) {
     }
     Require-Text $runtime 'refresh = option_boolean(options, "refresh", false)' "$($deployment.label) native-targets command"
     Require-Text $runtime 'unsafe = option_boolean(options, "unsafe", false)' "$($deployment.label) native-targets command"
+    Require-Text $runtime 'state.tools.applicator.component_cache = {}' "$($deployment.label) bounded component cache"
+    Require-Text $runtime 'local class_name = "BrickComponentType_ItemSpawn"' "$($deployment.label) deterministic ItemSpawn target"
+    Require-Text $runtime 'BMF.tools.uobject.describe({ address = denied_component.address })' "$($deployment.label) live ItemSpawn target validation"
+    Require-Text $runtime ':BRRegistry.Component_ItemSpawn' "$($deployment.label) live ItemSpawn registry identity"
+    Require-Text $runtime 'NATIVE_ITEMSPAWN_TARGET_INVALID' "$($deployment.label) fail-closed ItemSpawn target validation"
+    Reject-Text $runtime 'for address, cached in pairs(state.tools.applicator.component_cache or {}) do' "$($deployment.label) deterministic ItemSpawn target"
 
     $positiveAddressChecks = [regex]::Matches(
       $runtime,

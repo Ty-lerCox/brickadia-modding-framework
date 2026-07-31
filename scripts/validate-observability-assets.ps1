@@ -109,7 +109,26 @@ try {
         $errors.Add("Observability manifest is missing label: $label")
       }
     }
-    foreach ($metric in @('bmf_runtime_status_up', 'brickadia_frame_fps', 'brickadia_frame_delta_milliseconds', 'brickadia_frame_slow_total', 'bmf_command_total', 'bmf_event_total')) {
+    foreach ($metric in @(
+      'bmf_runtime_status_up',
+      'brickadia_frame_pacing_enabled',
+      'brickadia_frame_pacing_config_valid',
+      'brickadia_frame_pacing_target_fps',
+      'brickadia_frame_pacing_target_override_attempted',
+      'brickadia_frame_pacing_target_override_applied',
+      'brickadia_frame_pacing_layout_calibrated',
+      'brickadia_frame_pacing_layout_adjustment_bytes',
+      'brickadia_frame_pacing_entry_signatures_valid',
+      'brickadia_frame_pacing_observed_max_fps',
+      'brickadia_frame_pacing_observed_max_tick_rate',
+      'brickadia_frame_pacing_timer_policy_applied',
+      'brickadia_frame_pacing_timer_resolution_request_succeeded',
+      'brickadia_frame_fps',
+      'brickadia_frame_delta_milliseconds',
+      'brickadia_frame_slow_total',
+      'bmf_command_total',
+      'bmf_event_total'
+    )) {
       if ($metric -notin @($manifest.metrics)) {
         $errors.Add("Observability manifest is missing metric: $metric")
       }
@@ -133,9 +152,24 @@ try {
       }
     }
     $expressions = (Get-PanelExpressions $dashboard.panels) -join "`n"
-    foreach ($metric in @('bmf_runtime_status_up', 'up{job="bmf-omegga"', 'bmf_socket_connected', 'brickadia_frame_fps', 'brickadia_frame_delta_milliseconds', 'brickadia_frame_slow_total', 'bmf_command_total', 'bmf_event_total')) {
+    foreach ($metric in @('bmf_runtime_status_up', 'up{job="bmf-omegga"', 'bmf_socket_connected', 'brickadia_frame_fps', 'brickadia_frame_pacing_target_fps', 'brickadia_frame_delta_milliseconds', 'brickadia_frame_slow_total', 'bmf_command_total', 'bmf_event_total')) {
       if ($expressions -notmatch [regex]::Escape($metric)) {
         $errors.Add("Dashboard queries do not contain expected metric: $metric")
+      }
+    }
+    $frameFpsPanel = @($dashboard.panels | Where-Object { [int]$_.id -eq 8 }) | Select-Object -First 1
+    if (!$frameFpsPanel) {
+      $errors.Add('Dashboard is missing the native frame FPS panel (id 8).')
+    } else {
+      $frameFpsExpressions = (Get-PanelExpressions @($frameFpsPanel)) -join "`n"
+      foreach ($metric in @('brickadia_frame_fps', 'brickadia_frame_pacing_target_fps')) {
+        if ($frameFpsExpressions -notmatch [regex]::Escape($metric)) {
+          $errors.Add("Native frame FPS panel does not contain expected metric: $metric")
+        }
+      }
+      $fixedFrameFpsThresholds = @($frameFpsPanel.fieldConfig.defaults.thresholds.steps | Where-Object { $null -ne $_.value })
+      if ($fixedFrameFpsThresholds.Count -ne 0) {
+        $errors.Add('Native frame FPS panel must not use fixed absolute FPS thresholds when the configured target can be 60 or 120 FPS.')
       }
     }
   }

@@ -4,16 +4,20 @@
 #endif
 
 #include <windows.h>
+#include <timeapi.h>
 
 #include <Mod/CppUserModBase.hpp>
 #include <UEngine.hpp>
 #include <Unreal/Hooks/Hooks.hpp>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -142,6 +146,51 @@ namespace
         return value;
     }
 
+    bool env_flag_enabled(const char* name, bool default_value)
+    {
+        std::string text = getenv_narrow(name);
+        if (text.empty())
+        {
+            return default_value;
+        }
+        for (char& ch : text)
+        {
+            if (ch >= 'A' && ch <= 'Z')
+            {
+                ch = static_cast<char>(ch - 'A' + 'a');
+            }
+        }
+        return text != "0" && text != "false" && text != "off" && text != "no";
+    }
+
+    struct TargetFpsConfig
+    {
+        uint32_t value = 60;
+        bool valid = true;
+    };
+
+    TargetFpsConfig target_fps_config()
+    {
+        const std::string text = getenv_narrow("BMF_FRAME_PACING_TARGET_FPS");
+        if (text.empty())
+        {
+            return {};
+        }
+
+        errno = 0;
+        char* end = nullptr;
+        const long parsed = std::strtol(text.c_str(), &end, 10);
+        while (end && (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n'))
+        {
+            ++end;
+        }
+        if (errno == 0 && end && *end == '\0' && (parsed == 60 || parsed == 120))
+        {
+            return {static_cast<uint32_t>(parsed), true};
+        }
+        return {60, false};
+    }
+
     std::filesystem::path default_output_path()
     {
         const std::wstring configured = getenv_wide(L"BMF_FRAME_TELEMETRY_PATH");
@@ -163,20 +212,636 @@ namespace
 
     bool env_enabled()
     {
-        std::string text = getenv_narrow("BMF_FRAME_TELEMETRY_ENABLED");
-        if (text.empty())
+        return env_flag_enabled("BMF_FRAME_TELEMETRY_ENABLED", true);
+    }
+
+    bool is_accessible_memory(uintptr_t address, size_t bytes)
+    {
+        MEMORY_BASIC_INFORMATION mbi{};
+        if (address == 0 || bytes == 0 || VirtualQuery(reinterpret_cast<void*>(address), &mbi, sizeof(mbi)) == 0)
         {
+            return false;
+        }
+        if (mbi.State != MEM_COMMIT || (mbi.Protect & PAGE_GUARD) || (mbi.Protect & PAGE_NOACCESS))
+        {
+            return false;
+        }
+        const uintptr_t region_start = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+        if (region_start > UINTPTR_MAX - mbi.RegionSize)
+        {
+            return false;
+        }
+        const uintptr_t region_end = region_start + mbi.RegionSize;
+        return address >= region_start && address + bytes >= address && address + bytes <= region_end;
+    }
+
+    bool is_executable_memory(uintptr_t address)
+    {
+        MEMORY_BASIC_INFORMATION mbi{};
+        if (address == 0 || VirtualQuery(reinterpret_cast<void*>(address), &mbi, sizeof(mbi)) == 0)
+        {
+            return false;
+        }
+        if (mbi.State != MEM_COMMIT || (mbi.Protect & PAGE_GUARD) || (mbi.Protect & PAGE_NOACCESS))
+        {
+            return false;
+        }
+        const DWORD execute_flags =
+            PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+        return (mbi.Protect & execute_flags) != 0;
+    }
+
+    bool is_main_module_executable(void* address)
+    {
+        MEMORY_BASIC_INFORMATION mbi{};
+        const auto module = GetModuleHandleW(nullptr);
+        return address && module &&
+               VirtualQuery(address, &mbi, sizeof(mbi)) != 0 &&
+               mbi.AllocationBase == module &&
+               is_executable_memory(reinterpret_cast<uintptr_t>(address));
+    }
+
+    void* get_uobject_vtable_entry(Unreal::UObject* object, std::size_t vtable_offset)
+    {
+        if (!object ||
+            vtable_offset % sizeof(void*) != 0 ||
+            vtable_offset > 0x2000 ||
+            !is_accessible_memory(reinterpret_cast<uintptr_t>(object), sizeof(void*)))
+        {
+            return nullptr;
+        }
+
+        auto** vtable = *reinterpret_cast<void***>(object);
+        if (!vtable ||
+            !is_accessible_memory(reinterpret_cast<uintptr_t>(vtable) + vtable_offset, sizeof(void*)))
+        {
+            return nullptr;
+        }
+
+        void* entry = vtable[vtable_offset / sizeof(void*)];
+        return is_executable_memory(reinterpret_cast<uintptr_t>(entry)) ? entry : nullptr;
+    }
+
+    bool get_uobject_vtable_entry_guarded(Unreal::UObject* object,
+                                          std::size_t vtable_offset,
+                                          void*& entry,
+                                          unsigned long& exception_code)
+    {
+        entry = nullptr;
+        exception_code = 0;
+        __try
+        {
+            entry = get_uobject_vtable_entry(object, vtable_offset);
             return true;
         }
-        for (char& ch : text)
+        __except ((exception_code = GetExceptionInformation()->ExceptionRecord->ExceptionCode), EXCEPTION_EXECUTE_HANDLER)
         {
-            if (ch >= 'A' && ch <= 'Z')
+            return false;
+        }
+    }
+
+    bool matches_masked_bytes(void* entry,
+                              const uint8_t* expected,
+                              const uint8_t* mask,
+                              std::size_t size)
+    {
+        if (!entry || !expected || !mask || size == 0 ||
+            !is_accessible_memory(reinterpret_cast<uintptr_t>(entry), size))
+        {
+            return false;
+        }
+
+        const auto* bytes = static_cast<const uint8_t*>(entry);
+        for (std::size_t index = 0; index < size; ++index)
+        {
+            if ((bytes[index] & mask[index]) != (expected[index] & mask[index]))
             {
-                ch = static_cast<char>(ch - 'A' + 'a');
+                return false;
             }
         }
-        return text != "0" && text != "false" && text != "off" && text != "no";
+        return true;
     }
+
+    bool matches_current_get_max_fps(void* entry)
+    {
+        // CL24084343 / Release-EA3-CL-14860. RIP-relative displacements and
+        // short branch distances are masked; the remaining instructions are
+        // the validated t.MaxFPS getter prologue.
+        static constexpr uint8_t expected[] = {
+            0x56, 0x57, 0x48, 0x83, 0xEC, 0x28, 0x48, 0x8B, 0x35, 0x00, 0x00, 0x00, 0x00,
+            0x48, 0x85, 0xF6, 0x74, 0x00, 0x8B, 0x05, 0x00, 0x00, 0x00, 0x00, 0x65, 0x48,
+            0x8B, 0x0C, 0x25, 0x58, 0x00, 0x00, 0x00, 0x48, 0x8B, 0x04, 0xC1, 0x8B, 0x80,
+            0x70, 0x0B, 0x00, 0x00, 0x31, 0xC9, 0x3D, 0x02, 0x00, 0x00, 0x40,
+        };
+        static constexpr uint8_t mask[] = {
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00,
+            0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF,
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        };
+        static_assert(sizeof(expected) == sizeof(mask));
+        return matches_masked_bytes(entry, expected, mask, sizeof(expected));
+    }
+
+    bool matches_current_set_max_fps(void* entry)
+    {
+        // Validated t.MaxFPS setter prologue. It consumes the requested float
+        // from XMM1 before entering the console-variable Set path.
+        static constexpr uint8_t expected[] = {
+            0x56, 0x57, 0x53, 0x48, 0x81, 0xEC, 0x80, 0x00, 0x00, 0x00,
+            0xC5, 0xF8, 0x29, 0x74, 0x24, 0x70, 0xC5, 0xF8, 0x28, 0xF1,
+        };
+        static constexpr uint8_t mask[] = {
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        };
+        static_assert(sizeof(expected) == sizeof(mask));
+        return matches_masked_bytes(entry, expected, mask, sizeof(expected));
+    }
+
+    bool matches_current_get_max_tick_rate(void* entry)
+    {
+        // Validated UGameEngine::GetMaxTickRate override prologue for the
+        // current server build. This guards the readback call independently
+        // from the adjacent t.MaxFPS getter/setter checks.
+        static constexpr uint8_t expected[] = {
+            0x56, 0x57, 0x53, 0x48, 0x83, 0xEC, 0x40, 0xC5, 0xF8, 0x29,
+            0x7C, 0x24, 0x30, 0xC5, 0xF8, 0x29, 0x74, 0x24, 0x20,
+        };
+        static constexpr uint8_t mask[] = {
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        };
+        static_assert(sizeof(expected) == sizeof(mask));
+        return matches_masked_bytes(entry, expected, mask, sizeof(expected));
+    }
+
+    using SetMaxFpsFunction = void (*)(Unreal::UEngine*, float);
+    using GetMaxFpsFunction = float (*)(const Unreal::UEngine*);
+    using GetMaxTickRateFunction = float (*)(const Unreal::UEngine*, float, bool);
+
+    bool set_max_fps_guarded(Unreal::UEngine* engine,
+                             void* entry,
+                             float target_fps,
+                             unsigned long& exception_code)
+    {
+        exception_code = 0;
+        __try
+        {
+            reinterpret_cast<SetMaxFpsFunction>(entry)(engine, target_fps);
+            return true;
+        }
+        __except ((exception_code = GetExceptionInformation()->ExceptionRecord->ExceptionCode), EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+    }
+
+    bool get_max_fps_guarded(const Unreal::UEngine* engine,
+                             void* entry,
+                             float& value,
+                             unsigned long& exception_code)
+    {
+        value = 0.0f;
+        exception_code = 0;
+        __try
+        {
+            value = reinterpret_cast<GetMaxFpsFunction>(entry)(engine);
+            return true;
+        }
+        __except ((exception_code = GetExceptionInformation()->ExceptionRecord->ExceptionCode), EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+    }
+
+    bool get_max_tick_rate_guarded(const Unreal::UEngine* engine,
+                                   void* entry,
+                                   float& value,
+                                   unsigned long& exception_code)
+    {
+        value = 0.0f;
+        exception_code = 0;
+        __try
+        {
+            value = reinterpret_cast<GetMaxTickRateFunction>(entry)(engine, 0.0f, false);
+            return true;
+        }
+        __except ((exception_code = GetExceptionInformation()->ExceptionRecord->ExceptionCode), EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+    }
+
+    enum class TargetOverrideResult : uint32_t
+    {
+        NotAttempted = 0,
+        Applied = 1,
+        EngineUnavailable = 2,
+        LayoutUnavailable = 3,
+        VirtualEntryUnavailable = 4,
+        SetException = 5,
+        ReadbackException = 6,
+        VerificationFailed = 7,
+        LayoutCalibrationFailed = 8,
+        SignatureMismatch = 9,
+        GetterValidationFailed = 10,
+    };
+
+    const char* target_override_result_name(TargetOverrideResult result)
+    {
+        switch (result)
+        {
+        case TargetOverrideResult::Applied:
+            return "applied";
+        case TargetOverrideResult::EngineUnavailable:
+            return "engine_unavailable";
+        case TargetOverrideResult::LayoutUnavailable:
+            return "layout_unavailable";
+        case TargetOverrideResult::VirtualEntryUnavailable:
+            return "virtual_entry_unavailable";
+        case TargetOverrideResult::SetException:
+            return "set_exception";
+        case TargetOverrideResult::ReadbackException:
+            return "readback_exception";
+        case TargetOverrideResult::VerificationFailed:
+            return "verification_failed";
+        case TargetOverrideResult::LayoutCalibrationFailed:
+            return "layout_calibration_failed";
+        case TargetOverrideResult::SignatureMismatch:
+            return "signature_mismatch";
+        case TargetOverrideResult::GetterValidationFailed:
+            return "getter_validation_failed";
+        case TargetOverrideResult::NotAttempted:
+        default:
+            return "not_attempted";
+        }
+    }
+
+    class FramePacingPolicy
+    {
+      public:
+        FramePacingPolicy()
+            : enabled_(env_flag_enabled("BMF_FRAME_PACING_ENABLED", true)), target_config_(target_fps_config())
+        {
+        }
+
+        ~FramePacingPolicy()
+        {
+            stop();
+        }
+
+        void start()
+        {
+            bool expected = false;
+            if (!started_.compare_exchange_strong(expected, true))
+            {
+                return;
+            }
+
+            if (!enabled_)
+            {
+                std::printf("[BMFFrameTelemetry] frame pacing disabled by BMF_FRAME_PACING_ENABLED\n");
+                return;
+            }
+
+            power_policy_attempted_.store(true, std::memory_order_relaxed);
+            PROCESS_POWER_THROTTLING_STATE state{};
+            state.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+            state.ControlMask = PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
+            state.StateMask = 0;
+            SetLastError(ERROR_SUCCESS);
+            const BOOL policy_applied = SetProcessInformation(
+                GetCurrentProcess(), ProcessPowerThrottling, &state, sizeof(state));
+            power_policy_applied_.store(policy_applied != FALSE, std::memory_order_relaxed);
+            power_policy_error_.store(policy_applied ? ERROR_SUCCESS : GetLastError(), std::memory_order_relaxed);
+
+            const MMRESULT timer_result = timeBeginPeriod(kTimerResolutionMs);
+            timer_begin_result_.store(static_cast<uint32_t>(timer_result), std::memory_order_relaxed);
+            const bool timer_succeeded = timer_result == TIMERR_NOERROR;
+            timer_begin_succeeded_.store(timer_succeeded, std::memory_order_relaxed);
+            timer_active_.store(timer_succeeded, std::memory_order_relaxed);
+
+            if (!target_config_.valid)
+            {
+                std::printf(
+                    "[BMFFrameTelemetry] invalid BMF_FRAME_PACING_TARGET_FPS; falling back to 60\n");
+            }
+            std::printf(
+                "[BMFFrameTelemetry] frame pacing startup target_fps=%u power_policy_applied=%d "
+                "power_policy_error=%lu timer_resolution_ms=%u timer_result=%u\n",
+                target_config_.value,
+                policy_applied ? 1 : 0,
+                static_cast<unsigned long>(power_policy_error_.load(std::memory_order_relaxed)),
+                kTimerResolutionMs,
+                static_cast<unsigned int>(timer_result));
+        }
+
+        void stop()
+        {
+            if (timer_active_.exchange(false, std::memory_order_relaxed))
+            {
+                timeEndPeriod(kTimerResolutionMs);
+            }
+        }
+
+        bool should_apply_target() const
+        {
+            return enabled_;
+        }
+
+        void apply_target_once(Unreal::UEngine* engine)
+        {
+            if (target_attempted_.exchange(true, std::memory_order_relaxed))
+            {
+                return;
+            }
+            if (!engine)
+            {
+                target_result_.store(TargetOverrideResult::EngineUnavailable, std::memory_order_relaxed);
+                return;
+            }
+
+            const auto named_engine_tick_it = Unreal::UEngine::VTableLayoutMap.find(STR("Tick"));
+            const auto named_set_it = Unreal::UEngine::VTableLayoutMap.find(STR("SetMaxFPS"));
+            const auto named_get_it = Unreal::UEngine::VTableLayoutMap.find(STR("GetMaxFPS"));
+            const auto named_tick_rate_it = Unreal::UEngine::VTableLayoutMap.find(STR("GetMaxTickRate"));
+            if (named_engine_tick_it == Unreal::UEngine::VTableLayoutMap.end() ||
+                named_set_it == Unreal::UEngine::VTableLayoutMap.end() ||
+                named_get_it == Unreal::UEngine::VTableLayoutMap.end() ||
+                named_tick_rate_it == Unreal::UEngine::VTableLayoutMap.end())
+            {
+                target_result_.store(TargetOverrideResult::LayoutUnavailable, std::memory_order_relaxed);
+                std::printf("[BMFFrameTelemetry] frame target unavailable: UE4SS named engine layout is incomplete\n");
+                return;
+            }
+
+            // Brickadia can update ahead of the installed UE4SS compatibility
+            // bundle. Calibrate its uniformly shifted named layout against the
+            // independently scanned Tick function that UE4SS is already using
+            // for this callback. Never call a candidate setter unless exactly
+            // one vtable slot matches that live Tick address.
+            void* scanned_engine_tick = Unreal::UEngine::TickInternal.get_function_address();
+            if (!is_main_module_executable(scanned_engine_tick))
+            {
+                target_result_.store(TargetOverrideResult::LayoutCalibrationFailed, std::memory_order_relaxed);
+                std::printf("[BMFFrameTelemetry] frame target unavailable: scanned engine Tick is not ready\n");
+                return;
+            }
+
+            constexpr std::size_t kCalibrationRadiusBytes = 0x80;
+            const std::size_t named_engine_tick = named_engine_tick_it->second;
+            const std::size_t search_start =
+                named_engine_tick > kCalibrationRadiusBytes ? named_engine_tick - kCalibrationRadiusBytes : 0;
+            const std::size_t search_end =
+                std::min<std::size_t>(0x2000, named_engine_tick + kCalibrationRadiusBytes);
+            std::size_t calibrated_engine_tick = 0;
+            uint32_t calibration_matches = 0;
+            unsigned long exception_code = 0;
+            for (std::size_t offset = search_start; offset <= search_end; offset += sizeof(void*))
+            {
+                void* candidate = nullptr;
+                unsigned long candidate_exception = 0;
+                if (!get_uobject_vtable_entry_guarded(engine, offset, candidate, candidate_exception))
+                {
+                    exception_code = candidate_exception;
+                    continue;
+                }
+                if (candidate == scanned_engine_tick)
+                {
+                    calibrated_engine_tick = offset;
+                    ++calibration_matches;
+                }
+            }
+
+            if (calibration_matches != 1)
+            {
+                target_exception_code_.store(exception_code, std::memory_order_relaxed);
+                target_result_.store(TargetOverrideResult::LayoutCalibrationFailed, std::memory_order_relaxed);
+                std::printf(
+                    "[BMFFrameTelemetry] frame target unavailable: engine layout calibration matches=%u\n",
+                    calibration_matches);
+                return;
+            }
+
+            const std::ptrdiff_t layout_adjustment =
+                static_cast<std::ptrdiff_t>(calibrated_engine_tick) -
+                static_cast<std::ptrdiff_t>(named_engine_tick);
+            const auto adjusted_offset = [layout_adjustment](uint32_t named_offset, std::size_t& value) {
+                const auto adjusted = static_cast<std::ptrdiff_t>(named_offset) + layout_adjustment;
+                if (adjusted < 0 || adjusted > 0x2000 || adjusted % static_cast<std::ptrdiff_t>(sizeof(void*)) != 0)
+                {
+                    return false;
+                }
+                value = static_cast<std::size_t>(adjusted);
+                return true;
+            };
+
+            std::size_t set_offset = 0;
+            std::size_t get_offset = 0;
+            std::size_t tick_rate_offset = 0;
+            if (!adjusted_offset(named_set_it->second, set_offset) ||
+                !adjusted_offset(named_get_it->second, get_offset) ||
+                !adjusted_offset(named_tick_rate_it->second, tick_rate_offset) ||
+                get_offset + sizeof(void*) != set_offset ||
+                tick_rate_offset + sizeof(void*) != get_offset)
+            {
+                target_result_.store(TargetOverrideResult::LayoutCalibrationFailed, std::memory_order_relaxed);
+                std::printf("[BMFFrameTelemetry] frame target unavailable: calibrated engine layout is not contiguous\n");
+                return;
+            }
+
+            void* set_entry = nullptr;
+            void* get_entry = nullptr;
+            void* tick_entry = nullptr;
+            if (!get_uobject_vtable_entry_guarded(engine, set_offset, set_entry, exception_code) ||
+                !set_entry ||
+                !get_uobject_vtable_entry_guarded(engine, get_offset, get_entry, exception_code) ||
+                !get_entry ||
+                !get_uobject_vtable_entry_guarded(engine, tick_rate_offset, tick_entry, exception_code) ||
+                !tick_entry)
+            {
+                target_exception_code_.store(exception_code, std::memory_order_relaxed);
+                target_result_.store(TargetOverrideResult::VirtualEntryUnavailable, std::memory_order_relaxed);
+                std::printf(
+                    "[BMFFrameTelemetry] frame target unavailable: guarded virtual resolution failed exception=0x%08lx\n",
+                    exception_code);
+                return;
+            }
+
+            if (set_entry == get_entry || set_entry == tick_entry || get_entry == tick_entry ||
+                !is_main_module_executable(set_entry) ||
+                !is_main_module_executable(get_entry) ||
+                !is_main_module_executable(tick_entry) ||
+                !matches_current_get_max_fps(get_entry) ||
+                !matches_current_set_max_fps(set_entry) ||
+                !matches_current_get_max_tick_rate(tick_entry))
+            {
+                target_result_.store(TargetOverrideResult::SignatureMismatch, std::memory_order_relaxed);
+                std::printf("[BMFFrameTelemetry] frame target unavailable: calibrated function validation failed\n");
+                return;
+            }
+
+            layout_calibrated_.store(true, std::memory_order_relaxed);
+            layout_adjustment_bytes_.store(static_cast<int32_t>(layout_adjustment), std::memory_order_relaxed);
+            entry_signatures_valid_.store(true, std::memory_order_relaxed);
+
+            float previous_max_fps = 0.0f;
+            float previous_max_tick_rate = 0.0f;
+            if (!get_max_fps_guarded(engine, get_entry, previous_max_fps, exception_code) ||
+                !get_max_tick_rate_guarded(engine, tick_entry, previous_max_tick_rate, exception_code))
+            {
+                target_exception_code_.store(exception_code, std::memory_order_relaxed);
+                target_result_.store(TargetOverrideResult::ReadbackException, std::memory_order_relaxed);
+                return;
+            }
+            if (!std::isfinite(previous_max_fps) || previous_max_fps < 0.0f || previous_max_fps > 1000.0f ||
+                !std::isfinite(previous_max_tick_rate) || previous_max_tick_rate < 0.0f ||
+                previous_max_tick_rate > 1000.0f)
+            {
+                target_result_.store(TargetOverrideResult::GetterValidationFailed, std::memory_order_relaxed);
+                std::printf(
+                    "[BMFFrameTelemetry] frame target unavailable: getter validation max_fps=%.3f max_tick_rate=%.3f\n",
+                    previous_max_fps,
+                    previous_max_tick_rate);
+                return;
+            }
+            previous_max_fps_milli_.store(fps_to_milli(previous_max_fps), std::memory_order_relaxed);
+            previous_max_tick_rate_milli_.store(fps_to_milli(previous_max_tick_rate), std::memory_order_relaxed);
+
+            if (!set_max_fps_guarded(engine, set_entry, static_cast<float>(target_config_.value), exception_code))
+            {
+                target_exception_code_.store(exception_code, std::memory_order_relaxed);
+                target_result_.store(TargetOverrideResult::SetException, std::memory_order_relaxed);
+                return;
+            }
+
+            float observed_max_fps = 0.0f;
+            float observed_max_tick_rate = 0.0f;
+            if (!get_max_fps_guarded(engine, get_entry, observed_max_fps, exception_code) ||
+                !get_max_tick_rate_guarded(engine, tick_entry, observed_max_tick_rate, exception_code))
+            {
+                target_exception_code_.store(exception_code, std::memory_order_relaxed);
+                target_result_.store(TargetOverrideResult::ReadbackException, std::memory_order_relaxed);
+                return;
+            }
+
+            observed_max_fps_milli_.store(fps_to_milli(observed_max_fps), std::memory_order_relaxed);
+            observed_max_tick_rate_milli_.store(fps_to_milli(observed_max_tick_rate), std::memory_order_relaxed);
+            const float target = static_cast<float>(target_config_.value);
+            const bool applied = std::isfinite(observed_max_fps) &&
+                                 std::isfinite(observed_max_tick_rate) &&
+                                 std::fabs(observed_max_fps - target) < 0.5f &&
+                                 std::fabs(observed_max_tick_rate - target) < 0.5f;
+            target_applied_.store(applied, std::memory_order_relaxed);
+            target_result_.store(
+                applied ? TargetOverrideResult::Applied : TargetOverrideResult::VerificationFailed,
+                std::memory_order_relaxed);
+            std::printf(
+                "[BMFFrameTelemetry] frame target target_fps=%u applied=%d layout_adjustment=%d "
+                "previous_max_fps=%.3f previous_max_tick_rate=%.3f observed_max_fps=%.3f "
+                "observed_max_tick_rate=%.3f\n",
+                target_config_.value,
+                applied ? 1 : 0,
+                static_cast<int>(layout_adjustment),
+                previous_max_fps,
+                previous_max_tick_rate,
+                observed_max_fps,
+                observed_max_tick_rate);
+        }
+
+        std::string status_json() const
+        {
+            const auto result = target_result_.load(std::memory_order_relaxed);
+            std::ostringstream out;
+            out.setf(std::ios::fixed);
+            out.precision(3);
+            out << "{"
+                << "\"enabled\":" << (enabled_ ? "true" : "false") << ","
+                << "\"config_valid\":" << (target_config_.valid ? "true" : "false") << ","
+                << "\"target_fps\":" << target_config_.value << ","
+                << "\"target_override_attempted\":"
+                << (target_attempted_.load(std::memory_order_relaxed) ? "true" : "false") << ","
+                << "\"target_override_applied\":"
+                << (target_applied_.load(std::memory_order_relaxed) ? "true" : "false") << ","
+                << "\"target_override_result\":\"" << target_override_result_name(result) << "\","
+                << "\"target_exception_code\":"
+                << target_exception_code_.load(std::memory_order_relaxed) << ","
+                << "\"layout_calibrated\":"
+                << (layout_calibrated_.load(std::memory_order_relaxed) ? "true" : "false") << ","
+                << "\"layout_adjustment_bytes\":"
+                << layout_adjustment_bytes_.load(std::memory_order_relaxed) << ","
+                << "\"entry_signatures_valid\":"
+                << (entry_signatures_valid_.load(std::memory_order_relaxed) ? "true" : "false") << ","
+                << "\"previous_max_fps\":";
+            append_optional_fps(out, previous_max_fps_milli_.load(std::memory_order_relaxed));
+            out << ",\"previous_max_tick_rate\":";
+            append_optional_fps(out, previous_max_tick_rate_milli_.load(std::memory_order_relaxed));
+            out << ",\"observed_max_fps\":";
+            append_optional_fps(out, observed_max_fps_milli_.load(std::memory_order_relaxed));
+            out << ",\"observed_max_tick_rate\":";
+            append_optional_fps(out, observed_max_tick_rate_milli_.load(std::memory_order_relaxed));
+            out << ","
+                << "\"timer_policy_attempted\":"
+                << (power_policy_attempted_.load(std::memory_order_relaxed) ? "true" : "false") << ","
+                << "\"timer_policy_applied\":"
+                << (power_policy_applied_.load(std::memory_order_relaxed) ? "true" : "false") << ","
+                << "\"timer_policy_error\":" << power_policy_error_.load(std::memory_order_relaxed) << ","
+                << "\"timer_resolution_ms\":" << kTimerResolutionMs << ","
+                << "\"timer_resolution_request_succeeded\":"
+                << (timer_begin_succeeded_.load(std::memory_order_relaxed) ? "true" : "false") << ","
+                << "\"timer_resolution_result\":" << timer_begin_result_.load(std::memory_order_relaxed)
+                << "}";
+            return out.str();
+        }
+
+      private:
+        static constexpr uint32_t kTimerResolutionMs = 1;
+
+        static int64_t fps_to_milli(float value)
+        {
+            if (!std::isfinite(value))
+            {
+                return -1;
+            }
+            return static_cast<int64_t>(std::llround(static_cast<double>(value) * 1000.0));
+        }
+
+        static void append_optional_fps(std::ostringstream& out, int64_t milli_fps)
+        {
+            if (milli_fps < 0)
+            {
+                out << "null";
+            }
+            else
+            {
+                out << static_cast<double>(milli_fps) / 1000.0;
+            }
+        }
+
+        bool enabled_ = true;
+        TargetFpsConfig target_config_{};
+        std::atomic<bool> started_{false};
+        std::atomic<bool> power_policy_attempted_{false};
+        std::atomic<bool> power_policy_applied_{false};
+        std::atomic<uint32_t> power_policy_error_{0};
+        std::atomic<uint32_t> timer_begin_result_{0};
+        std::atomic<bool> timer_begin_succeeded_{false};
+        std::atomic<bool> timer_active_{false};
+        std::atomic<bool> target_attempted_{false};
+        std::atomic<bool> target_applied_{false};
+        std::atomic<TargetOverrideResult> target_result_{TargetOverrideResult::NotAttempted};
+        std::atomic<uint32_t> target_exception_code_{0};
+        std::atomic<bool> layout_calibrated_{false};
+        std::atomic<int32_t> layout_adjustment_bytes_{0};
+        std::atomic<bool> entry_signatures_valid_{false};
+        std::atomic<int64_t> previous_max_fps_milli_{-1};
+        std::atomic<int64_t> previous_max_tick_rate_milli_{-1};
+        std::atomic<int64_t> observed_max_fps_milli_{-1};
+        std::atomic<int64_t> observed_max_tick_rate_milli_{-1};
+    };
+
+    FramePacingPolicy g_frame_pacing;
 
     struct WindowSnapshot
     {
@@ -309,7 +974,7 @@ namespace
             out.setf(std::ios::fixed);
             out.precision(3);
             out << "{"
-                << "\"schema_version\":1,"
+                << "\"schema_version\":2,"
                 << "\"source\":\"BMFFrameTelemetry\","
                 << "\"enabled\":" << (enabled_ ? "true" : "false") << ","
                 << "\"hook_registered\":" << (hook_registered_.load(std::memory_order_relaxed) ? "true" : "false") << ","
@@ -317,6 +982,7 @@ namespace
                 << "\"started_at_unix_ms\":" << started_at_ms_ << ","
                 << "\"updated_at_unix_ms\":" << unix_time_ms() << ","
                 << "\"path\":\"" << json_escape(output_path_.string()) << "\","
+                << "\"pacing\":" << g_frame_pacing.status_json() << ","
                 << "\"window\":{"
                 << "\"samples\":" << window.samples << ","
                 << "\"idle_samples\":" << window.idle_samples << ","
@@ -532,8 +1198,9 @@ namespace
         {
             ModName = STR("BMFFrameTelemetry");
             ModVersion = STR("0.1.0");
-            ModDescription = STR("Native engine tick frame-time sampler for BMF metrics");
+            ModDescription = STR("Native server frame pacing and engine tick telemetry for BMF");
             ModAuthors = STR("CityRPG/BMF");
+            g_frame_pacing.start();
             g_sampler.start();
             std::printf("[BMFFrameTelemetry] loaded\n");
         }
@@ -541,10 +1208,20 @@ namespace
         ~BMFFrameTelemetryMod() override
         {
             g_sampler.stop();
+            g_frame_pacing.stop();
         }
 
         auto on_unreal_init() -> void override
         {
+            if (g_frame_pacing.should_apply_target())
+            {
+                Unreal::Hook::RegisterEngineTickPreCallback(
+                    [](Unreal::Hook::TCallbackIterationData<void>&, Unreal::UEngine* engine, float, bool) {
+                        g_frame_pacing.apply_target_once(engine);
+                    },
+                    {true, false, STR("BMFFrameTelemetry"), STR("FramePacingTarget")});
+                std::printf("[BMFFrameTelemetry] one-shot frame target callback registered\n");
+            }
             Unreal::Hook::RegisterEngineTickPostCallback(
                 [](Unreal::Hook::TCallbackIterationData<void>&, Unreal::UEngine*, float delta_seconds, bool idle) {
                     g_sampler.observe(delta_seconds, idle);

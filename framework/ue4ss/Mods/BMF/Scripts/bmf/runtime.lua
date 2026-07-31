@@ -264,6 +264,19 @@ local state = {
     last_result_code = "",
     last_error = "",
   },
+  reserved_chat_command_guard = {
+    enabled = true,
+    installed = false,
+    native_available = false,
+    source = "BMFSocketReservedChatGuard",
+    install_attempts = 0,
+    max_install_attempts = 0,
+    denied = 0,
+    inspection_failures = 0,
+    target = "",
+    last_denied_command = "",
+    last_error = "",
+  },
   player_cache = nil,
   player_cache_error = "",
   player_position_controller_cache = {
@@ -452,6 +465,8 @@ local UNSAFE_PLUGIN_GLOBAL_NAMES = {
   "FindFirstOf",
   "LoadAsset",
   "BMFSocketPlayerChatMessageImplementationProbe",
+  "BMFSocketReservedChatGuardInstall",
+  "BMFSocketReservedChatGuardStatus",
   "BMFSocketReceive",
   "BMFSocketSend",
   "BMFSocketStart",
@@ -5062,6 +5077,25 @@ local function register_builtin_commands()
     return result(true, "OK", "Game command tunnel status", snapshot)
   end)
 
+  BMF.commands.register("bmf.chat.reserved.status", "Report the server-only CityRPG chat-command guard state.", function()
+    local snapshot = type(BMF_reserved_chat_command_guard_snapshot) == "function"
+      and BMF_reserved_chat_command_guard_snapshot()
+      or copy_table(state.reserved_chat_command_guard or {})
+    snapshot.lines = {
+      "enabled=" .. tostring(snapshot.enabled == true),
+      "native_available=" .. tostring(snapshot.nativeAvailable == true),
+      "installed=" .. tostring(snapshot.installed == true),
+      "source=" .. tostring(snapshot.source or ""),
+      "install_attempts=" .. tostring(snapshot.installAttempts or snapshot.install_attempts or 0),
+      "denied=" .. tostring(snapshot.denied or 0),
+      "inspection_failures=" .. tostring(snapshot.inspectionFailures or snapshot.inspection_failures or 0),
+      "target=" .. tostring(snapshot.target or ""),
+      "last_denied_command=" .. tostring(snapshot.lastDeniedCommand or snapshot.last_denied_command or ""),
+      "last_error=" .. tostring(snapshot.lastError or snapshot.last_error or ""),
+    }
+    return result(true, "OK", "Reserved CityRPG chat-command guard status", snapshot)
+  end)
+
   BMF.commands.register("bmf.players.list", "List known BMF player records.", function(args)
     local options = parse_command_options(args)
     local listed = BMF.players.list({
@@ -9361,6 +9395,7 @@ end
 
 function BMF.tools.applicator.refreshComponentCache(options)
   options = type(options) == "table" and options or {}
+  state.tools.applicator.component_cache = {}
   local denied = BMF.permissions._componentRuleList(options.deniedComponents, BMF.permissions.APPLICATOR_DENIED_COMPONENTS)
   local cached = 0
   local notes = {}
@@ -9705,14 +9740,45 @@ function BMF.tools.applicator.scanObjects(options)
 end
 
 local function applicator_denied_component_target()
-  for address, cached in pairs(state.tools.applicator.component_cache or {}) do
-    local normalized = BMF.permissions._normalizeComponentKey(cached and cached.name or "")
-    local key = normalized.ok and normalized.data.key or ""
-    if key == "itemspawn" or key == "spawnitem" then
-      return tostring(address), cached
-    end
+  -- ServerAddComponent receives the live BRRegistry Component_ItemSpawn
+  -- instance. Policy aliases, UClasses, and data structs must never be used as
+  -- the native comparison target.
+  local notes = {}
+  local class_name = "BrickComponentType_ItemSpawn"
+  local object, find_error = applicator_find_first_of(class_name)
+  if not object then
+    notes[#notes + 1] = class_name .. ":" .. tostring(find_error or "not found")
+    return "", nil, notes
   end
-  return "", nil
+
+  local denied_component = {
+    name = "ItemSpawn",
+    address = tool_object_address(object),
+    source = "FindFirstOf(" .. class_name .. ")",
+    fullName = tool_object_full_name(object),
+    className = tool_object_class_full_name(object),
+  }
+  if denied_component.address == "" then
+    notes[#notes + 1] = "NATIVE_ITEMSPAWN_TARGET_ADDRESS_EMPTY"
+    return "", nil, notes
+  end
+
+  local described = BMF.tools.uobject.describe({ address = denied_component.address })
+  local fields = described and described.data and described.data.fields or {}
+  local valid = described and described.ok == true
+    and tostring(fields.object_name or "") == "Component_ItemSpawn"
+    and tostring(fields.object_full_name or ""):find(":BRRegistry.Component_ItemSpawn", 1, true) ~= nil
+    and tostring(fields.object_class or "") == "Component_ItemSpawn_C"
+    and tostring(fields.object_class_full_name or ""):find("/Game/Bricks/ComponentTypes/Component_ItemSpawn.Component_ItemSpawn_C", 1, true) ~= nil
+  if not valid then
+    notes[#notes + 1] = "NATIVE_ITEMSPAWN_TARGET_INVALID:" .. tostring(described and described.code or "DESCRIBE_FAILED")
+    return "", nil, notes
+  end
+
+  denied_component.validationSource = "BMFSocketDescribeUObject"
+  denied_component.objectName = tostring(fields.object_name or "")
+  denied_component.objectFullName = tostring(fields.object_full_name or "")
+  return denied_component.address, denied_component, notes
 end
 
 local function applicator_process_event_context_candidates()
@@ -9795,7 +9861,7 @@ function BMF.tools.applicator.nativeTargets(options)
   local function_address = tool_object_address(function_object)
   local modify_function_object, modify_function_source, modify_function_errors = applicator_find_server_modify_component_function()
   local modify_function_address = tool_object_address(modify_function_object)
-  local denied_component_address, denied_component = applicator_denied_component_target()
+  local denied_component_address, denied_component, denied_component_errors = applicator_denied_component_target()
   local interact_component, interact_component_errors = applicator_resolve_component_type("Interact")
   local context_candidates = applicator_process_event_context_candidates()
   local process_event_context_address = ""
@@ -9842,6 +9908,9 @@ function BMF.tools.applicator.nativeTargets(options)
   for index, item in ipairs(interact_component_errors or {}) do
     lines[#lines + 1] = "interact_component_error_" .. tostring(index) .. "=" .. tostring(item)
   end
+  for index, item in ipairs(denied_component_errors or {}) do
+    lines[#lines + 1] = "denied_component_error_" .. tostring(index) .. "=" .. tostring(item)
+  end
 
   local code = ok and "OK" or "NATIVE_TARGETS_INCOMPLETE"
   local data = {
@@ -9864,6 +9933,7 @@ function BMF.tools.applicator.nativeTargets(options)
     functionErrors = function_errors or {},
     modifyFunctionErrors = modify_function_errors or {},
     interactComponentErrors = interact_component_errors or {},
+    deniedComponentErrors = denied_component_errors or {},
     lines = lines,
   }
   app.native_targets_cache = copy_table(data)
@@ -24311,6 +24381,97 @@ local BMF_game_command_tunnel_drain_once
 local BMF_game_command_tunnel_pump
 local BMF_process_game_command_tunnel_request
 
+function BMF_reserved_chat_command_guard_snapshot()
+  local guard = state.reserved_chat_command_guard or {}
+  if type(BMFSocketReservedChatGuardStatus) == "function" then
+    local ok, response = pcall(BMFSocketReservedChatGuardStatus)
+    if ok then
+      local _, fields = parse_key_value_lines(response)
+      guard.native_available = tostring(fields.available or "") == "true"
+      guard.installed = tostring(fields.installed or "") == "true"
+      guard.source = tostring(fields.source or guard.source or "")
+      guard.denied = tonumber(fields.denied) or 0
+      guard.inspection_failures = tonumber(fields.inspection_failures) or 0
+      guard.target = tostring(fields.target or "")
+      guard.last_denied_command = tostring(fields.last_command or "")
+      guard.last_error = tostring(fields.last_error or "")
+    else
+      guard.native_available = false
+      guard.installed = false
+      guard.last_error = "BMFSocketReservedChatGuardStatus failed: " .. tostring(response)
+    end
+  else
+    guard.native_available = false
+    guard.installed = false
+    guard.last_error = "BMFSocketReservedChatGuardStatus is unavailable"
+  end
+  return {
+    enabled = guard.enabled == true,
+    nativeAvailable = guard.native_available == true,
+    installed = guard.installed == true,
+    source = tostring(guard.source or ""),
+    installAttempts = tonumber(guard.install_attempts) or 0,
+    maxInstallAttempts = tonumber(guard.max_install_attempts) or 0,
+    denied = tonumber(guard.denied) or 0,
+    inspectionFailures = tonumber(guard.inspection_failures) or 0,
+    target = tostring(guard.target or ""),
+    lastDeniedCommand = tostring(guard.last_denied_command or ""),
+    lastError = tostring(guard.last_error or ""),
+    policy = "deny-player-allow-authenticated-tunnel",
+    trustedTransport = "bmf-tunnel/1 direct implementation call",
+  }
+end
+
+function BMF_install_reserved_chat_command_guard()
+  local guard = state.reserved_chat_command_guard
+  if type(guard) ~= "table" or guard.enabled ~= true or guard.installed == true then
+    return guard and guard.installed == true
+  end
+  local max_attempts = tonumber(guard.max_install_attempts) or 0
+  if max_attempts > 0 and (tonumber(guard.install_attempts) or 0) >= max_attempts then
+    return false
+  end
+  guard.install_attempts = (tonumber(guard.install_attempts) or 0) + 1
+  if type(BMFSocketReservedChatGuardInstall) ~= "function" then
+    guard.native_available = false
+    guard.last_error = "BMFSocketReservedChatGuardInstall is unavailable"
+    return false
+  end
+
+  local ok, native_ok, response = pcall(BMFSocketReservedChatGuardInstall)
+  if not ok then
+    guard.native_available = false
+    guard.installed = false
+    guard.last_error = "BMFSocketReservedChatGuardInstall failed: " .. tostring(native_ok)
+    return false
+  end
+
+  local _, fields = parse_key_value_lines(response)
+  guard.native_available = tostring(fields.available or "") == "true"
+  guard.installed = native_ok == true and tostring(fields.installed or "") == "true"
+  guard.source = tostring(fields.source or guard.source or "")
+  guard.denied = tonumber(fields.denied) or tonumber(guard.denied) or 0
+  guard.inspection_failures = tonumber(fields.inspection_failures) or tonumber(guard.inspection_failures) or 0
+  guard.target = tostring(fields.target or "")
+  guard.last_denied_command = tostring(fields.last_command or "")
+  guard.last_error = tostring(fields.last_error or fields.detail or "")
+  if not guard.installed then
+    return false
+  end
+
+  log("info", "reserved CityRPG chat command native guard installed target=" .. tostring(guard.target))
+  audit_record("chat.reserved_command.guard_installed", {
+    source = guard.source,
+    target = guard.target,
+  }, {
+    source = "framework",
+    severity = "info",
+    ok = true,
+    code = "OK",
+  })
+  return true
+end
+
 function BMF_game_command_tunnel_snapshot()
   local tunnel = state.game_command_tunnel
   local dispatch_count = tonumber(tunnel.dispatch_count) or 0
@@ -24693,6 +24854,13 @@ BMF_game_command_tunnel_pump = function()
   end
 
   tunnel.worker_ticks = (tonumber(tunnel.worker_ticks) or 0) + 1
+  local guard = state.reserved_chat_command_guard
+  if type(guard) == "table"
+      and guard.enabled == true
+      and guard.installed ~= true
+      and (tunnel.worker_ticks == 1 or (tunnel.worker_ticks % 40) == 1) then
+    BMF_install_reserved_chat_command_guard()
+  end
   if (tunnel.worker_ticks % 40) == 1 then
     tunnel.last_worker_tick_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
   end
@@ -26485,6 +26653,7 @@ audit_record("framework.loaded", {
 })
 write_status()
 BMF.loadPlugins()
+BMF_install_reserved_chat_command_guard()
 BMF_start_socket_transport()
 start_command_worker()
 mark_server_ready({

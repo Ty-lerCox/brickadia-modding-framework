@@ -29,6 +29,9 @@ const requiredLocalFiles = [
   'templates/windows-ue4ss/ue4ss/Mods/BMFSocket/README.md',
   'templates/windows-ue4ss/ue4ss/Mods/BMFSocket/dlls/.gitkeep',
   'templates/windows-ue4ss/ue4ss/Mods/BMFSocket/dlls/main.dll',
+  'templates/windows-ue4ss/ue4ss/Mods/BMFFrameTelemetry/README.md',
+  'templates/windows-ue4ss/ue4ss/Mods/BMFFrameTelemetry/dlls/.gitkeep',
+  'templates/windows-ue4ss/ue4ss/Mods/BMFFrameTelemetry/dlls/main.dll',
   'templates/windows-ue4ss/ue4ss/Mods/OmeggaBridge/Scripts/main.lua',
   'templates/windows-ue4ss/ue4ss/CustomGameConfigs/Brickadia/UE4SS-settings.ini',
 ];

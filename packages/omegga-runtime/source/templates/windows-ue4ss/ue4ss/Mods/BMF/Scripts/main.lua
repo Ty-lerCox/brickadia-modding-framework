@@ -8621,6 +8621,7 @@ end
 
 function BMF.tools.applicator.refreshComponentCache(options)
   options = type(options) == "table" and options or {}
+  state.tools.applicator.component_cache = {}
   local denied = BMF.permissions._componentRuleList(options.deniedComponents, BMF.permissions.APPLICATOR_DENIED_COMPONENTS)
   local cached = 0
   local notes = {}
@@ -8965,14 +8966,45 @@ function BMF.tools.applicator.scanObjects(options)
 end
 
 local function applicator_denied_component_target()
-  for address, cached in pairs(state.tools.applicator.component_cache or {}) do
-    local normalized = BMF.permissions._normalizeComponentKey(cached and cached.name or "")
-    local key = normalized.ok and normalized.data.key or ""
-    if key == "itemspawn" or key == "spawnitem" then
-      return tostring(address), cached
-    end
+  -- ServerAddComponent receives the live BRRegistry Component_ItemSpawn
+  -- instance. Policy aliases, UClasses, and data structs must never be used as
+  -- the native comparison target.
+  local notes = {}
+  local class_name = "BrickComponentType_ItemSpawn"
+  local object, find_error = applicator_find_first_of(class_name)
+  if not object then
+    notes[#notes + 1] = class_name .. ":" .. tostring(find_error or "not found")
+    return "", nil, notes
   end
-  return "", nil
+
+  local denied_component = {
+    name = "ItemSpawn",
+    address = tool_object_address(object),
+    source = "FindFirstOf(" .. class_name .. ")",
+    fullName = tool_object_full_name(object),
+    className = tool_object_class_full_name(object),
+  }
+  if denied_component.address == "" then
+    notes[#notes + 1] = "NATIVE_ITEMSPAWN_TARGET_ADDRESS_EMPTY"
+    return "", nil, notes
+  end
+
+  local described = BMF.tools.uobject.describe({ address = denied_component.address })
+  local fields = described and described.data and described.data.fields or {}
+  local valid = described and described.ok == true
+    and tostring(fields.object_name or "") == "Component_ItemSpawn"
+    and tostring(fields.object_full_name or ""):find(":BRRegistry.Component_ItemSpawn", 1, true) ~= nil
+    and tostring(fields.object_class or "") == "Component_ItemSpawn_C"
+    and tostring(fields.object_class_full_name or ""):find("/Game/Bricks/ComponentTypes/Component_ItemSpawn.Component_ItemSpawn_C", 1, true) ~= nil
+  if not valid then
+    notes[#notes + 1] = "NATIVE_ITEMSPAWN_TARGET_INVALID:" .. tostring(described and described.code or "DESCRIBE_FAILED")
+    return "", nil, notes
+  end
+
+  denied_component.validationSource = "BMFSocketDescribeUObject"
+  denied_component.objectName = tostring(fields.object_name or "")
+  denied_component.objectFullName = tostring(fields.object_full_name or "")
+  return denied_component.address, denied_component, notes
 end
 
 local function applicator_process_event_context_candidates()
@@ -9055,7 +9087,7 @@ function BMF.tools.applicator.nativeTargets(options)
   local function_address = tool_object_address(function_object)
   local modify_function_object, modify_function_source, modify_function_errors = applicator_find_server_modify_component_function()
   local modify_function_address = tool_object_address(modify_function_object)
-  local denied_component_address, denied_component = applicator_denied_component_target()
+  local denied_component_address, denied_component, denied_component_errors = applicator_denied_component_target()
   local interact_component, interact_component_errors = applicator_resolve_component_type("Interact")
   local context_candidates = applicator_process_event_context_candidates()
   local process_event_context_address = ""
@@ -9102,6 +9134,9 @@ function BMF.tools.applicator.nativeTargets(options)
   for index, item in ipairs(interact_component_errors or {}) do
     lines[#lines + 1] = "interact_component_error_" .. tostring(index) .. "=" .. tostring(item)
   end
+  for index, item in ipairs(denied_component_errors or {}) do
+    lines[#lines + 1] = "denied_component_error_" .. tostring(index) .. "=" .. tostring(item)
+  end
 
   local code = ok and "OK" or "NATIVE_TARGETS_INCOMPLETE"
   local data = {
@@ -9124,6 +9159,7 @@ function BMF.tools.applicator.nativeTargets(options)
     functionErrors = function_errors or {},
     modifyFunctionErrors = modify_function_errors or {},
     interactComponentErrors = interact_component_errors or {},
+    deniedComponentErrors = denied_component_errors or {},
     lines = lines,
   }
   app.native_targets_cache = copy_table(data)

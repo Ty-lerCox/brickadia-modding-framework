@@ -28,6 +28,11 @@
   "guardrails": [
     "optional-native-telemetry",
     "low-rate-json-output",
+    "one-time-process-timer-policy",
+    "target-fps-allowlist",
+    "120-fps-explicit-opt-in",
+    "calibrated-layout-fail-closed",
+    "no-pacing-poll-loop",
     "grafana-remains-dashboard-owner",
     "validate-before-release"
   ]

@@ -379,12 +379,80 @@ local function findPlayerById(players, uuid)
   return nil
 end
 
+local function findPlayerByController(players, controller_name, controller_full_name)
+  local wanted_name = trim(controller_name):lower()
+  local wanted_full_name = trim(controller_full_name):lower()
+  if wanted_name == "" and wanted_full_name == "" then
+    return nil
+  end
+  for _, player in ipairs(players or {}) do
+    for _, candidate in pairs({
+      player.controllerPath,
+      player.controller,
+      player.controllerName,
+      player.controllerFullName,
+    }) do
+      local value = trim(candidate):lower()
+      if value ~= "" and (
+        value == wanted_name
+        or value == wanted_full_name
+        or (wanted_full_name ~= "" and wanted_full_name:sub(-#value) == value)
+      ) then
+        return player
+      end
+    end
+  end
+  return nil
+end
+
+local function resolveContextPlayer(BMF, players, context)
+  if type(BMF.tools) ~= "table"
+    or type(BMF.tools.uobject) ~= "table"
+    or type(BMF.tools.uobject.describe) ~= "function" then
+    return nil, "native-context-describe-unavailable"
+  end
+
+  local described = BMF.tools.uobject.describe({ address = context })
+  if not described or not described.ok then
+    return nil, "native-context-describe-failed"
+  end
+  local fields = described.data and described.data.fields or {}
+  local ref_count = tonumber(fields.memory_ref_count) or 0
+  for index = 1, ref_count do
+    local prefix = "memory_ref_" .. tostring(index) .. "_"
+    local class_name = tostring(fields[prefix .. "class"] or "")
+    local class_full_name = tostring(fields[prefix .. "class_full_name"] or "")
+    if class_name == "BP_PlayerController_C"
+      or class_full_name:find("/Game/Blueprints/BP_PlayerController.BP_PlayerController_C", 1, true) then
+      local player = findPlayerByController(
+        players,
+        fields[prefix .. "name"],
+        fields[prefix .. "full_name"]
+      )
+      if player then
+        return player, "native-context-controller"
+      end
+    end
+  end
+  return nil, "native-context-controller-unmatched"
+end
+
 local function resolveEventPlayer(BMF, event)
   local players = playersList(BMF)
   local context = normalizeContext(event.context)
   local known_uuid = Plugin.policy.contextPlayers[context]
   if known_uuid then
     return findPlayerById(players, known_uuid) or { uuid = known_uuid }, "known-context"
+  end
+
+  local context_player, context_source = resolveContextPlayer(BMF, players, context)
+  if context_player then
+    local uuid = idFromPlayer(context_player)
+    if context ~= "" and uuid ~= "" then
+      Plugin.policy.contextPlayers[context] = uuid
+      Plugin.policy.contextPlayerSources[context] = context_source
+    end
+    return context_player, context_source
   end
 
   if context ~= "" and POLICY.allowSinglePlayerContextLearning and #players == 1 then
@@ -397,7 +465,7 @@ local function resolveEventPlayer(BMF, event)
     end
   end
 
-  return nil, #players > 1 and "ambiguous-multiple-players" or "no-live-player"
+  return nil, #players > 1 and context_source or "no-live-player"
 end
 
 local function contextAllowedByStaticPolicy(context)

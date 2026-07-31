@@ -92,15 +92,21 @@ $result = [ordered]@{
   dll = $dll.FullName
   deployed = $false
   deployedPath = $null
+  deployedPaths = @()
 }
 
 if ($Deploy) {
-  $targetDir = Join-Path $rootFull 'framework/ue4ss/Mods/BMFFrameTelemetry/dlls'
-  New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
-  $target = Join-Path $targetDir 'main.dll'
-  Copy-Item -LiteralPath $dll.FullName -Destination $target -Force
+  $targets = @(
+    (Join-Path $rootFull 'framework/ue4ss/Mods/BMFFrameTelemetry/dlls/main.dll'),
+    (Join-Path $rootFull 'packages/omegga-runtime/source/templates/windows-ue4ss/ue4ss/Mods/BMFFrameTelemetry/dlls/main.dll')
+  )
+  foreach ($target in $targets) {
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
+    Copy-Item -LiteralPath $dll.FullName -Destination $target -Force
+  }
   $result.deployed = $true
-  $result.deployedPath = $target
+  $result.deployedPath = $targets[0]
+  $result.deployedPaths = @($targets)
 }
 
 $result | ConvertTo-Json -Depth 4

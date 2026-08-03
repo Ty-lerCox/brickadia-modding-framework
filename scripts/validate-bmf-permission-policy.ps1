@@ -483,6 +483,7 @@ return {
     Invoke-BmfConsoleCommand 'bmf.nospawnitem.status' 'bmf-nospawnitem-status' @(
       'BMF bmf.nospawnitem.status OK',
       'policy=noSpawnItemApplicator',
+      'allowed_roles=Admin',
       'role_compliant=true',
       'safe_applicator_allowed=true',
       'spawn_items_permission_state=Forbidden',

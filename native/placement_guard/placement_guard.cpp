@@ -41,15 +41,27 @@ using ResolveBrickPrimaryFunc = uintptr_t(__fastcall*)(uintptr_t record);
 using ResolveBrickVariantFunc = uintptr_t(__fastcall*)(uintptr_t record, void* variant_ref);
 using BrickClassFunc = uintptr_t(__fastcall*)();
 
+constexpr uint32_t kCapabilityLegacy = 1u << 0;
+constexpr uint32_t kCapabilityMechanic = 1u << 1;
+constexpr uint32_t kCapabilityAdmin = 1u << 2;
+constexpr uint32_t kCapabilityAll = 0xFFFFFFFFu;
+
 struct DeniedAsset {
     uintptr_t address = 0;
     char name[128]{};
+    uint32_t required_capabilities = kCapabilityLegacy;
 };
 
 struct DeniedPrefabHash {
     unsigned char hash[32]{};
     char hash_hex[65]{};
     char asset_name[128]{};
+    uint32_t required_capabilities = kCapabilityLegacy;
+};
+
+struct AllowedContextCapabilities {
+    uintptr_t address = 0;
+    uint32_t capabilities = 0;
 };
 
 std::atomic<bool> g_enabled{false};
@@ -98,6 +110,7 @@ std::atomic<uint64_t> g_action_brick_param_read_failures{0};
 std::atomic<uint64_t> g_passthrough{0};
 std::atomic<uint64_t> g_param_read_failures{0};
 std::atomic<uint64_t> g_prefab_param_read_failures{0};
+std::atomic<uint64_t> g_prefab_frame_scan_hits{0};
 std::atomic<uint64_t> g_allowed_context_overflow{0};
 
 void** g_func_slot = nullptr;
@@ -113,7 +126,7 @@ DeniedAsset g_denied_assets[256]{};
 uint32_t g_denied_asset_count = 0;
 DeniedPrefabHash g_denied_prefab_hashes[256]{};
 uint32_t g_denied_prefab_hash_count = 0;
-uintptr_t g_allowed_contexts[256]{};
+AllowedContextCapabilities g_allowed_contexts[256]{};
 uint32_t g_allowed_context_count = 0;
 
 void __fastcall NativeFuncDetour(void* context, void* stack, void* result);
@@ -288,6 +301,90 @@ bool parse_prefab_hash(const std::string& value, unsigned char* out, char* hex_o
     return true;
 }
 
+std::vector<std::string> split_policy_fields(const std::string& value) {
+    std::vector<std::string> fields;
+    size_t start = 0;
+    while (start <= value.size()) {
+        const size_t end = value.find('|', start);
+        fields.push_back(trim_ascii(value.substr(
+            start,
+            end == std::string::npos ? std::string::npos : end - start)));
+        if (end == std::string::npos) {
+            break;
+        }
+        start = end + 1;
+    }
+    return fields;
+}
+
+uint32_t parse_capabilities(const std::string& value, uint32_t fallback) {
+    uint32_t capabilities = 0;
+    std::string token;
+    const auto flush_token = [&]() {
+        const std::string normalized = trim_ascii(token);
+        token.clear();
+        if (normalized.empty()) {
+            return;
+        }
+        std::string lowered;
+        lowered.reserve(normalized.size());
+        for (char c : normalized) {
+            lowered.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+        }
+        if (lowered == "all" || lowered == "bypass" || lowered == "*") {
+            capabilities = kCapabilityAll;
+        } else if (lowered == "legacy" || lowered == "default") {
+            capabilities |= kCapabilityLegacy;
+        } else if (lowered == "mechanic" || lowered == "ismechanic" || lowered == "is mechanic" ||
+                   lowered == "spacemechanic" || lowered == "isspacemechanic" || lowered == "is space mechanic") {
+            capabilities |= kCapabilityMechanic;
+        } else if (lowered == "admin" || lowered == "administrator") {
+            capabilities |= kCapabilityAdmin;
+        }
+    };
+
+    for (char c : value) {
+        if (c == ',' || c == '+' || c == ';') {
+            flush_token();
+        } else {
+            token.push_back(c);
+        }
+    }
+    flush_token();
+    return capabilities == 0 ? fallback : capabilities;
+}
+
+void format_capabilities(uint32_t capabilities, char* out, size_t out_size) {
+    if (!out || out_size == 0) {
+        return;
+    }
+    out[0] = '\0';
+    if (capabilities == kCapabilityAll) {
+        strncpy_s(out, out_size, "all", _TRUNCATE);
+        return;
+    }
+    std::string text;
+    const auto append = [&](const char* name) {
+        if (!text.empty()) {
+            text.push_back(',');
+        }
+        text.append(name);
+    };
+    if ((capabilities & kCapabilityLegacy) != 0) {
+        append("legacy");
+    }
+    if ((capabilities & kCapabilityMechanic) != 0) {
+        append("mechanic");
+    }
+    if ((capabilities & kCapabilityAdmin) != 0) {
+        append("admin");
+    }
+    if (text.empty()) {
+        text = "none";
+    }
+    strncpy_s(out, out_size, text.c_str(), _TRUNCATE);
+}
+
 uintptr_t parse_hex_value(const std::string& text, const char* key, uintptr_t fallback = 0) {
     std::string value;
     if (!find_control_value(text, key, &value)) {
@@ -338,10 +435,9 @@ bool is_executable_memory(uintptr_t address) {
 }
 
 void parse_policy_lists(const std::string& text) {
-    std::vector<uintptr_t> denied_addresses;
-    std::vector<std::string> denied_names;
+    std::vector<DeniedAsset> denied_assets;
     std::vector<DeniedPrefabHash> denied_prefab_hashes;
-    uintptr_t allowed_contexts[256]{};
+    AllowedContextCapabilities allowed_contexts[256]{};
     uint32_t allowed_context_count = 0;
     uint64_t overflow = 0;
 
@@ -354,30 +450,52 @@ void parse_policy_lists(const std::string& text) {
             std::string key = trim_ascii(line.substr(0, equals));
             std::string value = trim_ascii(line.substr(equals + 1));
             if (key == "denied_asset" || key == "deny_asset" || key == "denied_entity" || key == "deny_entity") {
-                uintptr_t parsed = parse_numeric_literal(value.c_str());
+                const auto fields = split_policy_fields(value);
+                const uintptr_t parsed = fields.empty() ? 0 : parse_numeric_literal(fields[0].c_str());
                 if (parsed != 0) {
-                    denied_addresses.push_back(parsed);
-                    size_t pipe = value.find('|');
-                    if (pipe != std::string::npos) {
-                        denied_names.push_back(trim_ascii(value.substr(pipe + 1)));
-                    }
-                }
-            } else if (key == "denied_asset_name" || key == "deny_asset_name" || key == "denied_entity_name") {
-                denied_names.push_back(value);
-            } else if (key == "denied_prefab_hash" || key == "deny_prefab_hash" || key == "denied_hash" || key == "deny_hash") {
-                const size_t pipe = value.find('|');
-                const std::string hash_text = trim_ascii(value.substr(0, pipe == std::string::npos ? std::string::npos : pipe));
-                DeniedPrefabHash rule{};
-                if (parse_prefab_hash(hash_text, rule.hash, rule.hash_hex)) {
-                    if (pipe != std::string::npos) {
-                        const std::string asset_name = trim_ascii(value.substr(pipe + 1));
-                        if (!asset_name.empty()) {
-                            strncpy_s(rule.asset_name, asset_name.c_str(), _TRUNCATE);
+                    const uint32_t required = fields.size() >= 3
+                        ? parse_capabilities(fields[2], kCapabilityLegacy)
+                        : kCapabilityLegacy;
+                    bool duplicate = false;
+                    for (auto& existing : denied_assets) {
+                        if (existing.address == parsed) {
+                            existing.required_capabilities |= required;
+                            duplicate = true;
+                            break;
                         }
                     }
+                    if (!duplicate) {
+                        if (denied_assets.size() < 256) {
+                            DeniedAsset rule{};
+                            rule.address = parsed;
+                            rule.required_capabilities = required;
+                            if (fields.size() >= 2 && !fields[1].empty()) {
+                                strncpy_s(rule.name, fields[1].c_str(), _TRUNCATE);
+                            }
+                            denied_assets.push_back(rule);
+                        } else {
+                            ++overflow;
+                        }
+                    }
+                }
+            } else if (key == "denied_prefab_hash" || key == "deny_prefab_hash" || key == "denied_hash" || key == "deny_hash") {
+                const auto fields = split_policy_fields(value);
+                const std::string hash_text = fields.empty() ? "" : fields[0];
+                DeniedPrefabHash rule{};
+                if (parse_prefab_hash(hash_text, rule.hash, rule.hash_hex)) {
+                    if (fields.size() >= 2 && !fields[1].empty()) {
+                        strncpy_s(rule.asset_name, fields[1].c_str(), _TRUNCATE);
+                    }
+                    rule.required_capabilities = fields.size() >= 3
+                        ? parse_capabilities(fields[2], kCapabilityLegacy)
+                        : kCapabilityLegacy;
                     bool duplicate = false;
-                    for (const auto& existing : denied_prefab_hashes) {
+                    for (auto& existing : denied_prefab_hashes) {
                         if (std::memcmp(existing.hash, rule.hash, sizeof(rule.hash)) == 0) {
+                            existing.required_capabilities |= rule.required_capabilities;
+                            if (existing.asset_name[0] == '\0' && rule.asset_name[0] != '\0') {
+                                strncpy_s(existing.asset_name, rule.asset_name, _TRUNCATE);
+                            }
                             duplicate = true;
                             break;
                         }
@@ -390,19 +508,27 @@ void parse_policy_lists(const std::string& text) {
                         }
                     }
                 }
-            } else if (key == "allowed_context" || key == "allow_context") {
-                uintptr_t parsed = parse_numeric_literal(value.c_str());
+            } else if (key == "allowed_context" || key == "allow_context" ||
+                       key == "allowed_context_capability" || key == "allow_context_capability") {
+                const auto fields = split_policy_fields(value);
+                const uintptr_t parsed = fields.empty() ? 0 : parse_numeric_literal(fields[0].c_str());
                 if (parsed != 0) {
+                    const uint32_t capabilities = (key == "allowed_context" || key == "allow_context")
+                        ? kCapabilityAll
+                        : (fields.size() >= 2 ? parse_capabilities(fields[1], 0) : 0);
                     bool duplicate = false;
                     for (uint32_t index = 0; index < allowed_context_count; ++index) {
-                        if (allowed_contexts[index] == parsed) {
+                        if (allowed_contexts[index].address == parsed) {
+                            allowed_contexts[index].capabilities |= capabilities;
                             duplicate = true;
                             break;
                         }
                     }
                     if (!duplicate) {
                         if (allowed_context_count < static_cast<uint32_t>(sizeof(allowed_contexts) / sizeof(allowed_contexts[0]))) {
-                            allowed_contexts[allowed_context_count++] = parsed;
+                            allowed_contexts[allowed_context_count].address = parsed;
+                            allowed_contexts[allowed_context_count].capabilities = capabilities;
+                            ++allowed_context_count;
                         } else {
                             ++overflow;
                         }
@@ -417,36 +543,12 @@ void parse_policy_lists(const std::string& text) {
         start = end + 1;
     }
 
-    DeniedAsset denied[256]{};
-    uint32_t denied_count = 0;
-    for (size_t index = 0; index < denied_addresses.size(); ++index) {
-        uintptr_t address = denied_addresses[index];
-        bool duplicate = false;
-        for (uint32_t existing = 0; existing < denied_count; ++existing) {
-            if (denied[existing].address == address) {
-                duplicate = true;
-                break;
-            }
-        }
-        if (duplicate) {
-            continue;
-        }
-        if (denied_count >= static_cast<uint32_t>(sizeof(denied) / sizeof(denied[0]))) {
-            ++overflow;
-            continue;
-        }
-        denied[denied_count].address = address;
-        const std::string name = index < denied_names.size() ? denied_names[index] : "";
-        if (!name.empty()) {
-            strncpy_s(denied[denied_count].name, name.c_str(), _TRUNCATE);
-        }
-        ++denied_count;
-    }
-
     AcquireSRWLockExclusive(&g_policy_lock);
     std::memset(g_denied_assets, 0, sizeof(g_denied_assets));
-    std::memcpy(g_denied_assets, denied, denied_count * sizeof(DeniedAsset));
-    g_denied_asset_count = denied_count;
+    if (!denied_assets.empty()) {
+        std::memcpy(g_denied_assets, denied_assets.data(), denied_assets.size() * sizeof(DeniedAsset));
+    }
+    g_denied_asset_count = static_cast<uint32_t>(denied_assets.size());
     std::memset(g_denied_prefab_hashes, 0, sizeof(g_denied_prefab_hashes));
     if (!denied_prefab_hashes.empty()) {
         std::memcpy(
@@ -456,7 +558,10 @@ void parse_policy_lists(const std::string& text) {
     }
     g_denied_prefab_hash_count = static_cast<uint32_t>(denied_prefab_hashes.size());
     std::memset(g_allowed_contexts, 0, sizeof(g_allowed_contexts));
-    std::memcpy(g_allowed_contexts, allowed_contexts, allowed_context_count * sizeof(uintptr_t));
+    std::memcpy(
+        g_allowed_contexts,
+        allowed_contexts,
+        allowed_context_count * sizeof(AllowedContextCapabilities));
     g_allowed_context_count = allowed_context_count;
     ReleaseSRWLockExclusive(&g_policy_lock);
 
@@ -465,11 +570,18 @@ void parse_policy_lists(const std::string& text) {
     }
 }
 
-void load_control() {
+bool load_control() {
+    static std::string last_control_text;
     const std::string text = read_text(kControlPath);
     if (text.empty()) {
-        return;
+        return false;
     }
+
+    const bool changed = text != last_control_text;
+    if (!changed) {
+        return false;
+    }
+    last_control_text = text;
 
     g_enabled.store(parse_bool_value(text, "enable", g_enabled.load()));
     g_block.store(parse_bool_value(text, "block", g_block.load()));
@@ -518,23 +630,29 @@ void load_control() {
         "place_brick_asset_record_offset",
         g_place_brick_asset_record_offset.load())));
     parse_policy_lists(text);
+    return true;
 }
 
-bool context_is_allowed(void* context) {
+bool context_has_capabilities(void* context, uint32_t required_capabilities, uint32_t* out_capabilities = nullptr) {
     const uintptr_t context_address = reinterpret_cast<uintptr_t>(context);
     if (context_address == 0) {
         return false;
     }
 
     bool allowed = false;
+    uint32_t available = 0;
     AcquireSRWLockShared(&g_policy_lock);
     for (uint32_t index = 0; index < g_allowed_context_count; ++index) {
-        if (g_allowed_contexts[index] == context_address) {
-            allowed = true;
+        if (g_allowed_contexts[index].address == context_address) {
+            available = g_allowed_contexts[index].capabilities;
+            allowed = (available & required_capabilities) == required_capabilities;
             break;
         }
     }
     ReleaseSRWLockShared(&g_policy_lock);
+    if (out_capabilities) {
+        *out_capabilities = available;
+    }
     return allowed;
 }
 
@@ -583,7 +701,9 @@ void append_policy_event(
     uintptr_t locals,
     uintptr_t asset,
     const char* asset_name,
-    const char* reason) {
+    const char* reason,
+    uint32_t required_capabilities,
+    uint32_t context_capabilities) {
     ensure_parent(kEventPath);
     FILE* file = nullptr;
     _wfopen_s(&file, kEventPath, L"ab");
@@ -594,9 +714,13 @@ void append_policy_event(
     SYSTEMTIME st{};
     GetSystemTime(&st);
     const char* id_key = std::strcmp(event_name ? event_name : "", "block") == 0 ? "block_id" : "allow_id";
+    char required_text[64]{};
+    char context_text[64]{};
+    format_capabilities(required_capabilities, required_text, sizeof(required_text));
+    format_capabilities(context_capabilities, context_text, sizeof(context_text));
     std::fprintf(
         file,
-        "event=%s\t%s=%llu\tpolicy_id=%llu\tutc=%04u-%02u-%02uT%02u:%02u:%02u.%03uZ\tcontext=0x%p\tlocals=0x%p\tasset=0x%p\tasset_name=%s\treason=%s\n",
+        "event=%s\t%s=%llu\tpolicy_id=%llu\tutc=%04u-%02u-%02uT%02u:%02u:%02u.%03uZ\tcontext=0x%p\tlocals=0x%p\tasset=0x%p\tasset_name=%s\trequired_capabilities=%s\tcontext_capabilities=%s\treason=%s\n",
         event_name ? event_name : "",
         id_key,
         static_cast<unsigned long long>(event_id),
@@ -612,6 +736,8 @@ void append_policy_event(
         reinterpret_cast<void*>(locals),
         reinterpret_cast<void*>(asset),
         asset_name ? asset_name : "",
+        required_text,
+        context_text,
         reason ? reason : "");
     std::fclose(file);
 }
@@ -623,7 +749,9 @@ void append_prefab_policy_event(
     uintptr_t locals,
     const char* prefab_hash,
     const char* asset_name,
-    const char* reason) {
+    const char* reason,
+    uint32_t required_capabilities,
+    uint32_t context_capabilities) {
     ensure_parent(kEventPath);
     FILE* file = nullptr;
     _wfopen_s(&file, kEventPath, L"ab");
@@ -634,9 +762,13 @@ void append_prefab_policy_event(
     SYSTEMTIME st{};
     GetSystemTime(&st);
     const char* id_key = std::strcmp(event_name ? event_name : "", "block") == 0 ? "block_id" : "allow_id";
+    char required_text[64]{};
+    char context_text[64]{};
+    format_capabilities(required_capabilities, required_text, sizeof(required_text));
+    format_capabilities(context_capabilities, context_text, sizeof(context_text));
     std::fprintf(
         file,
-        "event=%s\tkind=prefab\t%s=%llu\tpolicy_id=%llu\tutc=%04u-%02u-%02uT%02u:%02u:%02u.%03uZ\tcontext=0x%p\tlocals=0x%p\tprefab_hash=%s\tasset_name=%s\treason=%s\n",
+        "event=%s\tkind=prefab\t%s=%llu\tpolicy_id=%llu\tutc=%04u-%02u-%02uT%02u:%02u:%02u.%03uZ\tcontext=0x%p\tlocals=0x%p\tprefab_hash=%s\tasset_name=%s\trequired_capabilities=%s\tcontext_capabilities=%s\treason=%s\n",
         event_name ? event_name : "",
         id_key,
         static_cast<unsigned long long>(event_id),
@@ -652,6 +784,8 @@ void append_prefab_policy_event(
         reinterpret_cast<void*>(locals),
         prefab_hash ? prefab_hash : "",
         asset_name ? asset_name : "",
+        required_text,
+        context_text,
         reason ? reason : "");
     std::fclose(file);
 }
@@ -722,6 +856,7 @@ void write_status(const char* reason) {
     std::fprintf(file, "passthrough=%llu\n", static_cast<unsigned long long>(g_passthrough.load()));
     std::fprintf(file, "param_read_failures=%llu\n", static_cast<unsigned long long>(g_param_read_failures.load()));
     std::fprintf(file, "prefab_param_read_failures=%llu\n", static_cast<unsigned long long>(g_prefab_param_read_failures.load()));
+    std::fprintf(file, "prefab_frame_scan_hits=%llu\n", static_cast<unsigned long long>(g_prefab_frame_scan_hits.load()));
     std::fprintf(
         file,
         "action_prefab_param_read_failures=%llu\n",
@@ -733,29 +868,47 @@ void write_status(const char* reason) {
     AcquireSRWLockShared(&g_policy_lock);
     std::fprintf(file, "denied_asset_count=%u\n", g_denied_asset_count);
     for (uint32_t index = 0; index < g_denied_asset_count; ++index) {
+        char required_text[64]{};
+        format_capabilities(
+            g_denied_assets[index].required_capabilities,
+            required_text,
+            sizeof(required_text));
         std::fprintf(
             file,
-            "denied_asset_%u=0x%p|%s\n",
+            "denied_asset_%u=0x%p|%s|%s\n",
             index + 1,
             reinterpret_cast<void*>(g_denied_assets[index].address),
-            g_denied_assets[index].name);
+            g_denied_assets[index].name,
+            required_text);
     }
     std::fprintf(file, "denied_prefab_hash_count=%u\n", g_denied_prefab_hash_count);
     for (uint32_t index = 0; index < g_denied_prefab_hash_count; ++index) {
+        char required_text[64]{};
+        format_capabilities(
+            g_denied_prefab_hashes[index].required_capabilities,
+            required_text,
+            sizeof(required_text));
         std::fprintf(
             file,
-            "denied_prefab_hash_%u=%s|%s\n",
+            "denied_prefab_hash_%u=%s|%s|%s\n",
             index + 1,
             g_denied_prefab_hashes[index].hash_hex,
-            g_denied_prefab_hashes[index].asset_name);
+            g_denied_prefab_hashes[index].asset_name,
+            required_text);
     }
     std::fprintf(file, "allowed_context_count=%u\n", g_allowed_context_count);
     for (uint32_t index = 0; index < g_allowed_context_count; ++index) {
+        char capability_text[64]{};
+        format_capabilities(
+            g_allowed_contexts[index].capabilities,
+            capability_text,
+            sizeof(capability_text));
         std::fprintf(
             file,
-            "allowed_context_%u=0x%p\n",
+            "allowed_context_%u=0x%p|%s\n",
             index + 1,
-            reinterpret_cast<void*>(g_allowed_contexts[index]));
+            reinterpret_cast<void*>(g_allowed_contexts[index].address),
+            capability_text);
     }
     ReleaseSRWLockShared(&g_policy_lock);
     std::fprintf(file, "allowed_context_overflow=%llu\n", static_cast<unsigned long long>(g_allowed_context_overflow.load()));
@@ -813,6 +966,107 @@ bool read_prefab_hash(void* stack, uintptr_t* out_locals, unsigned char* out_has
     }
     *out_locals = locals;
     return true;
+}
+
+bool read_bytes(uintptr_t address, void* out, size_t bytes) {
+    if (!address || !out || !is_accessible_memory(address, bytes)) {
+        return false;
+    }
+    __try {
+        std::memcpy(out, reinterpret_cast<void*>(address), bytes);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return true;
+}
+
+bool find_denied_prefab_hash_in_range(
+    uintptr_t base,
+    size_t bytes,
+    DeniedPrefabHash* out_denied,
+    uintptr_t* out_address,
+    uint32_t* out_offset) {
+    if (!base || bytes < 32 || !is_accessible_memory(base, bytes)) {
+        return false;
+    }
+
+    bool found = false;
+    AcquireSRWLockShared(&g_policy_lock);
+    __try {
+        const unsigned char* data = reinterpret_cast<const unsigned char*>(base);
+        for (size_t offset = 0; offset + 32 <= bytes && !found; ++offset) {
+            for (uint32_t index = 0; index < g_denied_prefab_hash_count; ++index) {
+                if (std::memcmp(data + offset, g_denied_prefab_hashes[index].hash, 32) == 0) {
+                    if (out_denied) {
+                        *out_denied = g_denied_prefab_hashes[index];
+                    }
+                    if (out_address) {
+                        *out_address = base + offset;
+                    }
+                    if (out_offset) {
+                        *out_offset = static_cast<uint32_t>(offset);
+                    }
+                    found = true;
+                    break;
+                }
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        found = false;
+    }
+    ReleaseSRWLockShared(&g_policy_lock);
+    return found;
+}
+
+bool find_denied_prefab_hash_in_frame(
+    void* stack,
+    DeniedPrefabHash* out_denied,
+    uintptr_t* out_hash_address,
+    uint32_t* out_frame_pointer_offset,
+    uint32_t* out_hash_offset) {
+    if (!stack) {
+        return false;
+    }
+
+    // FFrame has changed layout between supported Brickadia builds. Search only
+    // the small buffers referenced by plausible pointer fields; never scan the
+    // process or arbitrary object graphs on the placement hot path.
+    static constexpr uint32_t kFramePointerOffsets[] = {
+        0x10, 0x18, 0x20, 0x28, 0x30, 0x38, 0x40, 0x48, 0x50, 0x58,
+    };
+    static constexpr size_t kCandidateBytes = 0x180;
+    const uintptr_t frame = reinterpret_cast<uintptr_t>(stack);
+
+    for (uint32_t frame_offset : kFramePointerOffsets) {
+        uintptr_t candidate = 0;
+        if (!read_bytes(frame + frame_offset, &candidate, sizeof(candidate)) || !candidate) {
+            continue;
+        }
+
+        uintptr_t hash_address = 0;
+        uint32_t hash_offset = 0;
+        if (!find_denied_prefab_hash_in_range(
+                candidate,
+                kCandidateBytes,
+                out_denied,
+                &hash_address,
+                &hash_offset)) {
+            continue;
+        }
+
+        if (out_hash_address) {
+            *out_hash_address = hash_address;
+        }
+        if (out_frame_pointer_offset) {
+            *out_frame_pointer_offset = frame_offset;
+        }
+        if (out_hash_offset) {
+            *out_hash_offset = hash_offset;
+        }
+        return true;
+    }
+
+    return false;
 }
 
 void format_prefab_hash(const unsigned char* hash, char* out, size_t out_size) {
@@ -1003,9 +1257,19 @@ void __fastcall NativeFuncDetour(void* context, void* stack, void* result) {
     }
 
     if (g_enabled.load() && g_block.load() && denied_match) {
-        if (context_is_allowed(context)) {
+        uint32_t context_capabilities = 0;
+        if (context_has_capabilities(context, denied.required_capabilities, &context_capabilities)) {
             const uint64_t allows = g_allows.fetch_add(1) + 1;
-            append_policy_event("allow", allows, context, locals, asset, denied.name, "ContextAllowlisted");
+            append_policy_event(
+                "allow",
+                allows,
+                context,
+                locals,
+                asset,
+                denied.name,
+                "ContextCapabilitiesSatisfied",
+                denied.required_capabilities,
+                context_capabilities);
             write_status("allowed");
             g_passthrough.fetch_add(1);
             if (g_original) {
@@ -1015,7 +1279,16 @@ void __fastcall NativeFuncDetour(void* context, void* stack, void* result) {
         }
 
         const uint64_t blocks = g_blocks.fetch_add(1) + 1;
-        append_policy_event("block", blocks, context, locals, asset, denied.name, "PlacementAssetDenied");
+        append_policy_event(
+            "block",
+            blocks,
+            context,
+            locals,
+            asset,
+            denied.name,
+            "PlacementAssetDenied",
+            denied.required_capabilities,
+            context_capabilities);
         append_log(
             "blocked ServerPlaceSimpleEntityVolume context=0x%p locals=0x%p asset=0x%p asset_name=%s blocks=%llu",
             context,
@@ -1037,22 +1310,49 @@ void __fastcall PrefabFuncDetour(void* context, void* stack, void* result) {
     const uint64_t hits = g_prefab_hits.fetch_add(1) + 1;
     uintptr_t locals = 0;
     unsigned char hash[32]{};
+    char raw_hash_hex[65]{};
     const bool params_ok = read_prefab_hash(stack, &locals, hash);
     if (!params_ok) {
         g_prefab_param_read_failures.fetch_add(1);
+    } else {
+        format_prefab_hash(hash, raw_hash_hex, sizeof(raw_hash_hex));
     }
 
     DeniedPrefabHash denied{};
-    const bool denied_match = params_ok && find_denied_prefab_hash(hash, &denied);
+    bool denied_match = params_ok && find_denied_prefab_hash(hash, &denied);
+    const char* match_source = denied_match ? "configured-offset" : "none";
+    uintptr_t matched_hash_address = denied_match
+        ? locals + g_prefab_hash_offset.load()
+        : 0;
+    uint32_t matched_frame_pointer_offset = denied_match ? g_locals_offset.load() : 0;
+    uint32_t matched_hash_offset = denied_match ? g_prefab_hash_offset.load() : 0;
+
+    if (!denied_match) {
+        denied_match = find_denied_prefab_hash_in_frame(
+            stack,
+            &denied,
+            &matched_hash_address,
+            &matched_frame_pointer_offset,
+            &matched_hash_offset);
+        if (denied_match) {
+            match_source = "frame-pointer-scan";
+            g_prefab_frame_scan_hits.fetch_add(1);
+        }
+    }
 
     if (g_trace.load() && (hits <= 40 || denied_match || !params_ok)) {
         append_log(
-            "prefab_hit context=0x%p stack=0x%p result=0x%p locals=0x%p hash=%s denied_match=%d asset_name=%s enabled=%d block=%d hits=%llu",
+            "prefab_hit context=0x%p stack=0x%p result=0x%p locals=0x%p raw_hash=%s matched_hash=%s match_source=%s hash_address=0x%p frame_pointer_offset=0x%X hash_offset=0x%X denied_match=%d asset_name=%s enabled=%d block=%d hits=%llu",
             context,
             stack,
             result,
             reinterpret_cast<void*>(locals),
+            raw_hash_hex,
             denied.hash_hex,
+            match_source,
+            reinterpret_cast<void*>(matched_hash_address),
+            matched_frame_pointer_offset,
+            matched_hash_offset,
             denied_match ? 1 : 0,
             denied.asset_name,
             g_enabled.load() ? 1 : 0,
@@ -1061,9 +1361,19 @@ void __fastcall PrefabFuncDetour(void* context, void* stack, void* result) {
     }
 
     if (g_enabled.load() && g_block.load() && denied_match) {
-        if (context_is_allowed(context)) {
+        uint32_t context_capabilities = 0;
+        if (context_has_capabilities(context, denied.required_capabilities, &context_capabilities)) {
             const uint64_t allows = g_prefab_allows.fetch_add(1) + 1;
-            append_prefab_policy_event("allow", allows, context, locals, denied.hash_hex, denied.asset_name, "ContextAllowlisted");
+            append_prefab_policy_event(
+                "allow",
+                allows,
+                context,
+                locals,
+                denied.hash_hex,
+                denied.asset_name,
+                "ContextCapabilitiesSatisfied",
+                denied.required_capabilities,
+                context_capabilities);
             write_status("prefab-allowed");
             g_passthrough.fetch_add(1);
             if (g_prefab_original) {
@@ -1073,7 +1383,16 @@ void __fastcall PrefabFuncDetour(void* context, void* stack, void* result) {
         }
 
         const uint64_t blocks = g_prefab_blocks.fetch_add(1) + 1;
-        append_prefab_policy_event("block", blocks, context, locals, denied.hash_hex, denied.asset_name, "PrefabAssetDenied");
+        append_prefab_policy_event(
+            "block",
+            blocks,
+            context,
+            locals,
+            denied.hash_hex,
+            denied.asset_name,
+            "PrefabAssetDenied",
+            denied.required_capabilities,
+            context_capabilities);
         append_log(
             "blocked ServerPastePrefab context=0x%p locals=0x%p prefab_hash=%s asset_name=%s blocks=%llu",
             context,
@@ -1131,7 +1450,8 @@ void __fastcall PlacePrefabApplyDetour(
     }
 
     if (g_enabled.load() && g_block.load() && denied_match) {
-        if (context_is_allowed(context)) {
+        uint32_t context_capabilities = 0;
+        if (context_has_capabilities(context, denied.required_capabilities, &context_capabilities)) {
             const uint64_t allows = g_action_prefab_allows.fetch_add(1) + 1;
             append_prefab_policy_event(
                 "allow",
@@ -1140,7 +1460,9 @@ void __fastcall PlacePrefabApplyDetour(
                 reinterpret_cast<uintptr_t>(action),
                 denied.hash_hex,
                 denied.asset_name,
-                "PlacePrefabActionContextAllowlisted");
+                "PlacePrefabActionContextCapabilitiesSatisfied",
+                denied.required_capabilities,
+                context_capabilities);
             write_status("action-prefab-allowed");
             g_passthrough.fetch_add(1);
             if (g_place_prefab_apply_original) {
@@ -1157,7 +1479,9 @@ void __fastcall PlacePrefabApplyDetour(
             reinterpret_cast<uintptr_t>(action),
             denied.hash_hex,
             denied.asset_name,
-            "PlacePrefabActionDenied");
+            "PlacePrefabActionDenied",
+            denied.required_capabilities,
+            context_capabilities);
         append_log(
             "blocked PlacePrefab action=0x%p context=0x%p payload=0x%p prefab_hash=%s asset_name=%s blocks=%llu",
             action,
@@ -1215,7 +1539,8 @@ void __fastcall PlaceBrickApplyDetour(
     }
 
     if (g_enabled.load() && g_block.load() && denied_match) {
-        if (context_is_allowed(context)) {
+        uint32_t context_capabilities = 0;
+        if (context_has_capabilities(context, denied.required_capabilities, &context_capabilities)) {
             const uint64_t allows = g_action_brick_allows.fetch_add(1) + 1;
             append_policy_event(
                 "allow",
@@ -1224,7 +1549,9 @@ void __fastcall PlaceBrickApplyDetour(
                 reinterpret_cast<uintptr_t>(action),
                 asset,
                 denied.name,
-                "PlaceBrickActionContextAllowlisted");
+                "PlaceBrickActionContextCapabilitiesSatisfied",
+                denied.required_capabilities,
+                context_capabilities);
             write_status("action-brick-allowed");
             g_passthrough.fetch_add(1);
             if (g_place_brick_apply_original) {
@@ -1241,7 +1568,9 @@ void __fastcall PlaceBrickApplyDetour(
             reinterpret_cast<uintptr_t>(action),
             asset,
             denied.name,
-            "PlaceBrickActionDenied");
+            "PlaceBrickActionDenied",
+            denied.required_capabilities,
+            context_capabilities);
         append_log(
             "blocked PlaceBrick action=0x%p context=0x%p record=0x%p asset=0x%p asset_name=%s blocks=%llu",
             action,
@@ -1557,7 +1886,11 @@ DWORD WINAPI worker_thread(void*) {
     }
 
     while (true) {
-        load_control();
+        const bool policy_changed = load_control();
+        if (policy_changed && g_installed.load() &&
+            (g_prefab_function.load() == 0 || g_prefab_installed.load())) {
+            write_status("policy-refreshed");
+        }
         Sleep(1000);
     }
     return 0;

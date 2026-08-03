@@ -182,6 +182,9 @@ const getBmfCommandFromOmeggaLine = (line: string) => {
 export const isOmeggaBookkeepingCommand = (line: string) =>
   /^(?:br\.)?Chat\.MessageForUnknownCommands\s+(?:0|false)$/i.test(line.trim());
 
+export const isEnvironmentControlCommand = (line: string) =>
+  /^(?:br\.)?Server\.Environment\.(?:LoadPreset|Reset)\b.*$/i.test(line);
+
 const DEGRADED_WORLD_COMMAND_PATTERN =
   /^(?:BR\.World\.(?:SaveAs|LoadAdditive|ClearRegion|ClearAll)|Bricks\.(?:Save|SaveRegion|Load|ClearRegion)|br\.Prefab\.(?:SaveRegion|Load))\b.*$/i;
 
@@ -864,12 +867,9 @@ export default class BrickadiaServer extends EventEmitter {
         return true;
       }
 
-      const directEnvironmentCommand = normalizedLine.match(
-        /^(Server\.Environment\.(?:LoadPreset|Reset)\b.*)$/i,
-      );
-      if (directEnvironmentCommand) {
+      if (isEnvironmentControlCommand(normalizedLine)) {
         await this.#ue4ssBridge.execCommand(
-          `Omegga.Bridge.ForceConsoleExecutor consolemanager ${directEnvironmentCommand[1]}`,
+          `Omegga.Bridge.ForceConsoleExecutor consolemanager ${normalizedLine}`,
         );
         return true;
       }

@@ -7,7 +7,7 @@ const { summarizeArchive } = require('./list-brick-assets.js');
 function usage() {
   console.error([
     'Usage:',
-    '  node scripts/build-brick-asset-prefab-index.js <input.brz|input.brdb> [...] [--scan-gallery [dir]] [--clipboard] [--denied-assets <csv>] [--out-json <path>] [--brickadia-root <path>]',
+    '  node scripts/build-brick-asset-prefab-index.js <input.brz|input.brdb> [...] [--scan-gallery [dir]] [--clipboard] [--denied-assets <csv>] [--policy-json <path>] [--out-json <path>] [--brickadia-root <path>]',
     '',
     'Builds a prefab hash/asset index for BrickAssetPlacementGuard.',
   ].join('\n'));
@@ -20,6 +20,7 @@ function parseArgs(argv) {
     galleryDir: '',
     clipboard: false,
     deniedAssets: [],
+    policyJson: '',
     outJson: '',
     brickadiaRoot: '',
   };
@@ -38,6 +39,9 @@ function parseArgs(argv) {
     } else if (token === '--denied-assets') {
       const value = argv[index + 1] || '';
       args.deniedAssets.push(...splitList(value));
+      index += 1;
+    } else if (token === '--policy-json') {
+      args.policyJson = argv[index + 1] || '';
       index += 1;
     } else if (token === '--out-json') {
       args.outJson = argv[index + 1] || '';
@@ -175,10 +179,37 @@ function inferBrickadiaRoot(explicit) {
   throw new Error('Could not locate Brickadia root. Pass --brickadia-root <path>.');
 }
 
+function loadTierRules(args) {
+  const tiers = [];
+  if (args.deniedAssets.length > 0) {
+    tiers.push({
+      capability: 'legacy',
+      assets: uniqueSorted(args.deniedAssets),
+      rules: args.deniedAssets.map(normalizeRule).filter(Boolean),
+    });
+  }
+  if (!args.policyJson) return tiers;
+
+  const policyPath = path.resolve(args.policyJson);
+  const parsed = JSON.parse(fs.readFileSync(policyPath, 'utf8'));
+  const policy = parsed && parsed.policy && typeof parsed.policy === 'object' ? parsed.policy : parsed;
+  const configuredTiers = policy && policy.tiers && typeof policy.tiers === 'object' ? policy.tiers : {};
+  for (const [capability, tier] of Object.entries(configuredTiers)) {
+    const assets = uniqueSorted(tier && (tier.assets || tier.deniedAssets || tier.blockedAssets) || []);
+    if (assets.length === 0) continue;
+    tiers.push({
+      capability: String(capability).trim().toLowerCase(),
+      assets,
+      rules: assets.map(normalizeRule).filter(Boolean),
+    });
+  }
+  return tiers;
+}
+
 function buildIndex(args) {
   const brickadiaRoot = inferBrickadiaRoot(args.brickadiaRoot);
   const hashPrefab = loadHashPrefab(brickadiaRoot);
-  const deniedRules = args.deniedAssets.map(normalizeRule).filter(Boolean);
+  const tierRules = loadTierRules(args);
   const prefabs = [];
 
   for (const input of collectInputs(args)) {
@@ -187,8 +218,17 @@ function buildIndex(args) {
     }
     const summary = summarizeArchive(input, { brickadiaRoot });
     const assetNames = collectAssetNames(summary);
-    const deniedAssets = uniqueSorted(assetNames.filter((asset) =>
-      deniedRules.some((rule) => ruleMatches(asset, rule))));
+    const assetRequirements = [];
+    for (const asset of assetNames) {
+      const requiredCapabilities = uniqueSorted(tierRules
+        .filter((tier) => tier.rules.some((rule) => ruleMatches(asset, rule)))
+        .map((tier) => tier.capability));
+      if (requiredCapabilities.length > 0) {
+        assetRequirements.push({ asset, requiredCapabilities });
+      }
+    }
+    const deniedAssets = assetRequirements.map((item) => item.asset);
+    const requiredCapabilities = uniqueSorted(assetRequirements.flatMap((item) => item.requiredCapabilities));
     const ext = path.extname(input).toLowerCase();
     const hashReport = ext === '.brz' && hashPrefab ? hashPrefab(input) : null;
     const hash = normalizeHash(hashReport && hashReport.brPrefabHashCandidate);
@@ -201,6 +241,8 @@ function buildIndex(args) {
       brPrefabHashCandidate: hash,
       assetNames,
       deniedAssets,
+      assetRequirements,
+      requiredCapabilities,
       brickCount: summary.data.brickCount,
       entityTypeNames: summary.data.entityTypeNames || [],
       basicBrickAssetNames: summary.data.basicBrickAssetNames || [],
@@ -214,6 +256,8 @@ function buildIndex(args) {
       hash: prefab.hash,
       name: prefab.name,
       deniedAssets: prefab.deniedAssets,
+      assetRequirements: prefab.assetRequirements,
+      requiredCapabilities: prefab.requiredCapabilities,
       inputPath: prefab.inputPath,
     }));
 
@@ -224,6 +268,8 @@ function buildIndex(args) {
     data: {
       brickadiaRoot,
       deniedAssets: args.deniedAssets,
+      policyJson: args.policyJson ? path.resolve(args.policyJson) : '',
+      tiers: tierRules.map((tier) => ({ capability: tier.capability, assets: tier.assets })),
       prefabCount: prefabs.length,
       deniedPrefabHashCount: deniedPrefabHashes.length,
       prefabs,

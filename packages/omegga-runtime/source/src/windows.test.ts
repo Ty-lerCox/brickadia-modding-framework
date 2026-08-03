@@ -1,4 +1,5 @@
 import { write as writeServerConfig } from '@brickadia/config';
+import { isEnvironmentControlCommand } from '@brickadia/server';
 import Ue4ssBridgeHost from '@brickadia/ue4ssBridge';
 import RpcPlugin from '@omegga/plugin/plugin_jsonrpc_stdio';
 import { getProcessInvocation } from '@util/process';
@@ -119,6 +120,24 @@ afterEach(() => {
 });
 
 windowsDescribe('Windows platform support', () => {
+  it('recognizes legacy and namespaced environment control commands', () => {
+    expect(
+      isEnvironmentControlCommand('Server.Environment.LoadPreset normal'),
+    ).toBe(true);
+    expect(
+      isEnvironmentControlCommand(
+        'br.Server.Environment.LoadPreset omegga_cityrpg_temp',
+      ),
+    ).toBe(true);
+    expect(isEnvironmentControlCommand('Server.Environment.Reset')).toBe(true);
+    expect(isEnvironmentControlCommand('br.Server.Environment.Reset')).toBe(
+      true,
+    );
+    expect(isEnvironmentControlCommand('br.Server.Minigames.Reset')).toBe(
+      false,
+    );
+  });
+
   it('writes server config to WindowsServer', () => {
     const tempDir = makeTempDir();
     const dataPath = path.join(tempDir, 'data');

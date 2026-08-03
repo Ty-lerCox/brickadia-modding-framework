@@ -1,7 +1,7 @@
 {
   "policy": {
     "savedDir": "C:/Users/tycox/OneDrive/Documents/GitHub/Brickadia/omegga-master/omegga-master/data/Saved",
-    "allowedRoles": [],
+    "allowedRoles": ["Admin"],
     "allowedPlayers": [],
     "allowedContexts": [],
     "allowSinglePlayerContextLearning": true,

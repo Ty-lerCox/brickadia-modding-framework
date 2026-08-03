@@ -1,0 +1,92 @@
+{
+  "policy": {
+    "savedDir": "C:/Users/tycox/OneDrive/Documents/GitHub/Brickadia/omegga-master/omegga-master/data/Saved",
+    "tiers": {
+      "mechanic": {
+        "roles": ["Is Mechanic", "IsMechanic", "Is Space Mechanic", "IsSpaceMechanic"],
+        "assets": [
+          "B_1x1_Gate_WheelEngineSlim",
+          "B_2x2_Thruster",
+          "B_Joint_Wheel",
+          "B_Joint_Wheel_Micro",
+          "B_Joint_Wheel_Suspension",
+          "B_Vehicle_Engine",
+          "Entity_Wheel_Caster",
+          "Entity_Wheel_Deep1",
+          "Entity_Wheel_Deep2",
+          "Entity_Wheel_Deep3",
+          "Entity_Wheel_DogDish1",
+          "Entity_Wheel_DollarSign",
+          "Entity_Wheel_German5",
+          "Entity_Wheel_GoKart",
+          "Entity_Wheel_LandingGear1",
+          "Entity_Wheel_Muscle1",
+          "Entity_Wheel_Muscle2",
+          "Entity_Wheel_Offroad1",
+          "Entity_Wheel_Offroad2",
+          "Entity_Wheel_Racing1",
+          "Entity_Wheel_Racing2B",
+          "Entity_Wheel_Railroad1",
+          "Entity_Wheel_SaladSpinner",
+          "Entity_Wheel_SaladSpinnerFlipped",
+          "Entity_Wheel_Skateboard",
+          "Entity_Wheel_Sport2",
+          "Entity_Wheel_Sport3",
+          "Entity_Wheel_Sport4",
+          "Entity_Wheel_Stance1",
+          "Entity_Wheel_Stance2",
+          "Entity_Wheel_Stance3",
+          "Entity_Wheel_Steelie1",
+          "Entity_Wheel_Steelie2",
+          "Entity_Wheel_Super1",
+          "Entity_Wheel_Super2",
+          "Entity_Wheel_Tracked1",
+          "Entity_Wheel_TrackedSprocket1",
+          "Entity_Wheel_Truck1",
+          "Entity_Wheel_Truck2",
+          "Entity_Wheel_Truck3",
+          "Entity_Wheel_Tuner1",
+          "Entity_Wheel_Tuner2",
+          "Entity_Wheel_Tuner3",
+          "Entity_Wheel_Tuner3Flipped",
+          "Entity_Wheel_Tuner4",
+          "Entity_Wheel_Tuner5",
+          "Entity_Wheel_Tuner6",
+          "Entity_Wheel_Wagon1",
+          "Entity_Wheel_Wagon2",
+          "Entity_Wheel_Whitewall1",
+          "Entity_Wheel_Whitewall2"
+        ]
+      },
+      "admin": {
+        "roles": ["Admin"],
+        "assets": [
+          "B_1x1_Gate_Exec_Character_AddInventoryItem",
+          "B_1x1_Gate_Exec_Character_AddInventoryItemAdv",
+          "B_1x1_Gate_Exec_Character_SetDamage",
+          "B_1x1_Gate_Exec_Character_SetInventoryItem",
+          "B_1x1_Gate_Exec_Character_SetInventoryItemAdv"
+        ]
+      }
+    }
+  },
+  "native": {
+    "controlPath": "C:/Users/tycox/OneDrive/Documents/GitHub/bmf/artifacts/local/placement-asset-guard-control.txt",
+    "statusPath": "C:/Users/tycox/OneDrive/Documents/GitHub/bmf/artifacts/local/placement-asset-guard-status.txt",
+    "eventPath": "C:/Users/tycox/OneDrive/Documents/GitHub/bmf/artifacts/local/placement-asset-guard-events.tsv",
+    "trace": true,
+    "refreshIntervalMilliseconds": 5000,
+    "eventPollIntervalMilliseconds": 500
+  },
+  "prefabs": {
+    "enabled": true,
+    "indexPath": "prefab-index.json"
+  },
+  "feedback": {
+    "enabled": true,
+    "mechanicMessage": "BMF blocked that placement: it requires Is Mechanic or Is Space Mechanic.",
+    "adminMessage": "BMF blocked that placement: this brick is Admin-only.",
+    "mixedMessage": "BMF blocked that prefab: it contains both mechanic-restricted and Admin-only bricks.",
+    "retryMessage": "BMF refreshed your placement permissions. Please try that placement again."
+  }
+}

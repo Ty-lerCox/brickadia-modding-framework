@@ -4,8 +4,11 @@ param(
   [string]$BrickadiaRoot = '',
   [string]$BridgeDir = '',
   [string]$RuntimeBmfDir = '',
-  [string[]]$DeniedAsset = @('Entity_Wheel_Steelie1'),
+  [string[]]$DeniedAsset = @(),
   [string[]]$AllowedContext = @(),
+  [string[]]$AllowedContextCapability = @(),
+  [string]$PolicyConfigPath = '',
+  [string]$PrefabIndexPath = '',
   [string]$ControlPath = '',
   [string]$StatusPath = '',
   [string]$EventPath = '',
@@ -16,6 +19,7 @@ param(
   [switch]$TrustExistingStatus,
   [switch]$SkipInject,
   [switch]$ForceReinject,
+  [switch]$DisableActionHooks,
   [int]$CommandTimeoutSeconds = 30,
   [int]$ResponseTimeoutSeconds = 20,
   [int]$VerificationTimeoutSeconds = 20,
@@ -76,17 +80,54 @@ function Expand-ListValues([string[]]$Values) {
   return @($items.ToArray())
 }
 
-function Find-LatestBridgeDir([string]$BrickadiaRootPath) {
-  $roots = @(
-    (Join-Path $BrickadiaRootPath 'omegga-master/omegga-master/data/ue4ss-bridge'),
-    (Join-Path $BrickadiaRootPath 'omegga-master/omegga-master/data')
-  )
-  foreach ($bridgeRoot in $roots) {
-    if (!(Test-Path -LiteralPath $bridgeRoot)) {
-      continue
+function Get-TieredPolicyInputs([string]$ConfigPath, [string]$IndexPath) {
+  if (!(Test-Path -LiteralPath $ConfigPath -PathType Leaf)) {
+    throw "Tiered placement policy config does not exist: $ConfigPath"
+  }
+  $config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
+  $assets = New-Object System.Collections.Generic.List[string]
+  foreach ($tierProperty in @($config.policy.tiers.PSObject.Properties)) {
+    $capability = [string]$tierProperty.Name
+    foreach ($asset in @($tierProperty.Value.assets)) {
+      $name = ([string]$asset).Trim()
+      if ($name) {
+        $rule = "$name|$capability"
+        if (!$assets.Contains($rule)) { $assets.Add($rule) }
+      }
     }
+  }
+
+  $prefabs = New-Object System.Collections.Generic.List[string]
+  if (Test-Path -LiteralPath $IndexPath -PathType Leaf) {
+    $index = Get-Content -LiteralPath $IndexPath -Raw | ConvertFrom-Json
+    $entries = @($index.deniedPrefabHashes)
+    if ($entries.Count -eq 0 -and $index.data) { $entries = @($index.data.deniedPrefabHashes) }
+    foreach ($entry in $entries) {
+      $hash = ([string]$entry.hash).Trim()
+      $label = if (@($entry.deniedAssets).Count -gt 0) { [string]@($entry.deniedAssets)[0] } else { [string]$entry.name }
+      $capabilities = @($entry.requiredCapabilities | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ }) -join '+'
+      if ($hash -and $capabilities) {
+        $rule = "$hash|$label|$capabilities"
+        if (!$prefabs.Contains($rule)) { $prefabs.Add($rule) }
+      }
+    }
+  }
+
+  return [pscustomobject]@{
+    deniedAssets = @($assets.ToArray())
+    deniedPrefabHashes = @($prefabs.ToArray())
+  }
+}
+
+function Find-LatestBridgeDir([string]$BrickadiaRootPath) {
+  $bridgeRoot = Join-Path $BrickadiaRootPath 'omegga-master/omegga-master/data/ue4ss-bridge'
+  if (Test-Path -LiteralPath $bridgeRoot) {
     $dir = Get-ChildItem -LiteralPath $bridgeRoot -Directory |
-      Where-Object { $_.Name -like 'ue4ss-bridge*' } |
+      Where-Object {
+        $_.Name -match '^[0-9A-Fa-f]{24}$' -and
+        (Test-Path -LiteralPath (Join-Path $_.FullName 'status.json')) -and
+        (Test-Path -LiteralPath (Join-Path $_.FullName 'inbox.ndjson'))
+      } |
       Sort-Object LastWriteTime -Descending |
       Select-Object -First 1
     if ($dir) {
@@ -170,28 +211,33 @@ function Resolve-DeniedAsset([string]$Name) {
   if (!$text) {
     throw "Denied asset name cannot be empty."
   }
-  if ($text -match '^0x[0-9A-Fa-f]+$') {
+  $parts = @($text -split '\|', 3)
+  $assetName = $parts[0].Trim()
+  $capability = if ($parts.Count -ge 2 -and $parts[1].Trim()) { $parts[1].Trim() } else { 'legacy' }
+  if ($assetName -match '^0x[0-9A-Fa-f]+$') {
     return [ordered]@{
-      name = $text
-      address = Convert-HexToUInt64 $text 'denied asset'
+      name = $assetName
+      address = Convert-HexToUInt64 $assetName 'denied asset'
+      capability = $capability
       source = 'explicit-address'
       lines = @()
     }
   }
 
-  $lines = Invoke-BridgeConsole "Omegga.Bridge.DescribeObjectNameLite $text"
+  $lines = Invoke-BridgeConsole "Omegga.Bridge.DescribeObjectNameLite $assetName"
   foreach ($line in $lines) {
     if ($line -match 'hit\[\d+\]\s+addr=0x([0-9A-Fa-f]+)\s+') {
       return [ordered]@{
-        name = $text
+        name = $assetName
         address = [Convert]::ToUInt64($Matches[1], 16)
+        capability = $capability
         source = 'DescribeObjectNameLite'
         lines = $lines
       }
     }
   }
 
-  throw "Could not resolve denied placement asset '$text'.`n$($lines -join "`n")"
+  throw "Could not resolve denied placement asset '$assetName'.`n$($lines -join "`n")"
 }
 
 function Write-PlacementControl(
@@ -208,6 +254,7 @@ function Write-PlacementControl(
   [UInt64]$PlaceBrickResolveVariant,
   [object[]]$DeniedAssets,
   [string[]]$AllowedContexts,
+  [string[]]$AllowedContextCapabilities,
   [string[]]$DeniedPrefabHashes
 ) {
   $lines = @(
@@ -241,10 +288,13 @@ function Write-PlacementControl(
     $lines += "event_path=$([System.IO.Path]::GetFullPath($EventPath))"
   }
   foreach ($asset in @($DeniedAssets)) {
-    $lines += "denied_asset=$(Format-Hex64 ([UInt64]$asset.address))|$($asset.name)"
+    $lines += "denied_asset=$(Format-Hex64 ([UInt64]$asset.address))|$($asset.name)|$($asset.capability)"
   }
   foreach ($context in @(Expand-ListValues $AllowedContexts)) {
     $lines += "allowed_context=$context"
+  }
+  foreach ($contextCapability in @(Expand-ListValues $AllowedContextCapabilities)) {
+    $lines += "allowed_context_capability=$contextCapability"
   }
   foreach ($prefabHash in @(Expand-ListValues $DeniedPrefabHashes)) {
     $lines += "denied_prefab_hash=$prefabHash"
@@ -264,11 +314,13 @@ function Test-ExistingInstalledHook([hashtable]$Status, [UInt64]$FunctionValue, 
   if (!$Status.ContainsKey('prefab_installed') -or [string]$Status['prefab_installed'] -ne '1') {
     return $false
   }
-  if (!$Status.ContainsKey('action_prefab_installed') -or [string]$Status['action_prefab_installed'] -ne '1') {
-    return $false
-  }
-  if (!$Status.ContainsKey('action_brick_installed') -or [string]$Status['action_brick_installed'] -ne '1') {
-    return $false
+  if (!$DisableActionHooks) {
+    if (!$Status.ContainsKey('action_prefab_installed') -or [string]$Status['action_prefab_installed'] -ne '1') {
+      return $false
+    }
+    if (!$Status.ContainsKey('action_brick_installed') -or [string]$Status['action_brick_installed'] -ne '1') {
+      return $false
+    }
   }
   if ($Status.ContainsKey('pid') -and [string]$Status['pid'] -and [int]$Status['pid'] -ne $TargetProcessId) {
     return $false
@@ -292,10 +344,13 @@ function Wait-ForInstalledStatus([string]$Path, [UInt64]$FunctionValue, [UInt64]
   $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
   while ((Get-Date) -lt $deadline) {
     $status = Read-KeyValueFile $Path
+    $actionHooksOk = $DisableActionHooks -or (
+      $status.ContainsKey('action_prefab_installed') -and [string]$status['action_prefab_installed'] -eq '1' -and
+      $status.ContainsKey('action_brick_installed') -and [string]$status['action_brick_installed'] -eq '1'
+    )
     if ($status.ContainsKey('installed') -and [string]$status['installed'] -eq '1' -and
         $status.ContainsKey('prefab_installed') -and [string]$status['prefab_installed'] -eq '1' -and
-        $status.ContainsKey('action_prefab_installed') -and [string]$status['action_prefab_installed'] -eq '1' -and
-        $status.ContainsKey('action_brick_installed') -and [string]$status['action_brick_installed'] -eq '1' -and
+        $actionHooksOk -and
         $status.ContainsKey('function') -and $status.ContainsKey('prefab_function') -and $status.ContainsKey('denied_asset_count')) {
       $statusFunction = Convert-HexToUInt64 ([string]$status['function']) 'status.function'
       $statusPrefabFunction = Convert-HexToUInt64 ([string]$status['prefab_function']) 'status.prefab_function'
@@ -341,6 +396,12 @@ if (!$InjectScript) {
 if (!$SourcePath) {
   $SourcePath = Join-Path $Root 'native/placement_guard/placement_guard.cpp'
 }
+if (!$PolicyConfigPath) {
+  $PolicyConfigPath = Join-Path $Root 'framework/ue4ss/Mods/BMF/plugins/TieredBrickPlacementGuard/config.json'
+}
+if (!$PrefabIndexPath) {
+  $PrefabIndexPath = Join-Path $Root 'framework/ue4ss/Mods/BMF/plugins/TieredBrickPlacementGuard/data/prefab-index.json'
+}
 if (!$BridgeDir) {
   $BridgeDir = Find-LatestBridgeDir $BrickadiaRoot
 }
@@ -362,8 +423,8 @@ if ($ProcessId -eq 0) {
 }
 
 $moduleBase = [UInt64]$serverProcess.MainModule.BaseAddress.ToInt64()
-$placePrefabMethodBlock = $moduleBase + [UInt64]0x6C79D50
-$placeBrickMethodBlock = $moduleBase + [UInt64]0x6C77CE0
+$placePrefabMethodBlock = if ($DisableActionHooks) { [UInt64]0 } else { $moduleBase + [UInt64]0x6C79D50 }
+$placeBrickMethodBlock = if ($DisableActionHooks) { [UInt64]0 } else { $moduleBase + [UInt64]0x6C77CE0 }
 $placeBrickResolveRef = $moduleBase + [UInt64]0x53ABF0
 $placeBrickPrimaryClass = $moduleBase + [UInt64]0x419DF90
 $placeBrickVariantClass = $moduleBase + [UInt64]0x419ED20
@@ -375,6 +436,15 @@ $functionTarget = Resolve-PlacementFunction
 $functionValue = [UInt64]$functionTarget.address
 $prefabFunctionTarget = Resolve-PrefabFunction
 $prefabFunctionValue = [UInt64]$prefabFunctionTarget.address
+$policyInputs = Get-TieredPolicyInputs `
+  -ConfigPath ([System.IO.Path]::GetFullPath($PolicyConfigPath)) `
+  -IndexPath ([System.IO.Path]::GetFullPath($PrefabIndexPath))
+if (@($DeniedAsset).Count -eq 0) {
+  $DeniedAsset = @($policyInputs.deniedAssets)
+}
+if (@($DeniedPrefabHash).Count -eq 0) {
+  $DeniedPrefabHash = @($policyInputs.deniedPrefabHashes)
+}
 $resolvedAssets = New-Object System.Collections.Generic.List[object]
 foreach ($name in @(Expand-ListValues $DeniedAsset)) {
   $resolvedAssets.Add((Resolve-DeniedAsset $name))
@@ -397,6 +467,7 @@ Write-PlacementControl `
   -PlaceBrickResolveVariant $placeBrickResolveVariant `
   -DeniedAssets @($resolvedAssets.ToArray()) `
   -AllowedContexts (Expand-ListValues $AllowedContext) `
+  -AllowedContextCapabilities (Expand-ListValues $AllowedContextCapability) `
   -DeniedPrefabHashes (Expand-ListValues $DeniedPrefabHash)
 
 $statusBefore = Read-KeyValueFile $StatusPath
@@ -465,15 +536,18 @@ $result = [ordered]@{
     [ordered]@{
       name = $_.name
       address = Format-Hex64 ([UInt64]$_.address)
+      capability = $_.capability
       source = $_.source
     }
   })
   allowedContexts = @(Expand-ListValues $AllowedContext)
+  allowedContextCapabilities = @(Expand-ListValues $AllowedContextCapability)
   deniedPrefabHashes = @(Expand-ListValues $DeniedPrefabHash)
   alreadyInstalled = [bool]$alreadyInstalled
   injected = [bool]$injected
   skippedInject = [bool]$SkipInject
   forceReinject = [bool]$ForceReinject
+  actionHooksDisabled = [bool]$DisableActionHooks
   trustedExistingStatus = [bool]$TrustExistingStatus
   controlPath = [System.IO.Path]::GetFullPath($ControlPath)
   statusPath = [System.IO.Path]::GetFullPath($StatusPath)

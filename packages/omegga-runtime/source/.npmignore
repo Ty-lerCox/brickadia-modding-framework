@@ -5,11 +5,14 @@
 /plugins/
 /src/
 /frontend/
+/artifacts/
 .omegga-config.yml
 .omegga.yml
 .prettierrc
 .prettierignore
 config.json
+!templates/windows-ue4ss/ue4ss/Mods/BMF/plugins/InteractConsolePrefixGuard/config.json
+!templates/windows-ue4ss/ue4ss/Mods/BMF/plugins/NoSpawnItemApplicator/config.json
 config.yml
 omegga-config.json
 omegga.json

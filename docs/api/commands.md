@@ -123,9 +123,21 @@ BMF writes those lines to the command response envelope and to `runtime/bmf.log`
 
 Commands registered through a plugin's scoped `BMF` facade are owned by that
 plugin and are automatically removed when the plugin unloads or reloads.
+Command names are exclusive: registering an existing built-in or plugin command
+returns `COMMAND_ALREADY_REGISTERED` without replacing its handler or owner.
+This also ensures cleanup of a failed plugin load cannot delete the registration
+that won the name first.
+
+The scoped plugin facade exposes command registration and listing, but never
+the unrestricted `BMF.commands.dispatch`. In-process plugins should call the
+intended BMF API directly. The access-checked dispatcher is available only to a
+plugin that explicitly declares `commands.dispatchWithAccess`; command dispatch
+otherwise remains a framework/bridge boundary for authenticated external
+routing.
 
 ## Access-Checked Dispatch
 
+The framework-level
 `BMF.commands.dispatchWithAccess(policy, actor, name, args, ar)` dispatches a
 registered command only if the command access policy allows the actor:
 
@@ -137,6 +149,14 @@ local handled = BMF.commands.dispatchWithAccess(
   "name=NightlyBackup",
   ar
 )
+```
+
+A plugin using this wrapper must declare:
+
+```json
+{
+  "capabilities": ["commands.dispatchWithAccess"]
+}
 ```
 
 Denied commands are considered handled and produce console-style lines:

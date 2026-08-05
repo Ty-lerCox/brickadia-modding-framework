@@ -70,6 +70,11 @@ local listeners = BMF.minigames.listenerCount("join")
 BMF.minigames.off(id)
 ```
 
+Subscriptions made through a plugin's scoped BMF facade carry that plugin's
+owner id. They are removed with the plugin during unload, reload, or watchdog
+isolation. Scoped `BMF.minigames.off(id)` cannot remove another plugin's or a
+framework-owned subscription.
+
 Accepted aliases include:
 
 | Alias | Event |

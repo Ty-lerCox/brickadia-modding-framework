@@ -22,12 +22,15 @@
     "test:core": "npm --prefix packages/orchestrator-core test",
     "test:cli": "npm --prefix cli test",
     "doctor": "node cli/bin/bmfctl.js doctor",
+    "sync:runtime-template": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/sync-bmf-runtime-template.ps1",
     "validate": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/validate-package.ps1",
     "validate:workspace": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/validate-workspace.ps1",
     "validate:ci": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/validate-ci-workflows.ps1",
     "validate:desktop": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/validate-bmf-desktop.ps1",
     "validate:orchestrator": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/validate-orchestrator-core.ps1",
     "validate:runtime-packages": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/validate-bmf-runtime-packages.ps1",
+    "validate:runtime-template-parity": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/validate-bmf-runtime-template-parity.ps1",
+    "validate:plugin-facade-safety": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/validate-bmf-plugin-facade-safety.ps1",
     "validate:release": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/validate-release-package.ps1"
   },
   "license": "UNLICENSED"

@@ -40,6 +40,8 @@ smallest needed set.
 | `prefabs.loadBrz` | `BMF.prefabs.loadBrz(options)` |
 | `vehicles.spawnSet` | `BMF.vehicles.spawnSet(options)` |
 | `plugins.storage` | `BMF.storage.*` |
+| `commands.dispatchWithAccess` | Scoped `BMF.commands.dispatchWithAccess(...)`; unrestricted dispatch is never exposed to plugins |
+| `filesystem.raw` | Time-reviewed native-helper interoperability through `io.open` and `io.type`; normal plugin files must use `BMF.storage.*` |
 
 ## Runtime Checks
 

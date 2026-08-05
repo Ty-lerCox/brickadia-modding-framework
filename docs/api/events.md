@@ -35,6 +35,9 @@ plugin and are automatically removed when the plugin unloads or reloads.
 ## `BMF.events.off(id)`
 
 Unregisters a handler id. Returns `true` when a handler was removed.
+The scoped plugin facade can remove only a handler registered by that same
+plugin; an id owned by the framework or another plugin returns `false` and is
+left intact.
 
 ## `BMF.events.emit(name, data)`
 

@@ -2,11 +2,7 @@
   "id": null,
   "uid": "bmf-standard",
   "title": "BMF Standard Server Telemetry",
-  "tags": [
-    "bmf",
-    "brickadia",
-    "omegga"
-  ],
+  "tags": ["bmf", "brickadia", "omegga"],
   "timezone": "browser",
   "schemaVersion": 41,
   "version": 1,
@@ -142,9 +138,7 @@
       },
       "options": {
         "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
+          "calcs": ["lastNotNull"],
           "fields": "",
           "values": false
         },
@@ -194,9 +188,7 @@
       },
       "options": {
         "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
+          "calcs": ["lastNotNull"],
           "fields": "",
           "values": false
         },
@@ -246,9 +238,7 @@
       },
       "options": {
         "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
+          "calcs": ["lastNotNull"],
           "fields": "",
           "values": false
         },
@@ -295,9 +285,7 @@
       },
       "options": {
         "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
+          "calcs": ["lastNotNull"],
           "fields": "",
           "values": false
         },
@@ -462,6 +450,160 @@
           "refId": "A",
           "expr": "sum by (event, source) (rate(bmf_event_total{environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\"}[5m]))",
           "legendFormat": "{{event}} / {{source}}"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "BMF Socket Pump Time / Budget",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 21
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 3
+              },
+              {
+                "color": "red",
+                "value": 16.67
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(bmf_game_thread_slice_duration_milliseconds{worker=\"socket_pump\",statistic=\"last\",environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\"})",
+          "legendFormat": "pump slice"
+        },
+        {
+          "refId": "B",
+          "expr": "max(bmf_game_thread_budget_milliseconds{worker=\"socket_pump\",environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\"})",
+          "legendFormat": "configured budget"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "BMF Scheduler Containment Activity",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 21
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(bmf_game_thread_admission_stopped_total{worker=\"socket_pump\",reason=\"budget\",environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\"}[5m]))",
+          "legendFormat": "admission stops / sec"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(bmf_game_thread_dispatch_skipped_total{worker=\"socket_pump\",path=\"tunnel\",reason=\"budget\",environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\"}[5m]))",
+          "legendFormat": "tunnel deferrals / sec"
+        },
+        {
+          "refId": "C",
+          "expr": "sum by (path) (rate(bmf_game_thread_monolithic_overrun_total{environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\"}[5m]))",
+          "legendFormat": "{{path}} overruns / sec"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "stat",
+      "title": "BMF Pump Budget Enforcement",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 29
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "Disabled",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "Enabled",
+                  "color": "green"
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(bmf_game_thread_budget_enforced{worker=\"socket_pump\",environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\"})",
+          "legendFormat": "enforcement"
         }
       ]
     }

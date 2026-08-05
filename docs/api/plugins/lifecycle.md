@@ -57,9 +57,10 @@ end
 The `bmf.plugins` server command prints the same loaded plugin count plus
 per-plugin version, capability count, error count, and isolation state.
 
-`bmf.unload` unloads currently loaded plugins and removes plugin-owned commands
-and event handlers. `bmf.load` loads plugin directories from disk again without
-restarting the Brickadia server:
+`bmf.unload` unloads currently loaded plugins and removes plugin-owned commands,
+general event handlers, minigame subscriptions, tool handlers, and timers.
+`bmf.load` loads plugin directories from disk again without restarting the
+Brickadia server:
 
 ```text
 bmf.unload
@@ -68,3 +69,9 @@ bmf.load
 
 The console-command canary proves a temporary plugin command works before
 unload, is unloaded, and works again after `bmf.load`.
+
+Framework-wide load and unload functions are intentionally absent from the BMF
+facade passed to plugins. The loader also rejects a second load of the same
+plugin while its first chunk or `onLoad` hook is still in progress. This keeps a
+plugin from recursively re-entering its own lifecycle before the first instance
+has either committed or cleaned up.

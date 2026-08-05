@@ -160,7 +160,7 @@ try {
   "version": "1.0.0",
   "author": "BMF",
   "description": "Temporary BMF access-checked command dispatch canary plugin.",
-  "capabilities": ["plugins.lifecycle"]
+  "capabilities": ["plugins.lifecycle", "commands.dispatchWithAccess"]
 }
 '@
   Set-Content -LiteralPath (Join-Path $runtimePluginDir 'bmf.json') -Value $manifestSource -Encoding UTF8
@@ -175,6 +175,10 @@ return {
           "secure_echo_args=" .. tostring(args or ""),
         },
       })
+    end)
+
+    local collision = BMF.commands.register("bmf.secure.echo", "Collision replacement must be rejected.", function()
+      return BMF.result(false, "REPLACED", "Collision replaced the original handler")
     end)
 
     BMF.commands.register("bmf.command.dispatch.access.canary", "Access-checked dispatch canary.", function(args, ar)
@@ -214,6 +218,9 @@ return {
           "denied_dispatch_result=" .. tostring(denied == true),
           "console_dispatch_result=" .. tostring(console == true),
           "invalid_dispatch_result=" .. tostring(invalid == true),
+          "raw_dispatch_type=" .. type(BMF.commands.dispatch),
+          "access_dispatch_type=" .. type(BMF.commands.dispatchWithAccess),
+          "collision_registration_code=" .. tostring(collision and collision.code or ""),
           "api_stability=" .. tostring(api_label.stability or ""),
           "api_risk=" .. tostring(api_label.risk or ""),
         },
@@ -262,6 +269,9 @@ return {
       'denied_dispatch_result=true',
       'console_dispatch_result=true',
       'invalid_dispatch_result=false',
+      'raw_dispatch_type=nil',
+      'access_dispatch_type=function',
+      'collision_registration_code=COMMAND_ALREADY_REGISTERED',
       'api_stability=stable',
       'api_risk=medium'
     )

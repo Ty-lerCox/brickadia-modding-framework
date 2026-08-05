@@ -134,7 +134,7 @@ try {
     -Name 'BMF runtime' `
     -ComponentId 'bmf-runtime' `
     -PackageRoot 'packages/bmf-runtime' `
-    -RequiredGuardrails @('keep-current-install-path', 'stage-through-orchestrator-core') `
+    -RequiredGuardrails @('keep-current-install-path', 'stage-through-orchestrator-core', 'keep-omegga-template-byte-identical', 'no-async-lua-scheduler-callbacks', 'no-global-delayed-action-clears', 'detect-forbidden-scheduler-aliases', 'lua-5.3-compile-before-package') `
     -ManifestComponent (Get-Component 'bmf-runtime')
 
   Test-RuntimePackage `

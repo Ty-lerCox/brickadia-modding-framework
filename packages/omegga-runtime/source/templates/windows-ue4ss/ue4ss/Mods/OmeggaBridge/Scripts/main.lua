@@ -34,6 +34,24 @@ local GAME_THREAD_HOOK_CANDIDATES = {
 }
 
 local BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+if type(OMEGGA_BRIDGE_STOP_POLLER) == "function" then
+    pcall(OMEGGA_BRIDGE_STOP_POLLER, "replacement")
+end
+OMEGGA_BRIDGE_LOOP_STATE = type(OMEGGA_BRIDGE_LOOP_STATE) == "table" and OMEGGA_BRIDGE_LOOP_STATE or {}
+OMEGGA_BRIDGE_LOOP_STATE.active = OMEGGA_BRIDGE_LOOP_STATE.active == true
+OMEGGA_BRIDGE_LOOP_STATE.generation = tonumber(OMEGGA_BRIDGE_LOOP_STATE.generation) or 0
+OMEGGA_BRIDGE_LOOP_STATE.starts_total = tonumber(OMEGGA_BRIDGE_LOOP_STATE.starts_total) or 0
+OMEGGA_BRIDGE_LOOP_STATE.stops_total = tonumber(OMEGGA_BRIDGE_LOOP_STATE.stops_total) or 0
+OMEGGA_BRIDGE_LOOP_STATE.cancel_total = tonumber(OMEGGA_BRIDGE_LOOP_STATE.cancel_total) or 0
+OMEGGA_BRIDGE_LOOP_STATE.cancel_error_total = tonumber(OMEGGA_BRIDGE_LOOP_STATE.cancel_error_total) or 0
+OMEGGA_BRIDGE_LOOP_STATE.callback_error_total = tonumber(OMEGGA_BRIDGE_LOOP_STATE.callback_error_total) or 0
+OMEGGA_BRIDGE_LOOP_STATE.thread_violation_total = tonumber(OMEGGA_BRIDGE_LOOP_STATE.thread_violation_total) or 0
+OMEGGA_BRIDGE_LOOP_STATE.thread_check_unavailable_total =
+    tonumber(OMEGGA_BRIDGE_LOOP_STATE.thread_check_unavailable_total) or 0
+OMEGGA_BRIDGE_LOOP_STATE.polls_total = tonumber(OMEGGA_BRIDGE_LOOP_STATE.polls_total) or 0
+OMEGGA_BRIDGE_SCHEDULER_MODE = "game_thread_only"
+OMEGGA_BRIDGE_INBOX_SCHEDULER = "unavailable"
+OMEGGA_BRIDGE_MAX_INBOX_MESSAGES_PER_TICK = 1
 local inbox_offset = 0
 local pending_console_execs = {}
 local queue_hook_path = nil
@@ -169,7 +187,6 @@ local retained_callbacks = {}
 local retained_once_callback_order = {}
 local retained_once_callback_limit = 65536
 local retained_callback_serial = 0
-local scheduler_probe_fired = {}
 local chat_trace_sequence = 0
 local chat_hook_poll_counter = 0
 local chat_hook_attempts = {}
@@ -235,8 +252,17 @@ local function retain_once_callback(prefix, callback)
     end
 
     local wrapped
+    local fired = false
     wrapped = retain_callback(key, function(...)
-        local results = table.pack(pcall(callback, ...))
+        if fired then
+            return
+        end
+
+        fired = true
+        release_callback(key)
+        local once_callback = callback
+        callback = nil
+        local results = table.pack(pcall(once_callback, ...))
 
         if not results[1] then
             error(results[2])
@@ -245,16 +271,6 @@ local function retain_once_callback(prefix, callback)
         return table.unpack(results, 2, results.n)
     end)
     return wrapped, key
-end
-
-local function bridge_log_once(key, message)
-    local normalized_key = tostring(key or "")
-    if scheduler_probe_fired[normalized_key] then
-        return
-    end
-
-    scheduler_probe_fired[normalized_key] = true
-    bridge_log("info", message)
 end
 
 local function now_utc()
@@ -348,6 +364,41 @@ local function set_status(state, extra)
         json_string_field("session", SESSION),
         json_string_field("transport", TRANSPORT),
         json_string_field("pipe", PIPE_NAME),
+        json_string_field("scheduler_mode", OMEGGA_BRIDGE_SCHEDULER_MODE),
+        json_string_field("inbox_scheduler", OMEGGA_BRIDGE_INBOX_SCHEDULER),
+        json_bool_field("inbox_loop_active", OMEGGA_BRIDGE_LOOP_STATE.active == true),
+        json_bool_field(
+            "inbox_loop_handle_owned",
+            OMEGGA_BRIDGE_LOOP_STATE.handle == nil
+                or OMEGGA_BRIDGE_LOOP_STATE.handle_owner == "omegga_bridge_inbox"
+        ),
+        string.format("\"inbox_loop_generation\":%d", tonumber(OMEGGA_BRIDGE_LOOP_STATE.generation) or 0),
+        string.format("\"inbox_loop_starts_total\":%d", tonumber(OMEGGA_BRIDGE_LOOP_STATE.starts_total) or 0),
+        string.format("\"inbox_loop_stops_total\":%d", tonumber(OMEGGA_BRIDGE_LOOP_STATE.stops_total) or 0),
+        string.format("\"inbox_loop_cancel_total\":%d", tonumber(OMEGGA_BRIDGE_LOOP_STATE.cancel_total) or 0),
+        string.format(
+            "\"inbox_loop_cancel_error_total\":%d",
+            tonumber(OMEGGA_BRIDGE_LOOP_STATE.cancel_error_total) or 0
+        ),
+        string.format(
+            "\"inbox_loop_callback_error_total\":%d",
+            tonumber(OMEGGA_BRIDGE_LOOP_STATE.callback_error_total) or 0
+        ),
+        string.format(
+            "\"inbox_loop_thread_violation_total\":%d",
+            tonumber(OMEGGA_BRIDGE_LOOP_STATE.thread_violation_total) or 0
+        ),
+        string.format(
+            "\"inbox_loop_thread_check_unavailable_total\":%d",
+            tonumber(OMEGGA_BRIDGE_LOOP_STATE.thread_check_unavailable_total) or 0
+        ),
+        string.format("\"inbox_loop_polls_total\":%d", tonumber(OMEGGA_BRIDGE_LOOP_STATE.polls_total) or 0),
+        json_string_field("inbox_loop_stop_api", "OMEGGA_BRIDGE_STOP_POLLER"),
+        string.format(
+            "\"inbox_max_messages_per_tick\":%d",
+            OMEGGA_BRIDGE_MAX_INBOX_MESSAGES_PER_TICK
+        ),
+        string.format("\"inbox_poll_interval_ms\":%d", 100),
     }
 
     for key, value in pairs(extra) do
@@ -411,6 +462,64 @@ local function bridge_log(level, message)
             json_string_field("updated_at", now_utc()),
         })
     )
+end
+
+function OMEGGA_BRIDGE_STOP_POLLER(reason)
+    local loop_state = OMEGGA_BRIDGE_LOOP_STATE
+    if type(loop_state) ~= "table" then
+        return false
+    end
+
+    local action_handle = loop_state.handle
+    local release = loop_state.release_callback
+    local was_active = loop_state.active == true
+    local owns_handle = loop_state.handle_owner == "omegga_bridge_inbox"
+    local cleaned = action_handle == nil
+    loop_state.active = false
+    loop_state.generation = (tonumber(loop_state.generation) or 0) + 1
+    loop_state.stop_reason = tostring(reason or "shutdown")
+
+    if type(action_handle) == "number" and owns_handle then
+        if type(CancelDelayedAction) == "function" then
+            local cancel_ok, cancel_result = pcall(CancelDelayedAction, action_handle)
+            cleaned = cancel_ok and cancel_result == true
+        else
+            cleaned = false
+        end
+
+        if cleaned then
+            loop_state.cancel_total = (tonumber(loop_state.cancel_total) or 0) + 1
+        else
+            loop_state.cancel_error_total = (tonumber(loop_state.cancel_error_total) or 0) + 1
+        end
+    elseif action_handle ~= nil then
+        cleaned = false
+        loop_state.cancel_error_total = (tonumber(loop_state.cancel_error_total) or 0) + 1
+    end
+
+    if cleaned then
+        loop_state.handle = nil
+        loop_state.handle_owner = nil
+        loop_state.release_callback = nil
+        if type(release) == "function" then
+            pcall(release)
+        end
+    end
+
+    if was_active or action_handle ~= nil then
+        loop_state.stops_total = (tonumber(loop_state.stops_total) or 0) + 1
+        bridge_log(
+            cleaned and "info" or "error",
+            "Inbox poller stop reason="
+                .. loop_state.stop_reason
+                .. " cancelled="
+                .. tostring(cleaned)
+                .. " owned_handle="
+                .. tostring(owns_handle)
+        )
+    end
+
+    return cleaned
 end
 
 local function send_console_chunks(id, command, output)
@@ -517,25 +626,10 @@ local function schedule_on_game_thread(callback)
         bridge_log("info", "Scheduling callback via ExecuteInGameThread EngineTick")
         wrapped_callback = select(1, retain_once_callback("schedule_on_game_thread_engine_tick", callback))
         ExecuteInGameThread(wrapped_callback, EGameThreadMethod.EngineTick)
-        return
+        return true
     end
 
-    if type(ExecuteInGameThreadWithDelay) == "function" then
-        bridge_log("info", "Scheduling callback via ExecuteInGameThreadWithDelay")
-        wrapped_callback = select(1, retain_once_callback("schedule_on_game_thread_delay", callback))
-        ExecuteInGameThreadWithDelay(0, wrapped_callback)
-        return
-    end
-
-    if type(ExecuteAsync) == "function" then
-        bridge_log("warn", "Falling back to ExecuteAsync instead of a game-thread scheduler")
-        wrapped_callback = select(1, retain_once_callback("schedule_on_game_thread_async", callback))
-        ExecuteAsync(wrapped_callback)
-        return
-    end
-
-    bridge_log("warn", "Falling back to direct callback invocation without a scheduler")
-    callback()
+    error("No supported UE4SS EngineTick scheduler is available")
 end
 
 local function trim(value)
@@ -1525,28 +1619,14 @@ local function get_chat_broadcast_objects()
         }, nil
     end
 
-    local cached_objects, cached_error = get_cached_game_objects()
-    if cached_objects then
-        log_typed_chat_resolution(
-            "resolved via cached game objects world="
-                .. tostring(is_valid_object(cached_objects.world))
-                .. " game_mode="
-                .. tostring(is_valid_object(cached_objects.game_mode))
-                .. " game_state="
-                .. tostring(is_valid_object(cached_objects.game_state))
-                .. " game_session="
-                .. tostring(is_valid_object(cached_objects.game_session))
-        )
-        return cached_objects, nil
-    end
-
-    -- Command hooks are opportunistic. Resolve the two bounded server objects
-    -- directly so typed chat also works immediately after startup or reconnect.
+    -- Native command-context caches can outlive the UObject they reference.
+    -- Typed chat must only use hook-cached objects or objects discovered fresh
+    -- on this game-thread callback; otherwise fail closed without dereferencing
+    -- a cross-frame context.
     game_mode = find_first_valid("GameModeBase")
     game_state = find_first_valid("GameStateBase")
     if is_valid_object(game_mode) then
         last_hook_game_mode = game_mode
-        remember_object_world(game_mode)
         game_session = try_get_property_value(game_mode, "GameSession")
         if is_valid_object(game_session) then
             last_hook_game_session = game_session
@@ -1554,9 +1634,6 @@ local function get_chat_broadcast_objects()
     end
     if is_valid_object(game_state) then
         last_hook_game_state = game_state
-        if not is_valid_object(last_hook_world) then
-            remember_object_world(game_state)
-        end
     end
     world = is_valid_object(last_hook_world) and last_hook_world or nil
 
@@ -1579,10 +1656,9 @@ local function get_chat_broadcast_objects()
         }, nil
     end
 
-    log_typed_chat_resolution("minimal resolution found nothing")
+    log_typed_chat_resolution("fail-closed: no fresh server objects")
     return nil,
-        "Minimal typed chat resolution found no cached world, game mode, or game state. "
-            .. tostring(cached_error or "")
+        "Typed chat refused stale cached command context because no fresh world, game mode, or game state was available."
 end
 
 local function get_object_label(object, fallback)
@@ -1787,7 +1863,7 @@ local function probe_callable_method(method_name)
     local lines = { "Probe method: " .. method_name }
     local objects, object_error = get_cached_game_objects()
     if not objects then
-        return table.concat({ lines[1], "cached_game_objects_error=" .. tostring(object_error) }, "\n")
+        table.insert(lines, "cached_game_objects_error=" .. tostring(object_error))
     end
 
     local candidates = {}
@@ -1807,10 +1883,12 @@ local function probe_callable_method(method_name)
         table.insert(candidates, { label = label, object = object })
     end
 
-    add_probe_candidate("world", objects.world)
-    add_probe_candidate("game_mode", objects.game_mode)
-    add_probe_candidate("game_state", objects.game_state)
-    add_probe_candidate("game_session", objects.game_session)
+    if objects then
+        add_probe_candidate("world", objects.world)
+        add_probe_candidate("game_mode", objects.game_mode)
+        add_probe_candidate("game_state", objects.game_state)
+        add_probe_candidate("game_session", objects.game_session)
+    end
 
     local context = select(1, get_cached_command_context())
     add_probe_candidate("cached_context", context)
@@ -1827,6 +1905,37 @@ local function probe_callable_method(method_name)
             local ok, source_object = pcall(FindFirstOf, source_name)
             if ok then
                 add_probe_candidate("FindFirstOf(" .. source_name .. ")", source_object)
+            end
+        end
+    end
+
+    if type(FindAllOf) == "function" then
+        for _, source_name in ipairs(source_classes or {}) do
+            local ok, source_objects = pcall(FindAllOf, source_name)
+            if ok and type(source_objects) == "table" then
+                for index, source_object in ipairs(source_objects) do
+                    if index > 5 then
+                        break
+                    end
+                    add_probe_candidate("FindAllOf(" .. source_name .. ")[" .. tostring(index) .. "]", source_object)
+                end
+            end
+        end
+    end
+
+    if type(prefab_probe_collect_objects) == "function" then
+        for _, source_name in ipairs(source_classes or {}) do
+            local ok, source_objects = pcall(prefab_probe_collect_objects, source_name)
+            if ok and type(source_objects) == "table" then
+                for index, source_object in ipairs(source_objects) do
+                    if index > 5 then
+                        break
+                    end
+                    add_probe_candidate(
+                        "prefab_probe_collect_objects(" .. source_name .. ")[" .. tostring(index) .. "]",
+                        source_object
+                    )
+                end
             end
         end
     end
@@ -1869,6 +1978,178 @@ local function probe_callable_method(method_name)
         end
     end
 
+    return table.concat(lines, "\n")
+end
+
+function OmeggaListFunctionsByHint(spec)
+    if not ALLOW_UNSAFE_PROBES then
+        return "ListFunctionsByHint is disabled by default on Brickadia Windows because reflected lookup is unsafe. Set OMEGGA_UE4SS_UNSAFE_PROBES=1 to re-enable it."
+    end
+
+    local class_raw, hint_raw, limit_raw = trim(tostring(spec or "")):match("^(%S+)%s+(%S+)%s*(%d*)$")
+    if not class_raw or not hint_raw then
+        return "list-functions-by-hint requires: <ClassName[,ClassName...]> <hint[,hint...]> [Limit]"
+    end
+
+    local classes = prefab_probe_parse_classes(class_raw)
+    local hints = prefab_probe_parse_classes(hint_raw)
+    local limit = tonumber(limit_raw or "") or 80
+    if limit < 1 then
+        limit = 1
+    elseif limit > 240 then
+        limit = 240
+    end
+
+    local lower_hints = {}
+    for _, hint in ipairs(hints) do
+        table.insert(lower_hints, string.lower(tostring(hint or "")))
+    end
+
+    local function matches_hint(value)
+        local lowered = string.lower(tostring(value or ""))
+        for _, hint in ipairs(lower_hints) do
+            if hint ~= "" and lowered:find(hint, 1, true) then
+                return true
+            end
+        end
+        return false
+    end
+
+    local lines = {
+        "List functions by hint",
+        "classes=" .. table.concat(classes, ","),
+        "hints=" .. table.concat(hints, ","),
+        "limit=" .. tostring(limit),
+    }
+    local seen_objects = {}
+    local seen_functions = {}
+    local total = 0
+
+    local function append_holder_functions(source_label, holder)
+        if total >= limit or not is_valid_object(holder) or type(holder.ForEachFunction) ~= "function" then
+            return
+        end
+
+        local holder_label = get_object_label(holder, source_label)
+        local ok, iter_error = pcall(function()
+            holder:ForEachFunction(function(func)
+                local entry_ok, stop = pcall(function()
+                    if total >= limit then
+                        return true
+                    end
+
+                    local short_name = get_object_short_name(func, "")
+                    local full_name = get_object_label(func, short_name)
+                    if not matches_hint(short_name) and not matches_hint(full_name) then
+                        return false
+                    end
+
+                    local function_key = get_object_address_string(func) or full_name
+                    if seen_functions[function_key] then
+                        return false
+                    end
+                    seen_functions[function_key] = true
+                    total = total + 1
+
+                    local params = "<signature unavailable>"
+                    local params_ok, params_or_error = pcall(function()
+                        return describe_function_parameters(build_function_parameters(func))
+                    end)
+                    if params_ok then
+                        params = tostring(params_or_error or "")
+                    end
+
+                    table.insert(
+                        lines,
+                        "hit["
+                            .. tostring(total)
+                            .. "] source="
+                            .. tostring(source_label)
+                            .. " holder="
+                            .. holder_label
+                            .. " function="
+                            .. tostring(full_name)
+                            .. " params=["
+                            .. params
+                            .. "]"
+                    )
+                    return false
+                end)
+                if not entry_ok then
+                    table.insert(lines, tostring(source_label) .. " function_entry_error=" .. tostring(stop))
+                    return false
+                end
+                return stop == true
+            end)
+        end)
+
+        if not ok then
+            table.insert(lines, tostring(source_label) .. " iteration_error=" .. tostring(iter_error))
+        end
+    end
+
+    local function append_object(source_label, object)
+        if not is_valid_object(object) then
+            return
+        end
+
+        local object_key = get_object_address_string(object) or tostring(object)
+        if seen_objects[object_key] then
+            return
+        end
+        seen_objects[object_key] = true
+
+        append_holder_functions(source_label .. ":object", object)
+
+        local ok_class, class_object = pcall(function()
+            return object:GetClass()
+        end)
+        if ok_class and is_valid_object(class_object) then
+            append_holder_functions(source_label .. ":class", class_object)
+        end
+    end
+
+    for _, class_name in ipairs(classes) do
+        local found_count = 0
+        if type(prefab_probe_collect_objects) == "function" then
+            local ok, objects = pcall(prefab_probe_collect_objects, class_name)
+            if ok and type(objects) == "table" then
+                for index, object in ipairs(objects) do
+                    found_count = found_count + 1
+                    append_object("prefab_probe_collect_objects(" .. class_name .. ")[" .. tostring(index) .. "]", object)
+                    if total >= limit then
+                        break
+                    end
+                end
+            end
+        end
+
+        if found_count == 0 and type(FindObjects) == "function" then
+            local banned_flags = EObjectFlags.RF_ClassDefaultObject | EObjectFlags.RF_ArchetypeObject
+            local ok, objects = pcall(function()
+                return FindObjects(8, nil, class_name, EObjectFlags.RF_NoFlags, banned_flags, false)
+            end)
+            if ok and type(objects) == "table" then
+                for index, object in ipairs(objects) do
+                    found_count = found_count + 1
+                    append_object("FindObjects(" .. class_name .. ")[" .. tostring(index) .. "]", object)
+                    if total >= limit then
+                        break
+                    end
+                end
+            end
+        end
+
+        if found_count == 0 then
+            table.insert(lines, "class=" .. tostring(class_name) .. " found=0")
+        end
+
+        if total >= limit then
+            break
+        end
+    end
+
+    table.insert(lines, "hits=" .. tostring(total))
     return table.concat(lines, "\n")
 end
 
@@ -2169,6 +2450,26 @@ function prefab_probe_collect_objects(class_name)
     end
 
     return objects
+end
+
+function prefab_probe_find_object(class_name)
+    local object = find_first_valid(class_name)
+    if is_valid_object(object) then
+        return object, "FindFirstOf(" .. tostring(class_name) .. ")"
+    end
+
+    if type(prefab_probe_collect_objects) == "function" then
+        local collect_ok, objects = pcall(prefab_probe_collect_objects, class_name)
+        if collect_ok and type(objects) == "table" then
+            for _, candidate in ipairs(objects) do
+                if is_valid_object(candidate) then
+                    return candidate, "prefab_probe_collect_objects(" .. tostring(class_name) .. ")"
+                end
+            end
+        end
+    end
+
+    return nil, "unavailable"
 end
 
 function prefab_probe_object_flag_summary(object)
@@ -3023,18 +3324,19 @@ local function build_brplayerstate_owner_output(target_state_name)
 end
 
 function get_omegga_compat_player_state_records()
-    if os.getenv("OMEGGA_UE4SS_PLAYER_COMPAT_USE_GAME_OBJECTS") == "1" then
-        local objects = select(1, get_cached_game_objects())
-        if objects then
-            return get_cached_player_state_records(objects.game_state, objects.world)
+    local objects = select(1, get_cached_game_objects())
+    if objects then
+        local cached_records = get_cached_player_state_records(objects.game_state, objects.world)
+        if #cached_records > 0 then
+            return cached_records
         end
     end
 
-    if os.getenv("OMEGGA_UE4SS_PLAYER_COMPAT_USE_FINDALL") == "1" then
-        return get_cached_player_state_records(nil, nil)
-    end
-
-    return {}
+    -- Join/controller recovery is event-driven and only reaches this path when
+    -- the cached game-state list is unavailable. Keep the fallback bounded to
+    -- the existing player-state classes instead of leaving Omegga's player
+    -- records permanently without controller and state identifiers.
+    return get_cached_player_state_records(nil, nil)
 end
 
 function build_bp_playercontroller_pawn_output(target_controller_name)
@@ -3255,9 +3557,6 @@ end
 
 local function build_chat_runtime_context(objects, message)
     local cached_context = is_valid_object(last_hook_context) and last_hook_context or nil
-    if not is_valid_object(cached_context) then
-        cached_context = select(1, get_cached_command_context())
-    end
 
     local cached_executor = is_valid_object(last_hook_executor) and last_hook_executor or nil
     if not is_valid_object(cached_executor) and is_valid_object(cached_context) then
@@ -3833,12 +4132,29 @@ function OmeggaProbeCallByName(spec)
     }
 
     local ok, object = pcall(FindFirstOf, class_name)
+    local target_source = "FindFirstOf(" .. tostring(class_name) .. ")"
+    if not ok or not is_valid_object(object) then
+        if type(prefab_probe_collect_objects) == "function" then
+            local collect_ok, objects = pcall(prefab_probe_collect_objects, class_name)
+            if collect_ok and type(objects) == "table" then
+                for _, candidate in ipairs(objects) do
+                    if is_valid_object(candidate) then
+                        object = candidate
+                        ok = true
+                        target_source = "prefab_probe_collect_objects(" .. tostring(class_name) .. ")"
+                        break
+                    end
+                end
+            end
+        end
+    end
     if not ok or not is_valid_object(object) then
         table.insert(lines, "target=unavailable detail=" .. tostring(ok and object or object))
         return table.concat(lines, "\n")
     end
 
     table.insert(lines, "target=" .. get_object_label(object, class_name))
+    table.insert(lines, "target_source=" .. target_source)
 
     local executors = {}
     local seen_executors = {}
@@ -3903,13 +4219,14 @@ function OmeggaProbeFunctionSignature(spec)
         "Probe function signature: " .. tostring(class_name) .. " -> " .. tostring(function_name),
     }
 
-    local ok, object = pcall(FindFirstOf, class_name)
-    if not ok or not is_valid_object(object) then
-        table.insert(lines, "target=unavailable detail=" .. tostring(ok and object or object))
+    local object, object_source = prefab_probe_find_object(class_name)
+    if not is_valid_object(object) then
+        table.insert(lines, "target=unavailable detail=" .. tostring(object_source))
         return table.concat(lines, "\n")
     end
 
     table.insert(lines, "target=" .. get_object_label(object, class_name))
+    table.insert(lines, "target_source=" .. tostring(object_source))
 
     local class = object:GetClass()
     if not is_valid_object(class) or type(class.ForEachFunction) ~= "function" then
@@ -4012,13 +4329,14 @@ function OmeggaProbeFunctionFields(spec)
         "Probe function fields: " .. tostring(class_name) .. " -> " .. tostring(function_name),
     }
 
-    local ok, object = pcall(FindFirstOf, class_name)
-    if not ok or not is_valid_object(object) then
-        table.insert(lines, "target=unavailable detail=" .. tostring(ok and object or object))
+    local object, object_source = prefab_probe_find_object(class_name)
+    if not is_valid_object(object) then
+        table.insert(lines, "target=unavailable detail=" .. tostring(object_source))
         return table.concat(lines, "\n")
     end
 
     table.insert(lines, "target=" .. get_object_label(object, class_name))
+    table.insert(lines, "target_source=" .. tostring(object_source))
 
     local member_ok, func = pcall(function()
         return object[function_name]
@@ -4084,6 +4402,24 @@ function OmeggaForceConsoleExecutor(spec)
     end
 
     executor = string.lower(trim(executor))
+    local consolemanager_offset = nil
+    local consolemanager_offset_text = nil
+    do
+        local offset_text = executor:match("^consolemanager:(.+)$") or executor:match("^console:(.+)$")
+        if offset_text then
+            consolemanager_offset_text = trim(offset_text)
+            local hex_digits = consolemanager_offset_text:match("^0x([0-9a-f]+)$")
+            if hex_digits then
+                consolemanager_offset = tonumber(hex_digits, 16)
+            else
+                consolemanager_offset = tonumber(consolemanager_offset_text)
+            end
+            if not consolemanager_offset then
+                return "consolemanager invalid_offset=" .. tostring(consolemanager_offset_text)
+            end
+            executor = executor:match("^(.-):") or executor
+        end
+    end
     if executor == "engine" then
         if type(OmeggaExecuteCachedEngineExec) ~= "function" then
             return "engine helper missing"
@@ -4112,8 +4448,14 @@ function OmeggaForceConsoleExecutor(spec)
         if type(OmeggaExecuteConsoleManagerInput) ~= "function" then
             return "consolemanager helper missing"
         end
-        local ok, success, output = pcall(OmeggaExecuteConsoleManagerInput, command)
-        return "consolemanager ok=" .. tostring(ok) .. " success=" .. tostring(success) .. " detail=" .. trim(tostring(output or ""))
+        local ok, success, output
+        if consolemanager_offset then
+            ok, success, output = pcall(OmeggaExecuteConsoleManagerInput, command, consolemanager_offset)
+        else
+            ok, success, output = pcall(OmeggaExecuteConsoleManagerInput, command)
+        end
+        local offset_detail = consolemanager_offset and (" offset=" .. tostring(consolemanager_offset_text)) or ""
+        return "consolemanager ok=" .. tostring(ok) .. " success=" .. tostring(success) .. offset_detail .. " detail=" .. trim(tostring(output or ""))
     end
 
     return "unknown executor: " .. tostring(executor)
@@ -4402,8 +4744,6 @@ local function build_fast_chat_sources(objects, context)
     local cached_context = nil
     if type(context) == "table" and is_valid_object(context.cached_context) then
         cached_context = context.cached_context
-    else
-        cached_context = select(1, get_cached_command_context())
     end
     local fallback_contexts = {}
     local fallback_seen = {}
@@ -5837,6 +6177,12 @@ local function try_emulate_command(command)
         return true, "emulated-probe-function-fields", OmeggaProbeFunctionFields(trim(probe_function_fields))
     end
 
+    local list_functions_by_hint = command:match("^Omegga%.Bridge%.ListFunctionsByHint%s+(.+)$")
+        or command:match("^Omegga%.Bridge%.ListFunctions%s+(.+)$")
+    if list_functions_by_hint and trim(list_functions_by_hint) ~= "" then
+        return true, "emulated-list-functions-by-hint", OmeggaListFunctionsByHint(trim(list_functions_by_hint))
+    end
+
     local force_console_executor = command:match("^Omegga%.Bridge%.ForceConsoleExecutor%s+(.+)$")
     if force_console_executor and trim(force_console_executor) ~= "" then
         return true, "emulated-force-console-executor", OmeggaForceConsoleExecutor(trim(force_console_executor))
@@ -6249,8 +6595,7 @@ local function execute_command(id, command)
         local has_engine_tick_scheduler = type(ExecuteInGameThread) == "function"
             and type(EGameThreadMethod) == "table"
             and EGameThreadMethod.EngineTick ~= nil
-        local has_delayed_scheduler = type(ExecuteInGameThreadWithDelay) == "function"
-        if not has_engine_tick_scheduler and not has_delayed_scheduler then
+        if not has_engine_tick_scheduler then
             bridge_log("warn", "Cannot apply Chat.MessageForUnknownCommands without a game-thread scheduler")
             finish_command_success(id, command, "noop", "")
             return
@@ -6531,6 +6876,9 @@ local function handle_message(line)
         if objects then
             player_records = get_cached_player_state_records(objects.game_state, objects.world)
         end
+        if #player_records == 0 then
+            player_records = get_cached_player_state_records(nil, nil)
+        end
 
         send_response(
             message.id,
@@ -6605,63 +6953,24 @@ local function handle_message(line)
     )
 end
 
-local function schedule_scheduler_probes()
+local function schedule_game_thread_scheduler_probes()
     if not DEBUG_SCHEDULER then
         return
     end
 
-    if type(ExecuteWithDelay) == "function" then
-        ExecuteWithDelay(1000, select(1, retain_once_callback("scheduler_probe_execute_with_delay", function()
-            bridge_log("info", "Scheduler probe fired via ExecuteWithDelay")
-        end)))
-    end
-
-    if type(ExecuteInGameThread) == "function"
-        and type(EGameThreadMethod) == "table"
-        and EGameThreadMethod.EngineTick ~= nil then
-        ExecuteInGameThread(select(1, retain_once_callback("scheduler_probe_execute_in_game_thread", function()
-            bridge_log("info", "Scheduler probe fired via ExecuteInGameThread")
-        end)), EGameThreadMethod.EngineTick)
-    end
-
-    if type(ExecuteInGameThreadWithDelay) == "function" then
-        ExecuteInGameThreadWithDelay(1000, select(1, retain_once_callback("scheduler_probe_in_game_thread_delay", function()
-            bridge_log("info", "Scheduler probe fired via ExecuteInGameThreadWithDelay")
-        end)))
-    end
-
-    if type(ExecuteInGameThreadAfterFrames) == "function" then
-        ExecuteInGameThreadAfterFrames(6, select(1, retain_once_callback("scheduler_probe_after_frames", function()
-            bridge_log("info", "Scheduler probe fired via ExecuteInGameThreadAfterFrames")
-        end)))
-    end
-
-    if type(LoopInGameThreadWithDelay) == "function" then
-        LoopInGameThreadWithDelay(1000, retain_callback("scheduler_probe_loop_game_thread_delay", function()
-            bridge_log_once(
-                "scheduler_probe_loop_game_thread_delay",
-                "Scheduler probe fired via LoopInGameThreadWithDelay"
-            )
-            return true
-        end))
-    end
-
-    if type(LoopInGameThreadAfterFrames) == "function" then
-        LoopInGameThreadAfterFrames(6, retain_callback("scheduler_probe_loop_game_thread_frames", function()
-            bridge_log_once(
-                "scheduler_probe_loop_game_thread_frames",
-                "Scheduler probe fired via LoopInGameThreadAfterFrames"
-            )
-            return true
-        end))
-    end
-
-    if type(LoopAsync) == "function" then
-        LoopAsync(1000, retain_callback("scheduler_probe_loop_async", function()
-            bridge_log_once("scheduler_probe_loop_async", "Scheduler probe fired via LoopAsync")
-            return true
-        end))
-    end
+    -- Capability inspection is deliberately non-registering. A repeating action
+    -- used as a probe is still a real loop and can outlive a failed callback.
+    bridge_log(
+        "info",
+        "Scheduler capability audit"
+            .. " execute_game_thread=" .. tostring(type(ExecuteInGameThread) == "function")
+            .. " execute_delay=" .. tostring(type(ExecuteInGameThreadWithDelay) == "function")
+            .. " execute_frames=" .. tostring(type(ExecuteInGameThreadAfterFrames) == "function")
+            .. " loop_delay=" .. tostring(type(LoopInGameThreadWithDelay) == "function")
+            .. " loop_frames=" .. tostring(type(LoopInGameThreadAfterFrames) == "function")
+            .. " cancel=" .. tostring(type(CancelDelayedAction) == "function")
+            .. " engine_tick=" .. tostring(EngineTickAvailable == true)
+    )
 end
 
 local function describe_remote_object(param)
@@ -10839,10 +11148,6 @@ local function schedule_runtime_status_snapshot()
         return
     end
 
-    if type(ExecuteWithDelay) ~= "function" then
-        return
-    end
-
     local callback = select(1, retain_once_callback("runtime_status_snapshot", function()
         local ok, err = pcall(log_runtime_status_snapshot)
         if not ok then
@@ -10850,7 +11155,12 @@ local function schedule_runtime_status_snapshot()
         end
     end))
 
-    ExecuteWithDelay(5000, callback)
+    if type(ExecuteInGameThreadAfterFrames) == "function" then
+        ExecuteInGameThreadAfterFrames(300, callback)
+        return
+    end
+
+    bridge_log("warn", "Runtime status snapshot skipped: no game-thread delayed scheduler is available")
 end
 
 local function register_bridge_console_features()
@@ -10981,113 +11291,157 @@ end
 
 poll_inbox = nil
 
-function start_async_inbox_poller()
+function start_game_thread_inbox_poller()
+    local loop_state = OMEGGA_BRIDGE_LOOP_STATE
+
     local function run_poll_cycle()
+        loop_state.polls_total = (tonumber(loop_state.polls_total) or 0) + 1
+        loop_state.last_error = nil
+        if type(IsInGameThread) == "function" then
+            local thread_ok, on_game_thread = pcall(IsInGameThread)
+            if not thread_ok or not on_game_thread then
+                loop_state.thread_violation_total =
+                    (tonumber(loop_state.thread_violation_total) or 0) + 1
+                loop_state.last_error = "inbox_poller_left_game_thread"
+                bridge_log("error", "Inbox poller refused to run outside the game thread")
+                return false
+            end
+        else
+            loop_state.thread_check_unavailable_total =
+                (tonumber(loop_state.thread_check_unavailable_total) or 0) + 1
+            if not loop_state.thread_check_unavailable_logged then
+                loop_state.thread_check_unavailable_logged = true
+                bridge_log("warn", "IsInGameThread is unavailable; relying on the game-thread-only delayed scheduler")
+            end
+        end
+
         local ok, keep_running_or_error = pcall(poll_inbox)
         if not ok then
+            loop_state.callback_error_total =
+                (tonumber(loop_state.callback_error_total) or 0) + 1
+            loop_state.last_error = "inbox_poller_crashed"
             bridge_log("error", "Inbox poller crashed: " .. tostring(keep_running_or_error))
-            set_status("error", { detail = "inbox_poller_crashed" })
             return false
         end
 
         return keep_running_or_error ~= false
     end
 
-    local callback_key = "async_inbox_poller_tick"
+    local stopped = OMEGGA_BRIDGE_STOP_POLLER("replacement")
+    if not stopped then
+        bridge_log("error", "Refusing to replace an inbox poller whose delayed action could not be cancelled")
+        return false
+    end
 
-    local function schedule_next_tick()
-        if type(LoopAsync) == "function" then
-            LoopAsync(100, retain_callback("async_inbox_loop_async", function()
-                return not run_poll_cycle()
-            end))
-            return true
+    if type(CancelDelayedAction) ~= "function" then
+        bridge_log("error", "Inbox poller requires CancelDelayedAction for explicit lifecycle ownership")
+        return false
+    end
+
+    if type(ExecuteInGameThreadAfterFrames) ~= "function"
+        or type(ExecuteInGameThread) ~= "function"
+        or type(EGameThreadMethod) ~= "table"
+        or EGameThreadMethod.EngineTick == nil then
+        return false
+    end
+
+    OMEGGA_BRIDGE_INBOX_SCHEDULER = "ExecuteInGameThreadAfterFramesChain"
+    loop_state.generation = (tonumber(loop_state.generation) or 0) + 1
+    local generation = loop_state.generation
+    local callback_key = "game_thread_inbox_delay_chain:" .. tostring(generation)
+    local callback
+    local schedule_next_tick
+
+    schedule_next_tick = function()
+        if loop_state.active ~= true or loop_state.generation ~= generation then
+            return false, "inbox_poller_inactive"
         end
 
-        if type(MakeActionHandle) == "function" and type(ExecuteInGameThreadWithDelay) == "function" then
-            local action_handle = MakeActionHandle()
-            local callback
-            callback = retain_callback(callback_key, function()
-                if not run_poll_cycle() then
-                    if type(CancelDelayedAction) == "function" then
-                        pcall(CancelDelayedAction, action_handle)
-                    end
-                    return
-                end
-
-                ExecuteInGameThreadWithDelay(action_handle, 100, callback)
-            end)
-            ExecuteInGameThreadWithDelay(action_handle, 100, callback)
-            return true
+        -- Each link is a distinct owned one-shot. Six EngineTick frames is the
+        -- bounded equivalent of the prior 100 ms poll cadence.
+        local scheduled, handle_or_error = pcall(ExecuteInGameThreadAfterFrames, 6, callback)
+        if not scheduled or type(handle_or_error) ~= "number" then
+            return false, tostring(handle_or_error or "missing action handle")
         end
 
-        local callback = retain_callback(callback_key, function()
+        loop_state.handle = handle_or_error
+        loop_state.handle_owner = "omegga_bridge_inbox"
+        return true, handle_or_error
+    end
+
+    callback = retain_callback(callback_key, function()
+        if loop_state.active ~= true or loop_state.generation ~= generation then
+            return
+        end
+
+        -- The one-shot that entered this callback is complete, so it is no
+        -- longer an outstanding action for the stop path to cancel.
+        loop_state.handle = nil
+        loop_state.handle_owner = nil
+
+        -- Leave the native delayed traversal before polling or registering the
+        -- successor. This trampoline is safe with both the old and patched DLL.
+        local dispatch_ok, dispatched_or_error = pcall(schedule_on_game_thread, function()
+            if loop_state.active ~= true or loop_state.generation ~= generation then
+                return
+            end
             if not run_poll_cycle() then
+                local detail = tostring(loop_state.last_error or "inbox_poller_stopped")
+                OMEGGA_BRIDGE_STOP_POLLER(detail)
+                set_status("error", { detail = detail })
                 return
             end
 
-            schedule_next_tick()
+            local rescheduled, handle_or_error = schedule_next_tick()
+            if not rescheduled then
+                local detail = "inbox_poller_reschedule_failed: " .. tostring(handle_or_error)
+                loop_state.last_error = detail
+                OMEGGA_BRIDGE_STOP_POLLER(detail)
+                set_status("error", { detail = detail })
+                bridge_log("error", "Inbox poller one-shot reschedule failed: " .. tostring(handle_or_error))
+            end
         end)
-
-        if type(ExecuteWithDelay) == "function" then
-            ExecuteWithDelay(100, callback)
-            return true
+        if not dispatch_ok or dispatched_or_error ~= true then
+            local detail = "inbox_poller_engine_tick_dispatch_failed: " .. tostring(dispatched_or_error)
+            loop_state.last_error = detail
+            OMEGGA_BRIDGE_STOP_POLLER(detail)
+            set_status("error", { detail = detail })
         end
+    end)
 
-        if type(ExecuteInGameThreadWithDelay) == "function" then
-            ExecuteInGameThreadWithDelay(100, callback)
-            return true
-        end
-
-        if type(ExecuteInGameThreadAfterFrames) == "function" then
-            ExecuteInGameThreadAfterFrames(6, callback)
-            return true
-        end
-
-        if type(LoopInGameThreadWithDelay) == "function" then
-            LoopInGameThreadWithDelay(100, retain_callback("async_inbox_loop_game_thread_delay", function()
-                return not run_poll_cycle()
-            end))
-            return true
-        end
-
-        if type(LoopInGameThreadAfterFrames) == "function" then
-            LoopInGameThreadAfterFrames(6, retain_callback("async_inbox_loop_game_thread_frames", function()
-                return not run_poll_cycle()
-            end))
-            return true
-        end
-
+    loop_state.active = true
+    loop_state.last_error = nil
+    loop_state.release_callback = function()
+        release_callback(callback_key)
+    end
+    local scheduled, handle_or_error = schedule_next_tick()
+    if not scheduled then
+        loop_state.handle = nil
+        loop_state.last_error = "inbox_poller_missing_action_handle"
+        OMEGGA_BRIDGE_STOP_POLLER("start_failed")
+        bridge_log(
+            "error",
+            "Inbox poller one-shot scheduler did not return a cancellable action handle: "
+                .. tostring(handle_or_error)
+        )
         return false
     end
 
-    local scheduler_name = nil
-    if type(LoopAsync) == "function" then
-        scheduler_name = "LoopAsync"
-    elseif type(MakeActionHandle) == "function" and type(ExecuteInGameThreadWithDelay) == "function" then
-        scheduler_name = "ExecuteInGameThreadWithDelay(handle)"
-    elseif type(ExecuteWithDelay) == "function" then
-        scheduler_name = "ExecuteWithDelay"
-    elseif type(ExecuteInGameThreadWithDelay) == "function" then
-        scheduler_name = "ExecuteInGameThreadWithDelay"
-    elseif type(ExecuteInGameThreadAfterFrames) == "function" then
-        scheduler_name = "ExecuteInGameThreadAfterFrames"
-    elseif type(LoopInGameThreadWithDelay) == "function" then
-        scheduler_name = "LoopInGameThreadWithDelay"
-    elseif type(LoopInGameThreadAfterFrames) == "function" then
-        scheduler_name = "LoopInGameThreadAfterFrames"
-    else
-        return false
-    end
-
-    bridge_log("info", "Starting inbox poller via " .. scheduler_name)
-    return schedule_next_tick()
+    loop_state.starts_total = (tonumber(loop_state.starts_total) or 0) + 1
+    bridge_log(
+        "info",
+        "Starting game-thread-only inbox poller via "
+            .. OMEGGA_BRIDGE_INBOX_SCHEDULER
+            .. " handle="
+            .. tostring(handle_or_error)
+    )
+    return true
 end
 
 set_status("starting", { detail = "initializing" })
 bridge_log("info", "bridge mod loaded")
 send_hello()
-set_status("running", { detail = "awaiting commands" })
-schedule_scheduler_probes()
+schedule_game_thread_scheduler_probes()
 schedule_runtime_status_snapshot()
 register_bridge_console_features()
 
@@ -11107,26 +11461,55 @@ poll_inbox = function()
         end
     end
 
-    local contents = read_file(INBOX_PATH)
-    if not contents or contents == "" then
+    local file = io.open(INBOX_PATH, "rb")
+    if not file then
         return true
     end
 
-    if #contents <= inbox_offset then
+    local file_size = file:seek("end")
+    if not file_size then
+        file:close()
         return true
     end
 
-    local next_chunk = contents:sub(inbox_offset + 1)
-    inbox_offset = #contents
+    if file_size < inbox_offset then
+        inbox_offset = 0
+    end
+    if file_size <= inbox_offset then
+        file:close()
+        return true
+    end
 
-    for line in next_chunk:gmatch("[^\r\n]+") do
-        handle_message(line)
+    if not file:seek("set", inbox_offset) then
+        file:close()
+        error("Unable to seek OmeggaBridge inbox")
+    end
+
+    -- Process exactly one record per tick. This matches the existing BMF
+    -- command-worker bound and prevents a burst from monopolizing the game thread.
+    local line = file:read("*l")
+    local next_offset = file:seek()
+    file:close()
+    inbox_offset = next_offset or file_size
+
+    if line then
+        line = line:gsub("\r$", "")
+        if line ~= "" then
+            handle_message(line)
+        end
     end
 
     return true
 end
 
-if not start_async_inbox_poller() then
-    bridge_log("error", "No supported UE4SS loop function is available for inbox polling")
+OMEGGA_BRIDGE_POLLER_START_OK, OMEGGA_BRIDGE_POLLER_STARTED_OR_ERROR = pcall(start_game_thread_inbox_poller)
+if not OMEGGA_BRIDGE_POLLER_START_OK or not OMEGGA_BRIDGE_POLLER_STARTED_OR_ERROR then
+    bridge_log(
+        "error",
+        "No supported UE4SS game-thread delayed function is available for inbox polling: "
+            .. tostring(OMEGGA_BRIDGE_POLLER_STARTED_OR_ERROR)
+    )
     set_status("error", { detail = "missing_loop_scheduler" })
+else
+    set_status("running", { detail = "awaiting commands" })
 end

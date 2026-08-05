@@ -26,11 +26,20 @@ audit records, or reload recovery.
 When a plugin is isolated:
 
 - future plugin hooks are skipped;
-- plugin-owned console commands return `PLUGIN_ISOLATED` before the handler
-  runs;
+- plugin-owned event and tool registrations are removed, and owned timers are
+  cancelled;
+- plugin-owned command handlers are released while a small command tombstone is
+  retained to report `PLUGIN_ISOLATED`;
+- an already-snapshotted plugin event or tool handler is skipped before it can
+  run;
+- plugin-owned console commands that race with isolation return
+  `PLUGIN_ISOLATED` before the handler runs;
 - `runtime/audit.jsonl` receives a `plugin.isolated` record;
 - `BMF.plugins.list()` includes `errorCount`, `isolated`, `isolatedAt`,
   `isolatedReason`, and `lastError`.
+
+Failures from plugin-owned event handlers are routed through the same
+`onError` and watchdog path as lifecycle hooks and plugin commands.
 
 Server-console watchdog route:
 

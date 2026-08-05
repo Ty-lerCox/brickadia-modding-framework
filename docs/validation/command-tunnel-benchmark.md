@@ -178,10 +178,11 @@ separately in
 | New frames at or above 100 ms | -- | 0 | passed |
 
 The 10x `/balance` target required the five-line span to be no more than 243.3
-ms. The measured 197 ms span passed that target. The alternating one- and
-two-pump gaps are consistent with a two-frame `LoopInGameThreadAfterFrames`
-cadence and producer timing; the configured 25 ms socket and tunnel values are
-quantized to roughly 33 ms game-thread opportunities.
+ms. The measured 197 ms span passed that target. At the time of this benchmark,
+the alternating one- and two-pump gaps were consistent with a two-frame native
+loop and producer timing. The current crash-hardened runtime preserves the same
+two-frame quantization with an owned `EngineTickOneShotChain`; its performance
+is checked again during post-deploy telemetry observation.
 
 That 10x result applies to the repeated display-command cadence, not every
 boundary. Including the initial CityRPG response work, `/balance` appearing in

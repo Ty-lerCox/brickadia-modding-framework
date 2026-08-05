@@ -87,7 +87,11 @@ $requiredFiles = @(
   'packages/omegga-runtime/source/src/brickadia/ue4ssBridge.ts',
   'packages/omegga-runtime/source/src/omegga/index.ts',
   'packages/omegga-runtime/source/tools/package-bmf-omegga.js',
+  'packages/omegga-runtime/source/tools/validate-lua-runtime.js',
+  'packages/omegga-runtime/source/tools/validate-lua-runtime.test.js',
   'packages/omegga-runtime/source/templates/windows-ue4ss/ue4ss/Mods/BMF/Scripts/main.lua',
+  'packages/omegga-runtime/source/templates/windows-ue4ss/ue4ss/Mods/BMF/Scripts/bmf/runtime.lua',
+  'packages/omegga-runtime/source/templates/windows-ue4ss/ue4ss/Mods/OmeggaBridge/Scripts/main.lua',
   'packages/omegga-plugins/bmf-bridge/plugin.json',
   'packages/omegga-plugins/bmf-bridge/doc.json',
   'packages/omegga-plugins/bmf-bridge/access.json',
@@ -207,6 +211,8 @@ $requiredFiles = @(
   'scripts/validate-unified-runtime-manifest.ps1',
   'scripts/validate-orchestrator-core.ps1',
   'scripts/validate-bmf-runtime-packages.ps1',
+  'scripts/validate-bmf-runtime-template-parity.ps1',
+  'scripts/sync-bmf-runtime-template.ps1',
   'scripts/validate-omegga-runtime-package.ps1',
   'scripts/validate-ue4ss-compat-package.ps1',
   'scripts/validate-bmf-desktop.ps1',
@@ -243,6 +249,7 @@ $requiredFiles = @(
   'scripts/validate-bmf-plugin-lifecycle-hooks.ps1',
   'scripts/validate-bmf-plugin-command-cleanup.ps1',
   'scripts/validate-bmf-plugin-watchdog.ps1',
+  'scripts/validate-bmf-plugin-facade-safety.ps1',
   'scripts/validate-bmf-api-labels.ps1',
   'scripts/validate-bmf-compatibility.ps1',
   'scripts/validate-bmf-unsafe-globals.ps1',
@@ -424,9 +431,23 @@ if (Test-Path -LiteralPath $mainLua) {
 $runtimeLua = Join-Path $Root 'framework/ue4ss/Mods/BMF/Scripts/bmf/runtime.lua'
 if (Test-Path -LiteralPath $runtimeLua) {
   $source = Get-Content -Raw -LiteralPath $runtimeLua
-  foreach ($needle in @('_G.BMF', 'BMF.version', 'BMF.health', 'TARGET_BRICKADIA_BUILD', 'PC-Shipping-CL24045983', 'BUILD_DETECTION_MODE', 'declared-target-only', 'UNSUPPORTED_BUILD_POLICY', 'report-only', 'RUNTIME_HELPER_GROUPS', 'compatibility_snapshot', 'BMF.compatibility.check', 'BMF.compatibility.helpers', 'bmf.compatibility', 'compatibility_status', 'target_build', 'runtime_required_helper_groups', 'RegisterConsoleCommandGlobalHandler', 'ExecuteWithDelay', 'OmeggaExecuteConsoleManagerInput', 'BMF.apis.list', 'BMF.apis.get', 'BMF.apis.summary', 'API_REGISTRY', 'api_registry_summary', 'bmf.apis', 'unsafe-native', 'live-player', 'BMF.sandbox.policy', 'BMF.sandbox.denials', 'bmf.sandbox', 'UNSAFE_PLUGIN_GLOBALS', 'plugin_global_lookup', 'plugin.unsafe_global_denied', 'UNSAFE_GLOBAL_DENIED', 'allowPluginUnsafeGlobals', 'unsafe.globals', 'BMF.events.on', 'BMF.events.off', 'BMF.events.emit', 'BMF.events.listenerCount', 'serverReady', 'pluginLoaded', 'pluginUnloaded', 'worldSaved', 'shutdownRequested', 'remove_event_handlers_for_owner', 'record_plugin_error', 'run_plugin_hook', 'plugin_watchdog_note_error', 'plugin_watchdog_isolated', 'PLUGIN_ISOLATED', 'plugin.isolated', 'BMF.plugins.watchdog', 'bmf.plugins.watchdog', 'pluginWatchdogMaxErrors', 'onServerReady', 'onTick', 'onError', 'plugin_tick_active', 'BMF.server.status', 'BMF.server.save', 'BMF.server.shutdown', 'bmf.server.status', 'bmf.server.save', 'bmf.server.shutdown', 'BMF_SHUTDOWN', 'CONFIRMATION_REQUIRED', 'server.shutdown', 'allowPluginServerShutdown', 'headless-empty', 'BMF.logging', 'BMF.logWarn', 'BMF.logError', 'events.jsonl', 'audit.jsonl', 'AUDIT_LOG_PATH', 'audit_record', 'BMF.audit.record', 'BMF.audit.recent', 'bmf.audit.tail', 'BMF.rateLimits.check', 'BMF.rateLimits.recent', 'rate_limit_check', 'RATE_LIMITED', 'rate_limit.denied', 'bmf.ratelimits', 'log_plugin', 'BMF.timers.after', 'BMF.timers.every', 'BMF.timers.cancel', 'BMF.timers.activeCount', 'BMF.chat.broadcast', 'BMF.chat.whisper', 'BMF.chat.statusMessage', 'BMF.server.planSettingsPatch', 'BMF.players.normalize', 'BMF.players.resolve', 'BMF.players.getName', 'BMF.interact.handleConsoleMessage', 'interactConsole', 'bmf.interact.console', 'BMF.permissions.describeRole', 'BMF.permissions.evaluateNoSpawnItemApplicator', 'BMF.permissions.evaluateApplicatorComponentAccess', 'BMF.permissions.evaluateInteractConsolePrefixAccess', 'BMF.permissions.evaluateBrickAssetAccess', 'BMF.permissions.enforceNoSpawnItemApplicator', 'BMF.tools.onApplicatorComponentApply', 'BMF.tools.applicator.status', 'BMF.tools.applicator.refreshComponentCache', 'tools.applicator', 'noSpawnItemApplicator', 'BMF.permissions.describeRoleAssignments', 'BMF.permissions.loadRoleAssignments', 'BMF.permissions.getPlayerRoles', 'BMF.permissions.playerHasRole', 'BMF.permissions.evaluateCommandAccess', 'savedPlayerRoles', 'BMF.permissions.planRolePatch', 'BMF.permissions.planPlayerRoleAssignment', 'BMF.minigames.list', 'BMF.minigames.loadPreset', 'BMF.minigames.savePreset', 'BMF.minigames.nextRound', 'BMF.minigames.reset', 'BMF.minigames.delete', 'BMF.minigames.emitEvent', 'BMF.minigames.on', 'BMF.minigames.off', 'BMF.minigames.listenerCount', 'BMF.minigames.eventStatus', 'BMF.minigames.syntheticFlow', 'BMF.minigames.define', 'BMF.minigames.definitions', 'BMF.minigames.definition', 'BMF.minigames.deleteDefinition', 'BMF.minigames.definitionStatus', 'BMF.minigames.recentEvents', 'BMF.minigames.applySnapshot', 'BMF.minigames.data', 'BMF.minigames.dataStatus', 'BMF.minigames.dataList', 'BMF.minigames.get', 'BMF.minigames.getPlayer', 'BMF.minigames.players', 'BMF.minigames.teams', 'BMF.minigames.leaderboard', 'BMF.minigames.membership', 'BMF.minigames.playerState', 'BMF.minigames.clearData', 'BMF.minigames.objectSnapshot', 'BMF.world.loadAdditive', 'BMF.world.saveAs', 'BMF.prefabs.loadBrz', 'BMF.prefabs.loadBrdb', 'BMF.vehicles.planSpawnSet', 'BMF.vehicles.spawnSet', 'BMF.commands.register', 'BMF.commands.dispatch', 'BMF.commands.dispatchWithAccess', 'register_command', 'remove_commands_for_owner', 'BMF.plugins.list', 'BMF.plugins.hasCapability', 'BMF.storage.writeText', 'BMF.storage.readText', 'BMF.storage.readJson', 'BMF.storage.writeJson', 'BMF.storage.readConfig', 'BMF.storage.writeConfig', 'JSON_PARSE_FAILED', 'BMF.unloadPlugins', 'BMF.loadPlugins', 'CAPABILITY_REQUIRED', 'CONFIG_OPT_IN_REQUIRED', 'PLAYER_DELIVERY_UNAVAILABLE', 'allowPluginServerExec', 'create_plugin_api', 'api.audit', 'api.rateLimits', 'api.capabilities', 'api.commands', 'server.exec.restricted', 'server.save', 'chat.whisper', 'chat.statusMessage', 'register_builtin_commands', 'bmf.health', 'bmf.version', 'bmf.load', 'bmf.unload', 'bmf.chat.broadcast', 'bmf.chat.whisper', 'bmf.chat.statusmessage', 'bmf.players.list', 'bmf.players.find', 'bmf.players.getname', 'bmf.interact.console', 'bmf.permissions.role-assignments', 'bmf.permissions.enforce-nospawnitem', 'bmf.tools.applicator.status', 'bmf.tools.applicator.refresh', 'bmf.minigames.list', 'bmf.minigames.loadpreset', 'bmf.minigames.savepreset', 'bmf.minigames.nextround', 'bmf.minigames.reset', 'bmf.minigames.delete', 'bmf.minigames.definitions.status', 'bmf.minigames.definitions.set', 'bmf.minigames.definitions.list', 'bmf.minigames.definitions.get', 'bmf.minigames.definitions.delete', 'bmf.minigames.events.emit', 'bmf.minigames.events.canary', 'bmf.minigames.events.synthetic-flow', 'bmf.minigames.events.status', 'bmf.minigames.events.recent', 'bmf.minigames.data.status', 'bmf.minigames.data.snapshot', 'bmf.minigames.data.apply-snapshot', 'bmf.minigames.data.list', 'bmf.minigames.data.get', 'bmf.minigames.data.players', 'bmf.minigames.data.teams', 'bmf.minigames.data.leaderboard', 'bmf.minigames.data.player', 'bmf.minigames.data.playerstate', 'bmf.minigames.data.membership', 'bmf.minigames.data.clear', 'bmf.minigames.objects.snapshot', 'bmf.world.saveas', 'bmf.prefabs.loadbrz', 'bmf.prefabs.loadbrdb', 'bmf.vehicles.spawnset', 'bmf.vehicles.snapshot')) {
+  foreach ($needle in @('_G.BMF', 'BMF.version', 'BMF.health', 'TARGET_BRICKADIA_BUILD', 'PC-Shipping-CL24045983', 'BUILD_DETECTION_MODE', 'declared-target-only', 'UNSUPPORTED_BUILD_POLICY', 'report-only', 'RUNTIME_HELPER_GROUPS', 'compatibility_snapshot', 'BMF.compatibility.check', 'BMF.compatibility.helpers', 'bmf.compatibility', 'compatibility_status', 'target_build', 'runtime_required_helper_groups', 'RegisterConsoleCommandGlobalHandler', 'OmeggaExecuteConsoleManagerInput', 'BMF.apis.list', 'BMF.apis.get', 'BMF.apis.summary', 'API_REGISTRY', 'api_registry_summary', 'bmf.apis', 'unsafe-native', 'live-player', 'BMF.sandbox.policy', 'BMF.sandbox.denials', 'bmf.sandbox', 'UNSAFE_PLUGIN_GLOBALS', 'plugin_global_lookup', 'plugin.unsafe_global_denied', 'UNSAFE_GLOBAL_DENIED', 'allowPluginUnsafeGlobals', 'unsafe.globals', 'BMF.events.on', 'BMF.events.off', 'BMF.events.emit', 'BMF.events.listenerCount', 'serverReady', 'pluginLoaded', 'pluginUnloaded', 'worldSaved', 'shutdownRequested', 'remove_event_handlers_for_owner', 'record_plugin_error', 'run_plugin_hook', 'plugin_watchdog_note_error', 'plugin_watchdog_isolated', 'PLUGIN_ISOLATED', 'plugin.isolated', 'BMF.plugins.watchdog', 'bmf.plugins.watchdog', 'pluginWatchdogMaxErrors', 'onServerReady', 'onTick', 'onError', 'plugin_tick_active', 'BMF.server.status', 'BMF.server.save', 'BMF.server.shutdown', 'bmf.server.status', 'bmf.server.save', 'bmf.server.shutdown', 'BMF_SHUTDOWN', 'CONFIRMATION_REQUIRED', 'server.shutdown', 'allowPluginServerShutdown', 'headless-empty', 'BMF.logging', 'BMF.logWarn', 'BMF.logError', 'events.jsonl', 'audit.jsonl', 'AUDIT_LOG_PATH', 'audit_record', 'BMF.audit.record', 'BMF.audit.recent', 'bmf.audit.tail', 'BMF.rateLimits.check', 'BMF.rateLimits.recent', 'rate_limit_check', 'RATE_LIMITED', 'rate_limit.denied', 'bmf.ratelimits', 'log_plugin', 'BMF.timers.after', 'BMF.timers.every', 'BMF.timers.cancel', 'BMF.timers.activeCount', 'BMF.chat.broadcast', 'BMF.chat.whisper', 'BMF.chat.statusMessage', 'BMF.server.planSettingsPatch', 'BMF.players.normalize', 'BMF.players.resolve', 'BMF.players.getName', 'BMF.interact.handleConsoleMessage', 'interactConsole', 'bmf.interact.console', 'BMF.permissions.describeRole', 'BMF.permissions.evaluateNoSpawnItemApplicator', 'BMF.permissions.evaluateApplicatorComponentAccess', 'BMF.permissions.evaluateInteractConsolePrefixAccess', 'BMF.permissions.evaluateBrickAssetAccess', 'BMF.permissions.enforceNoSpawnItemApplicator', 'BMF.tools.onApplicatorComponentApply', 'BMF.tools.applicator.status', 'BMF.tools.applicator.refreshComponentCache', 'tools.applicator', 'noSpawnItemApplicator', 'BMF.permissions.describeRoleAssignments', 'BMF.permissions.loadRoleAssignments', 'BMF.permissions.getPlayerRoles', 'BMF.permissions.playerHasRole', 'BMF.permissions.evaluateCommandAccess', 'savedPlayerRoles', 'BMF.permissions.planRolePatch', 'BMF.permissions.planPlayerRoleAssignment', 'BMF.minigames.list', 'BMF.minigames.loadPreset', 'BMF.minigames.savePreset', 'BMF.minigames.nextRound', 'BMF.minigames.reset', 'BMF.minigames.delete', 'BMF.minigames.emitEvent', 'BMF.minigames.on', 'BMF.minigames.off', 'BMF.minigames.listenerCount', 'BMF.minigames.eventStatus', 'BMF.minigames.syntheticFlow', 'BMF.minigames.define', 'BMF.minigames.definitions', 'BMF.minigames.definition', 'BMF.minigames.deleteDefinition', 'BMF.minigames.definitionStatus', 'BMF.minigames.recentEvents', 'BMF.minigames.applySnapshot', 'BMF.minigames.data', 'BMF.minigames.dataStatus', 'BMF.minigames.dataList', 'BMF.minigames.get', 'BMF.minigames.getPlayer', 'BMF.minigames.players', 'BMF.minigames.teams', 'BMF.minigames.leaderboard', 'BMF.minigames.membership', 'BMF.minigames.playerState', 'BMF.minigames.clearData', 'BMF.minigames.objectSnapshot', 'BMF.world.loadAdditive', 'BMF.world.saveAs', 'BMF.prefabs.loadBrz', 'BMF.prefabs.loadBrdb', 'BMF.vehicles.planSpawnSet', 'BMF.vehicles.spawnSet', 'BMF.commands.register', 'BMF.commands.dispatch', 'BMF.commands.dispatchWithAccess', 'register_command', 'remove_commands_for_owner', 'BMF.plugins.list', 'BMF.plugins.hasCapability', 'BMF.storage.writeText', 'BMF.storage.readText', 'BMF.storage.readJson', 'BMF.storage.writeJson', 'BMF.storage.readConfig', 'BMF.storage.writeConfig', 'JSON_PARSE_FAILED', 'BMF.unloadPlugins', 'BMF.loadPlugins', 'CAPABILITY_REQUIRED', 'CONFIG_OPT_IN_REQUIRED', 'PLAYER_DELIVERY_UNAVAILABLE', 'allowPluginServerExec', 'create_plugin_api', 'api.audit', 'api.rateLimits', 'api.capabilities', 'api.commands', 'server.exec.restricted', 'server.save', 'chat.whisper', 'chat.statusMessage', 'register_builtin_commands', 'bmf.health', 'bmf.version', 'bmf.load', 'bmf.unload', 'bmf.chat.broadcast', 'bmf.chat.whisper', 'bmf.chat.statusmessage', 'bmf.players.list', 'bmf.players.find', 'bmf.players.getname', 'bmf.interact.console', 'bmf.permissions.role-assignments', 'bmf.permissions.enforce-nospawnitem', 'bmf.tools.applicator.status', 'bmf.tools.applicator.refresh', 'bmf.minigames.list', 'bmf.minigames.loadpreset', 'bmf.minigames.savepreset', 'bmf.minigames.nextround', 'bmf.minigames.reset', 'bmf.minigames.delete', 'bmf.minigames.definitions.status', 'bmf.minigames.definitions.set', 'bmf.minigames.definitions.list', 'bmf.minigames.definitions.get', 'bmf.minigames.definitions.delete', 'bmf.minigames.events.emit', 'bmf.minigames.events.canary', 'bmf.minigames.events.synthetic-flow', 'bmf.minigames.events.status', 'bmf.minigames.events.recent', 'bmf.minigames.data.status', 'bmf.minigames.data.snapshot', 'bmf.minigames.data.apply-snapshot', 'bmf.minigames.data.list', 'bmf.minigames.data.get', 'bmf.minigames.data.players', 'bmf.minigames.data.teams', 'bmf.minigames.data.leaderboard', 'bmf.minigames.data.player', 'bmf.minigames.data.playerstate', 'bmf.minigames.data.membership', 'bmf.minigames.data.clear', 'bmf.minigames.objects.snapshot', 'bmf.world.saveas', 'bmf.prefabs.loadbrz', 'bmf.prefabs.loadbrdb', 'bmf.vehicles.spawnset', 'bmf.vehicles.snapshot')) {
     if ($source -notmatch [regex]::Escape($needle)) {
       $errors.Add("runtime.lua does not contain expected API marker: $needle")
+    }
+  }
+  foreach ($needle in @(
+    'local function run_on_game_thread(callback)',
+    'execution_domain = "game-thread-only"',
+    'cancel_timers_for_owner',
+    'timer_owner_counts',
+    'BMF_TELEMETRY_PATH',
+    'BMF_telemetry_record_scheduler',
+    'scheduler_retained_callbacks_peak',
+    'unsafe_async_denied'
+  )) {
+    if ($source -notmatch [regex]::Escape($needle)) {
+      $errors.Add("runtime.lua does not contain expected game-thread scheduler guardrail marker: $needle")
     }
   }
   foreach ($needle in @('BMF.minigames.reconcileDefinitions', 'bmf.minigames.definitions.reconcile', 'BMF.minigames.applySnapshot', 'bmf.minigames.data.apply-snapshot')) {
@@ -502,6 +523,19 @@ if (Test-Path -LiteralPath $bmfRuntimePackagesValidator) {
     $errors.Add('BMF runtime package boundary validation failed.')
     foreach ($errorItem in @($bmfRuntimePackagesResult.errors)) {
       $errors.Add("bmf-runtime-packages: $errorItem")
+    }
+  }
+}
+
+$bmfRuntimeTemplateParityValidator = Join-Path $Root 'scripts/validate-bmf-runtime-template-parity.ps1'
+if (Test-Path -LiteralPath $bmfRuntimeTemplateParityValidator) {
+  $bmfRuntimeTemplateParityOut = Join-Path $Root 'artifacts/local/bmf-runtime-template-parity-package-validation.json'
+  $bmfRuntimeTemplateParityOutput = & $bmfRuntimeTemplateParityValidator -Root $Root -OutJson $bmfRuntimeTemplateParityOut
+  $bmfRuntimeTemplateParityResult = $bmfRuntimeTemplateParityOutput | ConvertFrom-Json
+  if ($bmfRuntimeTemplateParityResult.status -ne 'passed') {
+    $errors.Add('BMF runtime template parity validation failed.')
+    foreach ($errorItem in @($bmfRuntimeTemplateParityResult.errors)) {
+      $errors.Add("bmf-runtime-template-parity: $errorItem")
     }
   }
 }
@@ -603,6 +637,19 @@ if (Test-Path -LiteralPath $vehicleInventoryScript) {
   foreach ($needle in @('OutText', "ChangeExtension(`$outPath, '.txt')", 'Vehicle inventory console-style text report', 'textPath')) {
     if ($source -notmatch [regex]::Escape($needle)) {
       $errors.Add("export-vehicle-inventory.ps1 does not contain expected text-report marker: $needle")
+    }
+  }
+}
+
+$pluginFacadeSafetyValidator = Join-Path $Root 'scripts/validate-bmf-plugin-facade-safety.ps1'
+if (Test-Path -LiteralPath $pluginFacadeSafetyValidator) {
+  $pluginFacadeSafetyOut = Join-Path $Root 'artifacts/local/bmf-plugin-facade-safety-package-validation.json'
+  $pluginFacadeSafetyOutput = & $pluginFacadeSafetyValidator -Root $Root -OutJson $pluginFacadeSafetyOut
+  $pluginFacadeSafetyResult = $pluginFacadeSafetyOutput | ConvertFrom-Json
+  if ($pluginFacadeSafetyResult.status -ne 'passed') {
+    $errors.Add('BMF plugin facade safety validation failed.')
+    foreach ($errorItem in @($pluginFacadeSafetyResult.errors)) {
+      $errors.Add("plugin-facade-safety: $errorItem")
     }
   }
 }

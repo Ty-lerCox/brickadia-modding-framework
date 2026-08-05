@@ -49,6 +49,10 @@ const createTempCompatibilityWorkspace = ({
   const bundleRoot = path.join(workspaceRoot, 'bundles', bundleId);
   const bundleFiles: Record<string, string> = {
     'VTableLayout.ini': '; test vtable layout\n',
+    'MemberVariableLayout.ini': '; test member layout\n',
+    'CustomGameConfigs/Brickadia/VTableLayout.ini': '; test vtable layout\n',
+    'CustomGameConfigs/Brickadia/MemberVariableLayout.ini':
+      '; test member layout\n',
     'CustomGameConfigs/Brickadia/UE4SS-settings.ini':
       '[General]\nHookProcessConsoleExec = 1\n',
     'CustomGameConfigs/Brickadia/UE4SS_Signatures/CallFunctionByNameWithArguments.lua':

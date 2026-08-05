@@ -39,14 +39,24 @@ Important fields:
 Required helper groups:
 
 - `consoleExecutor`: at least one supported Omegga/UE4SS console executor.
-- `timerScheduler`: `ExecuteWithDelay` or `ExecuteInGameThreadWithDelay`, used
-  by BMF timers and legacy opt-in validation workers.
+- `timerScheduler`: `ExecuteInGameThreadWithDelay`, required for public timer
+  due actions and the safe one-shot pump fallback. The two game-thread loop
+  helpers are optional pump accelerators; neither replaces the required delayed
+  scheduler. `ExecuteWithDelay`, `ExecuteAsync`, and `LoopAsync` do not satisfy
+  this group.
 
 Optional helper groups:
 
 - `consoleCommandRegistration`: direct registration for `bmf.*` commands.
 - `gameThread`: game-thread callback helpers.
 - `objectLookup`: live-object lookup helpers for future discovery lanes.
+
+The supported execution invariant is game-thread-only Lua after runtime
+startup. Compatibility must fail closed when no game-thread scheduler is
+available; it must never select an async Lua helper merely because that helper
+exists. Initializing a native or Node.js background transport is compatible
+only when that worker does not enter Lua and exposes a synchronized, bounded
+queue for game-thread draining.
 
 ## `BMF.compatibility.helpers()`
 

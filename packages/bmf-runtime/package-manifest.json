@@ -30,6 +30,11 @@
     "keep-current-install-path",
     "validate-before-release",
     "stage-through-orchestrator-core",
-    "do-not-hide-runtime-source-roots"
+    "do-not-hide-runtime-source-roots",
+    "keep-omegga-template-byte-identical",
+    "no-async-lua-scheduler-callbacks",
+    "no-global-delayed-action-clears",
+    "detect-forbidden-scheduler-aliases",
+    "lua-5.3-compile-before-package"
   ]
 }

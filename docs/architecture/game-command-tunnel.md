@@ -111,24 +111,22 @@ Terminal states are `injected`, `rejected`, `expired`, and
 `outcome_unknown`. A result received before its acknowledgment is treated as
 implicit admission.
 
-## Persistent Game-Thread Pump
+## Owned Game-Thread Pump
 
-The supported live topology registers exactly one persistent
-`LoopInGameThreadAfterFrames` handle for the socket and tunnel pump. At the
-validated 25-millisecond socket setting, UE4SS rounds the loop to two frames,
-so the effective game-thread opportunity is about 33 milliseconds on a
+The supported live topology runs one shared `EngineTickOneShotChain` for the
+socket and tunnel pump. Each link waits two frames, dispatches through the
+simple EngineTick queue, performs bounded work, and only then registers its
+successor. The effective opportunity is about 33 milliseconds on a
 60-frame-per-second server. The pump drains at most 16 inbound socket messages
 and injects at most one admitted command on an eligible invocation. A 25 ms
 setting is therefore a requested cadence, not a promise of sub-frame or exact
 25 ms dispatch.
 
-The pump does not register delayed or simple callbacks per request. An earlier
-implementation scheduled a game-thread callback for each inbound request and
-another callback for its delayed continuation. Live testing exposed a UE4SS
-Lua function-registry race in that design and crashed the server. Keeping one
-long-lived callback and bounded work per invocation removes that callback churn
-and makes queue pressure visible instead of transferring it into UE4SS's
-scheduler.
+The pump does not register callbacks per request and retains at most one
+outstanding delayed link for the chain. The delayed-to-simple trampoline keeps
+successor registration outside delayed-vector traversal, while bounded work per
+invocation makes queue pressure visible instead of transferring it into
+UE4SS's scheduler.
 
 Readiness is fail closed. BMF writes `tunnelEnabled: true` and advertises
 `bmf-tunnel/1` only after the persistent callback has executed its first real

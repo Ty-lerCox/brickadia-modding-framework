@@ -1,0 +1,702 @@
+{
+  "schemaVersion": 1,
+  "feature": "bmf-command-tunnel-benchmark",
+  "status": "passed",
+  "validationLevel": "L3 Live Server; connected player required",
+  "label": "phase15-after-restart",
+  "startedAt": "2026-08-05T22:13:01.715Z",
+  "finishedAt": "2026-08-05T22:13:51.311Z",
+  "guardrails": {
+    "optInGameplayCommands": true,
+    "fixedSafeCommand": "/cityrpgRemote whisper:<player>:<unique marker>",
+    "maximumCommandSamples": 20,
+    "commandSpacingMinimumMs": 500,
+    "actualCommandSamples": 3,
+    "worldMutation": false,
+    "remoteSocketAllowed": false,
+    "runtimeFilesModified": false
+  },
+  "config": {
+    "mode": "all",
+    "commandProtocol": "tunnel",
+    "pingSamples": 20,
+    "commandSamples": 3,
+    "pingSpacingMs": 100,
+    "commandSpacingMs": 500,
+    "timeoutMs": 5000,
+    "logTimeoutMs": 5000,
+    "player": "Ty",
+    "logPath": "C:\\Users\\tycox\\OneDrive\\Documents\\GitHub\\Brickadia\\omegga-master\\omegga-master\\data\\Saved\\Logs\\Brickadia.log",
+    "bmfCommandTemplate": "bmf.chat.player-message-impl message={command} confirm=cityrpg-remote",
+    "metricsUrl": "http://127.0.0.1:8080/metrics",
+    "baselineMs": 30000,
+    "recoveryMs": 15000
+  },
+  "socket": {
+    "path": "C:\\Users\\tycox\\AppData\\Roaming\\omegga\\steam_installs\\main\\Brickadia\\Binaries\\Win64\\ue4ss\\main\\Mods\\BMF\\runtime\\socket.json",
+    "enabled": true,
+    "available": true,
+    "started": true,
+    "host": "127.0.0.1",
+    "port": 38915,
+    "pollIntervalMs": 25,
+    "workerMode": "EngineTickOneShotChain",
+    "workerStarted": true,
+    "updatedAt": "2026-08-05T22:12:48Z",
+    "tokenPresent": true
+  },
+  "measurements": {
+    "socketPing": {
+      "summary": {
+        "count": 20,
+        "min": 50.191,
+        "p50": 51.018,
+        "p90": 51.459,
+        "p95": 51.567,
+        "p99": 51.663,
+        "max": 51.687,
+        "mean": 50.96
+      },
+      "samples": [
+        {
+          "index": 1,
+          "ok": true,
+          "rttMs": 50.233
+        },
+        {
+          "index": 2,
+          "ok": true,
+          "rttMs": 51.448
+        },
+        {
+          "index": 3,
+          "ok": true,
+          "rttMs": 51.272
+        },
+        {
+          "index": 4,
+          "ok": true,
+          "rttMs": 51.2
+        },
+        {
+          "index": 5,
+          "ok": true,
+          "rttMs": 51.273
+        },
+        {
+          "index": 6,
+          "ok": true,
+          "rttMs": 50.68
+        },
+        {
+          "index": 7,
+          "ok": true,
+          "rttMs": 50.936
+        },
+        {
+          "index": 8,
+          "ok": true,
+          "rttMs": 51.561
+        },
+        {
+          "index": 9,
+          "ok": true,
+          "rttMs": 50.456
+        },
+        {
+          "index": 10,
+          "ok": true,
+          "rttMs": 50.191
+        },
+        {
+          "index": 11,
+          "ok": true,
+          "rttMs": 50.472
+        },
+        {
+          "index": 12,
+          "ok": true,
+          "rttMs": 51.104
+        },
+        {
+          "index": 13,
+          "ok": true,
+          "rttMs": 51.187
+        },
+        {
+          "index": 14,
+          "ok": true,
+          "rttMs": 51.089
+        },
+        {
+          "index": 15,
+          "ok": true,
+          "rttMs": 50.853
+        },
+        {
+          "index": 16,
+          "ok": true,
+          "rttMs": 50.85
+        },
+        {
+          "index": 17,
+          "ok": true,
+          "rttMs": 50.619
+        },
+        {
+          "index": 18,
+          "ok": true,
+          "rttMs": 51.146
+        },
+        {
+          "index": 19,
+          "ok": true,
+          "rttMs": 50.946
+        },
+        {
+          "index": 20,
+          "ok": true,
+          "rttMs": 51.687
+        }
+      ]
+    },
+    "tunnelAck": {
+      "summary": {
+        "count": 3,
+        "min": 49.944,
+        "p50": 50.814,
+        "p90": 50.98,
+        "p95": 51,
+        "p99": 51.017,
+        "max": 51.021,
+        "mean": 50.593
+      }
+    },
+    "commandResponse": {
+      "summary": {
+        "count": 3,
+        "min": 49.957,
+        "p50": 50.886,
+        "p90": 51.028,
+        "p95": 51.046,
+        "p99": 51.06,
+        "max": 51.064,
+        "mean": 50.636
+      }
+    },
+    "consoleCompletion": {
+      "summary": {
+        "count": 3,
+        "min": 12,
+        "p50": 22,
+        "p90": 38,
+        "p95": 40,
+        "p99": 41.6,
+        "max": 42,
+        "mean": 25.333
+      },
+      "samples": [
+        {
+          "index": 1,
+          "marker": "BMF_TUNNEL_CANARY_1785968014801_a949a2_01",
+          "ok": true,
+          "protocol": "tunnel",
+          "ackRttMs": 50.814,
+          "responseRttMs": 50.886,
+          "consoleObservedMs": 193.463,
+          "consoleTimestampMs": 42,
+          "completionMs": 42,
+          "postHealthRttMs": 50.706,
+          "envelope": {
+            "ok": false,
+            "detail": "ServerPushChatMessage implementation returned",
+            "source": "bmf",
+            "state": "injected",
+            "code": "OK"
+          },
+          "response": {
+            "implementationCalled": true,
+            "rateLimited": false,
+            "code": "OK",
+            "transport": "",
+            "dispatchMs": 7,
+            "totalMs": null,
+            "queueDepth": 0
+          },
+          "consoleLine": "[2026.08.05-22.13.34:844][263]LogChatCommands: Player \"montygamer33alex\" is trying to call command \"/cityrpgremote\" with arg string \"whisper:Ty:BMF_TUNNEL_CANARY_1785968014801_a949a2_01\"."
+        },
+        {
+          "index": 2,
+          "marker": "BMF_TUNNEL_CANARY_1785968014801_a949a2_02",
+          "ok": true,
+          "protocol": "tunnel",
+          "ackRttMs": 49.944,
+          "responseRttMs": 49.957,
+          "consoleObservedMs": 53.145,
+          "consoleTimestampMs": 12,
+          "completionMs": 12,
+          "postHealthRttMs": 50.732,
+          "envelope": {
+            "ok": false,
+            "detail": "ServerPushChatMessage implementation returned",
+            "source": "bmf",
+            "state": "injected",
+            "code": "OK"
+          },
+          "response": {
+            "implementationCalled": true,
+            "rateLimited": false,
+            "code": "OK",
+            "transport": "",
+            "dispatchMs": 7,
+            "totalMs": null,
+            "queueDepth": 0
+          },
+          "consoleLine": "[2026.08.05-22.13.35:573][307]LogChatCommands: Player \"montygamer33alex\" is trying to call command \"/cityrpgremote\" with arg string \"whisper:Ty:BMF_TUNNEL_CANARY_1785968014801_a949a2_02\"."
+        },
+        {
+          "index": 3,
+          "marker": "BMF_TUNNEL_CANARY_1785968014801_a949a2_03",
+          "ok": true,
+          "protocol": "tunnel",
+          "ackRttMs": 51.021,
+          "responseRttMs": 51.064,
+          "consoleObservedMs": 49.831,
+          "consoleTimestampMs": 22,
+          "completionMs": 22,
+          "postHealthRttMs": 51.028,
+          "envelope": {
+            "ok": false,
+            "detail": "ServerPushChatMessage implementation returned",
+            "source": "bmf",
+            "state": "injected",
+            "code": "OK"
+          },
+          "response": {
+            "implementationCalled": true,
+            "rateLimited": false,
+            "code": "OK",
+            "transport": "",
+            "dispatchMs": 7,
+            "totalMs": null,
+            "queueDepth": 0
+          },
+          "consoleLine": "[2026.08.05-22.13.36:203][345]LogChatCommands: Player \"montygamer33alex\" is trying to call command \"/cityrpgremote\" with arg string \"whisper:Ty:BMF_TUNNEL_CANARY_1785968014801_a949a2_03\"."
+        }
+      ]
+    }
+  },
+  "metrics": {
+    "baselineStart": {
+      "available": true,
+      "skipped": false,
+      "error": null,
+      "data": {
+        "capturedAt": "2026-08-05T22:13:01.739Z",
+        "up": {
+          "brickadiaServer": 1,
+          "bmfRuntime": 1,
+          "bmfTelemetry": 1,
+          "frameTelemetry": 1,
+          "frameHookRegistered": 1
+        },
+        "frame": {
+          "windowAverageMs": 16.511,
+          "windowMaximumMs": 17.372,
+          "samplesTotal": 16277,
+          "spikesTotal": 9,
+          "slowTotals": {
+            "50": 76,
+            "100": 9,
+            "16.67": 7471,
+            "33.33": 244
+          }
+        },
+        "attribution": {
+          "commandProcessedByName": {
+            "bmf.chat.broadcast": 3,
+            "bmf.chat.statusmessage": 1,
+            "bmf.chat.whisper": 3,
+            "bmf.players.list": 4,
+            "bmf.status": 2,
+            "bmf.tools.applicator.native-targets": 1,
+            "bmf.tools.resource.native.start": 1,
+            "bmf.tools.uobject.describe": 1,
+            "bmf.tools.zone.wire.start": 1
+          },
+          "commandTransportTotals": {
+            "socket": 17
+          },
+          "workerItemsByWorker": {
+            "command_polls": 0,
+            "socket_drains": 71
+          }
+        }
+      }
+    },
+    "before": {
+      "available": true,
+      "skipped": false,
+      "error": null,
+      "data": {
+        "capturedAt": "2026-08-05T22:13:31.748Z",
+        "up": {
+          "brickadiaServer": 1,
+          "bmfRuntime": 1,
+          "bmfTelemetry": 1,
+          "frameTelemetry": 1,
+          "frameHookRegistered": 1
+        },
+        "frame": {
+          "windowAverageMs": 16.528,
+          "windowMaximumMs": 17.154,
+          "samplesTotal": 18020,
+          "spikesTotal": 9,
+          "slowTotals": {
+            "50": 81,
+            "100": 9,
+            "16.67": 8039,
+            "33.33": 250
+          }
+        },
+        "attribution": {
+          "commandProcessedByName": {
+            "bmf.chat.broadcast": 3,
+            "bmf.chat.statusmessage": 1,
+            "bmf.chat.whisper": 3,
+            "bmf.players.list": 4,
+            "bmf.status": 2,
+            "bmf.tools.applicator.native-targets": 1,
+            "bmf.tools.resource.native.start": 1,
+            "bmf.tools.uobject.describe": 1,
+            "bmf.tools.zone.wire.start": 1
+          },
+          "commandTransportTotals": {
+            "socket": 17
+          },
+          "workerItemsByWorker": {
+            "command_polls": 0,
+            "socket_drains": 71
+          }
+        }
+      }
+    },
+    "activeEnd": {
+      "available": true,
+      "skipped": false,
+      "error": null,
+      "data": {
+        "capturedAt": "2026-08-05T22:13:36.287Z",
+        "up": {
+          "brickadiaServer": 1,
+          "bmfRuntime": 1,
+          "bmfTelemetry": 1,
+          "frameTelemetry": 1,
+          "frameHookRegistered": 1
+        },
+        "frame": {
+          "windowAverageMs": 16.569,
+          "windowMaximumMs": 17.202,
+          "samplesTotal": 18322,
+          "spikesTotal": 9,
+          "slowTotals": {
+            "50": 82,
+            "100": 9,
+            "16.67": 8133,
+            "33.33": 251
+          }
+        },
+        "attribution": {
+          "commandProcessedByName": {
+            "bmf.chat.broadcast": 3,
+            "bmf.chat.statusmessage": 1,
+            "bmf.chat.whisper": 3,
+            "bmf.players.list": 4,
+            "bmf.status": 2,
+            "bmf.tools.applicator.native-targets": 1,
+            "bmf.tools.resource.native.start": 1,
+            "bmf.tools.uobject.describe": 1,
+            "bmf.tools.zone.wire.start": 1
+          },
+          "commandTransportTotals": {
+            "socket": 17
+          },
+          "workerItemsByWorker": {
+            "command_polls": 0,
+            "socket_drains": 80
+          }
+        }
+      }
+    },
+    "after": {
+      "available": true,
+      "skipped": false,
+      "error": null,
+      "data": {
+        "capturedAt": "2026-08-05T22:13:51.311Z",
+        "up": {
+          "brickadiaServer": 1,
+          "bmfRuntime": 1,
+          "bmfTelemetry": 1,
+          "frameTelemetry": 1,
+          "frameHookRegistered": 1
+        },
+        "frame": {
+          "windowAverageMs": 16.468,
+          "windowMaximumMs": 17.501,
+          "samplesTotal": 19225,
+          "spikesTotal": 9,
+          "slowTotals": {
+            "50": 83,
+            "100": 9,
+            "16.67": 8421,
+            "33.33": 254
+          }
+        },
+        "attribution": {
+          "commandProcessedByName": {
+            "bmf.chat.broadcast": 3,
+            "bmf.chat.statusmessage": 1,
+            "bmf.chat.whisper": 3,
+            "bmf.players.list": 4,
+            "bmf.status": 2,
+            "bmf.tools.applicator.native-targets": 1,
+            "bmf.tools.resource.native.start": 1,
+            "bmf.tools.uobject.describe": 1,
+            "bmf.tools.zone.wire.start": 1
+          },
+          "commandTransportTotals": {
+            "socket": 17
+          },
+          "workerItemsByWorker": {
+            "command_polls": 0,
+            "socket_drains": 98
+          }
+        }
+      }
+    },
+    "delta": {
+      "frameSamples": 302,
+      "frameSpikes": 0,
+      "slowTotals": {
+        "50": 1,
+        "100": 0,
+        "16.67": 94,
+        "33.33": 1
+      },
+      "endingWindowAverageMs": 16.569,
+      "endingWindowMaximumMs": 17.202,
+      "windowAverageIncreasePercent": 0.248,
+      "attribution": {
+        "commandProcessedByName": {
+          "bmf.chat.broadcast": 0,
+          "bmf.chat.statusmessage": 0,
+          "bmf.chat.whisper": 0,
+          "bmf.players.list": 0,
+          "bmf.status": 0,
+          "bmf.tools.applicator.native-targets": 0,
+          "bmf.tools.resource.native.start": 0,
+          "bmf.tools.uobject.describe": 0,
+          "bmf.tools.zone.wire.start": 0
+        },
+        "commandTransportTotals": {
+          "socket": 0
+        },
+        "workerItemsByWorker": {
+          "command_polls": 0,
+          "socket_drains": 9
+        }
+      }
+    },
+    "recoveryDelta": {
+      "frameSamples": 903,
+      "frameSpikes": 0,
+      "slowTotals": {
+        "50": 1,
+        "100": 0,
+        "16.67": 288,
+        "33.33": 3
+      },
+      "endingWindowAverageMs": 16.468,
+      "endingWindowMaximumMs": 17.501,
+      "windowAverageIncreasePercent": -0.61,
+      "attribution": {
+        "commandProcessedByName": {
+          "bmf.chat.broadcast": 0,
+          "bmf.chat.statusmessage": 0,
+          "bmf.chat.whisper": 0,
+          "bmf.players.list": 0,
+          "bmf.status": 0,
+          "bmf.tools.applicator.native-targets": 0,
+          "bmf.tools.resource.native.start": 0,
+          "bmf.tools.uobject.describe": 0,
+          "bmf.tools.zone.wire.start": 0
+        },
+        "commandTransportTotals": {
+          "socket": 0
+        },
+        "workerItemsByWorker": {
+          "command_polls": 0,
+          "socket_drains": 18
+        }
+      }
+    },
+    "baselineToRecoveryDelta": {
+      "frameSamples": 1205,
+      "frameSpikes": 0,
+      "slowTotals": {
+        "50": 2,
+        "100": 0,
+        "16.67": 382,
+        "33.33": 4
+      },
+      "endingWindowAverageMs": 16.468,
+      "endingWindowMaximumMs": 17.501,
+      "windowAverageIncreasePercent": -0.363,
+      "attribution": {
+        "commandProcessedByName": {
+          "bmf.chat.broadcast": 0,
+          "bmf.chat.statusmessage": 0,
+          "bmf.chat.whisper": 0,
+          "bmf.players.list": 0,
+          "bmf.status": 0,
+          "bmf.tools.applicator.native-targets": 0,
+          "bmf.tools.resource.native.start": 0,
+          "bmf.tools.uobject.describe": 0,
+          "bmf.tools.zone.wire.start": 0
+        },
+        "commandTransportTotals": {
+          "socket": 0
+        },
+        "workerItemsByWorker": {
+          "command_polls": 0,
+          "socket_drains": 27
+        }
+      }
+    }
+  },
+  "acceptance": {
+    "gates": [
+      {
+        "name": "socket sample completeness",
+        "passed": true,
+        "actual": "20/20",
+        "expected": "20/20"
+      },
+      {
+        "name": "socket RTT p95",
+        "passed": true,
+        "actual": 51.567,
+        "expected": "<= 300 ms"
+      },
+      {
+        "name": "command sample completeness",
+        "passed": true,
+        "actual": "3/3",
+        "expected": "3/3"
+      },
+      {
+        "name": "console-observed command completion p95",
+        "passed": true,
+        "actual": 40,
+        "expected": "<= 300 ms"
+      },
+      {
+        "name": "new >=100ms frames",
+        "passed": true,
+        "actual": 0,
+        "expected": "<= 0"
+      },
+      {
+        "name": "frame window average increase",
+        "passed": true,
+        "actual": 0.248,
+        "expected": "<= 5%"
+      },
+      {
+        "name": "recovery frame window average increase from baseline",
+        "passed": true,
+        "actual": -0.363,
+        "expected": "<= 5%"
+      },
+      {
+        "name": "active metrics brickadiaServer",
+        "passed": true,
+        "actual": 1,
+        "expected": "1"
+      },
+      {
+        "name": "active metrics bmfRuntime",
+        "passed": true,
+        "actual": 1,
+        "expected": "1"
+      },
+      {
+        "name": "active metrics bmfTelemetry",
+        "passed": true,
+        "actual": 1,
+        "expected": "1"
+      },
+      {
+        "name": "active metrics frameTelemetry",
+        "passed": true,
+        "actual": 1,
+        "expected": "1"
+      },
+      {
+        "name": "active metrics frameHookRegistered",
+        "passed": true,
+        "actual": 1,
+        "expected": "1"
+      },
+      {
+        "name": "recovery metrics brickadiaServer",
+        "passed": true,
+        "actual": 1,
+        "expected": "1"
+      },
+      {
+        "name": "recovery metrics bmfRuntime",
+        "passed": true,
+        "actual": 1,
+        "expected": "1"
+      },
+      {
+        "name": "recovery metrics bmfTelemetry",
+        "passed": true,
+        "actual": 1,
+        "expected": "1"
+      },
+      {
+        "name": "recovery metrics frameTelemetry",
+        "passed": true,
+        "actual": 1,
+        "expected": "1"
+      },
+      {
+        "name": "recovery metrics frameHookRegistered",
+        "passed": true,
+        "actual": 1,
+        "expected": "1"
+      }
+    ]
+  },
+  "evidence": [
+    {
+      "kind": "json",
+      "path": "C:\\Users\\tycox\\AppData\\Roaming\\omegga\\steam_installs\\main\\Brickadia\\Binaries\\Win64\\ue4ss\\main\\Mods\\BMF\\runtime\\socket.json",
+      "summary": "Authenticated BMF socket metadata; token is redacted."
+    },
+    {
+      "kind": "log",
+      "path": "C:\\Users\\tycox\\OneDrive\\Documents\\GitHub\\Brickadia\\omegga-master\\omegga-master\\data\\Saved\\Logs\\Brickadia.log",
+      "summary": "Unique marker observations from the active Brickadia log."
+    },
+    {
+      "kind": "json",
+      "path": "C:\\Users\\tycox\\OneDrive\\Documents\\GitHub\\bmf\\artifacts\\local\\bmf-command-tunnel-phase15-after-restart.json",
+      "summary": "Benchmark report."
+    }
+  ],
+  "errors": []
+}

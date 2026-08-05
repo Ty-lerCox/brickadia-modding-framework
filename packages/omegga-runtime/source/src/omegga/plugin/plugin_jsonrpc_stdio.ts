@@ -1,6 +1,8 @@
 import Logger from '@/logger';
 import { EnvironmentPreset } from '@brickadia/presets';
 import Omegga from '@omegga/server';
+import { IS_WINDOWS } from '@util/platform';
+import { getProcessInvocation } from '@util/process';
 import { WriteSaveObject } from 'brs-js';
 import {
   JSONRPCClient,
@@ -21,6 +23,14 @@ import { bootstrap } from './plugin_node_safe/proxyOmegga';
 const MAIN_FILE = 'omegga_plugin';
 const DOC_FILE = 'doc.json';
 const PLUGIN_FILE = 'plugin.json';
+const MAIN_FILE_CANDIDATES = IS_WINDOWS
+  ? [MAIN_FILE, `${MAIN_FILE}.cmd`, `${MAIN_FILE}.bat`, `${MAIN_FILE}.ps1`]
+  : [MAIN_FILE];
+
+const resolveMainFile = (pluginPath: string) =>
+  MAIN_FILE_CANDIDATES.map(candidate => path.join(pluginPath, candidate)).find(
+    candidate => fs.existsSync(candidate),
+  );
 
 export default class RpcPlugin extends Plugin {
   #child: ChildProcessWithoutNullStreams;
@@ -33,7 +43,7 @@ export default class RpcPlugin extends Plugin {
   // all RPC plugins require a main (binary) file and a doc file
   static canLoad(pluginPath: string) {
     return (
-      fs.existsSync(path.join(pluginPath, MAIN_FILE)) &&
+      !!resolveMainFile(pluginPath) &&
       fs.existsSync(path.join(pluginPath, DOC_FILE))
     );
   }
@@ -55,7 +65,8 @@ export default class RpcPlugin extends Plugin {
     // TODO: validate documentation
     this.documentation = Plugin.readJSON(path.join(pluginPath, DOC_FILE));
     this.pluginConfig = Plugin.readJSON(path.join(pluginPath, PLUGIN_FILE));
-    this.pluginFile = path.join(pluginPath, MAIN_FILE);
+    this.pluginFile =
+      resolveMainFile(pluginPath) ?? path.join(pluginPath, MAIN_FILE);
 
     this.eventPassthrough = this.eventPassthrough.bind(this);
     this.commands = [];
@@ -104,7 +115,12 @@ export default class RpcPlugin extends Plugin {
         );
       }
       verbose('Spawning child process');
-      this.#child = spawn(this.pluginFile);
+      const invocation = getProcessInvocation(this.pluginFile);
+      this.#child = spawn(
+        invocation.command,
+        invocation.args,
+        invocation.options,
+      );
       this.#child.stdin.setDefaultEncoding('utf8');
       this.#outInterface = readline.createInterface({
         input: this.#child.stdout,

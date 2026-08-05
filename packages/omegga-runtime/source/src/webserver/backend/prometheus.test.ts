@@ -126,7 +126,7 @@ describe('buildPrometheusMetrics', () => {
     writeFileSync(
       bmfTelemetryPath,
       JSON.stringify({
-        schema_version: 1,
+        schema_version: 2,
         commands: {
           by_name: {
             'bmf.status': {
@@ -219,6 +219,70 @@ describe('buildPrometheusMetrics', () => {
             files_processed: 3,
           },
         },
+        socket_scheduler: {
+          budget_ms: 3,
+          budget_enforced: true,
+          configured_ingress_per_pump: 16,
+          effective_ingress_per_pump: 2,
+          direct_ingress_cap_enabled: true,
+          direct_ingress_cap_per_pump: 2,
+          ingress_last: 2,
+          direct_admitted_last: 1,
+          budget_exhausted_total: 4,
+          budget_admission_stopped_total: 3,
+          budget_tunnel_dispatch_skipped_total: 2,
+          slice: {
+            count: 10,
+            ok: 9,
+            error: 1,
+            duration_ms_sum: 50,
+            duration_ms_max: 21,
+            last_ms: 4,
+          },
+          by_path: {
+            direct_socket: {
+              path: 'direct_socket',
+              admitted: 7,
+              count: 7,
+              ok: 6,
+              error: 1,
+              duration_ms_sum: 35,
+              duration_ms_max: 18,
+              last_ms: 4,
+              monolithic_overruns: 2,
+            },
+            tunnel: {
+              path: 'tunnel',
+              admitted: 3,
+              count: 3,
+              ok: 3,
+              error: 0,
+              duration_ms_sum: 9,
+              duration_ms_max: 5,
+              last_ms: 2,
+              monolithic_overruns: 1,
+            },
+          },
+          ingress_by_type: {
+            command: { message_type: 'command', count: 7 },
+            tunnel_request: {
+              message_type: 'tunnel.request',
+              count: 3,
+            },
+            ping: { message_type: 'ping', count: 2 },
+            other: { message_type: 'other', count: 1 },
+          },
+          queues: {
+            direct_depth: 0,
+            direct_oldest_age_ms: 0,
+            tunnel_depth: 2,
+            tunnel_interactive_depth: 1,
+            tunnel_bulk_depth: 1,
+            tunnel_oldest_age_ms: 120,
+            tunnel_interactive_oldest_age_ms: 120,
+            tunnel_bulk_oldest_age_ms: 80,
+          },
+        },
       }),
       'utf8',
     );
@@ -295,7 +359,7 @@ describe('buildPrometheusMetrics', () => {
     );
     expect(output).toContain('bmf_runtime_status_up 1');
     expect(output).toContain('bmf_telemetry_up 1');
-    expect(output).toContain('bmf_telemetry_schema_version 1');
+    expect(output).toContain('bmf_telemetry_schema_version 2');
     expect(output).toContain('brickadia_frame_telemetry_up 1');
     expect(output).toContain('brickadia_frame_telemetry_hook_registered 1');
     expect(output).toContain('brickadia_frame_telemetry_schema_version 2');
@@ -361,6 +425,45 @@ describe('buildPrometheusMetrics', () => {
     expect(output).toContain(
       'bmf_worker_poll_duration_milliseconds{worker="command_polls",statistic="max"} 4',
     );
+    expect(output).toContain(
+      'bmf_socket_ingress_messages_total{type="command"} 7',
+    );
+    expect(output).toContain(
+      'bmf_socket_admitted_total{path="direct_socket"} 7',
+    );
+    expect(output).toContain(
+      'bmf_socket_work_duration_milliseconds{path="tunnel",statistic="max"} 5',
+    );
+    expect(output).toContain(
+      'bmf_game_thread_slice_duration_milliseconds{worker="socket_pump",statistic="avg"} 5',
+    );
+    expect(output).toContain(
+      'bmf_game_thread_budget_exhausted_total{worker="socket_pump"} 4',
+    );
+    expect(output).toContain(
+      'bmf_game_thread_budget_enforced{worker="socket_pump"} 1',
+    );
+    expect(output).toContain(
+      'bmf_game_thread_admission_stopped_total{worker="socket_pump",reason="budget"} 3',
+    );
+    expect(output).toContain(
+      'bmf_game_thread_dispatch_skipped_total{worker="socket_pump",path="tunnel",reason="budget"} 2',
+    );
+    expect(output).toContain(
+      'bmf_game_thread_monolithic_overrun_total{path="direct_socket"} 2',
+    );
+    expect(output).toContain(
+      'bmf_socket_queue_depth{path="tunnel",service_class="interactive"} 1',
+    );
+    expect(output).toContain(
+      'bmf_socket_queue_oldest_age_milliseconds{path="tunnel",service_class="total"} 120',
+    );
+    expect(output).toContain('bmf_socket_configured_ingress_per_pump 16');
+    expect(output).toContain('bmf_socket_effective_ingress_per_pump 2');
+    expect(output).toContain('bmf_socket_ingress_last 2');
+    expect(output).toContain('bmf_socket_direct_admitted_last 1');
+    expect(output).toContain('bmf_socket_direct_ingress_cap_enabled 1');
+    expect(output).toContain('bmf_socket_direct_ingress_cap_per_pump 2');
     expect(output).not.toContain('Ty');
     expect(output).not.toContain('player-id');
     expect(output).not.toContain('127.0.0.1"');

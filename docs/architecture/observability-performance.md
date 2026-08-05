@@ -37,6 +37,26 @@ worker mode, command worker intervals, and command worker limits.
 UE4SS C++ mod. It contains Unreal engine tick `DeltaSeconds` aggregates,
 sample counts, slow-frame counters, and recent spikes.
 
+## Lua Execution Domain
+
+All Lua owned by one UE4SS mod must execute in one domain after startup: the
+game thread. This includes timer wrappers, plugin hooks, event dispatch,
+command decoding, telemetry updates, cleanup, and code that only appears to do
+filesystem or socket work. Separate UE4SS Lua states can share one Lua global
+heap, so moving only the final UObject call to the game thread does not make an
+async Lua producer safe.
+
+`ExecuteWithDelay`, `ExecuteAsync`, and `LoopAsync` are therefore forbidden for
+BMF and OmeggaBridge runtime callbacks. Do not use them as compatibility
+fallbacks. If a game-thread scheduler is unavailable, the affected feature must
+fail closed.
+
+Background work is allowed only when a native or Node.js worker owns its data
+without entering Lua or retaining Lua/UObject references. The worker may place
+bounded byte strings or plain records into a synchronized queue; one
+game-thread Lua pump then drains a bounded batch. `BMFSocket` follows this
+transport boundary.
+
 ## Omegga and Grafana Cloud Path
 
 The BMF-vendored Omegga Windows runtime reads the runtime JSON files and exposes
@@ -72,45 +92,46 @@ BMF_COMMAND_WORKER_ENABLED=0
 BMF_COMMAND_WORKER_POLL_MS=250
 BMF_COMMAND_WORKER_FALLBACK_POLL_MS=1000
 BMF_COMMAND_WORKER_MAX_FILES_PER_POLL=1
-BMF_COMMAND_WORKER_ASYNC=1
+BMF_COMMAND_WORKER_ASYNC=0
+BMF_ALLOW_LOOPASYNC=0
 ```
 
 Enable `BMF_COMMAND_WORKER_ENABLED=1` only for legacy validation scripts that
 have not yet moved to the socket client. Normal BMF Desktop and Omegga adapter
 flows should use `BMFSocket`.
 
-When `LoopAsync` is available, the command worker enumerates request files from
-an async loop and schedules only the claimed command dispatch onto the game
-thread. This keeps filesystem polling and idle directory scans away from the
-game thread. `BMF_COMMAND_WORKER_MAX_FILES_PER_POLL` caps how much work can be
-scheduled from one poll.
-
-If async scheduling is unavailable or disabled, BMF can fall back to
-game-thread loops or delayed callbacks. Treat those modes as degraded:
+Do not run the file worker through `LoopAsync`. Even a callback that only
+enumerates files still enters the shared Lua heap off the game thread. The
+supported live configuration leaves this worker disabled and uses `BMFSocket`.
+Legacy validation may opt in to a low-rate game-thread compatibility poll, with
+one file at most per invocation. Treat any enabled file-worker mode as
+degraded and measure its frame cost:
 
 ```text
-bmf_command_worker_info{mode="LoopAsync"}                  preferred
-bmf_command_worker_info{mode="LoopInGameThread"}           fallback
-bmf_command_worker_info{mode="ExecuteInGameThreadWithDelay"} fallback
-bmf_command_worker_info{mode="stopped"}                    unhealthy
+bmf_command_worker_info{mode="disabled"}                   supported live default
+bmf_command_worker_info{mode="ExecuteInGameThreadAfterFramesChain"} legacy validation only
+bmf_command_worker_info{mode="LoopInGameThread"}           retired
+bmf_command_worker_info{mode="LoopAsync"}                  forbidden
+bmf_command_worker_info{mode="stopped"}                    failed closed
 ```
 
 Environment knobs:
 
 ```text
-BMF_ALLOW_LOOPASYNC=1                  allow LoopAsync explicitly
-BMF_ALLOW_LOOPASYNC=0                  force async loop off
+BMF_ALLOW_LOOPASYNC=0                  required; async Lua scheduling is unsupported
 BMF_COMMAND_WORKER_ENABLED=1           opt in to legacy request-file validation
-BMF_COMMAND_WORKER_ASYNC=0             disable async command worker path
-BMF_ALLOW_GAME_THREAD_LOOP=1           allow game-thread loop fallback
-BMF_ALLOW_DELAYED_WORKER_FALLBACK=0    fail closed instead of using recurring delayed callbacks
-BMF_COMMAND_WORKER_POLL_MS=<ms>        async poll interval
+BMF_COMMAND_WORKER_ASYNC=0             required; retain only for compatibility
+BMF_ALLOW_GAME_THREAD_LOOP=0           required; native recurring Lua loops are retired
+BMF_ALLOW_DELAYED_WORKER_FALLBACK=1    enable the owned EngineTick one-shot chain
+BMF_COMMAND_WORKER_POLL_MS=<ms>        legacy compatibility poll interval
 BMF_COMMAND_WORKER_FALLBACK_POLL_MS=<ms>
 BMF_COMMAND_WORKER_MAX_FILES_PER_POLL=<n>
 ```
 
-Use `BMF_COMMAND_WORKER_MAX_FILES_PER_POLL=1` unless a live test proves a higher
-value does not raise max frame time.
+Keep `BMF_COMMAND_WORKER_MAX_FILES_PER_POLL=1`. Do not raise it to recover
+throughput; migrate the caller to `BMFSocket` instead. A future file transport
+may move directory I/O into a native or Node.js worker, but Lua must still drain
+its bounded queue on the game thread.
 
 ## Socket Worker
 
@@ -119,9 +140,12 @@ traffic. Omegga starts an authenticated loopback broker and passes
 `OMEGGA_BMF_SOCKET_*` values into the Brickadia server. BMF connects from inside
 the UE4SS process and processes newline-delimited JSON command/event messages.
 
-The socket worker can also use `LoopAsync`; it still must queue and bound game
-thread work. A socket reduces transport latency, but it does not make Unreal
-property reads, team mutation, or command dispatch free.
+The native socket worker performs network I/O off-thread and owns synchronized
+byte queues. Lua must drain those queues only through the persistent game-thread
+pump; `LoopAsync` is not a supported socket-worker mode. A socket reduces
+transport latency, but it does not make JSON decoding, Unreal property reads,
+team mutation, or command dispatch free. Keep ingress and dispatch bounded on
+every pump invocation.
 
 Useful variables:
 
@@ -176,6 +200,15 @@ budget.
 
 Use these rules:
 
+- Keep all UE4SS Lua callbacks on the game thread. Never use
+  `ExecuteWithDelay`, `ExecuteAsync`, or `LoopAsync` for BMF/OmeggaBridge Lua.
+- Register a small number of long-lived game-thread pumps for high-frequency
+  request streams. Public timers retain at most one native game-thread due
+  action per live timer; active-timer ceilings bound that native enqueue work,
+  while the shared dispatcher bounds user callback work.
+- Keep timer queues bounded. Tag plugin timers with their owner, monotonic
+  nonreused ID, and lifecycle phase; cancel them during unload/reload; and cap
+  callbacks, owner share, queue scans, and elapsed work per pump.
 - Prefer event-driven data or one shared bulk snapshot over per-player polling.
 - Do not scan files, parse large payloads, enumerate broad UObject lists, or run
   analytics on the game thread.
@@ -189,6 +222,12 @@ Use these rules:
 
 Do not rely only on average frame time. The local telemetry investigation showed
 that max frame time can remain high even after command volume improves.
+
+Scheduler telemetry must make the invariant auditable: report execution mode,
+thread checks and violations, active and queued timers, owner counts, callbacks
+run/deferred/rejected, queue high-water mark, callback duration, and any denied
+async-scheduler lookup. Healthy live telemetry has a working game-thread guard,
+positive thread-check count, and zero off-game-thread Lua callback violations.
 
 ### Runtime Brick State Guardrails
 

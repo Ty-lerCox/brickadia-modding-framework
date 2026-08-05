@@ -95,12 +95,15 @@ try {
     Require-Script $scripts 'test:core' 'npm --prefix packages/orchestrator-core test' $errors
     Require-Script $scripts 'test:cli' 'npm --prefix cli test' $errors
     Require-Script $scripts 'doctor' 'cli/bin/bmfctl.js doctor' $errors
+    Require-Script $scripts 'sync:runtime-template' 'scripts/sync-bmf-runtime-template.ps1' $errors
     Require-Script $scripts 'validate' 'scripts/validate-package.ps1' $errors
     Require-Script $scripts 'validate:workspace' 'scripts/validate-workspace.ps1' $errors
     Require-Script $scripts 'validate:ci' 'scripts/validate-ci-workflows.ps1' $errors
     Require-Script $scripts 'validate:desktop' 'scripts/validate-bmf-desktop.ps1' $errors
     Require-Script $scripts 'validate:orchestrator' 'scripts/validate-orchestrator-core.ps1' $errors
     Require-Script $scripts 'validate:runtime-packages' 'scripts/validate-bmf-runtime-packages.ps1' $errors
+    Require-Script $scripts 'validate:runtime-template-parity' 'scripts/validate-bmf-runtime-template-parity.ps1' $errors
+    Require-Script $scripts 'validate:plugin-facade-safety' 'scripts/validate-bmf-plugin-facade-safety.ps1' $errors
     Require-Script $scripts 'validate:release' 'scripts/validate-release-package.ps1' $errors
   }
 

@@ -431,6 +431,13 @@ export function buildPrometheusMetrics(server: Webserver) {
   const bmfScheduler = objectRecord(bmfTelemetryRecord.scheduler);
   const bmfSchedulerByKey = objectRecord(bmfScheduler.by_key);
   const bmfWorkers = objectRecord(bmfTelemetryRecord.workers);
+  const bmfSocketScheduler = objectRecord(bmfTelemetryRecord.socket_scheduler);
+  const bmfSocketSchedulerByPath = objectRecord(bmfSocketScheduler.by_path);
+  const bmfSocketIngressByType = objectRecord(
+    bmfSocketScheduler.ingress_by_type,
+  );
+  const bmfSocketQueues = objectRecord(bmfSocketScheduler.queues);
+  const bmfSocketSlice = objectRecord(bmfSocketScheduler.slice);
   const bmfFrameWindow = objectRecord(bmfFrameTelemetryRecord.window);
   const bmfFrameLifetime = objectRecord(bmfFrameTelemetryRecord.lifetime);
   const bmfFrameSpikes = objectRecord(bmfFrameTelemetryRecord.spikes);
@@ -666,6 +673,98 @@ export function buildPrometheusMetrics(server: Webserver) {
       ];
     },
   );
+  const bmfSocketPaths = ['direct_socket', 'tunnel'] as const;
+  const bmfSocketWorkTotalLines = bmfSocketPaths.flatMap(pathName => {
+    const record = objectRecord(bmfSocketSchedulerByPath[pathName]);
+    return outcomeMetricLines(
+      'bmf_socket_work_total',
+      { path: pathName },
+      record,
+    );
+  });
+  const bmfSocketWorkDurationLines = bmfSocketPaths.flatMap(pathName => {
+    const record = objectRecord(bmfSocketSchedulerByPath[pathName]);
+    return durationMetricLines(
+      'bmf_socket_work_duration_milliseconds',
+      { path: pathName },
+      record,
+    );
+  });
+  const bmfSocketAdmissionLines = bmfSocketPaths.map(pathName => ({
+    name: 'bmf_socket_admitted_total',
+    labels: { path: pathName },
+    value: finiteMetricValue(
+      objectRecord(bmfSocketSchedulerByPath[pathName]).admitted,
+    ),
+  }));
+  const bmfSocketMonolithicOverrunLines = bmfSocketPaths.map(pathName => ({
+    name: 'bmf_game_thread_monolithic_overrun_total',
+    labels: { path: pathName },
+    value: finiteMetricValue(
+      objectRecord(bmfSocketSchedulerByPath[pathName]).monolithic_overruns,
+    ),
+  }));
+  const bmfSocketIngressTypes = [
+    ['command', 'command'],
+    ['tunnel_request', 'tunnel.request'],
+    ['ping', 'ping'],
+    ['other', 'other'],
+  ] as const;
+  const bmfSocketIngressTypeLines = bmfSocketIngressTypes.map(
+    ([recordName, messageType]) => ({
+      name: 'bmf_socket_ingress_messages_total',
+      labels: { type: messageType },
+      value: finiteMetricValue(
+        objectRecord(bmfSocketIngressByType[recordName]).count,
+      ),
+    }),
+  );
+  const bmfSocketQueueLines: MetricLine[] = [
+    {
+      name: 'bmf_socket_queue_depth',
+      labels: { path: 'direct_socket', service_class: 'direct' },
+      value: finiteMetricValue(bmfSocketQueues.direct_depth),
+    },
+    {
+      name: 'bmf_socket_queue_depth',
+      labels: { path: 'tunnel', service_class: 'total' },
+      value: finiteMetricValue(bmfSocketQueues.tunnel_depth),
+    },
+    {
+      name: 'bmf_socket_queue_depth',
+      labels: { path: 'tunnel', service_class: 'interactive' },
+      value: finiteMetricValue(bmfSocketQueues.tunnel_interactive_depth),
+    },
+    {
+      name: 'bmf_socket_queue_depth',
+      labels: { path: 'tunnel', service_class: 'bulk' },
+      value: finiteMetricValue(bmfSocketQueues.tunnel_bulk_depth),
+    },
+  ];
+  const bmfSocketQueueAgeLines: MetricLine[] = [
+    {
+      name: 'bmf_socket_queue_oldest_age_milliseconds',
+      labels: { path: 'direct_socket', service_class: 'direct' },
+      value: finiteMetricValue(bmfSocketQueues.direct_oldest_age_ms),
+    },
+    {
+      name: 'bmf_socket_queue_oldest_age_milliseconds',
+      labels: { path: 'tunnel', service_class: 'total' },
+      value: finiteMetricValue(bmfSocketQueues.tunnel_oldest_age_ms),
+    },
+    {
+      name: 'bmf_socket_queue_oldest_age_milliseconds',
+      labels: { path: 'tunnel', service_class: 'interactive' },
+      value: finiteMetricValue(
+        bmfSocketQueues.tunnel_interactive_oldest_age_ms,
+      ),
+    },
+    {
+      name: 'bmf_socket_queue_oldest_age_milliseconds',
+      labels: { path: 'tunnel', service_class: 'bulk' },
+      value: finiteMetricValue(bmfSocketQueues.tunnel_bulk_oldest_age_ms),
+    },
+  ];
   const bmfFrameDurationLines: MetricLine[] = [
     {
       name: 'brickadia_frame_delta_milliseconds',
@@ -1332,6 +1431,192 @@ export function buildPrometheusMetrics(server: Webserver) {
       'BMF bridge worker processed item totals.',
       bmfWorkerItemLines,
       'counter',
+    ),
+    ...metricBlock(
+      'bmf_socket_ingress_messages_total',
+      'Socket envelopes admitted from the native receive queue by fixed message type.',
+      bmfSocketIngressTypeLines,
+      'counter',
+    ),
+    ...metricBlock(
+      'bmf_socket_admitted_total',
+      'Executable socket work admitted by direct-command or tunnel path.',
+      bmfSocketAdmissionLines,
+      'counter',
+    ),
+    ...metricBlock(
+      'bmf_socket_work_total',
+      'Executed socket work outcomes by direct-command or tunnel path.',
+      bmfSocketWorkTotalLines,
+      'counter',
+    ),
+    ...metricBlock(
+      'bmf_socket_work_duration_milliseconds',
+      'Socket work duration by direct-command or tunnel path.',
+      bmfSocketWorkDurationLines,
+    ),
+    ...metricBlock(
+      'bmf_game_thread_slice_duration_milliseconds',
+      'Total game-thread scheduler slice duration for the socket pump.',
+      durationMetricLines(
+        'bmf_game_thread_slice_duration_milliseconds',
+        { worker: 'socket_pump' },
+        bmfSocketSlice,
+      ),
+    ),
+    ...metricBlock(
+      'bmf_game_thread_budget_milliseconds',
+      'Configured soft game-thread budget used for attribution.',
+      [
+        {
+          name: 'bmf_game_thread_budget_milliseconds',
+          labels: { worker: 'socket_pump' },
+          value: finiteMetricValue(bmfSocketScheduler.budget_ms),
+        },
+      ],
+    ),
+    ...metricBlock(
+      'bmf_game_thread_budget_enforced',
+      'Whether elapsed-time admission enforcement is enabled for the game-thread socket pump.',
+      [
+        {
+          name: 'bmf_game_thread_budget_enforced',
+          labels: { worker: 'socket_pump' },
+          value:
+            typeof bmfSocketScheduler.budget_enforced === 'boolean'
+              ? boolGauge(bmfSocketScheduler.budget_enforced)
+              : NaN,
+        },
+      ],
+    ),
+    ...metricBlock(
+      'bmf_game_thread_budget_exhausted_total',
+      'Socket pump slices whose elapsed time exceeded the soft game-thread budget.',
+      [
+        {
+          name: 'bmf_game_thread_budget_exhausted_total',
+          labels: { worker: 'socket_pump' },
+          value: finiteMetricValue(bmfSocketScheduler.budget_exhausted_total),
+        },
+      ],
+      'counter',
+    ),
+    ...metricBlock(
+      'bmf_game_thread_admission_stopped_total',
+      'Socket pump admissions stopped after the elapsed game-thread budget was exhausted.',
+      [
+        {
+          name: 'bmf_game_thread_admission_stopped_total',
+          labels: { worker: 'socket_pump', reason: 'budget' },
+          value: finiteMetricValue(
+            bmfSocketScheduler.budget_admission_stopped_total,
+          ),
+        },
+      ],
+      'counter',
+    ),
+    ...metricBlock(
+      'bmf_game_thread_dispatch_skipped_total',
+      'Pending path dispatches skipped after the elapsed game-thread budget was exhausted.',
+      [
+        {
+          name: 'bmf_game_thread_dispatch_skipped_total',
+          labels: {
+            worker: 'socket_pump',
+            path: 'tunnel',
+            reason: 'budget',
+          },
+          value: finiteMetricValue(
+            bmfSocketScheduler.budget_tunnel_dispatch_skipped_total,
+          ),
+        },
+      ],
+      'counter',
+    ),
+    ...metricBlock(
+      'bmf_game_thread_monolithic_overrun_total',
+      'Individual direct-command or tunnel calls exceeding the soft game-thread budget.',
+      bmfSocketMonolithicOverrunLines,
+      'counter',
+    ),
+    ...metricBlock(
+      'bmf_socket_queue_depth',
+      'Current queue depth by bounded socket execution path and service class.',
+      bmfSocketQueueLines,
+    ),
+    ...metricBlock(
+      'bmf_socket_queue_oldest_age_milliseconds',
+      'Age of the oldest queued socket request by path and service class.',
+      bmfSocketQueueAgeLines,
+    ),
+    ...metricBlock(
+      'bmf_socket_configured_ingress_per_pump',
+      'Configured native socket receive limit before direct-ingress containment.',
+      [
+        {
+          name: 'bmf_socket_configured_ingress_per_pump',
+          value: finiteMetricValue(
+            bmfSocketScheduler.configured_ingress_per_pump,
+          ),
+        },
+      ],
+    ),
+    ...metricBlock(
+      'bmf_socket_effective_ingress_per_pump',
+      'Effective native socket receive limit after direct-ingress containment.',
+      [
+        {
+          name: 'bmf_socket_effective_ingress_per_pump',
+          value: finiteMetricValue(
+            bmfSocketScheduler.effective_ingress_per_pump,
+          ),
+        },
+      ],
+    ),
+    ...metricBlock(
+      'bmf_socket_ingress_last',
+      'Actual socket envelopes admitted by the most recent pump.',
+      [
+        {
+          name: 'bmf_socket_ingress_last',
+          value: finiteMetricValue(bmfSocketScheduler.ingress_last),
+        },
+      ],
+    ),
+    ...metricBlock(
+      'bmf_socket_direct_admitted_last',
+      'Actual direct commands admitted by the most recent pump.',
+      [
+        {
+          name: 'bmf_socket_direct_admitted_last',
+          value: finiteMetricValue(bmfSocketScheduler.direct_admitted_last),
+        },
+      ],
+    ),
+    ...metricBlock(
+      'bmf_socket_direct_ingress_cap_enabled',
+      'Whether the default-on direct socket ingress containment cap is enabled.',
+      [
+        {
+          name: 'bmf_socket_direct_ingress_cap_enabled',
+          value:
+            typeof bmfSocketScheduler.direct_ingress_cap_enabled === 'boolean'
+              ? boolGauge(bmfSocketScheduler.direct_ingress_cap_enabled)
+              : NaN,
+        },
+      ],
+    ),
+    ...metricBlock(
+      'bmf_socket_direct_ingress_cap_per_pump',
+      'Configured default-on direct socket ingress cap per game-thread pump.',
+      [
+        {
+          name: 'bmf_socket_direct_ingress_cap_per_pump',
+          value: finiteMetricValue(
+            bmfSocketScheduler.direct_ingress_cap_per_pump,
+          ),
+        },
+      ],
     ),
     ...metricBlock('bmf_plugins_loaded', 'Loaded BMF plugin count.', [
       {

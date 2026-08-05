@@ -2,5 +2,5 @@
   "name": "TieredBrickPlacementGuard",
   "version": "0.1.0",
   "description": "Enforces capability-specific Brickadia brick and prefab placement restrictions.",
-  "capabilities": ["chat.whisper", "plugins.storage"]
+  "capabilities": ["chat.whisper", "plugins.storage", "filesystem.raw"]
 }

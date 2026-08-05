@@ -33,12 +33,109 @@ $runtimeLogPath = Join-Path $runtimeBmfDir 'runtime/bmf.log'
 $runtimePluginLogPath = Join-Path $runtimeBmfDir 'runtime/logs/plugins/TimerCanary.log'
 $runtimeStatusPath = Join-Path $runtimeBmfDir 'runtime/status.json'
 $bridgeDir = Join-Path $caseRoot "bridge-$Port"
+$bridgeLogPath = Join-Path $bridgeDir 'bridge.log'
+$bridgeStatusPath = Join-Path $bridgeDir 'status.json'
 $startPath = Join-Path $caseRoot 'server-start.json'
 $pluginStagePath = Join-Path $caseRoot 'timer-plugin-stage.json'
 $bmfLogPath = Join-Path $caseRoot 'bmf.log'
 $pluginLogPath = Join-Path $caseRoot 'TimerCanary.log'
 $statusPath = Join-Path $caseRoot 'status.json'
 $serverPid = $null
+$validationLockPath = Join-Path ([System.IO.Path]::GetFullPath($RuntimeModsDir)) '.bmf-active-validation.lock'
+$validationLock = $null
+$runtimeSnapshotTaken = $false
+$runtimeMutationStarted = $false
+$runtimeBmfExistedBefore = $false
+$runtimeBackupRoot = ''
+$runtimeBackupBmfDir = ''
+
+function Assert-RuntimeBmfTarget {
+  $modsFull = [System.IO.Path]::GetFullPath($RuntimeModsDir).TrimEnd('\', '/')
+  $bmfFull = [System.IO.Path]::GetFullPath($runtimeBmfDir).TrimEnd('\', '/')
+  $expected = [System.IO.Path]::GetFullPath((Join-Path $modsFull 'BMF')).TrimEnd('\', '/')
+  if (![string]::Equals($bmfFull, $expected, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "Refusing to mutate unexpected BMF runtime path: $bmfFull (expected $expected)"
+  }
+}
+
+function Acquire-ActiveBmfValidationLock {
+  Assert-RuntimeBmfTarget
+  New-Item -ItemType Directory -Force -Path $RuntimeModsDir | Out-Null
+  try {
+    $script:validationLock = [System.IO.File]::Open(
+      $validationLockPath,
+      [System.IO.FileMode]::OpenOrCreate,
+      [System.IO.FileAccess]::ReadWrite,
+      [System.IO.FileShare]::None
+    )
+  } catch [System.IO.IOException] {
+    throw "Active BMF staging is already locked by another validation process: $validationLockPath. Run live BMF validators serially."
+  }
+
+  $validationLock.SetLength(0)
+  $lockBytes = [System.Text.Encoding]::UTF8.GetBytes("pid=$PID`nvalidator=bmf-timers`n")
+  $validationLock.Write($lockBytes, 0, $lockBytes.Length)
+  $validationLock.Flush()
+}
+
+function Backup-ActiveBmfRuntime {
+  Assert-RuntimeBmfTarget
+  $script:runtimeBmfExistedBefore = Test-Path -LiteralPath $runtimeBmfDir -PathType Container
+  $script:runtimeBackupRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("bmf-timers-validation-$PID-" + [guid]::NewGuid().ToString('N'))
+  $script:runtimeBackupBmfDir = Join-Path $runtimeBackupRoot 'BMF'
+  New-Item -ItemType Directory -Force -Path $runtimeBackupRoot | Out-Null
+  try {
+    if ($runtimeBmfExistedBefore) {
+      Copy-Item -LiteralPath $runtimeBmfDir -Destination $runtimeBackupBmfDir -Recurse -Force
+    }
+    $script:runtimeSnapshotTaken = $true
+  } catch {
+    Remove-Item -LiteralPath $runtimeBackupRoot -Recurse -Force -ErrorAction SilentlyContinue
+    throw
+  }
+}
+
+function Capture-ActiveBmfEvidence {
+  foreach ($pair in @(
+    @($runtimeLogPath, $bmfLogPath),
+    @($runtimePluginLogPath, $pluginLogPath),
+    @($runtimeStatusPath, $statusPath)
+  )) {
+    if (Test-Path -LiteralPath $pair[0] -PathType Leaf) {
+      Copy-Item -LiteralPath $pair[0] -Destination $pair[1] -Force
+    }
+  }
+}
+
+function Restore-ActiveBmfRuntime {
+  if (!$runtimeSnapshotTaken) {
+    return
+  }
+  Assert-RuntimeBmfTarget
+  if ($runtimeBmfExistedBefore -and !(Test-Path -LiteralPath $runtimeBackupBmfDir -PathType Container)) {
+    throw "Active BMF backup is missing: $runtimeBackupBmfDir"
+  }
+  if (Test-Path -LiteralPath $runtimeBmfDir) {
+    Remove-Item -LiteralPath $runtimeBmfDir -Recurse -Force
+  }
+  if ($runtimeBmfExistedBefore) {
+    Copy-Item -LiteralPath $runtimeBackupBmfDir -Destination $runtimeBmfDir -Recurse -Force
+  }
+  if ($runtimeBackupRoot -and (Test-Path -LiteralPath $runtimeBackupRoot)) {
+    Remove-Item -LiteralPath $runtimeBackupRoot -Recurse -Force
+  }
+  $script:runtimeSnapshotTaken = $false
+}
+
+function Release-ActiveBmfValidationLock {
+  if ($validationLock) {
+    $validationLock.Dispose()
+    $script:validationLock = $null
+  }
+  if (Test-Path -LiteralPath $validationLockPath) {
+    Remove-Item -LiteralPath $validationLockPath -Force -ErrorAction SilentlyContinue
+  }
+}
 
 function Add-Evidence([string]$Kind, [string]$Path, [string]$Summary) {
   if ($Path -and (Test-Path -LiteralPath $Path)) {
@@ -62,6 +159,11 @@ function Invoke-BmfConsoleCommand([string]$Command, [string]$Slug, [string[]]$Ex
   $rpcPath = Join-Path $caseRoot "$Slug-rpc.json"
   $bridgeCommand = "Omegga.Bridge.BMF $Command"
   $responseArtifactPath = Join-Path $caseRoot "$Slug-response.txt"
+  foreach ($staleArtifact in @($rpcPath, $responseArtifactPath)) {
+    if (Test-Path -LiteralPath $staleArtifact) {
+      Remove-Item -LiteralPath $staleArtifact -Force
+    }
+  }
   $output = & node $sendRpcScript --dir $bridgeDir --method console.exec --command-raw $bridgeCommand --wait-ms 25000 --include-logs 1
   $output | Set-Content -LiteralPath $rpcPath -Encoding UTF8
   Add-Evidence 'json' $rpcPath "Bridge RPC output for $Command"
@@ -137,11 +239,28 @@ try {
     }
   }
 
+  $existingServers = @(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'BrickadiaServer-Win64-Shipping.exe' })
+  if ($existingServers.Count -gt 0) {
+    throw 'Refusing to stage the timer canary while another Brickadia server process is running.'
+  }
+
+  Acquire-ActiveBmfValidationLock
+  foreach ($artifactPath in @($bmfLogPath, $pluginLogPath, $statusPath)) {
+    if (Test-Path -LiteralPath $artifactPath) {
+      Remove-Item -LiteralPath $artifactPath -Force
+    }
+  }
+  Backup-ActiveBmfRuntime
+  $runtimeMutationStarted = $true
   if (Test-Path -LiteralPath $runtimeBmfDir) {
     Remove-Item -LiteralPath $runtimeBmfDir -Recurse -Force
   }
   New-Item -ItemType Directory -Force -Path $runtimeBmfDir | Out-Null
   Copy-Item -Path (Join-Path $sourceBmfDir '*') -Destination $runtimeBmfDir -Recurse -Force
+  $runtimePluginsDir = Join-Path $runtimeBmfDir 'plugins'
+  if (Test-Path -LiteralPath $runtimePluginsDir) {
+    Remove-Item -LiteralPath $runtimePluginsDir -Recurse -Force
+  }
   New-Item -ItemType Directory -Force -Path $runtimePluginDir | Out-Null
 
   $manifestSource = @'
@@ -185,6 +304,20 @@ return {
       BMF.logInfo("TimerCanary every fired", { phase = "every", count = count })
       if count >= 3 then
         state.everyCancelled = BMF.timers.cancel(id)
+        BMF.logInfo(
+          "TimerCanary complete"
+            .. " after_count=" .. tostring(state.after)
+            .. " every_count=" .. tostring(state.every)
+            .. " every_last_count=" .. tostring(state.everyLastCount)
+            .. " cancelled_count=" .. tostring(state.cancelled)
+            .. " cancel_before=" .. tostring(state.cancelBefore)
+            .. " every_cancelled=" .. tostring(state.everyCancelled)
+            .. " active_count=" .. tostring(BMF.timers.activeCount()))
+        BMF.timers.after(400, function()
+          BMF.logInfo(
+            "TimerCanary post-completion sentinel fired"
+              .. " active_count=" .. tostring(BMF.timers.activeCount()))
+        end)
       end
     end)
 
@@ -229,37 +362,88 @@ return {
   if ($start.verified -ne $true) {
     $errors.Add("Bridge server did not verify: $($start.verify_reason)")
   } else {
-    Start-Sleep -Seconds 4
+    $completionNeedle = 'TimerCanary complete after_count=1 every_count=3 every_last_count=3 cancelled_count=0 cancel_before=true every_cancelled=true active_count=0'
+    $sentinelNeedle = 'TimerCanary post-completion sentinel fired active_count=0'
+    $completionDeadline = (Get-Date).AddSeconds(12)
+    $completionObserved = $false
+    $sentinelObserved = $false
+    while ((Get-Date) -lt $completionDeadline) {
+      if (Test-Path -LiteralPath $runtimePluginLogPath) {
+        $livePluginLog = Get-Content -Raw -LiteralPath $runtimePluginLogPath
+        if ($livePluginLog -match [regex]::Escape($completionNeedle)) {
+          $completionObserved = $true
+        }
+        if ($livePluginLog -match [regex]::Escape($sentinelNeedle)) {
+          $sentinelObserved = $true
+        }
+        if ($completionObserved -and $sentinelObserved) {
+          break
+        }
+      }
+      Start-Sleep -Milliseconds 250
+    }
+    if (-not $completionObserved) {
+      $errors.Add('Timer canary did not publish its automatic completion record.')
+    }
+    if (-not $sentinelObserved) {
+      $errors.Add('Timer canary post-completion sentinel did not fire.')
+    }
 
-    Invoke-BmfConsoleCommand 'bmf.timers.canary' 'bmf-timers-canary' @(
-      'BMF bmf.timers.canary OK',
-      'after_count=1',
-      'every_count=3',
-      'every_last_count=3',
-      'cancelled_count=0',
-      'cancel_before=true',
-      'every_cancelled=true'
-    )
+    # Headless validation intentionally disables both command transports, which
+    # are the production status-heartbeat owners. The exact completion record
+    # above proves four timer callbacks and the sentinel proves the one-shot
+    # chain remains healthy after the canary timers finish.
+    if ($serverPid -and !(Get-Process -Id $serverPid -ErrorAction SilentlyContinue)) {
+      $errors.Add('Bridge server exited after the timer canary completed.')
+    }
   }
 } catch {
   $errors.Add($_.Exception.Message)
 } finally {
-  if ($serverPid) {
-    Stop-Process -Id $serverPid -Force -ErrorAction SilentlyContinue
+  try {
+    try {
+      if ($serverPid) {
+        Stop-Process -Id $serverPid -Force -ErrorAction SilentlyContinue
+        Wait-Process -Id $serverPid -Timeout 10 -ErrorAction SilentlyContinue
+      }
+      Get-CimInstance Win32_Process |
+        Where-Object { $_.Name -eq 'BrickadiaServer-Win64-Shipping.exe' -and $_.CommandLine -like "*-port=`"$Port`*"} |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    } catch {
+      $errors.Add("Failed to stop the timer validation server: $($_.Exception.Message)")
+    }
+    if ($runtimeMutationStarted) {
+      try {
+        Capture-ActiveBmfEvidence
+      } catch {
+        $errors.Add("Failed to capture timer validation evidence: $($_.Exception.Message)")
+      }
+      try {
+        Restore-ActiveBmfRuntime
+      } catch {
+        $errors.Add("Failed to restore the active BMF runtime: $($_.Exception.Message). Backup retained at $runtimeBackupRoot")
+      }
+    }
+  } finally {
+    Release-ActiveBmfValidationLock
   }
-  Get-CimInstance Win32_Process |
-    Where-Object { $_.Name -eq 'BrickadiaServer-Win64-Shipping.exe' -and $_.CommandLine -like "*-port=`"$Port`*"} |
-    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 }
 
-if (Test-Path -LiteralPath $runtimeLogPath) {
-  Copy-Item -LiteralPath $runtimeLogPath -Destination $bmfLogPath -Force
+if (Test-Path -LiteralPath $bmfLogPath) {
   Add-Evidence 'log' $bmfLogPath 'BMF framework log with timer evidence'
   $logText = Get-Content -Raw -LiteralPath $bmfLogPath
   foreach ($needle in @(
     '[TimerCanary] TimerCanary after fired',
     '[TimerCanary] TimerCanary every fired',
-    'BMF bmf.timers.canary OK'
+    '[TimerCanary] TimerCanary complete',
+    'after_count=1',
+    'every_count=3',
+    'every_last_count=3',
+    'cancelled_count=0',
+    'cancel_before=true',
+    'every_cancelled=true',
+    'active_count=0',
+    'TimerCanary post-completion sentinel fired active_count=0'
   )) {
     if ($logText -notmatch [regex]::Escape($needle)) {
       $errors.Add("BMF log missing expected line: $needle")
@@ -268,29 +452,87 @@ if (Test-Path -LiteralPath $runtimeLogPath) {
   if ($logText -match [regex]::Escape('TimerCanary cancelled timer unexpectedly fired')) {
     $errors.Add('Cancelled timer unexpectedly fired according to BMF log.')
   }
-} else {
+} elseif ($runtimeMutationStarted) {
   $errors.Add("BMF runtime log was not written: $runtimeLogPath")
 }
 
-if (Test-Path -LiteralPath $runtimePluginLogPath) {
-  Copy-Item -LiteralPath $runtimePluginLogPath -Destination $pluginLogPath -Force
+if (Test-Path -LiteralPath $pluginLogPath) {
   Add-Evidence 'log' $pluginLogPath 'TimerCanary per-plugin log'
-} else {
+} elseif ($runtimeMutationStarted) {
   $errors.Add("Plugin log was not written: $runtimePluginLogPath")
 }
 
-if (Test-Path -LiteralPath $runtimeStatusPath) {
-  Copy-Item -LiteralPath $runtimeStatusPath -Destination $statusPath -Force
+if (Test-Path -LiteralPath $bridgeLogPath) {
+  Add-Evidence 'log' $bridgeLogPath 'OmeggaBridge one-shot scheduler activity during timer canary'
+  $bridgeLogText = Get-Content -Raw -LiteralPath $bridgeLogPath
+  foreach ($needle in @(
+    'Starting game-thread-only inbox poller via ExecuteInGameThreadAfterFramesChain',
+    'Inbox poll tick 1',
+    'Scheduling callback via ExecuteInGameThread EngineTick'
+  )) {
+    if ($bridgeLogText -notmatch [regex]::Escape($needle)) {
+      $errors.Add("Bridge log missing expected scheduler evidence: $needle")
+    }
+  }
+} elseif ($runtimeMutationStarted) {
+  $errors.Add("Bridge log was not written: $bridgeLogPath")
+}
+
+if (Test-Path -LiteralPath $bridgeStatusPath) {
+  Add-Evidence 'json' $bridgeStatusPath 'OmeggaBridge scheduler status during timer canary'
+  try {
+    $bridgeStatus = Read-JsonFile $bridgeStatusPath
+    if ($bridgeStatus.inbox_loop_active -ne $true) {
+      $errors.Add('Expected the OmeggaBridge inbox loop to remain active.')
+    }
+    if ([string]$bridgeStatus.inbox_scheduler -ne 'ExecuteInGameThreadAfterFramesChain') {
+      $errors.Add("Unexpected OmeggaBridge scheduler: $($bridgeStatus.inbox_scheduler)")
+    }
+    foreach ($field in @(
+      'inbox_loop_cancel_error_total',
+      'inbox_loop_callback_error_total',
+      'inbox_loop_thread_violation_total'
+    )) {
+      if ([int]$bridgeStatus.$field -ne 0) {
+        $errors.Add("Expected zero $field, got $($bridgeStatus.$field).")
+      }
+    }
+  } catch {
+    $errors.Add("Could not parse OmeggaBridge status: $($_.Exception.Message)")
+  }
+} elseif ($runtimeMutationStarted) {
+  $errors.Add("OmeggaBridge status was not written: $bridgeStatusPath")
+}
+
+if (Test-Path -LiteralPath $statusPath) {
   Add-Evidence 'json' $statusPath 'BMF runtime status after timer canary'
   try {
     $status = Read-JsonFile $statusPath
     if ([int]$status.plugins_loaded -lt 1) {
       $errors.Add("Expected at least one plugin loaded, got $($status.plugins_loaded).")
     }
+    if ($status.timers_pump_started -ne $true) {
+      $errors.Add('Expected the bounded timer pump to remain started.')
+    }
+    if ([string]$status.timers_pump_mode -ne 'ExecuteInGameThreadAfterFramesChain') {
+      $errors.Add("Unexpected timer pump mode: $($status.timers_pump_mode)")
+    }
+    if ([int]$status.scheduler_thread_violations -ne 0) {
+      $errors.Add("Expected zero scheduler thread violations, got $($status.scheduler_thread_violations).")
+    }
+    if ([int]$status.scheduler_thread_check_errors -ne 0) {
+      $errors.Add("Expected zero scheduler thread-check errors, got $($status.scheduler_thread_check_errors).")
+    }
+    if ([int]$status.scheduler_dispatch_errors -ne 0) {
+      $errors.Add("Expected zero scheduler dispatch errors, got $($status.scheduler_dispatch_errors).")
+    }
+    if ([int]$status.timers_callback_errors -ne 0) {
+      $errors.Add("Expected zero timer callback errors, got $($status.timers_callback_errors).")
+    }
   } catch {
     $errors.Add("Could not parse BMF status: $($_.Exception.Message)")
   }
-} else {
+} elseif ($runtimeMutationStarted) {
   $errors.Add("BMF runtime status was not written: $runtimeStatusPath")
 }
 

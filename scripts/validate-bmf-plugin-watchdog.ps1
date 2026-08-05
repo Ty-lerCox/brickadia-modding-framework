@@ -25,15 +25,16 @@ $caseRoot = Join-Path $artifactRoot 'bmf-plugin-watchdog'
 New-Item -ItemType Directory -Force -Path $caseRoot | Out-Null
 
 $startServerScript = Join-Path $BrickadiaRoot 'brickadia-ue4ss-re/scripts/start-bridge-test-server.ps1'
-$sendRpcScript = Join-Path $BrickadiaRoot 'brickadia-ue4ss-re/scripts/send-bridge-rpc.js'
 $sourceBmfDir = Join-Path $Root 'framework/ue4ss/Mods/BMF'
 $runtimeBmfDir = Join-Path $RuntimeModsDir 'BMF'
 $runtimePluginDir = Join-Path $runtimeBmfDir 'plugins/WatchdogCanary'
+$runtimeConfigPath = Join-Path $runtimeBmfDir 'config.json'
 $runtimeLogPath = Join-Path $runtimeBmfDir 'runtime/bmf.log'
 $runtimeAuditPath = Join-Path $runtimeBmfDir 'runtime/audit.jsonl'
 $runtimePluginLogPath = Join-Path $runtimeBmfDir 'runtime/logs/plugins/WatchdogCanary.log'
 $runtimeStatusPath = Join-Path $runtimeBmfDir 'runtime/status.json'
 $bridgeDir = Join-Path $caseRoot "bridge-$Port"
+$bridgeLogPath = Join-Path $bridgeDir 'bridge.log'
 $startPath = Join-Path $caseRoot 'server-start.json'
 $pluginStagePath = Join-Path $caseRoot 'watchdog-plugin-stage.json'
 $bmfLogPath = Join-Path $caseRoot 'bmf.log'
@@ -43,6 +44,115 @@ $pluginLogPath = Join-Path $caseRoot 'WatchdogCanary.log'
 $statusIsolatedPath = Join-Path $caseRoot 'status-isolated.json'
 $statusReloadPath = Join-Path $caseRoot 'status-after-reload.json'
 $serverPid = $null
+$validationLockPath = Join-Path ([System.IO.Path]::GetFullPath($RuntimeModsDir)) '.bmf-active-validation.lock'
+$validationLock = $null
+$runtimeSnapshotTaken = $false
+$runtimeMutationStarted = $false
+$runtimeBmfExistedBefore = $false
+$runtimeBackupRoot = ''
+$runtimeBackupBmfDir = ''
+$loadedBeforeReload = 0
+$canaryEnvNames = @(
+  'OMEGGA_BMF_SOCKET_ENABLED',
+  'BMF_COMMAND_WORKER_ENABLED',
+  'BMF_COMMAND_WORKER_ASYNC',
+  'BMF_ALLOW_LOOPASYNC',
+  'BMF_ALLOW_GAME_THREAD_LOOP',
+  'BMF_ALLOW_DELAYED_WORKER_FALLBACK',
+  'BMF_COMMAND_WORKER_POLL_MS'
+)
+$canaryEnvOriginal = @{}
+foreach ($envName in $canaryEnvNames) {
+  $canaryEnvOriginal[$envName] = [Environment]::GetEnvironmentVariable($envName, 'Process')
+}
+
+function Assert-RuntimeBmfTarget {
+  $modsFull = [System.IO.Path]::GetFullPath($RuntimeModsDir).TrimEnd('\', '/')
+  $bmfFull = [System.IO.Path]::GetFullPath($runtimeBmfDir).TrimEnd('\', '/')
+  $expected = [System.IO.Path]::GetFullPath((Join-Path $modsFull 'BMF')).TrimEnd('\', '/')
+  if (![string]::Equals($bmfFull, $expected, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "Refusing to mutate unexpected BMF runtime path: $bmfFull (expected $expected)"
+  }
+}
+
+function Acquire-ActiveBmfValidationLock {
+  Assert-RuntimeBmfTarget
+  New-Item -ItemType Directory -Force -Path $RuntimeModsDir | Out-Null
+  try {
+    $script:validationLock = [System.IO.File]::Open(
+      $validationLockPath,
+      [System.IO.FileMode]::OpenOrCreate,
+      [System.IO.FileAccess]::ReadWrite,
+      [System.IO.FileShare]::None
+    )
+  } catch [System.IO.IOException] {
+    throw "Active BMF staging is already locked by another validation process: $validationLockPath. Run live BMF validators serially."
+  }
+
+  $validationLock.SetLength(0)
+  $lockBytes = [System.Text.Encoding]::UTF8.GetBytes("pid=$PID`nvalidator=bmf-plugin-watchdog`n")
+  $validationLock.Write($lockBytes, 0, $lockBytes.Length)
+  $validationLock.Flush()
+}
+
+function Backup-ActiveBmfRuntime {
+  Assert-RuntimeBmfTarget
+  $script:runtimeBmfExistedBefore = Test-Path -LiteralPath $runtimeBmfDir -PathType Container
+  $script:runtimeBackupRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("bmf-watchdog-validation-$PID-" + [guid]::NewGuid().ToString('N'))
+  $script:runtimeBackupBmfDir = Join-Path $runtimeBackupRoot 'BMF'
+  New-Item -ItemType Directory -Force -Path $runtimeBackupRoot | Out-Null
+  try {
+    if ($runtimeBmfExistedBefore) {
+      Copy-Item -LiteralPath $runtimeBmfDir -Destination $runtimeBackupBmfDir -Recurse -Force
+    }
+    $script:runtimeSnapshotTaken = $true
+  } catch {
+    Remove-Item -LiteralPath $runtimeBackupRoot -Recurse -Force -ErrorAction SilentlyContinue
+    throw
+  }
+}
+
+function Capture-ActiveBmfEvidence {
+  foreach ($pair in @(
+    @($runtimeLogPath, $bmfLogPath),
+    @($runtimeAuditPath, $auditPath),
+    @($runtimePluginLogPath, $pluginLogPath)
+  )) {
+    if (Test-Path -LiteralPath $pair[0] -PathType Leaf) {
+      Copy-Item -LiteralPath $pair[0] -Destination $pair[1] -Force
+    }
+  }
+}
+
+function Restore-ActiveBmfRuntime {
+  if (!$runtimeSnapshotTaken) {
+    return
+  }
+  Assert-RuntimeBmfTarget
+  if ($runtimeBmfExistedBefore -and !(Test-Path -LiteralPath $runtimeBackupBmfDir -PathType Container)) {
+    throw "Active BMF backup is missing: $runtimeBackupBmfDir"
+  }
+  if (Test-Path -LiteralPath $runtimeBmfDir) {
+    Remove-Item -LiteralPath $runtimeBmfDir -Recurse -Force
+  }
+  if ($runtimeBmfExistedBefore) {
+    Copy-Item -LiteralPath $runtimeBackupBmfDir -Destination $runtimeBmfDir -Recurse -Force
+  }
+  if ($runtimeBackupRoot -and (Test-Path -LiteralPath $runtimeBackupRoot)) {
+    Remove-Item -LiteralPath $runtimeBackupRoot -Recurse -Force
+  }
+  $script:runtimeSnapshotTaken = $false
+}
+
+function Release-ActiveBmfValidationLock {
+  if ($validationLock) {
+    $validationLock.Dispose()
+    $script:validationLock = $null
+  }
+  if (Test-Path -LiteralPath $validationLockPath) {
+    Remove-Item -LiteralPath $validationLockPath -Force -ErrorAction SilentlyContinue
+  }
+}
 
 function Add-Evidence([string]$Kind, [string]$Path, [string]$Summary) {
   if ($Path -and (Test-Path -LiteralPath $Path)) {
@@ -62,72 +172,57 @@ function Read-JsonFile([string]$Path) {
   return $text | ConvertFrom-Json
 }
 
-function Invoke-BmfConsoleCommand(
+function Invoke-BmfFileCommand(
   [string]$Command,
   [string]$Slug,
   [string[]]$ExpectedLines,
   [bool]$ExpectedOk = $true
 ) {
-  $rpcPath = Join-Path $caseRoot "$Slug-rpc.json"
-  $bridgeCommand = "Omegga.Bridge.BMF $Command"
+  $commandDir = Join-Path $runtimeBmfDir 'runtime/commands'
+  $requestId = '{0}_{1}_{2}' -f $Slug, [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds(), [guid]::NewGuid().ToString('N').Substring(0, 8)
+  $requestArtifactPath = Join-Path $caseRoot "$Slug-request.txt"
+  $requestTempPath = Join-Path $commandDir "$requestId.request.tmp"
+  $requestPath = Join-Path $commandDir "$requestId.request.txt"
   $responseArtifactPath = Join-Path $caseRoot "$Slug-response.txt"
-  $output = & node $sendRpcScript --dir $bridgeDir --method console.exec --command-raw $bridgeCommand --wait-ms 25000 --include-logs 1
-  $output | Set-Content -LiteralPath $rpcPath -Encoding UTF8
-  Add-Evidence 'json' $rpcPath "Bridge RPC output for $Command"
-
-  $rpc = $output | ConvertFrom-Json
-  $lines = @($rpc.chunks | ForEach-Object { $_.line })
-  $requestId = $null
-  foreach ($line in $lines) {
-    if ($line -match '^queued_bmf_command id=(.+)$') {
-      $requestId = $Matches[1].Trim()
-      break
+  $responsePath = Join-Path $commandDir "$requestId.response.txt"
+  foreach ($staleArtifact in @($requestArtifactPath, $responseArtifactPath)) {
+    if (Test-Path -LiteralPath $staleArtifact) {
+      Remove-Item -LiteralPath $staleArtifact -Force
     }
   }
+  New-Item -ItemType Directory -Force -Path $commandDir | Out-Null
+  $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllText($requestArtifactPath, $Command, $utf8NoBom)
+  Copy-Item -LiteralPath $requestArtifactPath -Destination $requestTempPath -Force
+  Move-Item -LiteralPath $requestTempPath -Destination $requestPath -Force
+  Add-Evidence 'text' $requestArtifactPath "Direct BMF file-command request for $Command"
 
   $responseLines = @()
-  $responsePath = ''
-  if ($requestId) {
-    $responsePath = Join-Path $runtimeBmfDir "runtime/commands/$requestId.response.txt"
-    $deadline = (Get-Date).AddSeconds(15)
-    while ((Get-Date) -lt $deadline -and !(Test-Path -LiteralPath $responsePath)) {
-      Start-Sleep -Milliseconds 250
-    }
-    if (Test-Path -LiteralPath $responsePath) {
-      Copy-Item -LiteralPath $responsePath -Destination $responseArtifactPath -Force
-      Add-Evidence 'text' $responseArtifactPath "BMF response output for $Command"
-      $responseLines = @([System.IO.File]::ReadAllLines($responseArtifactPath))
-    } else {
-      $script:errors.Add("Timed out waiting for BMF response file for command: $Command")
-    }
-  } else {
-    $script:errors.Add("Bridge response did not include queued request id for command: $Command")
+  $deadline = (Get-Date).AddSeconds(15)
+  while ((Get-Date) -lt $deadline -and !(Test-Path -LiteralPath $responsePath)) {
+    Start-Sleep -Milliseconds 250
   }
-
-  $responseFullPath = ''
-  if ($responsePath) {
-    $responseFullPath = [System.IO.Path]::GetFullPath($responsePath)
+  $responseObserved = Test-Path -LiteralPath $responsePath
+  if ($responseObserved) {
+    Copy-Item -LiteralPath $responsePath -Destination $responseArtifactPath -Force
+    Add-Evidence 'text' $responseArtifactPath "BMF file-command response for $Command"
+    $responseLines = @([System.IO.File]::ReadAllLines($responseArtifactPath))
+  } else {
+    $script:errors.Add("Timed out waiting for BMF file-command response: $Command")
   }
 
   $script:commandResults.Add([ordered]@{
     command = $Command
-    bridgeCommand = $bridgeCommand
-    rpcPath = [System.IO.Path]::GetFullPath($rpcPath)
-    responsePath = $responseFullPath
-    success = [bool]$rpc.complete.success
-    accepted = [bool]$rpc.result.accepted
+    transport = 'file-command'
+    requestId = $requestId
+    requestPath = [System.IO.Path]::GetFullPath($requestArtifactPath)
+    responsePath = [System.IO.Path]::GetFullPath($responseArtifactPath)
+    runtimeResponsePath = [System.IO.Path]::GetFullPath($responsePath)
+    success = [bool]$responseObserved
     expectedOk = $ExpectedOk
-    rpcLineCount = $lines.Count
     responseLineCount = $responseLines.Count
     lines = @($responseLines)
   })
-
-  if ($rpc.complete.success -ne $true) {
-    $script:errors.Add("Command did not complete successfully: $Command")
-  }
-  if ($rpc.result.accepted -ne $true) {
-    $script:errors.Add("Command was not accepted by bridge: $Command")
-  }
 
   $joined = ($responseLines -join "`n")
   $expectedOkLine = 'ok=' + $ExpectedOk.ToString().ToLowerInvariant()
@@ -142,17 +237,45 @@ function Invoke-BmfConsoleCommand(
 }
 
 try {
-  foreach ($path in @($startServerScript, $sendRpcScript, $sourceBmfDir)) {
+  foreach ($path in @($startServerScript, $sourceBmfDir)) {
     if (!(Test-Path -LiteralPath $path)) {
       throw "Required path does not exist: $path"
     }
   }
 
+  $existingServers = @(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'BrickadiaServer-Win64-Shipping.exe' })
+  if ($existingServers.Count -gt 0) {
+    throw 'Refusing to stage the watchdog canary while another Brickadia server process is running.'
+  }
+
+  Acquire-ActiveBmfValidationLock
+  foreach ($artifactPath in @(
+    $bmfLogPath,
+    $auditPath,
+    $auditParsedPath,
+    $pluginLogPath,
+    $statusIsolatedPath,
+    $statusReloadPath
+  )) {
+    if (Test-Path -LiteralPath $artifactPath) {
+      Remove-Item -LiteralPath $artifactPath -Force
+    }
+  }
+  Backup-ActiveBmfRuntime
+  $runtimeMutationStarted = $true
   if (Test-Path -LiteralPath $runtimeBmfDir) {
     Remove-Item -LiteralPath $runtimeBmfDir -Recurse -Force
   }
   New-Item -ItemType Directory -Force -Path $runtimeBmfDir | Out-Null
   Copy-Item -Path (Join-Path $sourceBmfDir '*') -Destination $runtimeBmfDir -Recurse -Force
+  $runtimeConfig = Read-JsonFile $runtimeConfigPath
+  $runtimeConfig.jsonlLogs = $true
+  $runtimeConfigJson = $runtimeConfig | ConvertTo-Json -Depth 20
+  [System.IO.File]::WriteAllText($runtimeConfigPath, $runtimeConfigJson, (New-Object System.Text.UTF8Encoding($false)))
+  $runtimePluginsDir = Join-Path $runtimeBmfDir 'plugins'
+  if (Test-Path -LiteralPath $runtimePluginsDir) {
+    Remove-Item -LiteralPath $runtimePluginsDir -Recurse -Force
+  }
   New-Item -ItemType Directory -Force -Path $runtimePluginDir | Out-Null
 
   $manifestSource = @'
@@ -200,6 +323,16 @@ return {
     }
   }
 
+  # The production socket is intentionally absent in this isolated process.
+  # Enable the game-thread-only file worker solely as the canary control plane.
+  $env:OMEGGA_BMF_SOCKET_ENABLED = '0'
+  $env:BMF_COMMAND_WORKER_ENABLED = '1'
+  $env:BMF_COMMAND_WORKER_ASYNC = '0'
+  $env:BMF_ALLOW_LOOPASYNC = '0'
+  $env:BMF_ALLOW_GAME_THREAD_LOOP = '0'
+  $env:BMF_ALLOW_DELAYED_WORKER_FALLBACK = '1'
+  $env:BMF_COMMAND_WORKER_POLL_MS = '250'
+
   $startOutput = & $startServerScript -BridgeDir $bridgeDir -Port $Port -VerifyWaitSeconds 30
   $startOutput | Set-Content -LiteralPath $startPath -Encoding UTF8
   $start = $startOutput | ConvertFrom-Json
@@ -208,15 +341,45 @@ return {
   if ($start.verified -ne $true) {
     $errors.Add("Bridge server did not verify: $($start.verify_reason)")
   } else {
-    Start-Sleep -Seconds 4
+    $readyDeadline = (Get-Date).AddSeconds(15)
+    $workerReady = $false
+    while ((Get-Date) -lt $readyDeadline) {
+      if ($serverPid -and !(Get-Process -Id $serverPid -ErrorAction SilentlyContinue)) {
+        break
+      }
+      $bridgeReady = Test-Path -LiteralPath $bridgeLogPath
+      if ($bridgeReady) {
+        $bridgeReady = (Get-Content -Raw -LiteralPath $bridgeLogPath) -match [regex]::Escape('Inbox poll tick 1')
+      }
+      if ($bridgeReady -and (Test-Path -LiteralPath $runtimeStatusPath)) {
+        try {
+          $readyStatus = Read-JsonFile $runtimeStatusPath
+          if (
+            $readyStatus.command_worker_started -eq $true -and
+            [string]$readyStatus.command_worker_mode -eq 'ExecuteInGameThreadAfterFramesChain' -and
+            [int]$readyStatus.scheduler_thread_violations -eq 0 -and
+            [int]$readyStatus.scheduler_dispatch_errors -eq 0
+          ) {
+            $workerReady = $true
+            break
+          }
+        } catch {
+          # Retry while status.json is being replaced.
+        }
+      }
+      Start-Sleep -Milliseconds 250
+    }
+    if (-not $workerReady) {
+      throw 'BMF file-command worker and OmeggaBridge one-shot chains did not become ready.'
+    }
 
-    Invoke-BmfConsoleCommand 'bmf.watchdog.fail' 'bmf-watchdog-fail-1' @(
+    Invoke-BmfFileCommand 'bmf.watchdog.fail' 'bmf-watchdog-fail-1' @(
       'BMF bmf.watchdog.fail ERROR WatchdogCanary forced failure 1'
     )
-    Invoke-BmfConsoleCommand 'bmf.watchdog.fail' 'bmf-watchdog-fail-2' @(
+    Invoke-BmfFileCommand 'bmf.watchdog.fail' 'bmf-watchdog-fail-2' @(
       'BMF bmf.watchdog.fail ERROR WatchdogCanary forced failure 2'
     )
-    Invoke-BmfConsoleCommand 'bmf.watchdog.fail' 'bmf-watchdog-fail-3' @(
+    Invoke-BmfFileCommand 'bmf.watchdog.fail' 'bmf-watchdog-fail-3' @(
       'BMF bmf.watchdog.fail ERROR WatchdogCanary forced failure 3'
     )
 
@@ -225,45 +388,55 @@ return {
       Copy-Item -LiteralPath $runtimeStatusPath -Destination $statusIsolatedPath -Force
       Add-Evidence 'json' $statusIsolatedPath 'BMF runtime status after watchdog isolation'
       $status = Read-JsonFile $statusIsolatedPath
+      $loadedBeforeReload = [int]$status.plugins_loaded
       if ([int]$status.plugin_watchdog_isolated -ne 1) {
         $errors.Add("Expected one isolated plugin before reload, got $($status.plugin_watchdog_isolated).")
+      }
+      if ([string]$status.command_worker_mode -ne 'ExecuteInGameThreadAfterFramesChain') {
+        $errors.Add("Unexpected command worker mode: $($status.command_worker_mode)")
+      }
+      if ([int]$status.scheduler_thread_violations -ne 0) {
+        $errors.Add("Expected zero scheduler thread violations, got $($status.scheduler_thread_violations).")
+      }
+      if ([int]$status.scheduler_dispatch_errors -ne 0) {
+        $errors.Add("Expected zero scheduler dispatch errors, got $($status.scheduler_dispatch_errors).")
       }
     } else {
       $errors.Add("BMF runtime status was not written before reload: $runtimeStatusPath")
     }
 
-    Invoke-BmfConsoleCommand 'bmf.watchdog.fail' 'bmf-watchdog-fail-blocked' @(
+    Invoke-BmfFileCommand 'bmf.watchdog.fail' 'bmf-watchdog-fail-blocked' @(
       'BMF bmf.watchdog.fail PLUGIN_ISOLATED Plugin is isolated by watchdog',
       'plugin=WatchdogCanary',
       'error_count=3',
       'isolated=true'
     )
 
-    Invoke-BmfConsoleCommand 'bmf.plugins.watchdog' 'bmf-plugins-watchdog-isolated' @(
+    Invoke-BmfFileCommand 'bmf.plugins.watchdog' 'bmf-plugins-watchdog-isolated' @(
       'BMF bmf.plugins.watchdog OK',
       'watchdog_enabled=true',
       'watchdog_threshold=3',
       'watchdog_isolated=1',
-      'plugin_1=WatchdogCanary|errors=3|isolated=true|last_hook=command:bmf.watchdog.fail|last_error=WatchdogCanary forced failure 3'
+      'WatchdogCanary|errors=3|isolated=true|last_hook=command:bmf.watchdog.fail|last_error=WatchdogCanary forced failure 3'
     )
 
-    Invoke-BmfConsoleCommand 'bmf.plugins' 'bmf-plugins-isolated' @(
+    Invoke-BmfFileCommand 'bmf.plugins' 'bmf-plugins-isolated' @(
       'BMF bmf.plugins OK',
       'plugin=WatchdogCanary version=1.0.0 capabilities=1 errors=3 isolated=true',
       'plugin_errors=3'
     )
 
-    Invoke-BmfConsoleCommand 'bmf.audit.tail limit=50' 'bmf-audit-tail-watchdog' @(
+    Invoke-BmfFileCommand 'bmf.audit.tail limit=50' 'bmf-audit-tail-watchdog' @(
       'BMF bmf.audit.tail OK',
       'plugin.isolated|severity=error|source=plugin|code=PLUGIN_ISOLATED|plugin=WatchdogCanary',
       'command.blocked|severity=warn|source=command|code=PLUGIN_ISOLATED|plugin=WatchdogCanary'
     )
 
-    Invoke-BmfConsoleCommand 'bmf.reload' 'bmf-reload-watchdog' @(
+    Invoke-BmfFileCommand 'bmf.reload' 'bmf-reload-watchdog' @(
       'BMF bmf.reload OK',
-      'plugins_unloaded=1',
+      "plugins_unloaded=$loadedBeforeReload",
       'unload_errors=0',
-      'plugins_loaded=1',
+      "plugins_loaded=$loadedBeforeReload",
       'plugin_errors=0'
     )
 
@@ -275,31 +448,57 @@ return {
       if ([int]$status.plugin_watchdog_isolated -ne 0) {
         $errors.Add("Expected zero isolated plugins after reload, got $($status.plugin_watchdog_isolated).")
       }
+      if ([int]$status.plugins_loaded -ne $loadedBeforeReload) {
+        $errors.Add("Expected $loadedBeforeReload plugins after reload, got $($status.plugins_loaded).")
+      }
     } else {
       $errors.Add("BMF runtime status was not written after reload: $runtimeStatusPath")
     }
 
-    Invoke-BmfConsoleCommand 'bmf.plugins.watchdog' 'bmf-plugins-watchdog-after-reload' @(
+    Invoke-BmfFileCommand 'bmf.plugins.watchdog' 'bmf-plugins-watchdog-after-reload' @(
       'BMF bmf.plugins.watchdog OK',
       'watchdog_enabled=true',
       'watchdog_threshold=3',
       'watchdog_isolated=0',
-      'plugin_1=WatchdogCanary|errors=0|isolated=false|last_hook=|last_error='
+      'WatchdogCanary|errors=0|isolated=false|last_hook=|last_error='
     )
   }
 } catch {
   $errors.Add($_.Exception.Message)
 } finally {
-  if ($serverPid) {
-    Stop-Process -Id $serverPid -Force -ErrorAction SilentlyContinue
+  try {
+    try {
+      if ($serverPid) {
+        Stop-Process -Id $serverPid -Force -ErrorAction SilentlyContinue
+        Wait-Process -Id $serverPid -Timeout 10 -ErrorAction SilentlyContinue
+      }
+      Get-CimInstance Win32_Process |
+        Where-Object { $_.Name -eq 'BrickadiaServer-Win64-Shipping.exe' -and $_.CommandLine -like "*-port=`"$Port`*"} |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    } catch {
+      $errors.Add("Failed to stop the watchdog validation server: $($_.Exception.Message)")
+    }
+    if ($runtimeMutationStarted) {
+      try {
+        Capture-ActiveBmfEvidence
+      } catch {
+        $errors.Add("Failed to capture watchdog validation evidence: $($_.Exception.Message)")
+      }
+      try {
+        Restore-ActiveBmfRuntime
+      } catch {
+        $errors.Add("Failed to restore the active BMF runtime: $($_.Exception.Message). Backup retained at $runtimeBackupRoot")
+      }
+    }
+  } finally {
+    Release-ActiveBmfValidationLock
+    foreach ($envName in $canaryEnvNames) {
+      [Environment]::SetEnvironmentVariable($envName, $canaryEnvOriginal[$envName], 'Process')
+    }
   }
-  Get-CimInstance Win32_Process |
-    Where-Object { $_.Name -eq 'BrickadiaServer-Win64-Shipping.exe' -and $_.CommandLine -like "*-port=`"$Port`*"} |
-    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 }
 
-if (Test-Path -LiteralPath $runtimeLogPath) {
-  Copy-Item -LiteralPath $runtimeLogPath -Destination $bmfLogPath -Force
+if (Test-Path -LiteralPath $bmfLogPath) {
   Add-Evidence 'log' $bmfLogPath 'BMF runtime log with watchdog evidence'
   $logText = Get-Content -Raw -LiteralPath $bmfLogPath
   foreach ($needle in @(
@@ -311,12 +510,11 @@ if (Test-Path -LiteralPath $runtimeLogPath) {
       $errors.Add("BMF log missing expected line: $needle")
     }
   }
-} else {
+} elseif ($runtimeMutationStarted) {
   $errors.Add("BMF runtime log was not written: $runtimeLogPath")
 }
 
-if (Test-Path -LiteralPath $runtimeAuditPath) {
-  Copy-Item -LiteralPath $runtimeAuditPath -Destination $auditPath -Force
+if (Test-Path -LiteralPath $auditPath) {
   Add-Evidence 'jsonl' $auditPath 'BMF audit JSONL with watchdog isolation records'
   $records = @()
   foreach ($line in [System.IO.File]::ReadAllLines($auditPath)) {
@@ -334,18 +532,17 @@ if (Test-Path -LiteralPath $runtimeAuditPath) {
   if ($blocked.Count -lt 1) {
     $errors.Add("Expected at least one command.blocked audit record for WatchdogCanary.")
   }
-} else {
+} elseif ($runtimeMutationStarted) {
   $errors.Add("BMF audit log was not written: $runtimeAuditPath")
 }
 
-if (Test-Path -LiteralPath $runtimePluginLogPath) {
-  Copy-Item -LiteralPath $runtimePluginLogPath -Destination $pluginLogPath -Force
+if (Test-Path -LiteralPath $pluginLogPath) {
   Add-Evidence 'log' $pluginLogPath 'WatchdogCanary per-plugin log'
   $pluginLog = Get-Content -Raw -LiteralPath $pluginLogPath
   if ($pluginLog -match 'forced failure 4') {
     $errors.Add("Fourth watchdog command reached plugin handler; expected PLUGIN_ISOLATED block before handler.")
   }
-} else {
+} elseif ($runtimeMutationStarted) {
   $errors.Add("Plugin log was not written: $runtimePluginLogPath")
 }
 

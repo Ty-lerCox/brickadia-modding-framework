@@ -4,8 +4,13 @@ const { spawnSync } = require('node:child_process');
 const { createHash } = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const {
+  forbiddenSchedulerPrimitives,
+  validateLuaFile,
+} = require('./validate-lua-runtime');
 
 const root = path.resolve(__dirname, '..');
+const repositoryRoot = path.resolve(root, '..', '..', '..');
 const artifactDir = path.join(root, 'artifacts', 'packages');
 const npmExecPath = process.env.npm_execpath || '';
 const npmCommand = npmExecPath
@@ -20,6 +25,7 @@ const gitCommand = process.platform === 'win32' ? 'git.exe' : 'git';
 const requiredLocalFiles = [
   'templates/windows-ue4ss/ue4ss/Mods/BMF/bmf.json',
   'templates/windows-ue4ss/ue4ss/Mods/BMF/Scripts/main.lua',
+  'templates/windows-ue4ss/ue4ss/Mods/BMF/Scripts/bmf/runtime.lua',
   'templates/windows-ue4ss/ue4ss/Mods/BMF/plugins/InteractConsolePrefixGuard/bmf.json',
   'templates/windows-ue4ss/ue4ss/Mods/BMF/plugins/InteractConsolePrefixGuard/config.json',
   'templates/windows-ue4ss/ue4ss/Mods/BMF/plugins/InteractConsolePrefixGuard/main.lua',
@@ -34,6 +40,29 @@ const requiredLocalFiles = [
   'templates/windows-ue4ss/ue4ss/Mods/BMFFrameTelemetry/dlls/main.dll',
   'templates/windows-ue4ss/ue4ss/Mods/OmeggaBridge/Scripts/main.lua',
   'templates/windows-ue4ss/ue4ss/CustomGameConfigs/Brickadia/UE4SS-settings.ini',
+  'tools/validate-lua-runtime.js',
+  'tools/validate-lua-runtime.test.js',
+];
+
+const runtimeTemplateParityFiles = [
+  {
+    label: 'BMF runtime loader',
+    canonical: 'framework/ue4ss/Mods/BMF/Scripts/main.lua',
+    template:
+      'templates/windows-ue4ss/ue4ss/Mods/BMF/Scripts/main.lua',
+  },
+  {
+    label: 'BMF runtime implementation',
+    canonical: 'framework/ue4ss/Mods/BMF/Scripts/bmf/runtime.lua',
+    template:
+      'templates/windows-ue4ss/ue4ss/Mods/BMF/Scripts/bmf/runtime.lua',
+  },
+];
+
+const luaSchedulerSafetyFiles = [
+  'templates/windows-ue4ss/ue4ss/Mods/BMF/Scripts/main.lua',
+  'templates/windows-ue4ss/ue4ss/Mods/BMF/Scripts/bmf/runtime.lua',
+  'templates/windows-ue4ss/ue4ss/Mods/OmeggaBridge/Scripts/main.lua',
 ];
 
 const requiredPackedFiles = [
@@ -100,6 +129,82 @@ function assertLocalFilesPresent() {
   }
 }
 
+function assertRuntimeTemplateParity() {
+  const errors = [];
+
+  for (const file of runtimeTemplateParityFiles) {
+    const canonicalPath = path.join(repositoryRoot, file.canonical);
+    const templatePath = path.join(root, file.template);
+
+    if (!fs.existsSync(canonicalPath)) {
+      errors.push(`${file.label} canonical source is missing: ${file.canonical}`);
+      continue;
+    }
+    if (!fs.existsSync(templatePath)) {
+      errors.push(`${file.label} template source is missing: ${file.template}`);
+      continue;
+    }
+
+    const canonicalHash = sha256(canonicalPath);
+    const templateHash = sha256(templatePath);
+    if (canonicalHash !== templateHash) {
+      errors.push(
+        `${file.label} template is not byte-identical to ${file.canonical} ` +
+          `(canonical sha256=${canonicalHash}, template sha256=${templateHash})`,
+      );
+    }
+  }
+
+  const loaderPath = path.join(root, runtimeTemplateParityFiles[0].template);
+  if (fs.existsSync(loaderPath)) {
+    const loader = fs.readFileSync(loaderPath, 'utf8');
+    for (const marker of [
+      'runtime_candidates',
+      'Scripts/bmf/runtime.lua',
+      'loadfile',
+    ]) {
+      if (!loader.includes(marker)) {
+        errors.push(`BMF runtime loader template is missing marker: ${marker}`);
+      }
+    }
+  }
+
+  if (errors.length > 0) {
+    throw new Error(
+      `BMF runtime template parity validation failed:\n${errors
+        .map(error => `  - ${error}`)
+        .join('\n')}\nRun npm run sync:runtime-template -- -Apply from the BMF repository root.`,
+    );
+  }
+}
+
+function assertNoUnsafeLuaSchedulerCalls() {
+  const errors = [];
+
+  for (const relativePath of luaSchedulerSafetyFiles) {
+    const result = validateLuaFile(path.join(root, relativePath));
+    if (!result.syntaxPassed) {
+      errors.push(`${relativePath} Lua 5.3 syntax: ${result.syntaxError}`);
+      continue;
+    }
+    for (const finding of result.unsafeSchedulerFindings) {
+      errors.push(
+        `${relativePath}:${finding.line} ${finding.invocation}` +
+          `(${finding.primitive})`,
+      );
+    }
+  }
+
+  if (errors.length > 0) {
+    throw new Error(
+      `Packaged Lua runtime validation failed. Lua 5.3 syntax is required, and ` +
+        `${forbiddenSchedulerPrimitives.join(', ')} references/calls are forbidden:\n${errors
+        .map(error => `  - ${error}`)
+        .join('\n')}`,
+    );
+  }
+}
+
 function parsePackJson(stdout) {
   try {
     const parsed = JSON.parse(stdout);
@@ -149,7 +254,10 @@ function artifactName(pack) {
 function main() {
   fs.mkdirSync(artifactDir, { recursive: true });
   assertLocalFilesPresent();
+  assertRuntimeTemplateParity();
+  assertNoUnsafeLuaSchedulerCalls();
 
+  runNpm(['run', 'test:lua-runtime-guard']);
   runNpm(['run', 'build']);
   runNpm(['run', 'test:backend', '--', '--run', 'windows.test.ts']);
 

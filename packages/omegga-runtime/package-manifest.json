@@ -47,6 +47,11 @@
     "record-supported-upstream-commit-before-release",
     "preserve-upstream-license-notice",
     "validate-bmf-required-surfaces",
-    "keep-server-data-out-of-source"
+    "keep-server-data-out-of-source",
+    "canonical-bmf-runtime-template-byte-parity",
+    "no-async-lua-scheduler-callbacks",
+    "no-global-delayed-action-clears",
+    "detect-forbidden-scheduler-aliases",
+    "lua-5.3-compile-before-package"
   ]
 }

@@ -39,7 +39,7 @@ $deployments = @(
   [ordered]@{
     label = 'omegga-package'
     pluginRoot = 'packages/omegga-runtime/source/templates/windows-ue4ss/ue4ss/Mods/BMF/plugins'
-    runtime = 'packages/omegga-runtime/source/templates/windows-ue4ss/ue4ss/Mods/BMF/Scripts/main.lua'
+    runtime = 'packages/omegga-runtime/source/templates/windows-ue4ss/ue4ss/Mods/BMF/Scripts/bmf/runtime.lua'
   }
 )
 

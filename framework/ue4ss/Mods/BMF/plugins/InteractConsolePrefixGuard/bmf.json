@@ -2,5 +2,5 @@
   "name": "InteractConsolePrefixGuard",
   "version": "0.1.2",
   "description": "Enforces Interactable Print-to-Console prefixes with a fail-closed live Moderator/Admin/Owner context bypass.",
-  "capabilities": ["chat.whisper", "chat.broadcast", "plugins.storage"]
+  "capabilities": ["chat.whisper", "chat.broadcast", "plugins.storage", "filesystem.raw"]
 }

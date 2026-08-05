@@ -38,6 +38,85 @@ function Test-Contains([object[]]$Items, [string]$Value, [string]$Message) {
   }
 }
 
+# A development checkout may legitimately contain ignored dependency/build
+# roots. Validate the tracked source boundary there; an extracted release has
+# no matching git root, so validate its packaged filesystem directly.
+function Get-SourceBoundary(
+  [string]$RepositoryRoot,
+  [string]$SourceRoot,
+  [string]$SourceRelative,
+  [System.Collections.Generic.HashSet[string]]$ForbiddenDirectoryNames
+) {
+  $repositoryFull = [System.IO.Path]::GetFullPath($RepositoryRoot)
+  $gitCommand = Get-Command git -ErrorAction SilentlyContinue
+  if ($gitCommand) {
+    $gitTopOutput = @(& $gitCommand.Source -C $repositoryFull rev-parse --show-toplevel 2>$null)
+    $gitTopExitCode = $LASTEXITCODE
+    if ($gitTopExitCode -eq 0 -and $gitTopOutput.Count -gt 0) {
+      $gitTop = [System.IO.Path]::GetFullPath(([string]$gitTopOutput[0]).Trim())
+      if ($gitTop.Equals($repositoryFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+        $trackedRelativeFiles = @(& $gitCommand.Source -C $repositoryFull ls-files -- $SourceRelative 2>$null)
+        if ($LASTEXITCODE -ne 0) {
+          throw 'Could not enumerate tracked Omegga source files with git ls-files.'
+        }
+
+        $files = [System.Collections.Generic.List[string]]::new()
+        $forbiddenDirectories = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        $sourcePrefix = $SourceRelative.TrimEnd('/') + '/'
+        foreach ($relativePathValue in $trackedRelativeFiles) {
+          $relativePath = ([string]$relativePathValue).Replace('\', '/')
+          if (!$relativePath.StartsWith($sourcePrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            continue
+          }
+          $withinSource = $relativePath.Substring($sourcePrefix.Length)
+          $fullPath = Join-Path $repositoryFull ($relativePath.Replace('/', [System.IO.Path]::DirectorySeparatorChar))
+          if (Test-Path -LiteralPath $fullPath -PathType Leaf) {
+            $files.Add([System.IO.Path]::GetFullPath($fullPath))
+          }
+
+          $parts = @($withinSource -split '/')
+          for ($index = 0; $index -lt ($parts.Count - 1); $index += 1) {
+            if ($ForbiddenDirectoryNames.Contains($parts[$index])) {
+              [void]$forbiddenDirectories.Add(($parts[0..$index] -join '/'))
+            }
+          }
+        }
+
+        return [pscustomobject]@{
+          mode = 'git-tracked'
+          files = $files.ToArray()
+          forbiddenDirectories = @($forbiddenDirectories | Sort-Object)
+        }
+      }
+    }
+  }
+
+  $files = [System.Collections.Generic.List[string]]::new()
+  $forbiddenDirectories = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  $directories = [System.Collections.Generic.Stack[string]]::new()
+  $directories.Push([System.IO.Path]::GetFullPath($SourceRoot))
+  while ($directories.Count -gt 0) {
+    $directory = $directories.Pop()
+    foreach ($file in Get-ChildItem -LiteralPath $directory -File -Force -ErrorAction SilentlyContinue) {
+      $files.Add($file.FullName)
+    }
+    foreach ($child in Get-ChildItem -LiteralPath $directory -Directory -Force -ErrorAction SilentlyContinue) {
+      if ($ForbiddenDirectoryNames.Contains($child.Name)) {
+        $relativeGenerated = $child.FullName.Substring($SourceRoot.Length).TrimStart('\', '/').Replace('\', '/')
+        [void]$forbiddenDirectories.Add($relativeGenerated)
+      } else {
+        $directories.Push($child.FullName)
+      }
+    }
+  }
+
+  return [pscustomobject]@{
+    mode = 'packaged-filesystem'
+    files = $files.ToArray()
+    forbiddenDirectories = @($forbiddenDirectories | Sort-Object)
+  }
+}
+
 try {
   $packageRoot = Join-Path $Root 'packages/omegga-runtime'
   $packageManifestPath = Join-Path $packageRoot 'package-manifest.json'
@@ -46,6 +125,10 @@ try {
   $readmePath = Join-Path $packageRoot 'README.md'
   $unifiedManifestPath = Join-Path $Root 'manifests/unified-runtime.json'
   $dependenciesPath = Join-Path $Root 'manifests/dependencies.json'
+  $sourceRootRelative = 'packages/omegga-runtime/source'
+  $sourceBoundaryMode = 'unavailable'
+  $sourceBoundaryFileCount = 0
+  $sourceBoundaryForbiddenDirectories = @()
 
   foreach ($path in @($packageManifestPath, $syncMetadataPath, $sourceRoot, $readmePath, $unifiedManifestPath, $dependenciesPath)) {
     if (!(Test-Path -LiteralPath $path)) {
@@ -112,7 +195,7 @@ try {
     )) {
       Test-Contains @($packageManifest.requiredSurfaces) $surface "Omegga runtime package requiredSurfaces are missing: $surface"
     }
-    foreach ($guardrail in @('do-not-vendor-node-modules', 'record-supported-upstream-commit-before-release', 'preserve-upstream-license-notice', 'keep-server-data-out-of-source')) {
+    foreach ($guardrail in @('do-not-vendor-node-modules', 'record-supported-upstream-commit-before-release', 'preserve-upstream-license-notice', 'keep-server-data-out-of-source', 'canonical-bmf-runtime-template-byte-parity', 'no-async-lua-scheduler-callbacks', 'no-global-delayed-action-clears', 'detect-forbidden-scheduler-aliases', 'lua-5.3-compile-before-package')) {
       Test-Contains @($packageManifest.guardrails) $guardrail "Omegga runtime package guardrails are missing: $guardrail"
     }
   }
@@ -184,9 +267,6 @@ try {
     }
     foreach ($excluded in @('node_modules', 'data', 'logs', 'artifacts', 'dist', 'plugins', 'plugins-disabled')) {
       Test-Contains @($syncMetadata.excludedNames) $excluded "Omegga sync metadata excludedNames are missing: $excluded"
-      if (Test-Path -LiteralPath (Join-Path $sourceRoot $excluded)) {
-        $errors.Add("Synced Omegga source contains excluded directory: $excluded")
-      }
     }
     foreach ($generated in @('node_modules', '.vite', '.angular', 'dist', 'logs', 'artifacts', 'target')) {
       Test-Contains @($syncMetadata.generatedExcludedNames) $generated "Omegga sync metadata generatedExcludedNames are missing: $generated"
@@ -194,6 +274,31 @@ try {
   }
 
   if (Test-Path -LiteralPath $sourceRoot) {
+    $forbiddenDirectoryNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($name in @('node_modules', '.vite', '.angular', 'dist', 'logs', 'artifacts', 'target')) {
+      [void]$forbiddenDirectoryNames.Add($name)
+    }
+    $sourceBoundary = Get-SourceBoundary $Root $sourceRoot $sourceRootRelative $forbiddenDirectoryNames
+    $sourceBoundaryMode = [string]$sourceBoundary.mode
+    $sourceBoundaryFiles = @($sourceBoundary.files)
+    $sourceBoundaryFileCount = $sourceBoundaryFiles.Count
+    $boundaryForbiddenDirectories = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($relativeGenerated in @($sourceBoundary.forbiddenDirectories)) {
+      [void]$boundaryForbiddenDirectories.Add([string]$relativeGenerated)
+    }
+    $rootOnlyExcludedNames = @('data', 'plugins', 'plugins-disabled')
+    foreach ($sourceFile in $sourceBoundaryFiles) {
+      $withinSource = $sourceFile.Substring($sourceRoot.Length).TrimStart('\', '/').Replace('\', '/')
+      $parts = @($withinSource -split '/')
+      if ($parts.Count -gt 1 -and $parts[0] -in $rootOnlyExcludedNames) {
+        [void]$boundaryForbiddenDirectories.Add($parts[0])
+      }
+    }
+    $sourceBoundaryForbiddenDirectories = @($boundaryForbiddenDirectories | Sort-Object)
+    foreach ($relativeGenerated in $sourceBoundaryForbiddenDirectories) {
+      $errors.Add("Omegga $sourceBoundaryMode source boundary contains forbidden generated directory: $relativeGenerated")
+    }
+
     foreach ($relative in @(
       'package.json',
       'package-lock.json',
@@ -203,7 +308,11 @@ try {
       'src/brickadia/ue4ssBridge.ts',
       'src/omegga/index.ts',
       'tools/package-bmf-omegga.js',
-      'templates/windows-ue4ss/ue4ss/Mods/BMF/Scripts/main.lua'
+      'tools/validate-lua-runtime.js',
+      'tools/validate-lua-runtime.test.js',
+      'templates/windows-ue4ss/ue4ss/Mods/BMF/Scripts/main.lua',
+      'templates/windows-ue4ss/ue4ss/Mods/BMF/Scripts/bmf/runtime.lua',
+      'templates/windows-ue4ss/ue4ss/Mods/OmeggaBridge/Scripts/main.lua'
     )) {
       if (!(Test-Path -LiteralPath (Join-Path $sourceRoot $relative))) {
         $errors.Add("Synced Omegga source is missing required file: $relative")
@@ -215,18 +324,29 @@ try {
       if ([string]$sourcePackage.scripts.'package:bmf' -ne 'node tools/package-bmf-omegga.js') {
         $errors.Add('Synced Omegga package.json must expose scripts.package:bmf.')
       }
-    }
-    foreach ($surface in @($packageManifest.requiredSurfaces)) {
-      $matches = Get-ChildItem -LiteralPath $sourceRoot -Recurse -File -ErrorAction SilentlyContinue |
-        Select-String -Pattern ([string]$surface) -ErrorAction SilentlyContinue
-      if (!$matches) {
-        $errors.Add("Synced Omegga source is missing required surface marker: $surface")
+      if ([string]$sourcePackage.scripts.'test:lua-runtime-guard' -ne 'node --test tools/validate-lua-runtime.test.js') {
+        $errors.Add('Synced Omegga package.json must expose the pinned Lua runtime guard regression test.')
+      }
+      if ([string]$sourcePackage.devDependencies.fengari -ne '0.1.5') {
+        $errors.Add('Synced Omegga package.json must pin fengari 0.1.5 for Lua 5.3 compilation.')
+      }
+      if ([string]$sourcePackage.devDependencies.luaparse -ne '0.3.1') {
+        $errors.Add('Synced Omegga package.json must pin luaparse 0.3.1 for scheduler AST scanning.')
       }
     }
-    foreach ($generated in Get-ChildItem -LiteralPath $sourceRoot -Recurse -Directory -Force -ErrorAction SilentlyContinue) {
-      if ($generated.Name -in @('node_modules', '.vite', '.angular', 'dist', 'logs', 'artifacts', 'target')) {
-        $relativeGenerated = $generated.FullName.Substring($sourceRoot.Length).TrimStart('\', '/')
-        $errors.Add("Synced Omegga source contains generated directory: $relativeGenerated")
+    foreach ($surface in @($packageManifest.requiredSurfaces)) {
+      $surfaceFound = $false
+      foreach ($sourceFile in $sourceBoundaryFiles) {
+        if ([System.IO.Path]::GetExtension($sourceFile).ToLowerInvariant() -notin @('.js', '.cjs', '.mjs', '.ts', '.tsx', '.mts', '.lua', '.md', '.json', '.ps1', '.yml', '.yaml', '.txt', '.ini')) {
+          continue
+        }
+        if (Select-String -LiteralPath $sourceFile -Pattern ([string]$surface) -SimpleMatch -Quiet -ErrorAction SilentlyContinue) {
+          $surfaceFound = $true
+          break
+        }
+      }
+      if (!$surfaceFound) {
+        $errors.Add("Synced Omegga source is missing required surface marker: $surface")
       }
     }
   }
@@ -253,6 +373,9 @@ $result = [ordered]@{
     packageRoot = [System.IO.Path]::GetFullPath((Join-Path $Root 'packages/omegga-runtime'))
     sourceRepository = 'https://github.com/Ty-lerCox/brickadia-modding-framework'
     upstreamRepository = 'https://github.com/brickadia-community/omegga'
+    sourceBoundaryMode = $sourceBoundaryMode
+    sourceBoundaryFileCount = $sourceBoundaryFileCount
+    sourceBoundaryForbiddenDirectories = @($sourceBoundaryForbiddenDirectories)
   }
   evidence = $evidence.ToArray()
   errors = $errors.ToArray()

@@ -52,6 +52,34 @@ OMEGGA_BRIDGE_LOOP_STATE.polls_total = tonumber(OMEGGA_BRIDGE_LOOP_STATE.polls_t
 OMEGGA_BRIDGE_SCHEDULER_MODE = "game_thread_only"
 OMEGGA_BRIDGE_INBOX_SCHEDULER = "unavailable"
 OMEGGA_BRIDGE_MAX_INBOX_MESSAGES_PER_TICK = 1
+OMEGGA_BRIDGE_BOUNDED_ADMISSION_ENABLED = os.getenv("OMEGGA_UE4SS_BOUNDED_ADMISSION_ENABLED") ~= "0"
+OMEGGA_BRIDGE_MAX_INBOX_RECORD_BYTES = math.max(
+    1,
+    math.min(65536, math.floor(tonumber(os.getenv("OMEGGA_UE4SS_MAX_INBOX_RECORD_BYTES")) or 65536))
+)
+OMEGGA_BRIDGE_INBOX_DISCARDING_OVERSIZE_RECORD = false
+OMEGGA_BRIDGE_INBOX_PARTIAL_RECORD = ""
+OMEGGA_BRIDGE_ADMISSION_STATE = type(OMEGGA_BRIDGE_ADMISSION_STATE) == "table"
+    and OMEGGA_BRIDGE_ADMISSION_STATE
+    or {}
+OMEGGA_BRIDGE_ADMISSION_STATE.processed_total = tonumber(OMEGGA_BRIDGE_ADMISSION_STATE.processed_total) or 0
+OMEGGA_BRIDGE_ADMISSION_STATE.admitted_interactive_total =
+    tonumber(OMEGGA_BRIDGE_ADMISSION_STATE.admitted_interactive_total) or 0
+OMEGGA_BRIDGE_ADMISSION_STATE.admitted_bulk_total =
+    tonumber(OMEGGA_BRIDGE_ADMISSION_STATE.admitted_bulk_total) or 0
+OMEGGA_BRIDGE_ADMISSION_STATE.expired_total = tonumber(OMEGGA_BRIDGE_ADMISSION_STATE.expired_total) or 0
+OMEGGA_BRIDGE_ADMISSION_STATE.deadline_missing_total =
+    tonumber(OMEGGA_BRIDGE_ADMISSION_STATE.deadline_missing_total) or 0
+OMEGGA_BRIDGE_ADMISSION_STATE.oversize_total = tonumber(OMEGGA_BRIDGE_ADMISSION_STATE.oversize_total) or 0
+OMEGGA_BRIDGE_ADMISSION_STATE.bmf_dispatch_blocked_total =
+    tonumber(OMEGGA_BRIDGE_ADMISSION_STATE.bmf_dispatch_blocked_total) or 0
+OMEGGA_BRIDGE_ADMISSION_STATE.pending_bytes = tonumber(OMEGGA_BRIDGE_ADMISSION_STATE.pending_bytes) or 0
+OMEGGA_BRIDGE_ADMISSION_STATE.pending_bytes_high_water =
+    tonumber(OMEGGA_BRIDGE_ADMISSION_STATE.pending_bytes_high_water) or 0
+OMEGGA_BRIDGE_ADMISSION_STATE.last_queue_age_ms =
+    tonumber(OMEGGA_BRIDGE_ADMISSION_STATE.last_queue_age_ms) or 0
+OMEGGA_BRIDGE_ADMISSION_STATE.max_queue_age_ms =
+    tonumber(OMEGGA_BRIDGE_ADMISSION_STATE.max_queue_age_ms) or 0
 local inbox_offset = 0
 local pending_console_execs = {}
 local queue_hook_path = nil
@@ -358,6 +386,12 @@ end
 
 local function set_status(state, extra)
     extra = extra or {}
+    local server_status_cache = type(OMEGGA_BRIDGE_STATUS_CACHE) == "table"
+        and OMEGGA_BRIDGE_STATUS_CACHE
+        or {}
+    local admission = type(OMEGGA_BRIDGE_ADMISSION_STATE) == "table"
+        and OMEGGA_BRIDGE_ADMISSION_STATE
+        or {}
     local parts = {
         json_string_field("state", state),
         json_string_field("updated_at", now_utc()),
@@ -399,6 +433,49 @@ local function set_status(state, extra)
             OMEGGA_BRIDGE_MAX_INBOX_MESSAGES_PER_TICK
         ),
         string.format("\"inbox_poll_interval_ms\":%d", 100),
+        json_bool_field("inbox_bounded_admission_enabled", OMEGGA_BRIDGE_BOUNDED_ADMISSION_ENABLED),
+        json_string_field("server_status_cache_mode", server_status_cache.mode or "initializing"),
+        json_string_field("server_status_cache_source", server_status_cache.source or "unavailable"),
+        json_string_field("server_status_cache_server_name", server_status_cache.server_name or ""),
+        json_string_field("server_status_cache_last_served_at", server_status_cache.last_served_at or ""),
+        string.format(
+            "\"server_status_cache_started_at_epoch\":%d",
+            tonumber(server_status_cache.started_at_epoch) or 0
+        ),
+        string.format(
+            "\"server_status_cache_hits_total\":%d",
+            tonumber(server_status_cache.hits_total) or 0
+        ),
+        string.format(
+            "\"server_status_request_full_log_scans_total\":%d",
+            tonumber(server_status_cache.request_full_log_scans_total) or 0
+        ),
+        string.format("\"inbox_processed_total\":%d", tonumber(admission.processed_total) or 0),
+        string.format(
+            "\"inbox_admitted_interactive_total\":%d",
+            tonumber(admission.admitted_interactive_total) or 0
+        ),
+        string.format(
+            "\"inbox_admitted_bulk_total\":%d",
+            tonumber(admission.admitted_bulk_total) or 0
+        ),
+        string.format("\"inbox_expired_total\":%d", tonumber(admission.expired_total) or 0),
+        string.format(
+            "\"inbox_deadline_missing_total\":%d",
+            tonumber(admission.deadline_missing_total) or 0
+        ),
+        string.format("\"inbox_oversize_total\":%d", tonumber(admission.oversize_total) or 0),
+        string.format(
+            "\"inbox_bmf_dispatch_blocked_total\":%d",
+            tonumber(admission.bmf_dispatch_blocked_total) or 0
+        ),
+        string.format("\"inbox_pending_bytes\":%d", tonumber(admission.pending_bytes) or 0),
+        string.format(
+            "\"inbox_pending_bytes_high_water\":%d",
+            tonumber(admission.pending_bytes_high_water) or 0
+        ),
+        string.format("\"inbox_last_queue_age_ms\":%d", tonumber(admission.last_queue_age_ms) or 0),
+        string.format("\"inbox_max_queue_age_ms\":%d", tonumber(admission.max_queue_age_ms) or 0),
     }
 
     for key, value in pairs(extra) do
@@ -591,6 +668,10 @@ local function parse_message(line)
         state_name_b64 = params:match("\"state_name_b64\":\"([^\"]*)\"")
             or line:match("\"state_name_b64\":\"([^\"]*)\""),
         format = params:match("\"format\":\"([^\"]+)\"") or line:match("\"format\":\"([^\"]+)\""),
+        issued_at_ms = tonumber(params:match("\"issued_at_ms\":(%d+)") or line:match("\"issued_at_ms\":(%d+)")),
+        deadline_ms = tonumber(params:match("\"deadline_ms\":(%d+)") or line:match("\"deadline_ms\":(%d+)")),
+        service_class = params:match("\"service_class\":\"([^\"]+)\"")
+            or line:match("\"service_class\":\"([^\"]+)\""),
     }
 end
 
@@ -636,6 +717,31 @@ local function trim(value)
     return tostring(value or ""):gsub("^%s+", ""):gsub("%s+$", "")
 end
 
+-- Server.Status is a frequent compatibility request. Keep its identity and
+-- uptime inputs as process-lifetime plain data so serving it performs no file
+-- IO, log parsing, or live UObject discovery on the game thread.
+OMEGGA_BRIDGE_STATUS_CACHE = type(OMEGGA_BRIDGE_STATUS_CACHE) == "table"
+    and OMEGGA_BRIDGE_STATUS_CACHE
+    or {}
+OMEGGA_BRIDGE_STATUS_CACHE.server_name = trim(
+    os.getenv("OMEGGA_UE4SS_SERVER_NAME") or OMEGGA_BRIDGE_STATUS_CACHE.server_name or ""
+)
+if OMEGGA_BRIDGE_STATUS_CACHE.server_name == "" then
+    OMEGGA_BRIDGE_STATUS_CACHE.server_name = "Brickadia Server"
+end
+OMEGGA_BRIDGE_STATUS_CACHE.description = trim(
+    os.getenv("OMEGGA_UE4SS_SERVER_DESCRIPTION") or OMEGGA_BRIDGE_STATUS_CACHE.description or ""
+)
+OMEGGA_BRIDGE_STATUS_CACHE.source = trim(
+    os.getenv("OMEGGA_UE4SS_SERVER_IDENTITY_SOURCE") or OMEGGA_BRIDGE_STATUS_CACHE.source or "fallback"
+)
+OMEGGA_BRIDGE_STATUS_CACHE.mode = "startup-cache-only"
+OMEGGA_BRIDGE_STATUS_CACHE.started_at_epoch =
+    tonumber(OMEGGA_BRIDGE_STATUS_CACHE.started_at_epoch) or os.time()
+OMEGGA_BRIDGE_STATUS_CACHE.hits_total = tonumber(OMEGGA_BRIDGE_STATUS_CACHE.hits_total) or 0
+OMEGGA_BRIDGE_STATUS_CACHE.request_full_log_scans_total =
+    tonumber(OMEGGA_BRIDGE_STATUS_CACHE.request_full_log_scans_total) or 0
+
 local function should_use_kismet_fallback(command)
     local normalized = trim(command)
     if normalized == "" then
@@ -658,14 +764,24 @@ local function should_use_kismet_fallback(command)
 end
 
 local function should_trace_console_command(command)
-    local normalized = trim(command)
+    local raw = tostring(command or "")
+    if raw == "Server.Status" or raw == "Omegga.Bridge.Echo" then
+        return false
+    end
+
+    local normalized = trim(raw)
     if normalized == "" then
         return false
     end
 
-    return normalized == "Server.Status"
-        or normalized == "Omegga.Bridge.Echo"
-        or normalized:match("^Omegga%.Bridge%.ProbeConsoleExec")
+    local lower = normalized:lower()
+    if lower == "server.status"
+        or lower == "omegga.bridge.echo"
+        or lower == "br.server.status" then
+        return true
+    end
+
+    return normalized:match("^Omegga%.Bridge%.ProbeConsoleExec")
         or normalized:match("^Chat%.")
         or normalized:match("^ServerTravel")
         or normalized:match("^Server%.")
@@ -891,110 +1007,23 @@ local function get_uehelpers()
     return UEHelpers, nil
 end
 
-local function dirname(path)
-    return tostring(path or ""):match("^(.*)[/\\][^/\\]+$")
+local function cached_status_uptime_seconds()
+    return math.max(
+        0,
+        os.time() - (tonumber(OMEGGA_BRIDGE_STATUS_CACHE.started_at_epoch) or os.time())
+    )
 end
 
-local function join_path(...)
-    local parts = { ... }
-    local separator = "\\"
-    local cleaned = {}
-
-    for _, part in ipairs(parts) do
-        if tostring(part or ""):find("/", 1, true) then
-            separator = "/"
-            break
-        end
-    end
-
-    for index, part in ipairs(parts) do
-        local value = tostring(part or "")
-        if value ~= "" then
-            value = value:gsub("[/\\]+$", "")
-            if index > 1 then
-                value = value:gsub("^[/\\]+", "")
-            end
-            if value ~= "" then
-                table.insert(cleaned, value)
-            end
-        end
-    end
-
-    return table.concat(cleaned, separator)
-end
-
-local function get_data_root()
-    local bridge_root = dirname(BRIDGE_DIR)
-    if not bridge_root then
-        return nil
-    end
-
-    if tostring(bridge_root):match("[/\\]ue4ss%-bridge$") then
-        return dirname(bridge_root) or bridge_root
-    end
-
-    return bridge_root
-end
-
-local function get_brickadia_log_path()
-    local data_root = get_data_root()
-    if not data_root then
-        return nil
-    end
-
-    return join_path(data_root, "Saved", "Logs", "Brickadia.log")
-end
-
-local function parse_log_timestamp(line)
-    local raw_timestamp = tostring(line or ""):match("^%[(%d+%.%d+%.%d+%-%d+%.%d+%.%d+:%d+)%]")
-    if not raw_timestamp then
-        return nil
-    end
-
-    local year, month, day, hour, min, sec = raw_timestamp:match("^(%d+)%.(%d+)%.(%d+)%-(%d+)%.(%d+)%.(%d+):%d+$")
-    if not year then
-        return nil
-    end
-
-    return os.time({
-        year = tonumber(year),
-        month = tonumber(month),
-        day = tonumber(day),
-        hour = tonumber(hour),
-        min = tonumber(min),
-        sec = tonumber(sec),
-    })
-end
-
-local function build_status_output_from_log()
-    local log_path = get_brickadia_log_path()
-    if not log_path then
-        return nil, "Could not determine Brickadia log path."
-    end
-
-    local contents = read_file(log_path)
-    if not contents or contents == "" then
-        return nil, "Brickadia log file is unavailable."
-    end
-
-    local latest_world_start = nil
-    for line in contents:gmatch("[^\r\n]+") do
-        if line:match("LogWorld: Bringing World .+ up for play") then
-            latest_world_start = parse_log_timestamp(line)
-        end
-    end
-
-    local uptime_ms = 0
-    if latest_world_start then
-        uptime_ms = math.max(0, (os.time() - latest_world_start) * 1000)
-    end
-
+local function build_status_output_from_cache()
+    OMEGGA_BRIDGE_STATUS_CACHE.hits_total =
+        (tonumber(OMEGGA_BRIDGE_STATUS_CACHE.hits_total) or 0) + 1
+    OMEGGA_BRIDGE_STATUS_CACHE.last_served_at = now_utc()
     local lines = {
-        "Server Name: Brickadia Windows UE4SS",
-        "Description: ",
+        "Server Name: " .. tostring(OMEGGA_BRIDGE_STATUS_CACHE.server_name or "Brickadia Server"),
+        "Description: " .. tostring(OMEGGA_BRIDGE_STATUS_CACHE.description or ""),
         "Bricks: 0",
         "Components: 0",
-        "Time: " .. format_duration_ms(uptime_ms),
+        "Time: " .. format_duration_ms(cached_status_uptime_seconds() * 1000),
         table.concat({
             "* ",
             pad_status_column("Name", 24),
@@ -3146,22 +3175,7 @@ local function get_cached_player_state_records(game_state, world)
         "RealTimeSeconds",
     }))) or 0
     if uptime_seconds <= 0 then
-        local status_output = build_status_output_from_log()
-        if status_output ~= nil then
-            local log_path = get_brickadia_log_path()
-            local contents = log_path and read_file(log_path) or nil
-            local latest_world_start = nil
-            if contents then
-                for line in contents:gmatch("[^\r\n]+") do
-                    if line:match("LogWorld: Bringing World .+ up for play") then
-                        latest_world_start = parse_log_timestamp(line)
-                    end
-                end
-            end
-            if latest_world_start then
-                uptime_seconds = math.max(0, os.time() - latest_world_start)
-            end
-        end
+        uptime_seconds = cached_status_uptime_seconds()
     end
     local player_states = get_cached_player_states(game_state)
     local records = {}
@@ -3175,22 +3189,15 @@ end
 
 local function build_status_output()
     -- CL13530 object-backed player status can crash while reading live
-    -- PlayerState/Controller properties. Keep status log-backed and inert.
-    local output, log_error = build_status_output_from_log()
-    if output then
-        return output
-    end
-    return nil, log_error
+    -- PlayerState/Controller properties. Keep status cache-backed and inert.
+    return build_status_output_from_cache()
 end
 
 function build_status_output_unsafe()
     local objects, object_error = get_cached_game_objects()
     if not objects then
-        local output, log_error = build_status_output_from_log()
-        if output then
-            return output
-        end
-        return nil, object_error or log_error
+        local output = build_status_output_from_cache()
+        return output, object_error
     end
 
     local world = objects.world
@@ -3216,7 +3223,7 @@ function build_status_output_unsafe()
         }))))
     end
     if server_name == "" then
-        server_name = "Brickadia Windows UE4SS"
+        server_name = tostring(OMEGGA_BRIDGE_STATUS_CACHE.server_name or "Brickadia Server")
     end
 
     local description = trim(safe_value_to_string(select(1, try_get_first_property_value(game_session, {
@@ -3229,6 +3236,9 @@ function build_status_output_unsafe()
             "Description",
             "ServerDescription",
         }))))
+    end
+    if description == "" then
+        description = tostring(OMEGGA_BRIDGE_STATUS_CACHE.description or "")
     end
 
     local bricks = value_to_number(select(1, try_get_first_property_value(game_state, {
@@ -4466,31 +4476,14 @@ function OmeggaBridgeDispatchBmfCommand(spec)
     if text == "" then
         return "dispatch_ok=false\ncode=BMF_COMMAND_REQUIRED\ndetail=usage: Omegga.Bridge.BmfDispatch <bmf.command> [args...]"
     end
-    if type(BMF) ~= "table" or type(BMF.commands) ~= "table" or type(BMF.commands.dispatch) ~= "function" then
-        return "dispatch_ok=false\ncode=BMF_RUNTIME_UNAVAILABLE\ndetail=BMF.commands.dispatch is unavailable"
-    end
-
-    local command_name, args = text:match("^(%S+)%s*(.*)$")
-    command_name = string.lower(trim(command_name or ""))
-    if command_name == "" then
-        return "dispatch_ok=false\ncode=BMF_COMMAND_REQUIRED\ndetail=command name is required"
-    end
-
-    local lines = {}
-    local ar = {
-        NoEventLog = true,
-        Log = function(_, line)
-            table.insert(lines, tostring(line or ""))
-        end,
-    }
-    local ok, success_or_error = pcall(BMF.commands.dispatch, command_name, trim(args or ""), ar)
-    table.insert(lines, 1, "dispatch_ok=" .. tostring(ok))
-    if not ok then
-        table.insert(lines, "dispatch_error=" .. tostring(success_or_error))
-    else
-        table.insert(lines, "dispatch_return=" .. tostring(success_or_error))
-    end
-    return table.concat(lines, "\n")
+    OMEGGA_BRIDGE_ADMISSION_STATE.bmf_dispatch_blocked_total =
+        (tonumber(OMEGGA_BRIDGE_ADMISSION_STATE.bmf_dispatch_blocked_total) or 0) + 1
+    return table.concat({
+        "dispatch_ok=false",
+        "code=BMF_SOCKET_ADMISSION_REQUIRED",
+        "detail=Omegga.Bridge.BmfDispatch must be routed by Omegga through the bounded BMF socket admission path.",
+        "command=" .. text,
+    }, "\n")
 end
 
 function OmeggaClientTravel(spec)
@@ -6265,7 +6258,60 @@ local function try_emulate_command(command)
     return nil, nil, nil
 end
 
-local function finish_command_success(id, command, executor, output)
+local function finish_command_success(id, command, executor, output, quiet)
+    if quiet then
+        local records = {
+            json_object({
+                json_string_field("jsonrpc", "2.0"),
+                string.format("\"id\":%d", id),
+                string.format(
+                    "\"result\":%s",
+                    json_object({
+                        json_bool_field("accepted", true),
+                        json_string_field("executor", executor),
+                    })
+                ),
+            }),
+        }
+        local chunk_count = 0
+        if output and output ~= "" then
+            for line in tostring(output):gmatch("[^\r\n]+") do
+                if line ~= "" then
+                    chunk_count = chunk_count + 1
+                    table.insert(records, json_object({
+                        json_string_field("jsonrpc", "2.0"),
+                        json_string_field("method", "console.chunk"),
+                        string.format(
+                            "\"params\":%s",
+                            json_object({
+                                string.format("\"request_id\":%d", id),
+                                string.format("\"chunk_index\":%d", chunk_count),
+                                json_string_field("command_b64", base64_encode(command)),
+                                json_string_field("line_b64", base64_encode(line)),
+                            })
+                        ),
+                    }))
+                end
+            end
+        end
+        table.insert(records, json_object({
+            json_string_field("jsonrpc", "2.0"),
+            json_string_field("method", "console.complete"),
+            string.format(
+                "\"params\":%s",
+                json_object({
+                    string.format("\"request_id\":%d", id),
+                    string.format("\"chunk_count\":%d", chunk_count),
+                    json_bool_field("success", true),
+                    json_string_field("executor", executor),
+                    json_string_field("command_b64", base64_encode(command)),
+                })
+            ),
+        }))
+        append_file(OUTBOX_PATH, table.concat(records, "\n") .. "\n")
+        return
+    end
+
     bridge_log("info", "Executed console command via " .. executor .. ": " .. command)
     set_status("running", { last_command = command, executor = executor })
     send_response(
@@ -6289,7 +6335,41 @@ local function finish_command_success(id, command, executor, output)
     )
 end
 
-local function finish_command_error(id, command, message, detail, code)
+local function finish_command_error(id, command, message, detail, code, quiet)
+    if quiet then
+        append_file(
+            OUTBOX_PATH,
+            table.concat({
+                json_object({
+                    json_string_field("jsonrpc", "2.0"),
+                    string.format("\"id\":%d", id),
+                    string.format(
+                        "\"error\":%s",
+                        json_object({
+                            string.format("\"code\":%d", code or -32002),
+                            json_string_field("message", message),
+                            json_string_field("data", detail or ""),
+                        })
+                    ),
+                }),
+                json_object({
+                    json_string_field("jsonrpc", "2.0"),
+                    json_string_field("method", "console.complete"),
+                    string.format(
+                        "\"params\":%s",
+                        json_object({
+                            string.format("\"request_id\":%d", id),
+                            json_bool_field("success", false),
+                            json_string_field("detail", detail or message),
+                            json_string_field("command_b64", base64_encode(command)),
+                        })
+                    ),
+                }),
+            }, "\n") .. "\n"
+        )
+        return
+    end
+
     bridge_log("error", message)
     set_status("error", { last_command = command, detail = detail or message })
     send_response(
@@ -6310,6 +6390,31 @@ local function finish_command_error(id, command, message, detail, code)
             json_string_field("command_b64", base64_encode(command)),
         })
     )
+end
+
+function OmeggaBridgeDeadlineExpired(deadline_ms)
+    return OMEGGA_BRIDGE_BOUNDED_ADMISSION_ENABLED
+        and deadline_ms ~= nil
+        and deadline_ms > 0
+        and os.time() * 1000 >= deadline_ms
+end
+
+function OmeggaBridgeRejectDeferredCommandIfExpired(id, command, deadline_ms, quiet)
+    if not OmeggaBridgeDeadlineExpired(deadline_ms) then
+        return false
+    end
+
+    OMEGGA_BRIDGE_ADMISSION_STATE.expired_total =
+        (tonumber(OMEGGA_BRIDGE_ADMISSION_STATE.expired_total) or 0) + 1
+    finish_command_error(
+        id,
+        command,
+        "UE4SS inbox request expired before deferred execution",
+        "deadline_ms=" .. tostring(deadline_ms),
+        -32005,
+        quiet
+    )
+    return true
 end
 
 local function try_execute_chat_broadcast_command(command)
@@ -6566,8 +6671,10 @@ local function install_game_thread_exec_hook()
     return false
 end
 
-local function execute_command(id, command)
-    set_status("executing", { last_command = command })
+local function execute_command(id, command, deadline_ms, quiet)
+    if not quiet then
+        set_status("executing", { last_command = command })
+    end
 
     if command == "Chat.MessageForUnknownCommands 0"
         or command == "br.Chat.MessageForUnknownCommands 0" then
@@ -6603,6 +6710,10 @@ local function execute_command(id, command)
 
         local scheduled_ok, scheduled_error = pcall(function()
             schedule_on_game_thread(function()
+                if OmeggaBridgeRejectDeferredCommandIfExpired(id, command, deadline_ms, quiet) then
+                    return
+                end
+
                 if type(IsInGameThread) == "function" then
                     local thread_ok, on_game_thread = pcall(IsInGameThread)
                     if not thread_ok or not on_game_thread then
@@ -6615,7 +6726,7 @@ local function execute_command(id, command)
                 if type(OmeggaExecuteKismetConsoleCommand) == "function" then
                     local exec_ok, success, output = pcall(OmeggaExecuteKismetConsoleCommand, command)
                     if exec_ok and success then
-                        finish_command_success(id, command, "kismet-message-for-unknown-commands", output or "")
+                        finish_command_success(id, command, "kismet-message-for-unknown-commands", output or "", quiet)
                         return
                     end
 
@@ -6653,7 +6764,7 @@ local function execute_command(id, command)
                     local output = tostring(native_output or "")
                     local output_lines = "\n" .. output .. "\n"
                     if native_ok and output_lines:find("\nok=true\n", 1, true) then
-                        finish_command_success(id, command, "bmf-kismet-message-for-unknown-commands", output)
+                        finish_command_success(id, command, "bmf-kismet-message-for-unknown-commands", output, quiet)
                         return
                     end
 
@@ -6666,7 +6777,7 @@ local function execute_command(id, command)
                     bridge_log("warn", "BMFSocketKismetConsoleCommandProbe helper is unavailable")
                 end
 
-                finish_command_success(id, command, "noop", "")
+                finish_command_success(id, command, "noop", "", quiet)
             end)
         end)
 
@@ -6676,7 +6787,8 @@ local function execute_command(id, command)
                 command,
                 "Failed to schedule Chat.MessageForUnknownCommands on the game thread",
                 tostring(scheduled_error),
-                -32002
+                -32002,
+                quiet
             )
         end
         return
@@ -6686,43 +6798,51 @@ local function execute_command(id, command)
         local emulation_ok, emulated_result, emulated_executor, emulated_output =
             pcall(try_emulate_command, command)
         if not emulation_ok then
-            bridge_log(
-                "warn",
-                "Immediate emulated command handling crashed before UE4SS game-thread scheduling: "
-                    .. tostring(emulated_result)
-            )
+            if not quiet then
+                bridge_log(
+                    "warn",
+                    "Immediate emulated command handling crashed before UE4SS game-thread scheduling: "
+                        .. tostring(emulated_result)
+                )
+            end
             finish_command_error(
                 id,
                 command,
                 "Immediate emulated command handling crashed",
                 tostring(emulated_result),
-                -32002
+                -32002,
+                quiet
             )
             return
         end
 
         if emulated_result ~= nil then
             if emulated_result then
-                bridge_log(
-                    "info",
-                    "Handled command without UE4SS game-thread scheduling via " .. tostring(emulated_executor)
-                )
-                set_status("running", { last_command = command, executor = emulated_executor })
-                finish_command_success(id, command, emulated_executor, emulated_output or "")
+                if not quiet then
+                    bridge_log(
+                        "info",
+                        "Handled command without UE4SS game-thread scheduling via " .. tostring(emulated_executor)
+                    )
+                    set_status("running", { last_command = command, executor = emulated_executor })
+                end
+                finish_command_success(id, command, emulated_executor, emulated_output or "", quiet)
                 return
             end
 
-            bridge_log(
-                "warn",
-                "Emulated command handling failed before UE4SS game-thread scheduling: "
-                    .. tostring(emulated_executor)
-            )
+            if not quiet then
+                bridge_log(
+                    "warn",
+                    "Emulated command handling failed before UE4SS game-thread scheduling: "
+                        .. tostring(emulated_executor)
+                )
+            end
             finish_command_error(
                 id,
                 command,
                 "Emulated command handling failed",
                 tostring(emulated_executor),
-                -32001
+                -32001,
+                quiet
             )
             return
         end
@@ -6744,6 +6864,10 @@ local function execute_command(id, command)
 
     local ok, err = pcall(function()
         schedule_on_game_thread(function()
+            if OmeggaBridgeRejectDeferredCommandIfExpired(id, command, deadline_ms, quiet) then
+                return
+            end
+
             local inner_ok, inner_result, inner_detail, inner_output = pcall(try_execute_console_command, command)
 
             if not inner_ok then
@@ -6752,13 +6876,14 @@ local function execute_command(id, command)
                     command,
                     "Command execution crashed before completion: " .. tostring(inner_result),
                     tostring(inner_result),
-                    -32002
+                    -32002,
+                    quiet
                 )
                 return
             end
 
             if inner_result then
-                finish_command_success(id, command, inner_detail, inner_output or "")
+                finish_command_success(id, command, inner_detail, inner_output or "", quiet)
                 return
             end
 
@@ -6767,7 +6892,8 @@ local function execute_command(id, command)
                 command,
                 "ProcessConsoleExec returned false",
                 tostring(inner_detail),
-                -32001
+                -32001,
+                quiet
             )
         end)
     end)
@@ -6778,13 +6904,19 @@ local function execute_command(id, command)
             command,
             "Command execution crashed before completion: " .. tostring(err),
             tostring(err),
-            -32002
+            -32002,
+            quiet
         )
     end
 end
 
 function unsafe_console_exec_block_reason(command)
     local lower = trim(command or ""):lower()
+    if lower:match("^omegga%.bridge%.bmfdispatch%s+") then
+        OMEGGA_BRIDGE_ADMISSION_STATE.bmf_dispatch_blocked_total =
+            (tonumber(OMEGGA_BRIDGE_ADMISSION_STATE.bmf_dispatch_blocked_total) or 0) + 1
+        return "Omegga.Bridge.BmfDispatch is blocked in UE4SS; Omegga must route BMF commands through the bounded BMF socket admission path"
+    end
     if lower:match("^server%.players%.setteam%s+") then
         return "Server.Players.SetTeam is blocked in the UE4SS bridge because this Brickadia dedicated-server build crashes in ProcessConsoleExec; use a BMF/native minigame team API instead"
     end
@@ -6804,7 +6936,101 @@ local function handle_message(line)
         return
     end
 
-    bridge_log("info", "Handling bridge message " .. message.method .. " id=" .. tostring(message.id or "nil"))
+    local console_command = nil
+    local exact_console_command = nil
+    if message.method == "console.exec" then
+        local decoded_command = base64_decode(message.command_b64 or "")
+        if trim(decoded_command) == "" then
+            exact_console_command = message.command_raw or ""
+            console_command = trim(exact_console_command)
+        else
+            exact_console_command = decoded_command
+            console_command = decoded_command
+        end
+    end
+    local quiet_request = message.method == "bridge.ping"
+        or message.method == "server.status"
+        or (message.method == "console.exec"
+            and (exact_console_command == "Omegga.Bridge.Echo" or exact_console_command == "Server.Status"))
+
+    local admission = OMEGGA_BRIDGE_ADMISSION_STATE
+    admission.processed_total = (tonumber(admission.processed_total) or 0) + 1
+    local service_class = message.service_class == "bulk" and "bulk" or "interactive"
+    local now_epoch_ms = os.time() * 1000
+    if message.issued_at_ms and message.issued_at_ms > 0 then
+        local queue_age_ms = math.max(0, now_epoch_ms - message.issued_at_ms)
+        admission.last_queue_age_ms = queue_age_ms
+        admission.max_queue_age_ms = math.max(tonumber(admission.max_queue_age_ms) or 0, queue_age_ms)
+    end
+    if OMEGGA_BRIDGE_BOUNDED_ADMISSION_ENABLED
+        and (not message.deadline_ms or message.deadline_ms <= 0) then
+        admission.deadline_missing_total = (tonumber(admission.deadline_missing_total) or 0) + 1
+        if message.method == "console.exec" then
+            finish_command_error(
+                message.id or 0,
+                console_command or "",
+                "UE4SS inbox request missing required deadline",
+                "method=" .. tostring(message.method),
+                -32005,
+                quiet_request
+            )
+        else
+            send_response(
+                message.id or 0,
+                json_object({
+                    string.format("\"code\":%d", -32005),
+                    json_string_field("message", "UE4SS inbox request missing required deadline"),
+                    json_string_field("data", "method=" .. tostring(message.method)),
+                }),
+                true
+            )
+            if not quiet_request then
+                set_status("running", { last_rejected_method = tostring(message.method) })
+            end
+        end
+        return
+    elseif OmeggaBridgeDeadlineExpired(message.deadline_ms) then
+        -- os.time is second-granularity, so this check can be late by less than
+        -- one second, but it is never early. Expired work never reaches a UE API.
+        admission.expired_total = (tonumber(admission.expired_total) or 0) + 1
+        local command = message.method == "console.exec"
+            and (console_command or "")
+            or tostring(message.method or "bridge.request")
+        if message.method == "console.exec" then
+            finish_command_error(
+                message.id or 0,
+                command,
+                "UE4SS inbox request expired before execution",
+                "deadline_ms=" .. tostring(message.deadline_ms) .. " queue_age_ms=" .. tostring(admission.last_queue_age_ms),
+                -32005,
+                quiet_request
+            )
+        else
+            send_response(
+                message.id or 0,
+                json_object({
+                    string.format("\"code\":%d", -32005),
+                    json_string_field("message", "UE4SS inbox request expired before execution"),
+                    json_string_field("data", "method=" .. tostring(message.method)),
+                }),
+                true
+            )
+            if not quiet_request then
+                set_status("running", { last_expired_method = tostring(message.method) })
+            end
+        end
+        return
+    end
+
+    if service_class == "bulk" then
+        admission.admitted_bulk_total = (tonumber(admission.admitted_bulk_total) or 0) + 1
+    else
+        admission.admitted_interactive_total = (tonumber(admission.admitted_interactive_total) or 0) + 1
+    end
+
+    if not quiet_request then
+        bridge_log("info", "Handling bridge message " .. message.method .. " id=" .. tostring(message.id or "nil"))
+    end
 
     if message.method == "bridge.ping" then
         send_response(
@@ -6820,7 +7046,7 @@ local function handle_message(line)
     end
 
     if message.method == "server.status" then
-        execute_command(message.id, "Server.Status")
+        execute_command(message.id, "Server.Status", message.deadline_ms, quiet_request)
         return
     end
 
@@ -6894,29 +7120,36 @@ local function handle_message(line)
 
     if message.method == "chat.broadcast" then
         local text = base64_decode(message.message_b64 or "")
-        execute_command(message.id, "Chat.Broadcast " .. quote_console_string(text))
+        execute_command(message.id, "Chat.Broadcast " .. quote_console_string(text), message.deadline_ms, false)
         return
     end
 
     if message.method == "chat.whisper" then
         local target = base64_decode(message.target_b64 or "")
         local text = base64_decode(message.message_b64 or "")
-        execute_command(message.id, "Chat.Whisper \"" .. quote_name(target) .. "\" " .. quote_console_string(text))
+        execute_command(
+            message.id,
+            "Chat.Whisper \"" .. quote_name(target) .. "\" " .. quote_console_string(text),
+            message.deadline_ms,
+            false
+        )
         return
     end
 
     if message.method == "chat.status_message" then
         local target = base64_decode(message.target_b64 or "")
         local text = base64_decode(message.message_b64 or "")
-        execute_command(message.id, "Chat.StatusMessage \"" .. quote_name(target) .. "\" " .. quote_console_string(text))
+        execute_command(
+            message.id,
+            "Chat.StatusMessage \"" .. quote_name(target) .. "\" " .. quote_console_string(text),
+            message.deadline_ms,
+            false
+        )
         return
     end
 
     if message.method == "console.exec" then
-        local command = base64_decode(message.command_b64 or "")
-        if trim(command) == "" then
-            command = trim(message.command_raw or "")
-        end
+        local command = console_command or ""
         if command == "" then
             finish_command_error(
                 message.id or 0,
@@ -6938,7 +7171,7 @@ local function handle_message(line)
             )
             return
         end
-        execute_command(message.id or 0, command)
+        execute_command(message.id or 0, command, message.deadline_ms, quiet_request)
         return
     end
 
@@ -11174,16 +11407,8 @@ local function register_bridge_console_features()
             RegisterConsoleCommandGlobalHandler(
                 "Omegga.Bridge.Echo",
                 retain_callback("console_handler:Omegga.Bridge.Echo", function(command, params, ar)
-                bridge_log(
-                    "info",
-                    "Self-test console handler invoked (has_output_device="
-                        .. ((ar and ar.Log) and "true" or "false")
-                        .. ")"
-                )
                 if ar and ar.Log then
                     ar:Log("Omegga bridge self-test ok")
-                else
-                    bridge_log("warn", "Self-test console handler did not receive an output device")
                 end
 
                 return true
@@ -11290,6 +11515,58 @@ local function register_bridge_console_features()
 end
 
 poll_inbox = nil
+
+function OmeggaBridgeReadBoundedInboxRecord(file, file_size)
+    local available = math.max(0, file_size - inbox_offset)
+    if available == 0 then
+        return nil
+    end
+
+    local partial = tostring(OMEGGA_BRIDGE_INBOX_PARTIAL_RECORD or "")
+    local remaining_capacity = math.max(0, OMEGGA_BRIDGE_MAX_INBOX_RECORD_BYTES - #partial)
+    local read_size = OMEGGA_BRIDGE_INBOX_DISCARDING_OVERSIZE_RECORD
+        and math.min(OMEGGA_BRIDGE_MAX_INBOX_RECORD_BYTES, available)
+        or math.min(OMEGGA_BRIDGE_MAX_INBOX_RECORD_BYTES, available, remaining_capacity + 1)
+    local chunk = file:read(read_size)
+    if not chunk or chunk == "" then
+        return nil
+    end
+
+    local newline = chunk:find("\n", 1, true)
+    if OMEGGA_BRIDGE_INBOX_DISCARDING_OVERSIZE_RECORD then
+        inbox_offset = inbox_offset + (newline or #chunk)
+        if newline then
+            OMEGGA_BRIDGE_INBOX_DISCARDING_OVERSIZE_RECORD = false
+        end
+        return nil
+    end
+
+    if newline then
+        inbox_offset = inbox_offset + newline
+        local suffix = chunk:sub(1, newline - 1)
+        if #partial + #suffix > OMEGGA_BRIDGE_MAX_INBOX_RECORD_BYTES then
+            OMEGGA_BRIDGE_INBOX_PARTIAL_RECORD = ""
+            OMEGGA_BRIDGE_ADMISSION_STATE.oversize_total =
+                (tonumber(OMEGGA_BRIDGE_ADMISSION_STATE.oversize_total) or 0) + 1
+            return nil
+        end
+
+        local record = partial .. suffix
+        OMEGGA_BRIDGE_INBOX_PARTIAL_RECORD = ""
+        return record:gsub("\r$", "")
+    end
+
+    inbox_offset = inbox_offset + #chunk
+    if #partial + #chunk > OMEGGA_BRIDGE_MAX_INBOX_RECORD_BYTES then
+        OMEGGA_BRIDGE_INBOX_PARTIAL_RECORD = ""
+        OMEGGA_BRIDGE_INBOX_DISCARDING_OVERSIZE_RECORD = true
+        OMEGGA_BRIDGE_ADMISSION_STATE.oversize_total =
+            (tonumber(OMEGGA_BRIDGE_ADMISSION_STATE.oversize_total) or 0) + 1
+    else
+        OMEGGA_BRIDGE_INBOX_PARTIAL_RECORD = partial .. chunk
+    end
+    return nil
+end
 
 function start_game_thread_inbox_poller()
     local loop_state = OMEGGA_BRIDGE_LOOP_STATE
@@ -11474,7 +11751,15 @@ poll_inbox = function()
 
     if file_size < inbox_offset then
         inbox_offset = 0
+        OMEGGA_BRIDGE_INBOX_DISCARDING_OVERSIZE_RECORD = false
+        OMEGGA_BRIDGE_INBOX_PARTIAL_RECORD = ""
     end
+    OMEGGA_BRIDGE_ADMISSION_STATE.pending_bytes = math.max(0, file_size - inbox_offset)
+        + #tostring(OMEGGA_BRIDGE_INBOX_PARTIAL_RECORD or "")
+    OMEGGA_BRIDGE_ADMISSION_STATE.pending_bytes_high_water = math.max(
+        tonumber(OMEGGA_BRIDGE_ADMISSION_STATE.pending_bytes_high_water) or 0,
+        OMEGGA_BRIDGE_ADMISSION_STATE.pending_bytes
+    )
     if file_size <= inbox_offset then
         file:close()
         return true
@@ -11487,16 +11772,13 @@ poll_inbox = function()
 
     -- Process exactly one record per tick. This matches the existing BMF
     -- command-worker bound and prevents a burst from monopolizing the game thread.
-    local line = file:read("*l")
-    local next_offset = file:seek()
+    local line = OmeggaBridgeReadBoundedInboxRecord(file, file_size)
     file:close()
-    inbox_offset = next_offset or file_size
+    OMEGGA_BRIDGE_ADMISSION_STATE.pending_bytes = math.max(0, file_size - inbox_offset)
+        + #tostring(OMEGGA_BRIDGE_INBOX_PARTIAL_RECORD or "")
 
-    if line then
-        line = line:gsub("\r$", "")
-        if line ~= "" then
-            handle_message(line)
-        end
+    if line and line ~= "" then
+        handle_message(line)
     end
 
     return true

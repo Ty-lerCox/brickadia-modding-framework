@@ -11,9 +11,7 @@ import { terminateChildProcess } from '@util/process';
 import { IS_WINDOWS } from '@util/platform';
 import {
   formatUe4ssDiagnostics,
-  getBrickadiaLogPath,
   installManagedUe4ss,
-  readBrickadiaBuildInfo,
   readUe4ssDiagnostics,
   resolveGameBinary,
   resolveWindowsControlBackend,
@@ -32,7 +30,22 @@ import { env } from 'node:process';
 import readline from 'readline';
 import stripAnsi from 'strip-ansi';
 import BmfSocketBridgeHost from './bmfSocketBridge';
+import {
+  type BrickadiaBuildInfoSnapshot,
+  type ServerStatusIdentity,
+  buildCachedServerStatusLines,
+  emptyBrickadiaBuildInfoSnapshot,
+  resolveServerStatusIdentity,
+  updateBrickadiaBuildInfoSnapshot,
+} from './serverStatusCache';
 import Ue4ssBridgeHost from './ue4ssBridge';
+import {
+  BoundedAdmissionQueue,
+  extractBmfDispatchCommand,
+  inferUe4ssServiceClass,
+  isSafeUe4ssAdmissionExempt,
+  type Ue4ssAdmissionContext,
+} from './ue4ssAdmission';
 
 // list of errors that can be solved by yelling at the user
 const knownErrors: {
@@ -69,6 +82,28 @@ const WINDOWS_UE4SS_READY_TIMEOUT_MS = envPositiveNumber(
   30000,
 );
 const DEFAULT_WINDOWS_UE4SS_WRITE_SPACING_MS = 75;
+const WINDOWS_UE4SS_BOUNDED_ADMISSION_ENABLED =
+  env.OMEGGA_UE4SS_BOUNDED_ADMISSION_ENABLED !== '0';
+const WINDOWS_UE4SS_WRITE_QUEUE_MAX_DEPTH = envPositiveNumber(
+  env.OMEGGA_UE4SS_WRITE_QUEUE_MAX_DEPTH,
+  64,
+);
+const WINDOWS_UE4SS_WRITE_QUEUE_MAX_BYTES = envPositiveNumber(
+  env.OMEGGA_UE4SS_WRITE_QUEUE_MAX_BYTES,
+  32 * 1024,
+);
+const WINDOWS_UE4SS_WRITE_QUEUE_EXEMPT_MAX_DEPTH = envPositiveNumber(
+  env.OMEGGA_UE4SS_WRITE_QUEUE_EXEMPT_MAX_DEPTH,
+  4,
+);
+const WINDOWS_UE4SS_WRITE_QUEUE_EXEMPT_MAX_BYTES = envPositiveNumber(
+  env.OMEGGA_UE4SS_WRITE_QUEUE_EXEMPT_MAX_BYTES,
+  4 * 1024,
+);
+const WINDOWS_UE4SS_WRITE_QUEUE_DEADLINE_MS = envPositiveNumber(
+  env.OMEGGA_UE4SS_WRITE_QUEUE_DEADLINE_MS,
+  3000,
+);
 const SYNTHETIC_PLAYER_STATE_BASE = 2147483000;
 const SYNTHETIC_PLAYER_CONTROLLER_BASE = 2147484000;
 const SYNTHETIC_PATH_PREFIX = 'Omegga:PersistentLevel.';
@@ -130,6 +165,9 @@ const parseConsoleArgs = (value: string) => {
 };
 
 const getBmfCommandFromOmeggaLine = (line: string) => {
+  const explicitDispatch = extractBmfDispatchCommand(line);
+  if (explicitDispatch) return explicitDispatch;
+
   const bmfBridgeMatch = line.match(/^Omegga\.Bridge\.BMF\s+(.+)$/i);
   if (bmfBridgeMatch) return bmfBridgeMatch[1].trim();
 
@@ -239,9 +277,23 @@ export default class BrickadiaServer extends EventEmitter {
   #ue4ssCompatibilityCl: string = null;
   #ue4ssCompatibilityReportPath: string = null;
   #ue4ssStagedObjectControlOverride = false;
+  #ue4ssBuildInfo: BrickadiaBuildInfoSnapshot =
+    emptyBrickadiaBuildInfoSnapshot();
+  #serverStatusIdentity: ServerStatusIdentity = {
+    serverName: 'Brickadia Server',
+    description: '',
+    source: 'fallback',
+  };
+  #serverStatusStartedAtMs = 0;
   #unknownCommandMessageRetryTimer: NodeJS.Timeout = null;
   #windowsContextBootstrapTimers = new Set<NodeJS.Timeout>();
-  #writeQueue: Promise<void> = Promise.resolve();
+  #writeQueue = new BoundedAdmissionQueue({
+    enabled: WINDOWS_UE4SS_BOUNDED_ADMISSION_ENABLED,
+    maxDepth: WINDOWS_UE4SS_WRITE_QUEUE_MAX_DEPTH,
+    maxBytes: WINDOWS_UE4SS_WRITE_QUEUE_MAX_BYTES,
+    exemptMaxDepth: WINDOWS_UE4SS_WRITE_QUEUE_EXEMPT_MAX_DEPTH,
+    exemptMaxBytes: WINDOWS_UE4SS_WRITE_QUEUE_EXEMPT_MAX_BYTES,
+  });
 
   config: IConfig;
   path: string;
@@ -271,6 +323,14 @@ export default class BrickadiaServer extends EventEmitter {
     }
 
     return this.#ue4ssBridge.getCapabilities();
+  }
+
+  getWindowsControlAdmissionStatus() {
+    return {
+      writeQueue: this.#writeQueue.getStatus(),
+      ue4ssInbox: this.#ue4ssBridge?.getAdmissionStatus() ?? null,
+      ue4ssRuntime: this.#ue4ssBridge?.getRuntimeAdmissionStatus() ?? null,
+    };
   }
 
   async waitUntilControlReady(timeoutMs = WINDOWS_UE4SS_READY_TIMEOUT_MS) {
@@ -563,7 +623,8 @@ export default class BrickadiaServer extends EventEmitter {
     let failure = '';
     try {
       const result = (await bridge.execCommand(command)) as
-        { executor?: unknown } | undefined;
+        | { executor?: unknown }
+        | undefined;
       executor = String(result?.executor ?? '');
     } catch (error) {
       failure = error instanceof Error ? error.message : String(error);
@@ -609,6 +670,21 @@ export default class BrickadiaServer extends EventEmitter {
 
   emitSyntheticConsoleLine(line: string) {
     this.emit('line', this.formatSyntheticConsoleLine(line));
+  }
+
+  getSyntheticServerStatusLines() {
+    return buildCachedServerStatusLines(
+      this.#serverStatusIdentity,
+      this.#serverStatusStartedAtMs
+        ? Date.now() - this.#serverStatusStartedAtMs
+        : 0,
+    );
+  }
+
+  emitSyntheticServerStatus() {
+    for (const line of this.getSyntheticServerStatusLines()) {
+      this.emitSyntheticConsoleLine(line);
+    }
   }
 
   getSyntheticPlayerLookups(): SyntheticPlayerLookup[] {
@@ -741,12 +817,7 @@ export default class BrickadiaServer extends EventEmitter {
     const diagnostics = this.#ue4ssWin64Dir
       ? readUe4ssDiagnostics(this.#ue4ssWin64Dir)
       : null;
-    const buildInfo = readBrickadiaBuildInfo(
-      getBrickadiaLogPath(
-        this.path,
-        this.config?.server?.savedDir ?? CONFIG_SAVED_DIR,
-      ),
-    );
+    const buildInfo = this.#ue4ssBuildInfo;
     const detail = diagnostics
       ? formatUe4ssDiagnostics(diagnostics, buildInfo)
       : '';
@@ -762,13 +833,20 @@ export default class BrickadiaServer extends EventEmitter {
     });
   }
 
-  async writeToUe4ssControl(line: string) {
+  async writeToUe4ssControl(
+    line: string,
+    admission: Partial<Ue4ssAdmissionContext> = {},
+  ) {
+    const normalizedLine = line.replace(/\r?\n$/, '');
+    if (normalizedLine === 'Server.Status') {
+      this.emitSyntheticServerStatus();
+      return;
+    }
     if (!this.#ue4ssBridge) {
       this.handleUe4ssDegraded('UE4SS bridge was not initialized.');
       return;
     }
 
-    const normalizedLine = line.replace(/\r?\n$/, '');
     const execBmfCommand = async (
       command: string,
       options: {
@@ -784,7 +862,11 @@ export default class BrickadiaServer extends EventEmitter {
         ),
       );
       if (this.#bmfSocketBridge?.hasBmfClients) {
-        return await this.#bmfSocketBridge.execCommand(command, timeoutMs);
+        return await this.#bmfSocketBridge.execCommand(command, timeoutMs, {
+          serviceClass: admission.serviceClass,
+          issuedAtMs: admission.issuedAtMs,
+          deadlineMs: admission.deadlineMs,
+        });
       }
 
       throw new Error('BMF socket bridge has no connected native client.');
@@ -794,14 +876,6 @@ export default class BrickadiaServer extends EventEmitter {
       const bmfCommand = getBmfCommandFromOmeggaLine(normalizedLine);
       if (bmfCommand) {
         await execBmfCommand(bmfCommand);
-        return true;
-      }
-
-      if (
-        normalizedLine === 'Server.Status' &&
-        this.#ue4ssBridge.hasCapability('server_status')
-      ) {
-        await this.#ue4ssBridge.requestServerStatus();
         return true;
       }
 
@@ -817,7 +891,12 @@ export default class BrickadiaServer extends EventEmitter {
         normalizedLine === 'GetAll BRPlayerState UserName' &&
         this.#ue4ssBridge.hasCapability('players_list')
       ) {
-        await this.#ue4ssBridge.requestPlayers('usernames');
+        await this.#ue4ssBridge.requestPlayers(
+          'usernames',
+          {},
+          undefined,
+          admission,
+        );
         return true;
       }
 
@@ -829,9 +908,12 @@ export default class BrickadiaServer extends EventEmitter {
         ownerMatch &&
         this.#ue4ssBridge.hasCapability('players_list')
       ) {
-        await this.#ue4ssBridge.requestPlayers('owners', {
-          stateName: ownerMatch[1],
-        });
+        await this.#ue4ssBridge.requestPlayers(
+          'owners',
+          { stateName: ownerMatch[1] },
+          undefined,
+          admission,
+        );
         return true;
       }
 
@@ -863,13 +945,15 @@ export default class BrickadiaServer extends EventEmitter {
         const command = forceWorldCommand
           ? normalizedLine
           : `Omegga.Bridge.ForceConsoleExecutor consolemanager ${normalizedLine}`;
-        await this.#ue4ssBridge.execCommand(command);
+        await this.#ue4ssBridge.execCommand(command, undefined, admission);
         return true;
       }
 
       if (isEnvironmentControlCommand(normalizedLine)) {
         await this.#ue4ssBridge.execCommand(
           `Omegga.Bridge.ForceConsoleExecutor consolemanager ${normalizedLine}`,
+          undefined,
+          admission,
         );
         return true;
       }
@@ -893,12 +977,7 @@ export default class BrickadiaServer extends EventEmitter {
       /^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+(?:\s|$)/.test(
         normalizedLine,
       ) || /^(?:GetAll|ServerTravel|exit|quit)\b/i.test(normalizedLine);
-    const buildInfo = readBrickadiaBuildInfo(
-      getBrickadiaLogPath(
-        this.path,
-        this.config?.server?.savedDir ?? CONFIG_SAVED_DIR,
-      ),
-    );
+    const buildInfo = this.#ue4ssBuildInfo;
 
     if (
       this.#ue4ssCompatibilityCl &&
@@ -951,6 +1030,8 @@ export default class BrickadiaServer extends EventEmitter {
       if (broadcastMatch && this.#ue4ssBridge.hasCapability('chat_broadcast')) {
         await this.#ue4ssBridge.broadcast(
           decodeConsoleChatText(broadcastMatch[1]),
+          undefined,
+          admission,
         );
         return true;
       }
@@ -977,6 +1058,8 @@ export default class BrickadiaServer extends EventEmitter {
         await this.#ue4ssBridge.whisper(
           whisperMatch[1],
           decodeConsoleChatText(whisperMatch[2]),
+          undefined,
+          admission,
         );
         return true;
       }
@@ -1006,6 +1089,8 @@ export default class BrickadiaServer extends EventEmitter {
         await this.#ue4ssBridge.statusMessage(
           statusMessageMatch[1],
           decodeConsoleChatText(statusMessageMatch[2]),
+          undefined,
+          admission,
         );
         return true;
       }
@@ -1069,7 +1154,11 @@ export default class BrickadiaServer extends EventEmitter {
 
       if (!this.#ue4ssCompatibilityValidated) {
         if (isDegradedSafePositionProbe) {
-          await this.#ue4ssBridge.execCommand(normalizedLine);
+          await this.#ue4ssBridge.execCommand(
+            normalizedLine,
+            undefined,
+            admission,
+          );
           return;
         }
 
@@ -1086,7 +1175,7 @@ export default class BrickadiaServer extends EventEmitter {
         throw new Error(reason);
       }
 
-      await this.#ue4ssBridge.execCommand(normalizedLine);
+      await this.#ue4ssBridge.execCommand(normalizedLine, undefined, admission);
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       this.handleUe4ssDegraded(reason);
@@ -1233,6 +1322,9 @@ export default class BrickadiaServer extends EventEmitter {
 
   // start the server child process
   async start() {
+    this.#writeQueue.clear(
+      'Brickadia server start replaced queued UE4SS writes.',
+    );
     const {
       email,
       password,
@@ -1351,6 +1443,7 @@ export default class BrickadiaServer extends EventEmitter {
     this.#windowsControlPort = IS_WINDOWS ? this.getWindowsControlPort() : null;
     this.#ue4ssWin64Dir = IS_WINDOWS ? path.dirname(command) : null;
     this.#syntheticLogCounter = 0;
+    this.#ue4ssBuildInfo = emptyBrickadiaBuildInfoSnapshot();
     this.#ue4ssDegraded = false;
     this.#ue4ssCompatibilityValidated = true;
     this.#ue4ssCompatibilityBundleId = null;
@@ -1363,6 +1456,22 @@ export default class BrickadiaServer extends EventEmitter {
     const spawnEnv = { ...process.env };
 
     if (IS_WINDOWS && this.#windowsBackend === 'ue4ss') {
+      const serverStatusIdentity = resolveServerStatusIdentity(
+        this.path,
+        this.config,
+      );
+      this.#serverStatusIdentity = serverStatusIdentity;
+      this.#serverStatusStartedAtMs = Date.now();
+      Object.assign(spawnEnv, {
+        OMEGGA_UE4SS_SERVER_NAME: serverStatusIdentity.serverName,
+        OMEGGA_UE4SS_SERVER_DESCRIPTION: serverStatusIdentity.description,
+        OMEGGA_UE4SS_SERVER_IDENTITY_SOURCE: serverStatusIdentity.source,
+      });
+      Logger.verbose(
+        'Cached UE4SS server status identity',
+        `source=${serverStatusIdentity.source}`,
+        `name=${serverStatusIdentity.serverName}`,
+      );
       const install = installManagedUe4ss(this.#ue4ssWin64Dir);
       const allowStagedObjectControl =
         env.OMEGGA_UE4SS_ALLOW_STAGED_OBJECT_CONTROL === '1';
@@ -1549,6 +1658,16 @@ export default class BrickadiaServer extends EventEmitter {
 
   // write a string to the child process
   async writeAsync(line: string) {
+    const issuedAtMs = Date.now();
+    const normalizedLine = line.replace(/\r?\n$/, '');
+    const admission: Ue4ssAdmissionContext = {
+      issuedAtMs,
+      deadlineMs: WINDOWS_UE4SS_BOUNDED_ADMISSION_ENABLED
+        ? issuedAtMs + WINDOWS_UE4SS_WRITE_QUEUE_DEADLINE_MS
+        : 0,
+      serviceClass: inferUe4ssServiceClass(normalizedLine),
+      admissionExempt: isSafeUe4ssAdmissionExempt(normalizedLine),
+    };
     const runWrite = async () => {
       if (line.length >= 512) {
         // show a warning
@@ -1574,7 +1693,7 @@ export default class BrickadiaServer extends EventEmitter {
             this.#windowsBackend === 'ue4ss' &&
             !isDegradedWorldCommand(line.trim())
           ) {
-            await this.writeToUe4ssControl(line);
+            await this.writeToUe4ssControl(line, admission);
 
             const spacingMs = getWindowsUe4ssWriteSpacingMs();
             if (spacingMs > 0) await delay(spacingMs);
@@ -1587,9 +1706,13 @@ export default class BrickadiaServer extends EventEmitter {
       }
     };
 
-    const queuedWrite = this.#writeQueue.then(runWrite, runWrite);
-    this.#writeQueue = queuedWrite.catch(() => {});
-    return queuedWrite;
+    return this.#writeQueue.enqueue(runWrite, {
+      bytes: Buffer.byteLength(line, 'utf8'),
+      serviceClass: admission.serviceClass,
+      issuedAtMs: admission.issuedAtMs,
+      deadlineMs: admission.deadlineMs,
+      exempt: admission.admissionExempt,
+    });
   }
 
   write(line: string) {
@@ -1607,6 +1730,9 @@ export default class BrickadiaServer extends EventEmitter {
 
   // forcibly kills the server
   stop() {
+    this.#writeQueue.clear(
+      'Brickadia server stopped before queued UE4SS write.',
+    );
     if (!this.#child) {
       Logger.verbose('Cannot stop server as no subprocess exists');
       return;
@@ -1695,6 +1821,18 @@ export default class BrickadiaServer extends EventEmitter {
   }
 
   lineListener(line: string) {
-    this.emit('line', stripAnsi(line));
+    const normalizedLine = stripAnsi(line);
+    const previousCl = this.#ue4ssBuildInfo.cl;
+    this.#ue4ssBuildInfo = updateBrickadiaBuildInfoSnapshot(
+      this.#ue4ssBuildInfo,
+      normalizedLine,
+    );
+    if (this.#ue4ssBuildInfo.cl && this.#ue4ssBuildInfo.cl !== previousCl) {
+      Logger.verbose(
+        'Cached Brickadia build identity from stdout',
+        this.#ue4ssBuildInfo.branchLabel,
+      );
+    }
+    this.emit('line', normalizedLine);
   }
 }

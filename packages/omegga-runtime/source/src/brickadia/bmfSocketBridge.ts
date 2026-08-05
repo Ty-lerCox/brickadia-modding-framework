@@ -22,19 +22,41 @@ type BridgeMessage = {
   deadlineMs?: number;
 };
 
+export type BmfCommandServiceClass = 'interactive' | 'bulk';
+
+export type BmfCommandOptions = {
+  serviceClass?: BmfCommandServiceClass;
+  issuedAtMs?: number;
+  deadlineMs?: number;
+};
+
+export type BmfSocketBridgeOptions = {
+  host?: string;
+  port?: number;
+  boundedAdmissionEnabled?: boolean;
+  maxPendingCommands?: number;
+  maxClientBufferBytes?: number;
+};
+
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT_MIN = 26000;
 const DEFAULT_PORT_MAX = 61000;
 const DEFAULT_COMMAND_TIMEOUT_MS = 3000;
+const MIN_COMMAND_TIMEOUT_MS = 100;
 const DEFAULT_TUNNEL_ROUTE_TIMEOUT_MS = 15000;
 const MAX_TUNNEL_ROUTE_TIMEOUT_MS = 300000;
 const MAX_PENDING_TUNNEL_ROUTES = 512;
+const DEFAULT_MAX_PENDING_COMMANDS = 64;
+const DEFAULT_MAX_CLIENT_BUFFER_BYTES = 256 * 1024;
 const RETRYABLE_BIND_ERROR_CODES = new Set(['EADDRINUSE', 'EACCES']);
 
 export default class BmfSocketBridgeHost extends EventEmitter {
   readonly token = randomBytes(16).toString('hex');
   readonly host: string;
   port: number;
+  readonly boundedAdmissionEnabled: boolean;
+  readonly maxPendingCommands: number;
+  readonly maxClientBufferBytes: number;
 
   #server: Server = null;
   #configuredPort: number;
@@ -46,6 +68,7 @@ export default class BmfSocketBridgeHost extends EventEmitter {
       resolve: (message: BridgeMessage) => void;
       reject: (error: Error) => void;
       timeout: NodeJS.Timeout;
+      native: Socket | null;
     }
   >();
   #pendingTunnelRoutes = new Map<
@@ -59,14 +82,37 @@ export default class BmfSocketBridgeHost extends EventEmitter {
   #commandCounter = 0;
   #stopped = true;
 
-  constructor(options: { host?: string; port?: number } = {}) {
+  constructor(options: BmfSocketBridgeOptions = {}) {
     super();
-    this.host = options.host || process.env.OMEGGA_BMF_SOCKET_HOST || DEFAULT_HOST;
+    this.host =
+      options.host || process.env.OMEGGA_BMF_SOCKET_HOST || DEFAULT_HOST;
     this.#configuredPort =
-      options.port ||
-      Number(process.env.OMEGGA_BMF_SOCKET_PORT || 0) ||
-      0;
-    this.port = this.#configuredPort || randomInt(DEFAULT_PORT_MIN, DEFAULT_PORT_MAX);
+      options.port || Number(process.env.OMEGGA_BMF_SOCKET_PORT || 0) || 0;
+    this.port =
+      this.#configuredPort || randomInt(DEFAULT_PORT_MIN, DEFAULT_PORT_MAX);
+    this.boundedAdmissionEnabled =
+      options.boundedAdmissionEnabled ??
+      process.env.OMEGGA_BMF_SOCKET_BOUNDED_ADMISSION_ENABLED !== '0';
+    this.maxPendingCommands = Math.max(
+      1,
+      Math.floor(
+        Number(
+          options.maxPendingCommands ??
+            process.env.OMEGGA_BMF_SOCKET_MAX_PENDING_COMMANDS ??
+            DEFAULT_MAX_PENDING_COMMANDS,
+        ),
+      ) || DEFAULT_MAX_PENDING_COMMANDS,
+    );
+    this.maxClientBufferBytes = Math.max(
+      1,
+      Math.floor(
+        Number(
+          options.maxClientBufferBytes ??
+            process.env.OMEGGA_BMF_SOCKET_MAX_CLIENT_BUFFER_BYTES ??
+            DEFAULT_MAX_CLIENT_BUFFER_BYTES,
+        ),
+      ) || DEFAULT_MAX_CLIENT_BUFFER_BYTES,
+    );
   }
 
   async start() {
@@ -76,7 +122,8 @@ export default class BmfSocketBridgeHost extends EventEmitter {
     const maxAttempts = this.#configuredPort ? 1 : 20;
     let lastError: Error | null = null;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      const port = this.#configuredPort || randomInt(DEFAULT_PORT_MIN, DEFAULT_PORT_MAX);
+      const port =
+        this.#configuredPort || randomInt(DEFAULT_PORT_MIN, DEFAULT_PORT_MAX);
       this.port = port;
       this.#server = createServer(socket => this.handleConnection(socket));
 
@@ -104,7 +151,10 @@ export default class BmfSocketBridgeHost extends EventEmitter {
         }
         this.#server = null;
         const errorCode = (lastError as NodeJS.ErrnoException).code;
-        if (!this.#configuredPort && RETRYABLE_BIND_ERROR_CODES.has(errorCode)) {
+        if (
+          !this.#configuredPort &&
+          RETRYABLE_BIND_ERROR_CODES.has(errorCode)
+        ) {
           this.emit('log', {
             level: 'warn',
             message:
@@ -148,7 +198,8 @@ export default class BmfSocketBridgeHost extends EventEmitter {
         OMEGGA_BMF_SOCKET_HOST: this.host,
         OMEGGA_BMF_SOCKET_PORT: String(this.port),
         OMEGGA_BMF_SOCKET_TOKEN: this.token,
-        OMEGGA_BMF_SOCKET_POLL_MS: process.env.OMEGGA_BMF_SOCKET_POLL_MS || '25',
+        OMEGGA_BMF_SOCKET_POLL_MS:
+          process.env.OMEGGA_BMF_SOCKET_POLL_MS || '25',
       };
     }
 
@@ -159,7 +210,9 @@ export default class BmfSocketBridgeHost extends EventEmitter {
   stop() {
     for (const [id, pending] of this.#pendingCommands) {
       clearTimeout(pending.timeout);
-      pending.reject(new Error(`BMF socket bridge stopped before command ${id} completed.`));
+      pending.reject(
+        new Error(`BMF socket bridge stopped before command ${id} completed.`),
+      );
     }
     this.#pendingCommands.clear();
     for (const route of this.#pendingTunnelRoutes.values()) {
@@ -187,17 +240,59 @@ export default class BmfSocketBridgeHost extends EventEmitter {
     return this.#bmfClients.size > 0;
   }
 
-  execCommand(command: string, timeoutMs = DEFAULT_COMMAND_TIMEOUT_MS) {
+  execCommand(
+    command: string,
+    timeoutMs = DEFAULT_COMMAND_TIMEOUT_MS,
+    options: BmfCommandOptions = {},
+  ) {
     if (this.#stopped || !this.#server) {
       return Promise.reject(new Error('BMF socket bridge is not running.'));
     }
     if (this.#bmfClients.size === 0) {
-      return Promise.reject(new Error('No BMF native socket clients are connected.'));
+      return Promise.reject(
+        new Error('No BMF native socket clients are connected.'),
+      );
+    }
+    if (
+      this.boundedAdmissionEnabled &&
+      this.#pendingCommands.size >= this.maxPendingCommands
+    ) {
+      return Promise.reject(
+        new Error(
+          `BMF socket command admission rejected: pending limit ${this.maxPendingCommands} reached.`,
+        ),
+      );
     }
 
+    const requestedTimeoutMs = Number(timeoutMs);
+    const effectiveTimeoutMs = Number.isFinite(requestedTimeoutMs)
+      ? Math.max(MIN_COMMAND_TIMEOUT_MS, Math.ceil(requestedTimeoutMs))
+      : DEFAULT_COMMAND_TIMEOUT_MS;
+    const nowMs = Date.now();
+    const requestedIssuedAtMs = Number(options.issuedAtMs);
+    const issuedAtMs =
+      Number.isFinite(requestedIssuedAtMs) && requestedIssuedAtMs > 0
+        ? requestedIssuedAtMs
+        : nowMs;
+    const requestedDeadlineMs = Number(options.deadlineMs);
+    const deadlineMs =
+      Number.isFinite(requestedDeadlineMs) && requestedDeadlineMs > 0
+        ? requestedDeadlineMs
+        : issuedAtMs + effectiveTimeoutMs;
+    if (deadlineMs <= nowMs) {
+      return Promise.reject(
+        new Error(`BMF socket command expired before dispatch: ${command}.`),
+      );
+    }
+    const responseTimeoutMs = Math.max(
+      1,
+      Math.min(effectiveTimeoutMs, deadlineMs - nowMs),
+    );
+    const serviceClass: BmfCommandServiceClass =
+      options.serviceClass === 'bulk' ? 'bulk' : 'interactive';
     const id = [
       'omegga',
-      Date.now(),
+      issuedAtMs,
       ++this.#commandCounter,
       randomBytes(4).toString('hex'),
     ].join('-');
@@ -206,20 +301,32 @@ export default class BmfSocketBridgeHost extends EventEmitter {
       id,
       source: 'omegga-core',
       command,
+      issuedAtMs,
+      deadlineMs,
+      serviceClass,
     })}\n`;
 
     return new Promise<BridgeMessage>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.#pendingCommands.delete(id);
-        reject(new Error(`Timed out waiting for BMF socket response to ${command}.`));
-      }, timeoutMs);
+        reject(
+          new Error(`Timed out waiting for BMF socket response to ${command}.`),
+        );
+      }, responseTimeoutMs);
 
-      this.#pendingCommands.set(id, { resolve, reject, timeout });
+      const pending = {
+        resolve,
+        reject,
+        timeout,
+        native: null as Socket | null,
+      };
+      this.#pendingCommands.set(id, pending);
 
       let sent = false;
       for (const socket of this.#bmfClients) {
         if (socket.destroyed || !socket.writable) continue;
         socket.write(payload);
+        pending.native = socket;
         sent = true;
         break;
       }
@@ -227,7 +334,9 @@ export default class BmfSocketBridgeHost extends EventEmitter {
       if (!sent) {
         this.#pendingCommands.delete(id);
         clearTimeout(timeout);
-        reject(new Error('No writable BMF native socket clients are connected.'));
+        reject(
+          new Error('No writable BMF native socket clients are connected.'),
+        );
       }
     });
   }
@@ -257,11 +366,17 @@ export default class BmfSocketBridgeHost extends EventEmitter {
     const client = this.#clients.get(socket);
     if (!client) return;
 
-    client.buffer += chunk.toString('utf8');
-    if (client.buffer.length > 1024 * 1024) {
-      socket.destroy(new Error('BMF socket client exceeded input buffer limit.'));
+    if (
+      this.boundedAdmissionEnabled &&
+      Buffer.byteLength(client.buffer, 'utf8') + chunk.byteLength >
+        this.maxClientBufferBytes
+    ) {
+      socket.destroy(
+        new Error('BMF socket client exceeded input buffer limit.'),
+      );
       return;
     }
+    client.buffer += chunk.toString('utf8');
 
     const lines = client.buffer.split(/\r?\n/);
     client.buffer = lines.pop() ?? '';
@@ -278,7 +393,10 @@ export default class BmfSocketBridgeHost extends EventEmitter {
     try {
       message = JSON.parse(trimmed) as BridgeMessage;
     } catch {
-      this.emit('log', { level: 'warn', message: 'BMF socket ignored invalid JSON.' });
+      this.emit('log', {
+        level: 'warn',
+        message: 'BMF socket ignored invalid JSON.',
+      });
       return;
     }
 
@@ -319,7 +437,11 @@ export default class BmfSocketBridgeHost extends EventEmitter {
       if (message.type === 'response' && message.id) {
         this.resolvePendingCommand(message);
       }
-      this.broadcast(trimmed, socket, socket => this.#clients.get(socket)?.role !== 'bmf-native');
+      this.broadcast(
+        trimmed,
+        socket,
+        socket => this.#clients.get(socket)?.role !== 'bmf-native',
+      );
       return;
     }
 
@@ -354,7 +476,9 @@ export default class BmfSocketBridgeHost extends EventEmitter {
   }
 
   private normalizeRole(value: string | undefined): ClientRole {
-    const role = String(value || '').trim().toLowerCase();
+    const role = String(value || '')
+      .trim()
+      .toLowerCase();
     if (role === 'bmf-native') return 'bmf-native';
     if (role === 'cityrpg' || role === 'plugin') return 'plugin';
     return 'unknown';
@@ -397,10 +521,20 @@ export default class BmfSocketBridgeHost extends EventEmitter {
     );
   }
 
-  private routeTunnelRequest(origin: Socket, message: BridgeMessage, line: string) {
+  private routeTunnelRequest(
+    origin: Socket,
+    message: BridgeMessage,
+    line: string,
+  ) {
     const id = String(message.id || '').trim();
     if (!id) {
-      this.writeTunnelResult(origin, message.id, 'rejected', 'INVALID_ID', 'tunnel request id is required');
+      this.writeTunnelResult(
+        origin,
+        message.id,
+        'rejected',
+        'INVALID_ID',
+        'tunnel request id is required',
+      );
       return;
     }
     if (this.#pendingTunnelRoutes.has(id)) {
@@ -426,7 +560,11 @@ export default class BmfSocketBridgeHost extends EventEmitter {
 
     const nowMs = Date.now();
     const absoluteDeadlineMs = Number(message.deadlineMs || 0);
-    if (Number.isFinite(absoluteDeadlineMs) && absoluteDeadlineMs > 0 && absoluteDeadlineMs <= nowMs) {
+    if (
+      Number.isFinite(absoluteDeadlineMs) &&
+      absoluteDeadlineMs > 0 &&
+      absoluteDeadlineMs <= nowMs
+    ) {
       this.writeTunnelResult(
         origin,
         id,
@@ -453,7 +591,10 @@ export default class BmfSocketBridgeHost extends EventEmitter {
       Number.isFinite(absoluteDeadlineMs) && absoluteDeadlineMs > nowMs
         ? Math.max(
             100,
-            Math.min(MAX_TUNNEL_ROUTE_TIMEOUT_MS, absoluteDeadlineMs - nowMs + 1000),
+            Math.min(
+              MAX_TUNNEL_ROUTE_TIMEOUT_MS,
+              absoluteDeadlineMs - nowMs + 1000,
+            ),
           )
         : DEFAULT_TUNNEL_ROUTE_TIMEOUT_MS;
     const timeout = setTimeout(() => {
@@ -473,7 +614,11 @@ export default class BmfSocketBridgeHost extends EventEmitter {
     native.write(`${line}\n`);
   }
 
-  private routeTunnelResponse(native: Socket, message: BridgeMessage, line: string) {
+  private routeTunnelResponse(
+    native: Socket,
+    message: BridgeMessage,
+    line: string,
+  ) {
     const id = String(message.id || '').trim();
     const route = this.#pendingTunnelRoutes.get(id);
     if (!route || route.native !== native) return;
@@ -504,6 +649,16 @@ export default class BmfSocketBridgeHost extends EventEmitter {
     if (!this.#clients.has(socket)) return;
     this.#clients.delete(socket);
     this.#bmfClients.delete(socket);
+    for (const [id, pending] of this.#pendingCommands) {
+      if (pending.native !== socket) continue;
+      clearTimeout(pending.timeout);
+      this.#pendingCommands.delete(id);
+      pending.reject(
+        new Error(
+          `BMF native socket disconnected before command ${id} completed.`,
+        ),
+      );
+    }
     for (const [id, route] of this.#pendingTunnelRoutes) {
       if (route.origin !== socket && route.native !== socket) continue;
       clearTimeout(route.timeout);

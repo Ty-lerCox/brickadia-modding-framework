@@ -43,6 +43,21 @@
       "default": 5000,
       "type": "number"
     },
+    "maxPendingSocketCommands": {
+      "description": "Maximum BMF socket commands awaiting responses. OMEGGA_BMF_BRIDGE_MAX_PENDING_COMMANDS or OMEGGA_BMF_SOCKET_MAX_PENDING_COMMANDS overrides this value.",
+      "default": 64,
+      "type": "number"
+    },
+    "maxSocketBufferBytes": {
+      "description": "Maximum incomplete or individual newline-delimited socket record size. OMEGGA_BMF_BRIDGE_MAX_BUFFER_BYTES or OMEGGA_BMF_SOCKET_MAX_CLIENT_BUFFER_BYTES overrides this value.",
+      "default": 262144,
+      "type": "number"
+    },
+    "maxSocketCommandBytes": {
+      "description": "Maximum serialized outbound BMF command envelope size. OMEGGA_BMF_BRIDGE_MAX_COMMAND_BYTES or BMF_UNIFIED_SOCKET_MAX_COMMAND_BYTES overrides this value.",
+      "default": 65536,
+      "type": "number"
+    },
     "socketReconnectMs": {
       "description": "Delay before reconnecting to the BMF socket broker after a disconnect. Set to 0 to disable reconnects.",
       "default": 2500,

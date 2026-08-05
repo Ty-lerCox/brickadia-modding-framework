@@ -23,6 +23,11 @@
       "default": 5000,
       "type": "number"
     },
+    "maxCommandBytes": {
+      "description": "Maximum serialized bmf.players.sync command size. OMEGGA_BMF_PLAYER_SYNC_MAX_COMMAND_BYTES or BMF_UNIFIED_SOCKET_MAX_COMMAND_BYTES overrides this value.",
+      "default": 65536,
+      "type": "number"
+    },
     "brickadiaLogPath": {
       "description": "Configurable explicit Brickadia.log path used when Omegga's live player list is empty.",
       "default": "",

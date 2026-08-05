@@ -50,6 +50,33 @@ local GAME_COMMAND_TUNNEL_DEFAULT_MAX_LINE_BYTES = 4096
 local GAME_COMMAND_TUNNEL_MAX_IDEMPOTENCY_KEY_BYTES = 128
 local GAME_COMMAND_TUNNEL_DEFAULT_INTERACTIVE_BURST = 4
 local GAME_COMMAND_TUNNEL_COMPLETED_RETENTION = 1024
+GAME_COMMAND_TUNNEL_COMPLETED_DEFAULT_MAX_BYTES = 1048576
+COMMAND_OUTPUT_DEFAULT_MAX_LINES = 128
+COMMAND_OUTPUT_DEFAULT_MAX_BYTES = 32768
+REPLAY_RESPONSE_OMITTED_MARKER = "[BMF_REPLAY_RESPONSE_OMITTED cache_entry_byte_budget]"
+local SOCKET_ADMISSION_DEFAULTS = {
+  max_queue = 64,
+  max_bytes = 131072,
+  max_direct_queue = 32,
+  max_direct_interactive_queue = 24,
+  max_direct_bulk_queue = 8,
+  max_command_bytes = 16384,
+  default_deadline_ms = 5000,
+  completed_retention = 256,
+  completed_max_bytes = 524288,
+}
+local SOCKET_ADMISSION_FAIRNESS_SLOTS = {
+  "direct_socket:interactive",
+  "tunnel:interactive",
+  "direct_socket:interactive",
+  "tunnel:interactive",
+  "direct_socket:interactive",
+  "tunnel:interactive",
+  "direct_socket:interactive",
+  "tunnel:interactive",
+  "direct_socket:bulk",
+  "tunnel:bulk",
+}
 local GAME_THREAD_CALLBACK_RETENTION_LIMIT = 4096
 local DELAYED_CALLBACK_RETENTION_LIMIT = 4096
 local TIMER_MINIMUM_INTERVAL_MS = 16
@@ -60,6 +87,7 @@ local TIMER_PUMP_MAX_DURATION_MS = 4
 local TIMER_PUMP_MAX_QUEUE_SCANS_PER_FRAME = 64
 local TIMER_PUMP_MAX_CALLBACKS_PER_OWNER_PER_FRAME = 4
 local PLUGIN_UNSAFE_GLOBAL_STATUS_WRITE_INTERVAL_SECONDS = 5
+BMF_PLAYER_REGISTRY_DEFAULT_REPAIR_COOLDOWN_MS = 5000
 
 local state = {
   started_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
@@ -105,6 +133,14 @@ local state = {
       error = 0,
       by_name = {},
       by_transport = {},
+      last = nil,
+    },
+    command_output = {
+      max_lines = COMMAND_OUTPUT_DEFAULT_MAX_LINES,
+      max_bytes = COMMAND_OUTPUT_DEFAULT_MAX_BYTES,
+      truncated_commands = 0,
+      omitted_lines = 0,
+      omitted_bytes = 0,
       last = nil,
     },
     events = {
@@ -197,9 +233,47 @@ local state = {
         messages = 0,
       },
     },
+    player_registry = {},
     socket_scheduler = {
+      unified_enabled = true,
       budget_ms = 3,
       budget_enforced = true,
+      native_drains = {
+        budget_enabled = true,
+        batch_size = 1,
+        max_events_per_pump = 4,
+        next_source = "tree",
+        attempted = 0,
+        drained = 0,
+        skipped = 0,
+        overruns = 0,
+        by_source = {
+          tree = {
+            source = "tree",
+            attempted = 0,
+            drained = 0,
+            skipped = 0,
+            overruns = 0,
+            errors = 0,
+            depth = -1,
+            depth_available = false,
+            duration_ms_max = 0,
+            last_ms = 0,
+          },
+          zone = {
+            source = "zone",
+            attempted = 0,
+            drained = 0,
+            skipped = 0,
+            overruns = 0,
+            errors = 0,
+            depth = -1,
+            depth_available = false,
+            duration_ms_max = 0,
+            last_ms = 0,
+          },
+        },
+      },
       configured_ingress_per_pump = 16,
       effective_ingress_per_pump = 2,
       direct_ingress_cap_enabled = true,
@@ -210,11 +284,14 @@ local state = {
       direct_admitted_last = 0,
       direct_admitted_peak = 0,
       tunnel_dispatched_last = 0,
+      direct_dispatched_last = 0,
       budget_exhausted_total = 0,
       budget_admission_stopped_total = 0,
       budget_admission_stopped_last = false,
       budget_tunnel_dispatch_skipped_total = 0,
       budget_tunnel_dispatch_skipped_last = false,
+      budget_dispatch_skipped_total = 0,
+      budget_dispatch_skipped_last = false,
       monolithic_overrun_total = 0,
       slice = {
         count = 0,
@@ -235,6 +312,21 @@ local state = {
           duration_ms_max = 0,
           last_ms = 0,
           monolithic_overruns = 0,
+          rejected = 0,
+          dropped = 0,
+          expired = 0,
+          terminal_completed = 0,
+          terminal_failed = 0,
+          terminal_rejected = 0,
+          terminal_expired = 0,
+          terminal_outcome_unknown = 0,
+          terminal_send_failed = 0,
+          duplicate_active = 0,
+          duplicate_completed = 0,
+          fairness = {
+            interactive = 0,
+            bulk = 0,
+          },
         },
         tunnel = {
           path = "tunnel",
@@ -246,6 +338,21 @@ local state = {
           duration_ms_max = 0,
           last_ms = 0,
           monolithic_overruns = 0,
+          rejected = 0,
+          dropped = 0,
+          expired = 0,
+          terminal_completed = 0,
+          terminal_failed = 0,
+          terminal_rejected = 0,
+          terminal_expired = 0,
+          terminal_outcome_unknown = 0,
+          terminal_send_failed = 0,
+          duplicate_active = 0,
+          duplicate_completed = 0,
+          fairness = {
+            interactive = 0,
+            bulk = 0,
+          },
         },
       },
       ingress_by_type = {
@@ -257,12 +364,34 @@ local state = {
       queues = {
         direct_depth = 0,
         direct_oldest_age_ms = 0,
+        direct_interactive_depth = 0,
+        direct_bulk_depth = 0,
+        direct_interactive_oldest_age_ms = 0,
+        direct_bulk_oldest_age_ms = 0,
+        direct_peak_depth = 0,
+        direct_interactive_peak_depth = 0,
+        direct_bulk_peak_depth = 0,
         tunnel_depth = 0,
         tunnel_interactive_depth = 0,
         tunnel_bulk_depth = 0,
         tunnel_oldest_age_ms = 0,
         tunnel_interactive_oldest_age_ms = 0,
         tunnel_bulk_oldest_age_ms = 0,
+        tunnel_peak_depth = 0,
+        tunnel_interactive_peak_depth = 0,
+        tunnel_bulk_peak_depth = 0,
+        direct_completed_count = 0,
+        direct_completed_bytes = 0,
+        direct_completed_max_bytes = SOCKET_ADMISSION_DEFAULTS.completed_max_bytes,
+        direct_completed_peak_bytes = 0,
+        direct_completed_evicted = 0,
+        direct_completed_response_omitted = 0,
+        tunnel_completed_count = 0,
+        tunnel_completed_bytes = 0,
+        tunnel_completed_max_bytes = GAME_COMMAND_TUNNEL_COMPLETED_DEFAULT_MAX_BYTES,
+        tunnel_completed_peak_bytes = 0,
+        tunnel_completed_evicted = 0,
+        tunnel_completed_response_omitted = 0,
       },
     },
   },
@@ -365,6 +494,8 @@ local state = {
     queued_count = 0,
     queued_bytes = 0,
     peak_depth = 0,
+    peak_interactive_depth = 0,
+    peak_bulk_depth = 0,
     peak_bytes = 0,
     scheduled = false,
     running = false,
@@ -394,12 +525,47 @@ local state = {
     completed_by_idempotency_key = {},
     completed_order = {},
     completed_retention = GAME_COMMAND_TUNNEL_COMPLETED_RETENTION,
+    completed_max_bytes = GAME_COMMAND_TUNNEL_COMPLETED_DEFAULT_MAX_BYTES,
+    completed_retained_bytes = 0,
+    completed_peak_bytes = 0,
+    completed_evicted = 0,
+    completed_response_omitted = 0,
     last_dispatch_ms = 0,
     max_dispatch_ms = 0,
     dispatch_ms_sum = 0,
     last_result_state = "",
     last_result_code = "",
     last_error = "",
+  },
+  socket_admission = {
+    enabled = true,
+    max_queue = SOCKET_ADMISSION_DEFAULTS.max_queue,
+    max_bytes = SOCKET_ADMISSION_DEFAULTS.max_bytes,
+    max_direct_queue = SOCKET_ADMISSION_DEFAULTS.max_direct_queue,
+    max_direct_interactive_queue = SOCKET_ADMISSION_DEFAULTS.max_direct_interactive_queue,
+    max_direct_bulk_queue = SOCKET_ADMISSION_DEFAULTS.max_direct_bulk_queue,
+    max_command_bytes = SOCKET_ADMISSION_DEFAULTS.max_command_bytes,
+    default_deadline_ms = SOCKET_ADMISSION_DEFAULTS.default_deadline_ms,
+    completed_retention = SOCKET_ADMISSION_DEFAULTS.completed_retention,
+    completed_max_bytes = SOCKET_ADMISSION_DEFAULTS.completed_max_bytes,
+    completed_retained_bytes = 0,
+    completed_peak_bytes = 0,
+    completed_evicted = 0,
+    completed_response_omitted = 0,
+    direct_queues = {
+      interactive = {},
+      bulk = {},
+    },
+    direct_queued_count = 0,
+    direct_queued_bytes = 0,
+    direct_peak_depth = 0,
+    direct_peak_interactive_depth = 0,
+    direct_peak_bulk_depth = 0,
+    fairness_cursor = 1,
+    running = false,
+    active_by_id = {},
+    completed_by_id = {},
+    completed_order = {},
   },
   reserved_chat_command_guard = {
     enabled = true,
@@ -416,6 +582,35 @@ local state = {
   },
   player_cache = nil,
   player_cache_error = "",
+  player_registry = {
+    cache_first_enabled = true,
+    repair_enabled = true,
+    legacy_discovery_enabled = false,
+    repair_cooldown_ms = BMF_PLAYER_REGISTRY_DEFAULT_REPAIR_COOLDOWN_MS,
+    cache_loaded = false,
+    generation = 0,
+    entries = 0,
+    cache_hits = 0,
+    cache_misses = 0,
+    disk_loads = 0,
+    disk_load_failures = 0,
+    memory_syncs = 0,
+    persisted_syncs = 0,
+    controller_handles = {},
+    controller_handle_hits = 0,
+    controller_handle_misses = 0,
+    targeted_resolutions = 0,
+    targeted_failures = 0,
+    broad_repairs = 0,
+    broad_repair_skipped = 0,
+    broad_repair_failures = 0,
+    broad_repair_matches = 0,
+    global_scans = 0,
+    repair_running = false,
+    last_repair_epoch = 0,
+    last_repair_at = "",
+    last_repair_error = "",
+  },
   player_position_controller_cache = {
     records = {},
     ttl_seconds = 120,
@@ -1355,6 +1550,34 @@ function BMF_telemetry_snapshot()
   for owner, count in pairs(state.timer_owner_counts) do
     telemetry.timers.owner_counts[owner] = tonumber(count) or 0
   end
+  local player_registry = state.player_registry or {}
+  telemetry.player_registry = {
+    cache_first_enabled = player_registry.cache_first_enabled == true,
+    repair_enabled = player_registry.repair_enabled == true,
+    legacy_discovery_enabled = player_registry.legacy_discovery_enabled == true,
+    cache_loaded = player_registry.cache_loaded == true,
+    generation = tonumber(player_registry.generation) or 0,
+    entries = tonumber(player_registry.entries) or 0,
+    cache_hits = tonumber(player_registry.cache_hits) or 0,
+    cache_misses = tonumber(player_registry.cache_misses) or 0,
+    disk_loads = tonumber(player_registry.disk_loads) or 0,
+    disk_load_failures = tonumber(player_registry.disk_load_failures) or 0,
+    memory_syncs = tonumber(player_registry.memory_syncs) or 0,
+    persisted_syncs = tonumber(player_registry.persisted_syncs) or 0,
+    controller_handle_hits = tonumber(player_registry.controller_handle_hits) or 0,
+    controller_handle_misses = tonumber(player_registry.controller_handle_misses) or 0,
+    targeted_resolutions = tonumber(player_registry.targeted_resolutions) or 0,
+    targeted_failures = tonumber(player_registry.targeted_failures) or 0,
+    broad_repairs = tonumber(player_registry.broad_repairs) or 0,
+    broad_repair_skipped = tonumber(player_registry.broad_repair_skipped) or 0,
+    broad_repair_failures = tonumber(player_registry.broad_repair_failures) or 0,
+    broad_repair_matches = tonumber(player_registry.broad_repair_matches) or 0,
+    global_scans = tonumber(player_registry.global_scans) or 0,
+    repair_running = player_registry.repair_running == true,
+    repair_cooldown_ms = tonumber(player_registry.repair_cooldown_ms) or 0,
+    last_repair_at = tostring(player_registry.last_repair_at or ""),
+    last_repair_error = tostring(player_registry.last_repair_error or ""),
+  }
   telemetry.paths = {
     status = STATUS_PATH,
     telemetry = BMF_TELEMETRY_PATH,
@@ -1406,6 +1629,12 @@ function BMF_telemetry_snapshot()
     max_bytes = tonumber(tunnel.max_bytes) or 0,
     max_line_bytes = tonumber(tunnel.max_line_bytes) or 0,
     completed_retention = tonumber(tunnel.completed_retention) or 0,
+    completed_max_bytes = tonumber(tunnel.completed_max_bytes) or 0,
+    completed_retained_bytes = tonumber(tunnel.completed_retained_bytes) or 0,
+    completed_count = #(tunnel.completed_order or {}),
+    completed_peak_bytes = tonumber(tunnel.completed_peak_bytes) or 0,
+    completed_evicted = tonumber(tunnel.completed_evicted) or 0,
+    completed_response_omitted = tonumber(tunnel.completed_response_omitted) or 0,
     queued_count = tonumber(tunnel.queued_count) or 0,
     oldest_age_ms = tonumber(telemetry.socket_scheduler.queues.tunnel_oldest_age_ms) or 0,
     interactive_depth = #(tunnel.queues.interactive or {}),
@@ -2120,6 +2349,13 @@ local function BMF_socket_write_metadata()
     maxPendingTunnelRequests = tunnel.max_queue,
     maxTunnelLineBytes = tunnel.max_line_bytes,
     tunnelCompletedRetention = tunnel.completed_retention,
+    directCompletedRetention = state.socket_admission.completed_retention,
+    directCompletedMaxBytes = state.socket_admission.completed_max_bytes,
+    directCompletedRetainedBytes = state.socket_admission.completed_retained_bytes,
+    directCompletedEvicted = state.socket_admission.completed_evicted,
+    tunnelCompletedMaxBytes = tunnel.completed_max_bytes,
+    tunnelCompletedRetainedBytes = tunnel.completed_retained_bytes,
+    tunnelCompletedEvicted = tunnel.completed_evicted,
     tunnelWorkerStarted = tunnel.worker_started,
     tunnelWorkerMode = tunnel.worker_mode,
     tunnelWorkerTicks = tunnel.worker_ticks,
@@ -2177,6 +2413,18 @@ local function BMF_socket_metadata_heartbeat(force)
   return true
 end
 
+function BMF_command_output_configure_from_env()
+  local output = state.telemetry.command_output
+  output.max_lines = math.max(8, math.min(2048, BMF_env_number(
+    "BMF_COMMAND_OUTPUT_MAX_LINES",
+    COMMAND_OUTPUT_DEFAULT_MAX_LINES,
+    8)))
+  output.max_bytes = math.max(1024, math.min(262144, BMF_env_number(
+    "BMF_COMMAND_OUTPUT_MAX_BYTES",
+    COMMAND_OUTPUT_DEFAULT_MAX_BYTES,
+    1024)))
+end
+
 function BMF_game_command_tunnel_configure_from_env()
   local tunnel = state.game_command_tunnel
   tunnel.enabled = BMF_env_bool("BMF_GAME_COMMAND_TUNNEL_ENABLED", true)
@@ -2212,10 +2460,16 @@ function BMF_game_command_tunnel_configure_from_env()
     "BMF_GAME_COMMAND_TUNNEL_COMPLETED_RETENTION",
     GAME_COMMAND_TUNNEL_COMPLETED_RETENTION,
     64)))
+  tunnel.completed_max_bytes = math.max(65536, math.min(16777216, BMF_env_number(
+    "BMF_GAME_COMMAND_TUNNEL_COMPLETED_MAX_BYTES",
+    GAME_COMMAND_TUNNEL_COMPLETED_DEFAULT_MAX_BYTES,
+    65536)))
 end
 
 function BMF_socket_configure_from_env()
   local socket_scheduler = state.telemetry.socket_scheduler
+  local admission = state.socket_admission
+  BMF_command_output_configure_from_env()
   state.socket.enabled = BMF_socket_enabled_from_env()
   state.socket.available = BMF_socket_native_available()
   state.socket.host = BMF_socket_env("OMEGGA_BMF_SOCKET_HOST")
@@ -2232,6 +2486,49 @@ function BMF_socket_configure_from_env()
   socket_scheduler.budget_enforced = BMF_env_bool(
     "BMF_GAME_THREAD_PUMP_BUDGET_ENFORCED",
     true)
+  socket_scheduler.native_drains.budget_enabled = BMF_env_bool(
+    "BMF_SOCKET_NATIVE_DRAIN_BUDGET_ENABLED",
+    true)
+  admission.enabled = BMF_env_bool(
+    "BMF_UNIFIED_SOCKET_ADMISSION_ENABLED",
+    true)
+  socket_scheduler.unified_enabled = admission.enabled == true
+  admission.max_queue = math.max(1, math.min(512, BMF_env_number(
+    "BMF_UNIFIED_SOCKET_MAX_QUEUE",
+    SOCKET_ADMISSION_DEFAULTS.max_queue,
+    1)))
+  admission.max_bytes = math.max(1024, math.min(1048576, BMF_env_number(
+    "BMF_UNIFIED_SOCKET_MAX_BYTES",
+    SOCKET_ADMISSION_DEFAULTS.max_bytes,
+    1024)))
+  admission.max_direct_queue = math.max(1, math.min(admission.max_queue, BMF_env_number(
+    "BMF_UNIFIED_SOCKET_MAX_DIRECT_QUEUE",
+    SOCKET_ADMISSION_DEFAULTS.max_direct_queue,
+    1)))
+  admission.max_direct_interactive_queue = math.max(1, math.min(admission.max_direct_queue, BMF_env_number(
+    "BMF_UNIFIED_SOCKET_MAX_DIRECT_INTERACTIVE_QUEUE",
+    SOCKET_ADMISSION_DEFAULTS.max_direct_interactive_queue,
+    1)))
+  admission.max_direct_bulk_queue = math.max(1, math.min(admission.max_direct_queue, BMF_env_number(
+    "BMF_UNIFIED_SOCKET_MAX_DIRECT_BULK_QUEUE",
+    SOCKET_ADMISSION_DEFAULTS.max_direct_bulk_queue,
+    1)))
+  admission.max_command_bytes = math.max(64, math.min(admission.max_bytes, BMF_env_number(
+    "BMF_UNIFIED_SOCKET_MAX_COMMAND_BYTES",
+    SOCKET_ADMISSION_DEFAULTS.max_command_bytes,
+    64)))
+  admission.default_deadline_ms = math.max(100, math.min(300000, BMF_env_number(
+    "BMF_UNIFIED_SOCKET_DEFAULT_DEADLINE_MS",
+    SOCKET_ADMISSION_DEFAULTS.default_deadline_ms,
+    100)))
+  admission.completed_retention = math.max(16, math.min(4096, BMF_env_number(
+    "BMF_UNIFIED_SOCKET_COMPLETED_RETENTION",
+    SOCKET_ADMISSION_DEFAULTS.completed_retention,
+    16)))
+  admission.completed_max_bytes = math.max(65536, math.min(16777216, BMF_env_number(
+    "BMF_UNIFIED_SOCKET_COMPLETED_MAX_BYTES",
+    SOCKET_ADMISSION_DEFAULTS.completed_max_bytes,
+    65536)))
   socket_scheduler.configured_ingress_per_pump = math.max(1, math.min(16, BMF_env_number(
     "BMF_GAME_COMMAND_TUNNEL_INGRESS_PER_TICK",
     16,
@@ -5563,6 +5860,8 @@ local function register_builtin_commands()
     local options = parse_command_options(args)
     local listed = BMF.players.list({
       liveControllers = option_boolean(options, "livecontrollers", false) or option_boolean(options, "includelivecontrollers", false),
+      repair = option_boolean(options, "repair", false),
+      legacyDiscovery = option_boolean(options, "legacydiscovery", false) or option_boolean(options, "diagnostic", false),
     })
     local players = {}
     if listed.data and type(listed.data.players) == "table" then
@@ -5576,6 +5875,12 @@ local function register_builtin_commands()
       "live_controllers_included=" .. tostring((listed.data and listed.data.liveControllersIncluded) == true),
       "adapter=" .. tostring((listed.data and listed.data.adapter) or "headless-empty"),
       "cache_path=" .. tostring((listed.data and listed.data.cachePath) or PLAYER_CACHE_PATH),
+      "cache_first=" .. tostring((listed.data and listed.data.cacheFirst) == true),
+      "cache_generation=" .. tostring((listed.data and listed.data.cacheGeneration) or 0),
+      "legacy_discovery_used=" .. tostring((listed.data and listed.data.legacyDiscoveryUsed) == true),
+      "repair_requested=" .. tostring((listed.data and listed.data.repair and listed.data.repair.requested) == true),
+      "repair_performed=" .. tostring((listed.data and listed.data.repair and listed.data.repair.performed) == true),
+      "repair_global_scans=" .. tostring((listed.data and listed.data.repair and listed.data.repair.globalScans) or 0),
     }
     if listed.data and listed.data.updatedAt then
       lines[#lines + 1] = "updated_at=" .. tostring(listed.data.updatedAt or "")
@@ -5707,6 +6012,7 @@ local function register_builtin_commands()
     local synced = BMF.players.sync(records, {
       source = source,
       adapter = adapter,
+      persist = option_boolean(options, "persist", true),
     })
     local lines = {
       "source=" .. source,
@@ -5714,6 +6020,8 @@ local function register_builtin_commands()
       "players_count=" .. tostring((synced.data and synced.data.playerCount) or 0),
       "invalid_count=" .. tostring((synced.data and synced.data.invalidCount) or 0),
       "cache_path=" .. tostring((synced.data and synced.data.cachePath) or PLAYER_CACHE_PATH),
+      "persisted=" .. tostring((synced.data and synced.data.persisted) == true),
+      "cache_generation=" .. tostring((synced.data and synced.data.cacheGeneration) or 0),
     }
     if synced.data and synced.data.updatedAt then
       lines[#lines + 1] = "updated_at=" .. tostring(synced.data.updatedAt or "")
@@ -11651,6 +11959,12 @@ local function tree_cut_native_update_status(status_text)
   native.last_status = tostring(status_text or "")
   native.last_error = tostring(fields.last_error or "")
   native.total_events = tonumber(fields.events) or native.total_events or 0
+  local drain_telemetry = state.telemetry.socket_scheduler.native_drains.by_source.tree
+  local queue_depth = tonumber(fields.queued)
+  if queue_depth ~= nil then
+    drain_telemetry.depth = math.max(0, queue_depth)
+    drain_telemetry.depth_available = true
+  end
   return lines, fields
 end
 
@@ -11665,6 +11979,12 @@ local function zone_native_update_status(status_text)
   native.last_status = tostring(status_text or "")
   native.last_error = tostring(fields.last_error or "")
   native.total_events = tonumber(fields.events) or native.total_events or 0
+  local drain_telemetry = state.telemetry.socket_scheduler.native_drains.by_source.zone
+  local queue_depth = tonumber(fields.queued)
+  if queue_depth ~= nil then
+    drain_telemetry.depth = math.max(0, queue_depth)
+    drain_telemetry.depth_available = true
+  end
   return lines, fields
 end
 
@@ -14632,6 +14952,7 @@ function BMF_zone_native_should_drain()
   return (state.tools.zone_native and state.tools.zone_native.enabled == true)
     or (state.tools.zone_console_trace and state.tools.zone_console_trace.enabled == true)
     or (state.tools.zone_wire_trace and state.tools.zone_wire_trace.enabled == true)
+    or (state.tools.zone_process_trace and state.tools.zone_process_trace.enabled == true)
 end
 
 function BMF_zone_native_drain_raw(limit)
@@ -21237,21 +21558,123 @@ function live_chat_controller_metadata(controller)
 end
 
 function live_chat_cached_players()
-  local raw = read_file(PLAYER_CACHE_PATH)
-  if not raw or trim_string(raw) == "" then
+  local registry = state.player_registry or {}
+  if registry.cache_loaded ~= true and type(load_player_cache) == "function" then
+    load_player_cache()
+  end
+  local cache = state.player_cache
+  if type(cache) ~= "table" then
     return {}
   end
-
-  local cache = json_decode(raw)
-  if type(cache) ~= "table" or type(cache.players) ~= "table" then
-    return {}
+  if type(cache.players) == "table" then
+    return cache.players
   end
-  return cache.players
+  return cache
 end
 
-function live_chat_collect_targets()
+function live_chat_cached_controller(controller_path)
+  local path = trim_string(tostring(controller_path or ""))
+  if path == "" then
+    return nil
+  end
+  local registry = state.player_registry or {}
+  registry.controller_handles = type(registry.controller_handles) == "table"
+    and registry.controller_handles or {}
+  local controller = registry.controller_handles[path]
+  if live_chat_is_valid_object(controller) then
+    registry.controller_handle_hits = (tonumber(registry.controller_handle_hits) or 0) + 1
+    return controller
+  end
+  registry.controller_handles[path] = nil
+  registry.controller_handle_misses = (tonumber(registry.controller_handle_misses) or 0) + 1
+  controller = live_chat_find_controller_by_name(path)
+  if live_chat_is_valid_object(controller) then
+    registry.targeted_resolutions = (tonumber(registry.targeted_resolutions) or 0) + 1
+    registry.controller_handles[path] = controller
+    return controller
+  end
+  registry.targeted_failures = (tonumber(registry.targeted_failures) or 0) + 1
+  return nil
+end
+
+function live_chat_exact_identity_values(record)
+  local values = {}
+  local seen = {}
+  for _, value in ipairs({
+    record and record.uuid,
+    record and record.id,
+    record and record.playerId,
+    record and record.username,
+    record and record.userName,
+    record and record.playerName,
+    record and record.displayName,
+    record and record.originalName,
+    record and record.name,
+  }) do
+    local normalized = trim_string(tostring(value or "")):lower()
+    if normalized ~= "" and not seen[normalized] then
+      seen[normalized] = true
+      values[#values + 1] = normalized
+    end
+  end
+  return values
+end
+
+function live_chat_match_cached_player(players, target)
+  local target_values = {}
+  for _, value in ipairs(live_chat_exact_identity_values(target)) do
+    target_values[value] = true
+  end
+  local match_index = nil
+  local match_player = nil
+  for index, player in ipairs(players or {}) do
+    local matched = false
+    for _, value in ipairs(live_chat_exact_identity_values(player)) do
+      if target_values[value] then
+        matched = true
+        break
+      end
+    end
+    if matched then
+      if match_index ~= nil then
+        return nil, nil
+      end
+      match_index = index
+      match_player = player
+    end
+  end
+  return match_index, match_player
+end
+
+function live_chat_repair_allowed(registry)
+  if registry.repair_enabled ~= true or registry.repair_running == true then
+    return false
+  end
+  local cooldown_ms = math.max(0, tonumber(registry.repair_cooldown_ms) or 0)
+  local last_epoch = tonumber(registry.last_repair_epoch) or 0
+  if last_epoch > 0 and cooldown_ms > 0 then
+    local elapsed_ms = math.max(0, os.time() - last_epoch) * 1000
+    if elapsed_ms < cooldown_ms then
+      return false
+    end
+  end
+  return true
+end
+
+function live_chat_collect_targets(options)
+  local opts = type(options) == "table" and options or {}
+  local registry = state.player_registry or {}
   local targets = {}
   local seen = {}
+  local cached_players = live_chat_cached_players()
+  local repair_detail = {
+    requested = opts.repair == true or option_boolean(opts, "repair", false),
+    performed = false,
+    skipped = false,
+    matched = 0,
+    globalScans = 0,
+    error = "",
+  }
 
   local function add_target(controller, source, metadata)
     if #targets >= LIVE_CHAT_MAX_CONTROLLER_TARGETS then
@@ -21269,6 +21692,10 @@ function live_chat_collect_targets()
     metadata = type(metadata) == "table" and metadata or {}
     local full_name = live_chat_object_full_name(controller)
     local label = full_name ~= "" and full_name or live_chat_object_label(controller, source or "player_controller")
+    local controller_path = tostring(metadata.controllerPath or "")
+    if trim_string(controller_path) == "" then
+      controller_path = full_name
+    end
 
     targets[#targets + 1] = {
       controller = controller,
@@ -21276,52 +21703,103 @@ function live_chat_collect_targets()
       userName = tostring(metadata.userName or metadata.username or metadata.playerName or ""),
       displayName = tostring(metadata.displayName or metadata.name or metadata.username or ""),
       playerId = tostring(metadata.uuid or metadata.id or metadata.playerId or ""),
-      controllerPath = tostring(metadata.controllerPath or ""),
+      controllerPath = controller_path,
       playerStatePath = tostring(metadata.playerStatePath or ""),
       label = label,
       source = tostring(source or ""),
     }
   end
 
-  for _, player in ipairs(live_chat_cached_players()) do
+  for _, player in ipairs(cached_players) do
     local controller_path = tostring(player.controllerPath or "")
-    local controller = live_chat_find_controller_by_name(controller_path)
+    local controller = live_chat_cached_controller(controller_path)
     if controller ~= nil then
       add_target(controller, "player_cache.controllerPath", player)
     end
   end
 
-  if type(FindAllOf) == "function" then
-    for _, class_name in ipairs(LIVE_CHAT_CONTROLLER_CLASSES) do
-      local ok, controllers = pcall(FindAllOf, class_name)
-      if ok and type(controllers) == "table" then
-        for index, controller in ipairs(controllers) do
-          add_target(
-            controller,
-            "FindAllOf(" .. class_name .. ")[" .. tostring(index) .. "]",
-            live_chat_controller_metadata(controller)
-          )
-          if #targets >= LIVE_CHAT_MAX_CONTROLLER_TARGETS then
-            break
+  local unresolved_count = math.max(0, #cached_players - #targets)
+  local repair_needed = repair_detail.requested and (#cached_players == 0 or unresolved_count > 0)
+  if repair_needed and not live_chat_repair_allowed(registry) then
+    registry.broad_repair_skipped = (tonumber(registry.broad_repair_skipped) or 0) + 1
+    repair_detail.skipped = true
+  elseif repair_needed then
+    registry.repair_running = true
+    registry.last_repair_epoch = os.time()
+    registry.last_repair_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+    registry.last_repair_error = ""
+    registry.broad_repairs = (tonumber(registry.broad_repairs) or 0) + 1
+    repair_detail.performed = true
+    local repair_ok, repair_error = pcall(function()
+      if type(FindAllOf) ~= "function" then
+        error("FindAllOf is unavailable")
+      end
+      for _, class_name in ipairs(LIVE_CHAT_CONTROLLER_CLASSES) do
+        local target_count_before_scan = #targets
+        registry.global_scans = (tonumber(registry.global_scans) or 0) + 1
+        repair_detail.globalScans = repair_detail.globalScans + 1
+        local ok, controllers = pcall(FindAllOf, class_name)
+        if ok and type(controllers) == "table" then
+          for index, controller in ipairs(controllers) do
+            add_target(
+              controller,
+              "repair.FindAllOf(" .. class_name .. ")[" .. tostring(index) .. "]",
+              live_chat_controller_metadata(controller)
+            )
+            if #targets >= LIVE_CHAT_MAX_CONTROLLER_TARGETS then
+              break
+            end
+          end
+        end
+        if #targets >= LIVE_CHAT_MAX_CONTROLLER_TARGETS then
+          break
+        end
+        if #targets > target_count_before_scan then
+          break
+        end
+      end
+    end)
+    registry.repair_running = false
+    if not repair_ok then
+      registry.broad_repair_failures = (tonumber(registry.broad_repair_failures) or 0) + 1
+      registry.last_repair_error = tostring(repair_error or "controller repair failed")
+      repair_detail.error = registry.last_repair_error
+    else
+      local updated_cache = type(state.player_cache) == "table" and copy_table(state.player_cache) or {
+        schemaVersion = 1,
+        adapter = "live-controller-repair",
+        source = "explicit-repair",
+        players = {},
+      }
+      updated_cache.players = type(updated_cache.players) == "table" and updated_cache.players or {}
+      for _, target in ipairs(targets) do
+        if tostring(target.source or ""):find("repair.FindAllOf(", 1, true) == 1 then
+          local match_index, matched_player = live_chat_match_cached_player(updated_cache.players, target)
+          if match_index ~= nil and type(matched_player) == "table" then
+            target.name = tostring(target.name ~= "" and target.name or matched_player.name or matched_player.playerName or matched_player.username or "")
+            target.userName = tostring(target.userName ~= "" and target.userName or matched_player.userName or matched_player.username or matched_player.playerName or "")
+            target.displayName = tostring(target.displayName ~= "" and target.displayName or matched_player.displayName or matched_player.name or matched_player.username or "")
+            target.playerId = tostring(matched_player.uuid or matched_player.id or matched_player.playerId or target.playerId or "")
+            matched_player.controllerPath = tostring(target.controllerPath or "")
+            matched_player.playerStatePath = tostring(target.playerStatePath or matched_player.playerStatePath or "")
+            matched_player.controllerAvailable = trim_string(matched_player.controllerPath) ~= ""
+            if trim_string(matched_player.controllerPath) ~= "" then
+              registry.controller_handles[matched_player.controllerPath] = target.controller
+            end
+            repair_detail.matched = repair_detail.matched + 1
           end
         end
       end
-      if #targets >= LIVE_CHAT_MAX_CONTROLLER_TARGETS then
-        break
+      registry.broad_repair_matches = (tonumber(registry.broad_repair_matches) or 0) + repair_detail.matched
+      if repair_detail.matched > 0 and type(publish_player_cache) == "function" then
+        updated_cache.source = "explicit-live-controller-repair"
+        updated_cache.updatedAt = registry.last_repair_at
+        publish_player_cache(updated_cache)
       end
     end
   end
 
-  if #targets == 0 and type(FindFirstOf) == "function" then
-    for _, class_name in ipairs(LIVE_CHAT_CONTROLLER_CLASSES) do
-      local ok, controller = pcall(FindFirstOf, class_name)
-      if ok then
-        add_target(controller, "FindFirstOf(" .. class_name .. ")", live_chat_controller_metadata(controller))
-      end
-    end
-  end
-
-  return targets
+  return targets, repair_detail
 end
 
 function live_chat_target_summary(target)
@@ -21526,31 +22004,88 @@ function external_player_record(record)
   return record
 end
 
-function load_player_cache()
+function BMF_player_registry_configure_from_env()
+  local registry = state.player_registry
+  registry.cache_first_enabled = BMF_env_bool(
+    "BMF_PLAYER_REGISTRY_CACHE_FIRST_ENABLED",
+    true)
+  registry.repair_enabled = BMF_env_bool(
+    "BMF_PLAYER_REGISTRY_REPAIR_ENABLED",
+    true)
+  registry.legacy_discovery_enabled = BMF_env_bool(
+    "BMF_PLAYER_REGISTRY_LEGACY_DISCOVERY_ENABLED",
+    false)
+  registry.repair_cooldown_ms = math.max(1000, math.min(300000, BMF_env_number(
+    "BMF_PLAYER_REGISTRY_REPAIR_COOLDOWN_MS",
+    BMF_PLAYER_REGISTRY_DEFAULT_REPAIR_COOLDOWN_MS,
+    1000)))
+end
+
+function publish_player_cache(cache, options)
+  if type(cache) ~= "table" then
+    return nil
+  end
+  options = type(options) == "table" and options or {}
+  local registry = state.player_registry
+  local requested_generation = tonumber(cache.generation or cache.snapshotGeneration) or 0
+  local current_generation = tonumber(registry.generation) or 0
+  local next_generation = current_generation + 1
+  if options.preserveGeneration == true and requested_generation > 0 then
+    next_generation = math.max(current_generation, requested_generation)
+  end
+  cache.generation = next_generation
+  cache.snapshotGeneration = next_generation
+  local players = type(cache.players) == "table" and cache.players or cache
+  local retained_handles = {}
+  for _, player in ipairs(players or {}) do
+    local controller_path = trim_string(tostring(player.controllerPath or ""))
+    local controller = registry.controller_handles[controller_path]
+    if controller_path ~= "" and live_chat_is_valid_object(controller) then
+      retained_handles[controller_path] = controller
+    end
+  end
+  registry.controller_handles = retained_handles
+  registry.cache_loaded = true
+  registry.generation = next_generation
+  registry.entries = type(players) == "table" and #players or 0
+  state.player_cache = cache
+  state.player_cache_error = ""
+  return cache
+end
+
+function load_player_cache(options)
+  options = type(options) == "table" and options or {}
+  local registry = state.player_registry
+  if registry.cache_loaded == true and options.force ~= true then
+    return state.player_cache, state.player_cache_error
+  end
+  registry.disk_loads = (tonumber(registry.disk_loads) or 0) + 1
   local raw = read_file(PLAYER_CACHE_PATH)
   if raw == nil or trim_string(raw) == "" then
     state.player_cache = nil
     state.player_cache_error = ""
+    registry.cache_loaded = true
+    registry.entries = 0
     return nil, ""
   end
 
   local decoded, err = json_decode(raw)
-  if err ~= nil then
+  if err ~= nil or type(decoded) ~= "table" then
     state.player_cache = nil
-    state.player_cache_error = tostring(err)
-    return nil, tostring(err)
+    state.player_cache_error = tostring(err or "invalid player cache")
+    registry.cache_loaded = true
+    registry.entries = 0
+    registry.disk_load_failures = (tonumber(registry.disk_load_failures) or 0) + 1
+    return nil, state.player_cache_error
   end
 
-  state.player_cache = decoded
-  state.player_cache_error = ""
-  return decoded, ""
+  return publish_player_cache(decoded, { preserveGeneration = true }), ""
 end
 
 function write_player_cache(cache)
   local ok = write_file(PLAYER_CACHE_PATH, json_encode(cache or {}) .. "\n")
   if ok then
-    state.player_cache = cache
-    state.player_cache_error = ""
+    publish_player_cache(cache)
   end
   return ok
 end
@@ -21711,9 +22246,9 @@ function native_player_records()
   return players, detail
 end
 
-function live_player_controller_count()
-  local targets = live_chat_collect_targets()
-  return #targets, targets
+function live_player_controller_count(options)
+  local targets, repair_detail = live_chat_collect_targets(options)
+  return #targets, targets, repair_detail
 end
 
 function player_cache_records(cache)
@@ -21728,15 +22263,37 @@ end
 
 BMF.players.list = function(options)
   local opts = type(options) == "table" and options or {}
-  local native_records, native_detail = native_player_records()
+  local registry = state.player_registry
   local cache, cache_err = load_player_cache()
-  local raw_records = #native_records > 0 and native_records or player_cache_records(cache)
+  local legacy_requested = opts.legacyDiscovery == true
+    or option_boolean(opts, "legacydiscovery", false)
+    or option_boolean(opts, "diagnostic", false)
+  local use_legacy_discovery = registry.cache_first_enabled ~= true
+    or (legacy_requested and registry.legacy_discovery_enabled == true)
+  local native_records = {}
+  local native_detail = {
+    adapter = "player-registry-cache",
+    source = "memory-cache",
+    error = "",
+    skipped = true,
+  }
+  if use_legacy_discovery then
+    native_records, native_detail = native_player_records()
+    native_detail.skipped = false
+  end
+  local cached_records = player_cache_records(cache)
+  local raw_records = use_legacy_discovery and #native_records > 0 and native_records or cached_records
+  if type(cache) == "table" then
+    registry.cache_hits = (tonumber(registry.cache_hits) or 0) + 1
+  else
+    registry.cache_misses = (tonumber(registry.cache_misses) or 0) + 1
+  end
   local adapter = "headless-empty"
   local source = ""
   local updated_at = ""
   local cache_path = PLAYER_CACHE_PATH
   local cache_error = cache_err
-  if #native_records > 0 then
+  if use_legacy_discovery and #native_records > 0 then
     adapter = tostring(native_detail.adapter or "brickadia-log")
     source = tostring(native_detail.source or "brickadia-log")
     cache_path = tostring(native_detail.path or "")
@@ -21767,11 +22324,25 @@ BMF.players.list = function(options)
     option_boolean(opts, "livecontrollers", false) or
     option_boolean(opts, "includelivecontrollers", false) or
     os.getenv("BMF_PLAYERS_LIST_LIVE_CONTROLLERS") == "1"
+  local repair_requested = opts.repair == true or option_boolean(opts, "repair", false)
+  if repair_requested then
+    include_live_controllers = true
+  end
   local live_count = 0
   local live_targets = {}
   local live_controllers = {}
+  local repair_detail = {
+    requested = repair_requested,
+    performed = false,
+    skipped = false,
+    matched = 0,
+    globalScans = 0,
+    error = "",
+  }
   if include_live_controllers then
-    live_count, live_targets = live_player_controller_count()
+    live_count, live_targets, repair_detail = live_player_controller_count({
+      repair = repair_requested,
+    })
     for _, target in ipairs(live_targets or {}) do
       live_controllers[#live_controllers + 1] = live_chat_target_summary(target)
     end
@@ -21790,6 +22361,10 @@ BMF.players.list = function(options)
     updatedAt = updated_at,
     cachePath = cache_path,
     cacheError = cache_error,
+    cacheFirst = registry.cache_first_enabled == true,
+    cacheGeneration = tonumber(registry.generation) or 0,
+    legacyDiscoveryUsed = use_legacy_discovery,
+    repair = repair_detail,
     native = native_detail,
   })
 end
@@ -23629,8 +24204,25 @@ BMF.players.sync = function(records, options)
     invalid = invalid,
   }
 
-  local written = write_player_cache(cache)
-  local response = result(written, written and (#invalid > 0 and "PARTIAL" or "OK") or "CACHE_WRITE_FAILED", written and "Player identity cache synced" or "Player identity cache could not be written", {
+  local persist = option_boolean(options, "persist", true)
+  local next_generation = (tonumber(state.player_registry.generation) or 0) + 1
+  cache.generation = next_generation
+  cache.snapshotGeneration = next_generation
+  local synced = false
+  local persisted = false
+  if persist then
+    synced = write_player_cache(cache)
+    persisted = synced
+  else
+    synced = publish_player_cache(cache) ~= nil
+  end
+  if synced then
+    state.player_registry.memory_syncs = (tonumber(state.player_registry.memory_syncs) or 0) + 1
+    if persisted then
+      state.player_registry.persisted_syncs = (tonumber(state.player_registry.persisted_syncs) or 0) + 1
+    end
+  end
+  local response = result(synced, synced and (#invalid > 0 and "PARTIAL" or "OK") or "CACHE_WRITE_FAILED", synced and "Player registry snapshot synced" or "Player registry snapshot could not be published", {
     players = players,
     invalid = invalid,
     playerCount = #players,
@@ -23640,6 +24232,8 @@ BMF.players.sync = function(records, options)
     source = cache.source,
     updatedAt = cache.updatedAt,
     cachePath = PLAYER_CACHE_PATH,
+    persisted = persisted,
+    cacheGeneration = tonumber(state.player_registry.generation) or 0,
   })
   audit_record("players.sync", {
     playerCount = #players,
@@ -23647,6 +24241,8 @@ BMF.players.sync = function(records, options)
     adapter = cache.adapter,
     source = cache.source,
     cachePath = PLAYER_CACHE_PATH,
+    persisted = persisted,
+    cacheGeneration = tonumber(state.player_registry.generation) or 0,
   }, {
     source = "framework",
     severity = response.ok and "info" or "warn",
@@ -24880,14 +25476,91 @@ function list_command_request_files()
   return files
 end
 
+function BMF_new_bounded_output_collector()
+  local output = state.telemetry.command_output or {}
+  return {
+    lines = {},
+    bytes = 0,
+    maxLines = math.max(8, tonumber(output.max_lines) or COMMAND_OUTPUT_DEFAULT_MAX_LINES),
+    maxBytes = math.max(1024, tonumber(output.max_bytes) or COMMAND_OUTPUT_DEFAULT_MAX_BYTES),
+    truncated = false,
+    omittedLines = 0,
+    omittedBytes = 0,
+  }
+end
+
+function BMF_bounded_output_add(collector, value)
+  local line = tostring(value or "")
+  local separator_bytes = #collector.lines > 0 and 1 or 0
+  if not collector.truncated
+      and #collector.lines < collector.maxLines
+      and (collector.bytes + separator_bytes + #line) <= collector.maxBytes then
+    collector.lines[#collector.lines + 1] = line
+    collector.bytes = collector.bytes + separator_bytes + #line
+    return true
+  end
+
+  collector.truncated = true
+  collector.omittedLines = collector.omittedLines + 1
+  collector.omittedBytes = collector.omittedBytes + #line
+  return false
+end
+
+function BMF_bounded_output_marker(collector)
+  return string.format(
+    "[BMF_OUTPUT_TRUNCATED omitted_lines=%d omitted_bytes_at_least=%d max_lines=%d max_bytes=%d]",
+    collector.omittedLines,
+    collector.omittedBytes,
+    collector.maxLines,
+    collector.maxBytes)
+end
+
+function BMF_bounded_output_finalize(collector, command_name, transport)
+  if not collector.truncated then
+    return collector.lines
+  end
+
+  local marker = BMF_bounded_output_marker(collector)
+  local separator_bytes = #collector.lines > 0 and 1 or 0
+  while #collector.lines >= collector.maxLines
+      or (collector.bytes + separator_bytes + #marker) > collector.maxBytes do
+    local removed = table.remove(collector.lines)
+    if removed == nil then
+      break
+    end
+    collector.bytes = math.max(0, collector.bytes - #removed - (#collector.lines > 0 and 1 or 0))
+    collector.omittedLines = collector.omittedLines + 1
+    collector.omittedBytes = collector.omittedBytes + #removed
+    marker = BMF_bounded_output_marker(collector)
+    separator_bytes = #collector.lines > 0 and 1 or 0
+  end
+
+  collector.lines[#collector.lines + 1] = marker
+  collector.bytes = collector.bytes + separator_bytes + #marker
+  local output = state.telemetry.command_output
+  output.truncated_commands = (tonumber(output.truncated_commands) or 0) + 1
+  output.omitted_lines = (tonumber(output.omitted_lines) or 0) + collector.omittedLines
+  output.omitted_bytes = (tonumber(output.omitted_bytes) or 0) + collector.omittedBytes
+  output.last = {
+    command = tostring(command_name or "unknown"),
+    transport = tostring(transport or "unknown"),
+    retained_lines = #collector.lines,
+    retained_bytes = collector.bytes,
+    omitted_lines = collector.omittedLines,
+    omitted_bytes = collector.omittedBytes,
+    at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+  }
+  return collector.lines
+end
+
 function BMF_dispatch_bmf_command_text(request_id, command_text, transport)
   local process_started_clock = os.clock()
   local process_started_epoch = os.time()
-  local lines = {}
+  local output_collector = BMF_new_bounded_output_collector()
   local output_device = {
     suppressEventLog = true,
     Log = function(_, line)
-      lines[#lines + 1] = tostring(line or "")
+      BMF_bounded_output_add(output_collector, line)
     end,
   }
 
@@ -24902,7 +25575,7 @@ function BMF_dispatch_bmf_command_text(request_id, command_text, transport)
     ok = dispatch_ok and handled_or_error and true or false
     if not dispatch_ok then
       detail = "dispatch crashed: " .. tostring(handled_or_error)
-      lines[#lines + 1] = "BMF " .. tostring(command_name) .. " ERROR " .. detail
+      BMF_bounded_output_add(output_collector, "BMF " .. tostring(command_name) .. " ERROR " .. detail)
     elseif not handled_or_error then
       detail = "command was not handled"
     else
@@ -24922,6 +25595,7 @@ function BMF_dispatch_bmf_command_text(request_id, command_text, transport)
     BMF_socket_scheduler_record_work("direct_socket", total_duration_ms, ok, total_duration_exact_ms)
   end
   BMF_telemetry_record_command(command_name or "unknown", transport or "file", ok, detail, total_duration_ms, dispatch_duration_ms, request_age_ms)
+  local lines = BMF_bounded_output_finalize(output_collector, command_name, transport)
 
   local response = {
     "ok=" .. tostring(ok),
@@ -25187,9 +25861,11 @@ function start_command_worker()
 end
 
 local BMF_game_command_tunnel_schedule
+local BMF_game_command_tunnel_dequeue
 local BMF_game_command_tunnel_drain_once
 local BMF_game_command_tunnel_pump
 local BMF_process_game_command_tunnel_request
+local BMF_game_command_tunnel_send_terminal
 
 function BMF_socket_scheduler_path(path)
   local by_path = state.telemetry.socket_scheduler.by_path
@@ -25197,6 +25873,85 @@ function BMF_socket_scheduler_path(path)
     return by_path.tunnel
   end
   return by_path.direct_socket
+end
+
+function BMF_socket_scheduler_record_admission_outcome(path, outcome)
+  local item = BMF_socket_scheduler_path(path)
+  local normalized = tostring(outcome or "rejected")
+  if normalized == "accepted" then
+    item.admitted = (tonumber(item.admitted) or 0) + 1
+  elseif normalized == "expired" then
+    item.expired = (tonumber(item.expired) or 0) + 1
+  elseif normalized == "dropped" then
+    item.dropped = (tonumber(item.dropped) or 0) + 1
+  else
+    item.rejected = (tonumber(item.rejected) or 0) + 1
+  end
+end
+
+function BMF_socket_scheduler_record_terminal(path, result_state, send_ok)
+  local item = BMF_socket_scheduler_path(path)
+  local normalized = tostring(result_state or "rejected")
+  if normalized == "injected" or normalized == "completed" then
+    item.terminal_completed = (tonumber(item.terminal_completed) or 0) + 1
+  elseif normalized == "failed" then
+    item.terminal_failed = (tonumber(item.terminal_failed) or 0) + 1
+  elseif normalized == "expired" then
+    item.terminal_expired = (tonumber(item.terminal_expired) or 0) + 1
+  elseif normalized == "outcome_unknown" then
+    item.terminal_outcome_unknown = (tonumber(item.terminal_outcome_unknown) or 0) + 1
+  else
+    item.terminal_rejected = (tonumber(item.terminal_rejected) or 0) + 1
+  end
+  if send_ok == false then
+    item.terminal_send_failed = (tonumber(item.terminal_send_failed) or 0) + 1
+  end
+end
+
+function BMF_socket_scheduler_record_fairness(path, service_class)
+  local item = BMF_socket_scheduler_path(path)
+  local normalized = service_class == "bulk" and "bulk" or "interactive"
+  item.fairness[normalized] = (tonumber(item.fairness[normalized]) or 0) + 1
+end
+
+function BMF_socket_scheduler_record_duplicate(path, phase)
+  local item = BMF_socket_scheduler_path(path)
+  if phase == "completed" then
+    item.duplicate_completed = (tonumber(item.duplicate_completed) or 0) + 1
+  else
+    item.duplicate_active = (tonumber(item.duplicate_active) or 0) + 1
+  end
+end
+
+function BMF_socket_scheduler_deadline_expired(deadline_ms, issued_at_ms, accepted_clock)
+  local deadline = tonumber(deadline_ms) or 0
+  local issued = tonumber(issued_at_ms) or 0
+  if deadline <= 0 or issued <= 0 or deadline <= issued then
+    return true
+  end
+  -- The embedded wall clock has one-second resolution. It can prove an old
+  -- request expired, but it must not reject a short TTL merely because its
+  -- deadline falls inside the current second. Queue residence is measured
+  -- precisely with the monotonic clock captured at admission.
+  if (os.time() * 1000) >= deadline then
+    return true
+  end
+  local accepted = tonumber(accepted_clock)
+  if accepted ~= nil then
+    local elapsed_ms = math.max(0, (os.clock() - accepted) * 1000)
+    return elapsed_ms >= (deadline - issued)
+  end
+  return false
+end
+
+function BMF_socket_scheduler_total_depth()
+  return math.max(0, tonumber(state.socket_admission.direct_queued_count) or 0)
+    + math.max(0, tonumber(state.game_command_tunnel.queued_count) or 0)
+end
+
+function BMF_socket_scheduler_total_bytes()
+  return math.max(0, tonumber(state.socket_admission.direct_queued_bytes) or 0)
+    + math.max(0, tonumber(state.game_command_tunnel.queued_bytes) or 0)
 end
 
 function BMF_socket_scheduler_record_ingress(message_type)
@@ -25214,8 +25969,7 @@ function BMF_socket_scheduler_record_ingress(message_type)
 end
 
 function BMF_socket_scheduler_record_admission(path)
-  local item = BMF_socket_scheduler_path(path)
-  item.admitted = (tonumber(item.admitted) or 0) + 1
+  BMF_socket_scheduler_record_admission_outcome(path, "accepted")
 end
 
 function BMF_socket_scheduler_record_work(path, duration_ms, ok, budget_duration_ms)
@@ -25249,15 +26003,19 @@ function BMF_socket_scheduler_record_slice(
   ingress_count,
   direct_admitted,
   tunnel_dispatched,
+  direct_dispatched,
   budget_admission_stopped,
-  budget_tunnel_dispatch_skipped)
+  budget_tunnel_dispatch_skipped,
+  budget_dispatch_skipped)
   local scheduler = state.telemetry.socket_scheduler
   local elapsed_ms = math.max(0, tonumber(duration_ms) or 0)
   local ingress = math.max(0, tonumber(ingress_count) or 0)
   local direct_count = math.max(0, tonumber(direct_admitted) or 0)
   local tunnel_count = math.max(0, tonumber(tunnel_dispatched) or 0)
+  local direct_dispatched_count = math.max(0, tonumber(direct_dispatched) or 0)
   local stopped_for_budget = budget_admission_stopped == true
   local tunnel_skipped_for_budget = budget_tunnel_dispatch_skipped == true
+  local dispatch_skipped_for_budget = budget_dispatch_skipped == true
   BMF_telemetry_observe(scheduler.slice, elapsed_ms, ok)
   scheduler.ingress_total = (tonumber(scheduler.ingress_total) or 0) + ingress
   scheduler.ingress_last = ingress
@@ -25265,6 +26023,7 @@ function BMF_socket_scheduler_record_slice(
   scheduler.direct_admitted_last = direct_count
   scheduler.direct_admitted_peak = math.max(tonumber(scheduler.direct_admitted_peak) or 0, direct_count)
   scheduler.tunnel_dispatched_last = tunnel_count
+  scheduler.direct_dispatched_last = direct_dispatched_count
   scheduler.budget_admission_stopped_last = stopped_for_budget
   if stopped_for_budget then
     scheduler.budget_admission_stopped_total = (tonumber(scheduler.budget_admission_stopped_total) or 0) + 1
@@ -25272,6 +26031,10 @@ function BMF_socket_scheduler_record_slice(
   scheduler.budget_tunnel_dispatch_skipped_last = tunnel_skipped_for_budget
   if tunnel_skipped_for_budget then
     scheduler.budget_tunnel_dispatch_skipped_total = (tonumber(scheduler.budget_tunnel_dispatch_skipped_total) or 0) + 1
+  end
+  scheduler.budget_dispatch_skipped_last = dispatch_skipped_for_budget
+  if dispatch_skipped_for_budget then
+    scheduler.budget_dispatch_skipped_total = (tonumber(scheduler.budget_dispatch_skipped_total) or 0) + 1
   end
   if elapsed_ms > (tonumber(scheduler.budget_ms) or 3) then
     scheduler.budget_exhausted_total = (tonumber(scheduler.budget_exhausted_total) or 0) + 1
@@ -25291,20 +26054,638 @@ end
 
 function BMF_socket_scheduler_refresh_queue_telemetry()
   local queues = state.telemetry.socket_scheduler.queues
+  local admission = state.socket_admission
   local tunnel = state.game_command_tunnel
+  local direct_interactive = admission.direct_queues.interactive or {}
+  local direct_bulk = admission.direct_queues.bulk or {}
   local interactive = tunnel.queues.interactive or {}
   local bulk = tunnel.queues.bulk or {}
+  local direct_interactive_age = BMF_socket_queue_oldest_age_ms(direct_interactive, "acceptedAtMs")
+  local direct_bulk_age = BMF_socket_queue_oldest_age_ms(direct_bulk, "acceptedAtMs")
   local interactive_age = BMF_socket_queue_oldest_age_ms(interactive, "acceptedAtMs")
   local bulk_age = BMF_socket_queue_oldest_age_ms(bulk, "acceptedAtMs")
-  queues.direct_depth = 0
-  queues.direct_oldest_age_ms = 0
+  queues.direct_depth = tonumber(admission.direct_queued_count) or 0
+  queues.direct_interactive_depth = #direct_interactive
+  queues.direct_bulk_depth = #direct_bulk
+  queues.direct_interactive_oldest_age_ms = direct_interactive_age
+  queues.direct_bulk_oldest_age_ms = direct_bulk_age
+  queues.direct_oldest_age_ms = math.max(direct_interactive_age, direct_bulk_age)
+  queues.direct_peak_depth = tonumber(admission.direct_peak_depth) or 0
+  queues.direct_interactive_peak_depth = tonumber(admission.direct_peak_interactive_depth) or 0
+  queues.direct_bulk_peak_depth = tonumber(admission.direct_peak_bulk_depth) or 0
   queues.tunnel_depth = tonumber(tunnel.queued_count) or 0
   queues.tunnel_interactive_depth = #interactive
   queues.tunnel_bulk_depth = #bulk
   queues.tunnel_interactive_oldest_age_ms = interactive_age
   queues.tunnel_bulk_oldest_age_ms = bulk_age
   queues.tunnel_oldest_age_ms = math.max(interactive_age, bulk_age)
+  queues.tunnel_peak_depth = tonumber(tunnel.peak_depth) or 0
+  queues.tunnel_interactive_peak_depth = tonumber(tunnel.peak_interactive_depth) or 0
+  queues.tunnel_bulk_peak_depth = tonumber(tunnel.peak_bulk_depth) or 0
+  queues.direct_completed_count = #(admission.completed_order or {})
+  queues.direct_completed_bytes = tonumber(admission.completed_retained_bytes) or 0
+  queues.direct_completed_max_bytes = tonumber(admission.completed_max_bytes) or 0
+  queues.direct_completed_peak_bytes = tonumber(admission.completed_peak_bytes) or 0
+  queues.direct_completed_evicted = tonumber(admission.completed_evicted) or 0
+  queues.direct_completed_response_omitted = tonumber(admission.completed_response_omitted) or 0
+  queues.tunnel_completed_count = #(tunnel.completed_order or {})
+  queues.tunnel_completed_bytes = tonumber(tunnel.completed_retained_bytes) or 0
+  queues.tunnel_completed_max_bytes = tonumber(tunnel.completed_max_bytes) or 0
+  queues.tunnel_completed_peak_bytes = tonumber(tunnel.completed_peak_bytes) or 0
+  queues.tunnel_completed_evicted = tonumber(tunnel.completed_evicted) or 0
+  queues.tunnel_completed_response_omitted = tonumber(tunnel.completed_response_omitted) or 0
   return queues
+end
+
+function BMF_socket_scheduler_send_direct_json(record)
+  local sent = BMF_socket_send_json(record)
+  if sent then
+    state.socket.sent_responses = (tonumber(state.socket.sent_responses) or 0) + 1
+  end
+  return sent
+end
+
+function BMF_socket_replay_record_bytes(record, identity_bytes)
+  local encoded_ok, encoded = pcall(json_encode, record or {})
+  if not encoded_ok or type(encoded) ~= "string" then
+    return math.huge
+  end
+  -- Include identity strings and a conservative fixed allowance for the Lua
+  -- tables/hash entries retained alongside the serialized replay payload.
+  return #encoded + math.max(0, tonumber(identity_bytes) or 0) + 256
+end
+
+function BMF_socket_replay_record_for_cache(record, max_bytes, identity_bytes)
+  local cached = copy_table(record or {})
+  local byte_limit = math.max(65536, tonumber(max_bytes) or 65536)
+  local retained_bytes = BMF_socket_replay_record_bytes(cached, identity_bytes)
+  local omitted = false
+  local original_response = type(cached.response) == "string" and cached.response or nil
+  local original_response_bytes = original_response and #original_response or 0
+  local original_detail = type(cached.detail) == "string" and cached.detail or nil
+  local original_detail_bytes = original_detail and #original_detail or 0
+
+  if retained_bytes > byte_limit and original_response ~= nil then
+    cached.response = REPLAY_RESPONSE_OMITTED_MARKER
+      .. " original_bytes=" .. tostring(original_response_bytes) .. "\n"
+    cached.responseOmitted = true
+    cached.responseOriginalBytes = original_response_bytes
+    omitted = true
+    retained_bytes = BMF_socket_replay_record_bytes(cached, identity_bytes)
+  end
+
+  if retained_bytes > byte_limit and original_detail ~= nil then
+    cached.detail = "[BMF_REPLAY_DETAIL_OMITTED cache_entry_byte_budget] original_bytes="
+      .. tostring(original_detail_bytes)
+    cached.detailOmitted = true
+    cached.detailOriginalBytes = original_detail_bytes
+    omitted = true
+    retained_bytes = BMF_socket_replay_record_bytes(cached, identity_bytes)
+  end
+
+  if retained_bytes > byte_limit then
+    cached = {
+      type = cached.type,
+      source = cached.source,
+      v = cached.v,
+      ts = cached.ts,
+      id = cached.id,
+      ok = cached.ok,
+      state = cached.state,
+      code = cached.code,
+      dispatchMs = cached.dispatchMs,
+      detail = "[BMF_REPLAY_PAYLOAD_OMITTED cache_entry_byte_budget]",
+      response = REPLAY_RESPONSE_OMITTED_MARKER .. " original_bytes="
+        .. tostring(original_response_bytes) .. "\n",
+      responseOmitted = true,
+      responseOriginalBytes = original_response_bytes,
+      replayPayloadOmitted = true,
+    }
+    omitted = true
+    retained_bytes = BMF_socket_replay_record_bytes(cached, identity_bytes)
+  end
+
+  return cached, retained_bytes, omitted
+end
+
+function BMF_socket_replay_compact_cache_to_budget(cache, max_bytes, cache_kind)
+  local byte_limit = math.max(65536, tonumber(max_bytes) or 65536)
+  if (tonumber(cache.completed_retained_bytes) or 0) <= byte_limit then
+    return 0
+  end
+
+  local compacted = 0
+  local inspected = 0
+  for _, request_id in ipairs(cache.completed_order or {}) do
+    if (tonumber(cache.completed_retained_bytes) or 0) <= byte_limit then
+      break
+    end
+    inspected = inspected + 1
+    if inspected > 16 then
+      break
+    end
+    local entry = cache.completed_by_id and cache.completed_by_id[request_id] or nil
+    local record = entry and entry.record or nil
+    if type(record) == "table"
+        and type(record.response) == "string"
+        and record.responseOmitted ~= true then
+      local cached_record = copy_table(record)
+      local original_response_bytes = #cached_record.response
+      cached_record.response = REPLAY_RESPONSE_OMITTED_MARKER
+        .. " original_bytes=" .. tostring(original_response_bytes) .. "\n"
+      cached_record.responseOmitted = true
+      cached_record.responseOriginalBytes = original_response_bytes
+      local identity_bytes = cache_kind == "tunnel"
+        and (#tostring(entry.requestId or "")
+          + #tostring(entry.line or "")
+          + #tostring(entry.idempotencyKey or ""))
+        or #tostring(entry.command or "")
+      local previous_bytes = tonumber(entry.retainedBytes) or 0
+      local retained_bytes = BMF_socket_replay_record_bytes(cached_record, identity_bytes)
+      if retained_bytes < previous_bytes then
+        entry.record = cached_record
+        entry.retainedBytes = retained_bytes
+        cache.completed_retained_bytes = math.max(
+          0,
+          (tonumber(cache.completed_retained_bytes) or 0) - (previous_bytes - retained_bytes))
+        cache.completed_response_omitted = (tonumber(cache.completed_response_omitted) or 0) + 1
+        compacted = compacted + 1
+      end
+    end
+  end
+  return compacted
+end
+
+function BMF_socket_replay_evict_oldest(cache, clear_idempotency)
+  if type(cache.completed_order) ~= "table" or #cache.completed_order == 0 then
+    return false
+  end
+  local expired_id = table.remove(cache.completed_order, 1)
+  local expired_entry = cache.completed_by_id and cache.completed_by_id[expired_id] or nil
+  if cache.completed_by_id then
+    cache.completed_by_id[expired_id] = nil
+  end
+  if expired_entry ~= nil then
+    cache.completed_retained_bytes = math.max(
+      0,
+      (tonumber(cache.completed_retained_bytes) or 0) - (tonumber(expired_entry.retainedBytes) or 0))
+    cache.completed_evicted = (tonumber(cache.completed_evicted) or 0) + 1
+    if clear_idempotency == true
+        and expired_entry.idempotencyKey ~= ""
+        and cache.completed_by_idempotency_key
+        and cache.completed_by_idempotency_key[expired_entry.idempotencyKey] == expired_entry then
+      cache.completed_by_idempotency_key[expired_entry.idempotencyKey] = nil
+    end
+  end
+  return true
+end
+
+function BMF_socket_scheduler_remember_direct_result(request, record)
+  local admission = state.socket_admission
+  local request_id = trim_string(request and request.id or "")
+  if request_id == "" then
+    return
+  end
+  local previous = admission.completed_by_id[request_id]
+  if previous == nil then
+    admission.completed_order[#admission.completed_order + 1] = request_id
+  else
+    admission.completed_retained_bytes = math.max(
+      0,
+      (tonumber(admission.completed_retained_bytes) or 0) - (tonumber(previous.retainedBytes) or 0))
+  end
+  local command = tostring(request.command or "")
+  local max_bytes = math.max(
+    65536,
+    tonumber(admission.completed_max_bytes) or SOCKET_ADMISSION_DEFAULTS.completed_max_bytes)
+  local cached_record, retained_bytes, response_omitted = BMF_socket_replay_record_for_cache(
+    record,
+    max_bytes,
+    #command)
+  admission.completed_by_id[request_id] = {
+    command = command,
+    record = cached_record,
+    retainedBytes = retained_bytes,
+  }
+  admission.completed_retained_bytes = (tonumber(admission.completed_retained_bytes) or 0) + retained_bytes
+  admission.completed_peak_bytes = math.max(
+    tonumber(admission.completed_peak_bytes) or 0,
+    admission.completed_retained_bytes)
+  if response_omitted then
+    admission.completed_response_omitted = (tonumber(admission.completed_response_omitted) or 0) + 1
+  end
+  local retention = math.max(16, tonumber(admission.completed_retention) or SOCKET_ADMISSION_DEFAULTS.completed_retention)
+  while #admission.completed_order > retention do
+    BMF_socket_replay_evict_oldest(admission, false)
+  end
+  BMF_socket_replay_compact_cache_to_budget(admission, max_bytes, "direct")
+  while (tonumber(admission.completed_retained_bytes) or 0) > max_bytes do
+    if not BMF_socket_replay_evict_oldest(admission, false) then
+      break
+    end
+  end
+end
+
+function BMF_socket_scheduler_send_direct_terminal(request, result_state, code, detail, response, command_ok)
+  if type(request) ~= "table" then
+    return nil, false
+  end
+  if request.terminalSent == true then
+    return request.terminalRecord, false
+  end
+
+  local normalized_state = tostring(result_state or "rejected")
+  local record = {
+    type = "response",
+    source = "bmf",
+    ts = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    id = trim_string(request.id or ""),
+    ok = command_ok == true,
+    state = normalized_state,
+    code = tostring(code or "UNKNOWN"),
+    detail = tostring(detail or ""),
+    response = type(response) == "string" and response or nil,
+  }
+
+  -- Mark terminal before attempting transport. A send failure may be replayed
+  -- by request ID, but the command is never dispatched again in this process.
+  request.terminalSent = true
+  request.terminalRecord = record
+  if state.socket_admission.active_by_id[record.id] == request then
+    state.socket_admission.active_by_id[record.id] = nil
+  end
+  BMF_socket_scheduler_remember_direct_result(request, record)
+  local sent = BMF_socket_scheduler_send_direct_json(record)
+  BMF_socket_scheduler_record_terminal("direct_socket", normalized_state, sent)
+  return record, sent
+end
+
+function BMF_socket_scheduler_reject_direct(request_id, command_text, result_state, code, detail, admission_outcome)
+  local request = {
+    id = trim_string(request_id or ""),
+    command = tostring(command_text or ""),
+  }
+  BMF_socket_scheduler_record_admission_outcome(
+    "direct_socket",
+    admission_outcome or (result_state == "expired" and "expired" or "rejected"))
+  if request.id == "" then
+    state.socket.last_error = tostring(code or "INVALID_REQUEST") .. ": " .. tostring(detail or "")
+    return false
+  end
+  BMF_socket_scheduler_send_direct_terminal(
+    request,
+    result_state or "rejected",
+    code or "INVALID_REQUEST",
+    detail or "direct socket request was rejected",
+    nil,
+    false)
+  return false
+end
+
+function BMF_socket_scheduler_admit_direct(decoded)
+  local admission = state.socket_admission
+  local request_id = trim_string(decoded and decoded.id or "")
+  local command_text = trim_string(decoded and decoded.command or "")
+  if request_id == "" or #request_id > 128 then
+    return BMF_socket_scheduler_reject_direct(
+      request_id,
+      command_text,
+      "rejected",
+      "INVALID_ID",
+      "id must contain 1-128 bytes")
+  end
+
+  local active = admission.active_by_id[request_id]
+  if active ~= nil then
+    BMF_socket_scheduler_record_duplicate("direct_socket", "active")
+    BMF_socket_scheduler_send_direct_json({
+      type = "command.ack",
+      source = "bmf",
+      ts = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+      id = request_id,
+      state = active.command == command_text and "accepted" or "conflict",
+      duplicate = true,
+      queueDepth = BMF_socket_scheduler_total_depth(),
+    })
+    return false
+  end
+
+  local completed = admission.completed_by_id[request_id]
+  if completed ~= nil then
+    BMF_socket_scheduler_record_duplicate("direct_socket", "completed")
+    if completed.command == command_text then
+      local replay = copy_table(completed.record)
+      replay.replayed = true
+      BMF_socket_scheduler_send_direct_json(replay)
+      return false
+    end
+    BMF_socket_scheduler_send_direct_json({
+      type = "command.ack",
+      source = "bmf",
+      ts = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+      id = request_id,
+      state = "conflict",
+      duplicate = true,
+      queueDepth = BMF_socket_scheduler_total_depth(),
+    })
+    return false
+  end
+
+  if command_text == "" then
+    return BMF_socket_scheduler_reject_direct(
+      request_id,
+      command_text,
+      "rejected",
+      "INVALID_COMMAND",
+      "command must be non-empty")
+  end
+  if #command_text > admission.max_command_bytes then
+    return BMF_socket_scheduler_reject_direct(
+      request_id,
+      command_text,
+      "rejected",
+      "COMMAND_TOO_LARGE",
+      "command exceeds configured byte limit")
+  end
+
+  local service_class = tostring(decoded.serviceClass or "interactive"):lower()
+  if service_class ~= "interactive" and service_class ~= "bulk" then
+    return BMF_socket_scheduler_reject_direct(
+      request_id,
+      command_text,
+      "rejected",
+      "INVALID_SERVICE_CLASS",
+      "serviceClass must be interactive or bulk")
+  end
+
+  local now_ms = os.time() * 1000
+  local supplied_issued_at_ms = tonumber(decoded.issuedAtMs)
+  local supplied_deadline_ms = tonumber(decoded.deadlineMs)
+  if admission.enabled == true
+      and ((supplied_issued_at_ms or 0) <= 0 or (supplied_deadline_ms or 0) <= 0) then
+    return BMF_socket_scheduler_reject_direct(
+      request_id,
+      command_text,
+      "rejected",
+      "DEADLINE_REQUIRED",
+      "positive issuedAtMs and absolute deadlineMs are required while bounded admission is enabled",
+      "rejected")
+  end
+  local issued_at_ms = supplied_issued_at_ms or now_ms
+  local deadline_ms = supplied_deadline_ms or (issued_at_ms + admission.default_deadline_ms)
+  if deadline_ms <= issued_at_ms
+      or BMF_socket_scheduler_deadline_expired(deadline_ms, issued_at_ms, nil) then
+    return BMF_socket_scheduler_reject_direct(
+      request_id,
+      command_text,
+      "expired",
+      "DEADLINE_EXPIRED",
+      "absolute deadlineMs has elapsed",
+      "expired")
+  end
+
+  local queue = admission.direct_queues[service_class]
+  local class_limit = service_class == "bulk"
+    and admission.max_direct_bulk_queue
+    or admission.max_direct_interactive_queue
+  if BMF_socket_scheduler_total_depth() >= admission.max_queue
+      or admission.direct_queued_count >= admission.max_direct_queue
+      or #queue >= class_limit then
+    return BMF_socket_scheduler_reject_direct(
+      request_id,
+      command_text,
+      "rejected",
+      "QUEUE_FULL",
+      "bounded unified socket admission queue is full",
+      "dropped")
+  end
+
+  local retained_bytes = #request_id + #command_text
+  if (BMF_socket_scheduler_total_bytes() + retained_bytes) > admission.max_bytes then
+    return BMF_socket_scheduler_reject_direct(
+      request_id,
+      command_text,
+      "rejected",
+      "QUEUE_BYTES_FULL",
+      "bounded unified socket admission byte budget is full",
+      "dropped")
+  end
+
+  local request = {
+    id = request_id,
+    command = command_text,
+    serviceClass = service_class,
+    issuedAtMs = issued_at_ms,
+    deadlineMs = deadline_ms,
+    acceptedAtMs = now_ms,
+    acceptedClock = os.clock(),
+    retainedBytes = retained_bytes,
+    executionStarted = false,
+    terminalSent = false,
+  }
+  queue[#queue + 1] = request
+  admission.active_by_id[request_id] = request
+  admission.direct_queued_count = admission.direct_queued_count + 1
+  admission.direct_queued_bytes = admission.direct_queued_bytes + retained_bytes
+  admission.direct_peak_depth = math.max(admission.direct_peak_depth, admission.direct_queued_count)
+  admission.direct_peak_interactive_depth = math.max(
+    admission.direct_peak_interactive_depth,
+    #admission.direct_queues.interactive)
+  admission.direct_peak_bulk_depth = math.max(
+    admission.direct_peak_bulk_depth,
+    #admission.direct_queues.bulk)
+  BMF_socket_scheduler_record_admission("direct_socket")
+  return true
+end
+
+function BMF_socket_scheduler_lane_queue(path, service_class)
+  local normalized_class = service_class == "bulk" and "bulk" or "interactive"
+  if path == "tunnel" then
+    return state.game_command_tunnel.queues[normalized_class]
+  end
+  return state.socket_admission.direct_queues[normalized_class]
+end
+
+function BMF_socket_scheduler_select_next_lane()
+  local admission = state.socket_admission
+  local slot_count = #SOCKET_ADMISSION_FAIRNESS_SLOTS
+  local start_index = math.max(1, math.min(slot_count, tonumber(admission.fairness_cursor) or 1))
+  for offset = 0, slot_count - 1 do
+    local index = ((start_index + offset - 1) % slot_count) + 1
+    local slot = SOCKET_ADMISSION_FAIRNESS_SLOTS[index]
+    local path, service_class = slot:match("^([^:]+):(.+)$")
+    local tunnel_eligible = path ~= "tunnel"
+      or math.max(0, tonumber(state.game_command_tunnel.cooldown_ticks) or 0) == 0
+    local queue = BMF_socket_scheduler_lane_queue(path, service_class)
+    if tunnel_eligible and type(queue) == "table" and #queue > 0 then
+      admission.fairness_cursor = (index % slot_count) + 1
+      return path, service_class
+    end
+  end
+  return nil, nil
+end
+
+function BMF_socket_scheduler_dequeue_direct(service_class)
+  local admission = state.socket_admission
+  local queue = admission.direct_queues[service_class == "bulk" and "bulk" or "interactive"]
+  local request = table.remove(queue, 1)
+  if request ~= nil then
+    admission.direct_queued_count = math.max(0, admission.direct_queued_count - 1)
+    admission.direct_queued_bytes = math.max(
+      0,
+      admission.direct_queued_bytes - (tonumber(request.retainedBytes) or 0))
+  end
+  return request
+end
+
+function BMF_socket_scheduler_execute_direct(request)
+  if type(request) ~= "table" then
+    return false
+  end
+  if BMF_socket_scheduler_deadline_expired(
+      request.deadlineMs,
+      request.issuedAtMs,
+      request.acceptedClock) then
+    BMF_socket_scheduler_send_direct_terminal(
+      request,
+      "expired",
+      "DEADLINE_EXPIRED",
+      "request deadline elapsed before command dispatch",
+      nil,
+      false)
+    return true
+  end
+
+  local work_started_clock = os.clock()
+  request.executionStarted = true
+  local processing_ok, response, command_ok, detail = pcall(
+    BMF_dispatch_bmf_command_text,
+    request.id,
+    request.command,
+    "socket")
+  if processing_ok then
+    local result_state = command_ok == true and "completed" or "failed"
+    local result_code = command_ok == true and "OK" or "COMMAND_FAILED"
+    BMF_socket_scheduler_send_direct_terminal(
+      request,
+      result_state,
+      result_code,
+      detail,
+      response,
+      command_ok)
+  else
+    local elapsed_exact_ms = math.max(0, (os.clock() - work_started_clock) * 1000)
+    BMF_socket_scheduler_record_work(
+      "direct_socket",
+      math.floor(elapsed_exact_ms + 0.5),
+      false,
+      elapsed_exact_ms)
+    BMF_socket_scheduler_send_direct_terminal(
+      request,
+      "outcome_unknown",
+      "DISPATCH_OUTCOME_UNKNOWN",
+      "direct command dispatch failed after execution began: " .. tostring(response),
+      nil,
+      false)
+  end
+  return true
+end
+
+function BMF_socket_scheduler_note_tunnel_tick()
+  local tunnel = state.game_command_tunnel
+  tunnel.worker_ticks = (tonumber(tunnel.worker_ticks) or 0) + 1
+  local guard = state.reserved_chat_command_guard
+  if type(guard) == "table"
+      and guard.enabled == true
+      and guard.installed ~= true
+      and (tunnel.worker_ticks == 1 or (tunnel.worker_ticks % 40) == 1) then
+    BMF_install_reserved_chat_command_guard()
+  end
+  if (tunnel.worker_ticks % 40) == 1 then
+    tunnel.last_worker_tick_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+  end
+  local cooldown_ticks = math.max(0, tonumber(tunnel.cooldown_ticks) or 0)
+  if cooldown_ticks > 0 then
+    tunnel.cooldown_ticks = cooldown_ticks - 1
+  end
+end
+
+function BMF_socket_scheduler_execute_one()
+  local admission = state.socket_admission
+  if admission.running == true then
+    return nil
+  end
+  BMF_socket_scheduler_note_tunnel_tick()
+  local path, service_class = BMF_socket_scheduler_select_next_lane()
+  if path == nil then
+    state.game_command_tunnel.worker_idle_ticks =
+      (tonumber(state.game_command_tunnel.worker_idle_ticks) or 0) + 1
+    return nil
+  end
+
+  admission.running = true
+  local selected_request = nil
+  local execution_ok, execution_error = pcall(function()
+    BMF_socket_scheduler_record_fairness(path, service_class)
+    if path == "tunnel" then
+      selected_request = BMF_game_command_tunnel_dequeue(service_class)
+      if selected_request ~= nil then
+        BMF_game_command_tunnel_drain_once(selected_request)
+        local poll_ms = math.max(1, tonumber(state.socket.poll_interval_ms) or SOCKET_DEFAULT_POLL_MS)
+        local interval_ms = math.max(
+          1,
+          tonumber(state.game_command_tunnel.interval_ms) or GAME_COMMAND_TUNNEL_DEFAULT_INTERVAL_MS)
+        state.game_command_tunnel.cooldown_ticks = math.max(1, math.ceil(interval_ms / poll_ms))
+      end
+    else
+      selected_request = BMF_socket_scheduler_dequeue_direct(service_class)
+      BMF_socket_scheduler_execute_direct(selected_request)
+    end
+  end)
+  admission.running = false
+  if not execution_ok then
+    state.socket.last_error = "unified socket scheduler failed: " .. tostring(execution_error)
+    if path == "direct_socket"
+        and type(selected_request) == "table"
+        and selected_request.terminalSent ~= true then
+      BMF_socket_scheduler_send_direct_terminal(
+        selected_request,
+        selected_request.executionStarted == true and "outcome_unknown" or "rejected",
+        selected_request.executionStarted == true and "SCHEDULER_OUTCOME_UNKNOWN" or "SCHEDULER_FAILED",
+        state.socket.last_error,
+        nil,
+        false)
+    end
+    return nil
+  end
+  return path
+end
+
+function BMF_socket_scheduler_fail_closed(detail)
+  local admission = state.socket_admission
+  local failure_detail = tostring(detail or "unified socket scheduler is unavailable")
+  for _, service_class in ipairs({ "interactive", "bulk" }) do
+    while #(admission.direct_queues[service_class] or {}) > 0 do
+      local request = BMF_socket_scheduler_dequeue_direct(service_class)
+      BMF_socket_scheduler_send_direct_terminal(
+        request,
+        "rejected",
+        "SCHEDULER_UNAVAILABLE",
+        failure_detail,
+        nil,
+        false)
+    end
+    while #(state.game_command_tunnel.queues[service_class] or {}) > 0 do
+      local request = BMF_game_command_tunnel_dequeue(service_class)
+      BMF_game_command_tunnel_send_terminal(
+        request,
+        "rejected",
+        "SCHEDULER_UNAVAILABLE",
+        failure_detail,
+        nil,
+        0)
+    end
+  end
 end
 
 function BMF_reserved_chat_command_guard_snapshot()
@@ -25419,6 +26800,12 @@ function BMF_game_command_tunnel_snapshot()
     maxBytes = tonumber(tunnel.max_bytes) or 0,
     maxLineBytes = tonumber(tunnel.max_line_bytes) or 0,
     completedRetention = tonumber(tunnel.completed_retention) or 0,
+    completedMaxBytes = tonumber(tunnel.completed_max_bytes) or 0,
+    completedRetainedBytes = tonumber(tunnel.completed_retained_bytes) or 0,
+    completedCount = #(tunnel.completed_order or {}),
+    completedPeakBytes = tonumber(tunnel.completed_peak_bytes) or 0,
+    completedEvicted = tonumber(tunnel.completed_evicted) or 0,
+    completedResponseOmitted = tonumber(tunnel.completed_response_omitted) or 0,
     interactiveBurst = tonumber(tunnel.interactive_burst) or 0,
     queueDepth = tonumber(tunnel.queued_count) or 0,
     oldestQueueAgeMs = tonumber(state.telemetry.socket_scheduler.queues.tunnel_oldest_age_ms) or 0,
@@ -25470,34 +26857,65 @@ local function BMF_game_command_tunnel_remember_result(record, request)
   if request_id == "" then
     return
   end
-  if tunnel.completed_by_id[request_id] == nil then
+  local previous = tunnel.completed_by_id[request_id]
+  if previous == nil then
     tunnel.completed_order[#tunnel.completed_order + 1] = request_id
+  else
+    if previous.idempotencyKey ~= ""
+        and tunnel.completed_by_idempotency_key[previous.idempotencyKey] == previous then
+      tunnel.completed_by_idempotency_key[previous.idempotencyKey] = nil
+    end
+    tunnel.completed_retained_bytes = math.max(
+      0,
+      (tonumber(tunnel.completed_retained_bytes) or 0) - (tonumber(previous.retainedBytes) or 0))
   end
+  local line = trim_string(request and request.line or "")
+  local idempotency_key = trim_string(request and request.idempotencyKey or "")
+  local max_bytes = math.max(
+    65536,
+    tonumber(tunnel.completed_max_bytes) or GAME_COMMAND_TUNNEL_COMPLETED_DEFAULT_MAX_BYTES)
+  local cached_record, retained_bytes, response_omitted = BMF_socket_replay_record_for_cache(
+    record,
+    max_bytes,
+    #request_id + #line + #idempotency_key)
   local entry = {
-    record = copy_table(record),
+    record = cached_record,
     requestId = request_id,
-    line = trim_string(request and request.line or ""),
-    idempotencyKey = trim_string(request and request.idempotencyKey or ""),
+    line = line,
+    idempotencyKey = idempotency_key,
+    retainedBytes = retained_bytes,
   }
   tunnel.completed_by_id[request_id] = entry
+  tunnel.completed_retained_bytes = (tonumber(tunnel.completed_retained_bytes) or 0) + retained_bytes
+  tunnel.completed_peak_bytes = math.max(
+    tonumber(tunnel.completed_peak_bytes) or 0,
+    tunnel.completed_retained_bytes)
+  if response_omitted then
+    tunnel.completed_response_omitted = (tonumber(tunnel.completed_response_omitted) or 0) + 1
+  end
   if entry.idempotencyKey ~= "" then
     tunnel.completed_by_idempotency_key[entry.idempotencyKey] = entry
   end
   local retention = math.max(1, tonumber(tunnel.completed_retention) or GAME_COMMAND_TUNNEL_COMPLETED_RETENTION)
   while #tunnel.completed_order > retention do
-    local expired_id = table.remove(tunnel.completed_order, 1)
-    local expired_entry = tunnel.completed_by_id[expired_id]
-    tunnel.completed_by_id[expired_id] = nil
-    if expired_entry ~= nil
-        and expired_entry.idempotencyKey ~= ""
-        and tunnel.completed_by_idempotency_key[expired_entry.idempotencyKey] == expired_entry then
-      tunnel.completed_by_idempotency_key[expired_entry.idempotencyKey] = nil
+    BMF_socket_replay_evict_oldest(tunnel, true)
+  end
+  BMF_socket_replay_compact_cache_to_budget(tunnel, max_bytes, "tunnel")
+  while (tonumber(tunnel.completed_retained_bytes) or 0) > max_bytes do
+    if not BMF_socket_replay_evict_oldest(tunnel, true) then
+      break
     end
   end
 end
 
-local function BMF_game_command_tunnel_send_terminal(request, result_state, code, detail, response, dispatch_ms)
+BMF_game_command_tunnel_send_terminal = function(request, result_state, code, detail, response, dispatch_ms)
   local tunnel = state.game_command_tunnel
+  if type(request) ~= "table" then
+    return nil
+  end
+  if request.terminalSent == true then
+    return request.terminalRecord
+  end
   local request_id = trim_string(request and request.id or "")
   local normalized_state = tostring(result_state or "rejected")
   local record = {
@@ -25514,6 +26932,10 @@ local function BMF_game_command_tunnel_send_terminal(request, result_state, code
     queueDepth = tonumber(tunnel.queued_count) or 0,
   }
 
+  -- Commit terminal ownership before transport so a send or cleanup failure
+  -- cannot cause the same accepted side effect to emit a second terminal.
+  request.terminalSent = true
+  request.terminalRecord = record
   local active_request = tunnel.active_by_id[request_id]
   tunnel.active_by_id[request_id] = nil
   local idempotency_key = trim_string(request and request.idempotencyKey or "")
@@ -25533,7 +26955,9 @@ local function BMF_game_command_tunnel_send_terminal(request, result_state, code
   end
 
   BMF_game_command_tunnel_remember_result(record, request)
-  if not BMF_game_command_tunnel_send_json(record) then
+  local sent = BMF_game_command_tunnel_send_json(record)
+  BMF_socket_scheduler_record_terminal("tunnel", normalized_state, sent)
+  if not sent then
     tunnel.last_error = "failed to send terminal result id=" .. request_id .. " state=" .. normalized_state
   end
   return record
@@ -25549,12 +26973,18 @@ local function BMF_game_command_tunnel_send_rejection(request_id, result_state, 
   local normalized_state = tostring(result_state or "rejected")
   if normalized_state == "expired" then
     tunnel.expired = (tonumber(tunnel.expired) or 0) + 1
+    BMF_socket_scheduler_record_admission_outcome("tunnel", "expired")
   else
     tunnel.rejected = (tonumber(tunnel.rejected) or 0) + 1
+    local normalized_code = tostring(code or "")
+    local dropped = normalized_code == "QUEUE_FULL"
+      or normalized_code == "SERVICE_CLASS_FULL"
+      or normalized_code == "QUEUE_BYTES_FULL"
+    BMF_socket_scheduler_record_admission_outcome("tunnel", dropped and "dropped" or "rejected")
   end
   tunnel.last_result_state = normalized_state
   tunnel.last_result_code = tostring(code or "UNKNOWN")
-  BMF_game_command_tunnel_send_json({
+  local sent = BMF_game_command_tunnel_send_json({
     type = "tunnel.result",
     source = "bmf",
     v = tonumber(tunnel.protocol_version) or 1,
@@ -25566,6 +26996,7 @@ local function BMF_game_command_tunnel_send_rejection(request_id, result_state, 
     dispatchMs = 0,
     queueDepth = tonumber(tunnel.queued_count) or 0,
   })
+  BMF_socket_scheduler_record_terminal("tunnel", normalized_state, sent)
   return false
 end
 
@@ -25577,13 +27008,17 @@ local function BMF_game_command_tunnel_line_allowed(line)
     or normalized:match("^/cityrpgroute%s") ~= nil
 end
 
-local function BMF_game_command_tunnel_dequeue()
+BMF_game_command_tunnel_dequeue = function(service_class)
   local tunnel = state.game_command_tunnel
   local interactive = tunnel.queues.interactive
   local bulk = tunnel.queues.bulk
   local request = nil
 
-  if #interactive > 0 and (#bulk == 0 or tunnel.interactive_since_bulk < tunnel.interactive_burst) then
+  if service_class == "interactive" then
+    request = table.remove(interactive, 1)
+  elseif service_class == "bulk" then
+    request = table.remove(bulk, 1)
+  elseif #interactive > 0 and (#bulk == 0 or tunnel.interactive_since_bulk < tunnel.interactive_burst) then
     request = table.remove(interactive, 1)
     tunnel.interactive_since_bulk = (tonumber(tunnel.interactive_since_bulk) or 0) + 1
   elseif #bulk > 0 then
@@ -25606,6 +27041,12 @@ local function BMF_game_command_tunnel_request_expired(request)
   if deadline_at_ms <= 0 then
     return true
   end
+  if state.socket_admission.enabled == true then
+    return BMF_socket_scheduler_deadline_expired(
+      deadline_at_ms,
+      request.issuedAtMs,
+      request.acceptedClock)
+  end
   return (os.time() * 1000) >= deadline_at_ms
 end
 
@@ -25620,22 +27061,24 @@ local function BMF_game_command_tunnel_classify_failure(invoked)
 end
 
 local function BMF_game_command_tunnel_compact_response(invoked)
-  local output = {}
+  local collector = BMF_new_bounded_output_collector()
+  collector.maxLines = math.min(64, collector.maxLines)
   local lines = invoked and invoked.data and invoked.data.lines or nil
   if type(lines) == "table" then
-    for _, line in ipairs(lines) do
-      output[#output + 1] = tostring(line)
-      if #output >= 64 then
+    for index, line in ipairs(lines) do
+      if not BMF_bounded_output_add(collector, line) then
+        -- Preserve the old 64-line traversal bound; the byte counter in the
+        -- marker is therefore an explicit lower bound for skipped tail lines.
+        collector.omittedLines = collector.omittedLines + math.max(0, #lines - index)
         break
       end
     end
   end
-  if #output == 0 then
-    output = {
-      "ok=" .. tostring(invoked and invoked.ok == true),
-      "code=" .. tostring(invoked and invoked.code or ""),
-    }
+  if #collector.lines == 0 and not collector.truncated then
+    BMF_bounded_output_add(collector, "ok=" .. tostring(invoked and invoked.ok == true))
+    BMF_bounded_output_add(collector, "code=" .. tostring(invoked and invoked.code or ""))
   end
+  local output = BMF_bounded_output_finalize(collector, "cityrpg.command.v1", "tunnel")
   return table.concat(output, "\n") .. "\n"
 end
 
@@ -25671,12 +27114,12 @@ BMF_game_command_tunnel_schedule = function(delay_ms)
   return false
 end
 
-BMF_game_command_tunnel_drain_once = function()
+BMF_game_command_tunnel_drain_once = function(request)
   local tunnel = state.game_command_tunnel
   if tunnel.running then
     return
   end
-  local request = BMF_game_command_tunnel_dequeue()
+  request = request or BMF_game_command_tunnel_dequeue()
   if request == nil then
     return
   end
@@ -25706,7 +27149,9 @@ BMF_game_command_tunnel_drain_once = function()
       tunnel.controller_cache_hits = (tonumber(tunnel.controller_cache_hits) or 0) + 1
     elseif cached_address ~= "" then
       local cached_failure_state = BMF_game_command_tunnel_classify_failure(invoked)
-      if cached_failure_state ~= "outcome_unknown" then
+      if cached_failure_state ~= "outcome_unknown"
+          and (state.socket_admission.enabled ~= true
+            or not BMF_game_command_tunnel_request_expired(request)) then
         tunnel.cached_controller_address = ""
         tunnel.controller_cache_refreshes = (tonumber(tunnel.controller_cache_refreshes) or 0) + 1
         invoked = BMF_player_message_implementation_probe(request.line, "", {
@@ -25971,14 +27416,35 @@ BMF_process_game_command_tunnel_request = function(decoded)
     return BMF_game_command_tunnel_send_rejection(request_id, "rejected", "INVALID_SERVICE_CLASS", "serviceClass must be interactive or bulk")
   end
   local now_ms = os.time() * 1000
-  local issued_at_ms = tonumber(decoded.issuedAtMs) or now_ms
-  local deadline_ms = tonumber(decoded.deadlineMs) or (issued_at_ms + 5000)
-  if deadline_ms <= now_ms or deadline_ms <= issued_at_ms then
+  local supplied_issued_at_ms = tonumber(decoded.issuedAtMs)
+  local supplied_deadline_ms = tonumber(decoded.deadlineMs)
+  if state.socket_admission.enabled == true
+      and ((supplied_issued_at_ms or 0) <= 0 or (supplied_deadline_ms or 0) <= 0) then
+    return BMF_game_command_tunnel_send_rejection(
+      request_id,
+      "rejected",
+      "DEADLINE_REQUIRED",
+      "positive issuedAtMs and absolute deadlineMs are required while bounded admission is enabled")
+  end
+  local issued_at_ms = supplied_issued_at_ms or now_ms
+  local deadline_ms = supplied_deadline_ms or (issued_at_ms + 5000)
+  local deadline_expired = state.socket_admission.enabled == true
+    and BMF_socket_scheduler_deadline_expired(deadline_ms, issued_at_ms, nil)
+    or deadline_ms <= now_ms
+  if deadline_ms <= issued_at_ms or deadline_expired then
     return BMF_game_command_tunnel_send_rejection(request_id, "expired", "DEADLINE_EXPIRED", "absolute deadlineMs has elapsed")
   end
 
   local queue = tunnel.queues[service_class]
   local class_limit = service_class == "bulk" and tunnel.max_bulk_queue or tunnel.max_interactive_queue
+  if state.socket_admission.enabled == true
+      and BMF_socket_scheduler_total_depth() >= state.socket_admission.max_queue then
+    return BMF_game_command_tunnel_send_rejection(
+      request_id,
+      "rejected",
+      "QUEUE_FULL",
+      "unified socket admission queue is full")
+  end
   if (tonumber(tunnel.queued_count) or 0) >= tunnel.max_queue then
     return BMF_game_command_tunnel_send_rejection(request_id, "rejected", "QUEUE_FULL", "game command tunnel queue is full")
   end
@@ -25986,6 +27452,14 @@ BMF_process_game_command_tunnel_request = function(decoded)
     return BMF_game_command_tunnel_send_rejection(request_id, "rejected", "SERVICE_CLASS_FULL", service_class .. " queue budget is full")
   end
   local retained_bytes = #line + #request_id + #idempotency_key
+  if state.socket_admission.enabled == true
+      and (BMF_socket_scheduler_total_bytes() + retained_bytes) > state.socket_admission.max_bytes then
+    return BMF_game_command_tunnel_send_rejection(
+      request_id,
+      "rejected",
+      "QUEUE_BYTES_FULL",
+      "unified socket admission byte budget is full")
+  end
   if ((tonumber(tunnel.queued_bytes) or 0) + retained_bytes) > tunnel.max_bytes then
     return BMF_game_command_tunnel_send_rejection(request_id, "rejected", "QUEUE_BYTES_FULL", "game command tunnel byte budget is full")
   end
@@ -26004,7 +27478,9 @@ BMF_process_game_command_tunnel_request = function(decoded)
     deadlineMs = deadline_ms,
     issuedAtMs = issued_at_ms,
     acceptedAtMs = now_ms,
+    acceptedClock = os.clock(),
     idempotencyKey = idempotency_key,
+    terminalSent = false,
   }
   queue[#queue + 1] = request
   tunnel.active_by_id[request_id] = request
@@ -26014,6 +27490,12 @@ BMF_process_game_command_tunnel_request = function(decoded)
   tunnel.queued_count = (tonumber(tunnel.queued_count) or 0) + 1
   tunnel.queued_bytes = (tonumber(tunnel.queued_bytes) or 0) + retained_bytes
   tunnel.peak_depth = math.max(tonumber(tunnel.peak_depth) or 0, tunnel.queued_count)
+  tunnel.peak_interactive_depth = math.max(
+    tonumber(tunnel.peak_interactive_depth) or 0,
+    #tunnel.queues.interactive)
+  tunnel.peak_bulk_depth = math.max(
+    tonumber(tunnel.peak_bulk_depth) or 0,
+    #tunnel.queues.bulk)
   tunnel.peak_bytes = math.max(tonumber(tunnel.peak_bytes) or 0, tunnel.queued_bytes)
   tunnel.accepted = (tonumber(tunnel.accepted) or 0) + 1
 
@@ -26078,6 +27560,11 @@ function BMF_process_socket_message(line)
     return "other", false
   end
 
+  if state.socket_admission.enabled == true then
+    state.socket.received_commands = state.socket.received_commands + 1
+    return "direct", BMF_socket_scheduler_admit_direct(decoded)
+  end
+
   local request_id = trim_string(decoded.id or "")
   local command_text = trim_string(decoded.command or "")
   if request_id == "" or command_text == "" then
@@ -26101,6 +27588,183 @@ function BMF_process_socket_message(line)
     state.socket.sent_responses = state.socket.sent_responses + 1
   end
   return "direct", true
+end
+
+function BMF_socket_native_drain_source_active(source)
+  if source == "tree" then
+    return state.tools.tree_cut_native and state.tools.tree_cut_native.enabled == true
+  end
+  if source == "zone" then
+    return BMF_zone_native_should_drain()
+  end
+  return false
+end
+
+function BMF_socket_native_drain_budget_exhausted(pump_started_clock)
+  local scheduler = state.telemetry.socket_scheduler
+  local native_drains = scheduler.native_drains
+  if native_drains.budget_enabled ~= true then
+    return false
+  end
+  local started = tonumber(pump_started_clock)
+  if not started then
+    return false
+  end
+  return BMF_telemetry_duration_ms(started) >= (tonumber(scheduler.budget_ms) or 3)
+end
+
+function BMF_socket_native_drain_mark_skipped(source)
+  local native_drains = state.telemetry.socket_scheduler.native_drains
+  local lane = native_drains.by_source[source]
+  if type(lane) ~= "table" then
+    return
+  end
+  native_drains.skipped = (tonumber(native_drains.skipped) or 0) + 1
+  lane.skipped = (tonumber(lane.skipped) or 0) + 1
+  lane.depth = -1
+  lane.depth_available = false
+end
+
+function BMF_socket_native_drain_one(source, pump_started_clock)
+  local native_drains = state.telemetry.socket_scheduler.native_drains
+  local lane = native_drains.by_source[source]
+  if type(lane) ~= "table" then
+    return false, 0, false, true
+  end
+  if BMF_socket_native_drain_budget_exhausted(pump_started_clock) then
+    BMF_socket_native_drain_mark_skipped(source)
+    return true, 0, true, false
+  end
+
+  native_drains.attempted = (tonumber(native_drains.attempted) or 0) + 1
+  lane.attempted = (tonumber(lane.attempted) or 0) + 1
+  local operation_started_clock = os.clock()
+  local raw_ok, code, message, raw_events
+  if source == "tree" then
+    raw_ok, code, message, raw_events = BMF_tree_cut_native_drain_raw(1)
+  else
+    raw_ok, code, message, raw_events = BMF_zone_native_drain_raw(1)
+  end
+
+  local operation_ok = raw_ok == true
+  raw_events = type(raw_events) == "table" and raw_events or {}
+  local drained_count = #raw_events
+  if not operation_ok then
+    lane.errors = (tonumber(lane.errors) or 0) + 1
+  elseif drained_count == 0 then
+    lane.depth = 0
+    lane.depth_available = true
+  else
+    lane.depth = -1
+    lane.depth_available = false
+    local emit_ok, emit_result
+    if source == "tree" then
+      emit_ok, emit_result = pcall(BMF_tree_cut_native_emit_raw, raw_events, {
+        silent = true,
+      })
+    else
+      emit_ok, emit_result = pcall(BMF_zone_native_emit_raw, raw_events, {
+        silent = true,
+      })
+    end
+    if not emit_ok then
+      operation_ok = false
+      lane.errors = (tonumber(lane.errors) or 0) + 1
+      if source == "tree" then
+        state.tools.tree_cut_native.last_error = "native tree-cut emit failed: " .. tostring(emit_result)
+      else
+        state.tools.zone_native.last_error = "native zone emit failed: " .. tostring(emit_result)
+      end
+    end
+    native_drains.drained = (tonumber(native_drains.drained) or 0) + drained_count
+    lane.drained = (tonumber(lane.drained) or 0) + drained_count
+  end
+
+  local duration_ms = BMF_telemetry_duration_ms(operation_started_clock)
+  lane.last_ms = duration_ms
+  lane.duration_ms_max = math.max(tonumber(lane.duration_ms_max) or 0, duration_ms)
+  local overrun = BMF_socket_native_drain_budget_exhausted(pump_started_clock)
+  if overrun then
+    native_drains.overruns = (tonumber(native_drains.overruns) or 0) + 1
+    lane.overruns = (tonumber(lane.overruns) or 0) + 1
+  end
+  if not raw_ok then
+    if source == "tree" then
+      state.tools.tree_cut_native.last_error = "native tree-cut drain failed: " .. tostring(message or code)
+    else
+      state.tools.zone_native.last_error = "native zone drain failed: " .. tostring(message or code)
+    end
+  end
+  return operation_ok, drained_count, overrun, drained_count == 0
+end
+
+function BMF_socket_native_drain_budgeted(pump_started_clock)
+  local native_drains = state.telemetry.socket_scheduler.native_drains
+  local tree_active = BMF_socket_native_drain_source_active("tree")
+  local zone_active = BMF_socket_native_drain_source_active("zone")
+  local next_source = native_drains.next_source == "zone" and "zone" or "tree"
+  local max_events = math.max(1, tonumber(native_drains.max_events_per_pump) or 4)
+  local drained = 0
+  local operation_ok = true
+  local budget_stopped = false
+
+  while (tree_active or zone_active) and drained < max_events do
+    if BMF_socket_native_drain_budget_exhausted(pump_started_clock) then
+      if tree_active then
+        BMF_socket_native_drain_mark_skipped("tree")
+      end
+      if zone_active then
+        BMF_socket_native_drain_mark_skipped("zone")
+      end
+      budget_stopped = true
+      break
+    end
+
+    local source = next_source
+    if source == "tree" and not tree_active then
+      source = "zone"
+    elseif source == "zone" and not zone_active then
+      source = "tree"
+    end
+
+    local lane_ok, lane_drained, lane_overrun, lane_empty =
+      BMF_socket_native_drain_one(source, pump_started_clock)
+    operation_ok = operation_ok and lane_ok
+    drained = drained + (tonumber(lane_drained) or 0)
+    if source == "tree" then
+      if lane_empty or not lane_ok then
+        tree_active = false
+      end
+      next_source = "zone"
+    else
+      if lane_empty or not lane_ok then
+        zone_active = false
+      end
+      next_source = "tree"
+    end
+    native_drains.next_source = next_source
+
+    if lane_overrun then
+      if tree_active then
+        BMF_socket_native_drain_mark_skipped("tree")
+      end
+      if zone_active then
+        BMF_socket_native_drain_mark_skipped("zone")
+      end
+      budget_stopped = true
+      break
+    end
+  end
+
+  if drained >= max_events and not budget_stopped then
+    if tree_active then
+      BMF_socket_native_drain_mark_skipped("tree")
+    end
+    if zone_active then
+      BMF_socket_native_drain_mark_skipped("zone")
+    end
+  end
+  return operation_ok, drained, budget_stopped
 end
 
 function BMF_drain_socket_messages(max_count, pump_started_clock)
@@ -26172,28 +27836,36 @@ function BMF_drain_socket_messages(max_count, pump_started_clock)
 
   state.socket.last_drain_count = drained
   local native_drained = 0
-  if state.tools.tree_cut_native and state.tools.tree_cut_native.enabled == true then
-    local native_ok, native_result = pcall(BMF.tools.treeCutNative.drain, {
-      limit = 64,
-      silent = true,
-    })
-    if native_ok and native_result and native_result.data then
-      native_drained = tonumber(native_result.data.drained) or 0
-    elseif not native_ok then
-      drain_ok = false
-      state.tools.tree_cut_native.last_error = "native tree-cut drain failed: " .. tostring(native_result)
+  if scheduler.native_drains.budget_enabled == true then
+    local native_ok, bounded_native_drained, native_budget_stopped =
+      BMF_socket_native_drain_budgeted(admission_started_clock)
+    drain_ok = drain_ok and native_ok
+    native_drained = tonumber(bounded_native_drained) or 0
+    budget_admission_stopped = budget_admission_stopped or native_budget_stopped == true
+  else
+    if state.tools.tree_cut_native and state.tools.tree_cut_native.enabled == true then
+      local native_ok, native_result = pcall(BMF.tools.treeCutNative.drain, {
+        limit = 64,
+        silent = true,
+      })
+      if native_ok and native_result and native_result.data then
+        native_drained = tonumber(native_result.data.drained) or 0
+      elseif not native_ok then
+        drain_ok = false
+        state.tools.tree_cut_native.last_error = "native tree-cut drain failed: " .. tostring(native_result)
+      end
     end
-  end
-  if BMF_zone_native_should_drain() then
-    local zone_ok, zone_result = pcall(BMF.tools.zoneNative.drain, {
-      limit = 64,
-      silent = true,
-    })
-    if zone_ok and zone_result and zone_result.data then
-      native_drained = native_drained + (tonumber(zone_result.data.drained) or 0)
-    elseif not zone_ok then
-      drain_ok = false
-      state.tools.zone_native.last_error = "native zone drain failed: " .. tostring(zone_result)
+    if BMF_zone_native_should_drain() then
+      local zone_ok, zone_result = pcall(BMF.tools.zoneNative.drain, {
+        limit = 64,
+        silent = true,
+      })
+      if zone_ok and zone_result and zone_result.data then
+        native_drained = native_drained + (tonumber(zone_result.data.drained) or 0)
+      elseif not zone_ok then
+        drain_ok = false
+        state.tools.zone_native.last_error = "native zone drain failed: " .. tostring(zone_result)
+      end
     end
   end
   if drained > 0 or native_drained > 0 or not drain_ok then
@@ -26241,8 +27913,10 @@ function BMF_poll_socket_messages()
   local ingress_count = 0
   local direct_admitted = 0
   local tunnel_dispatched = 0
+  local direct_dispatched = 0
   local budget_admission_stopped = false
   local budget_tunnel_dispatch_skipped = false
+  local budget_dispatch_skipped = false
   local pump_ok, pump_error = pcall(function()
     local _, drained, admitted, stopped_for_budget = BMF_drain_socket_messages(
       state.telemetry.socket_scheduler.effective_ingress_per_pump,
@@ -26250,12 +27924,26 @@ function BMF_poll_socket_messages()
     ingress_count = tonumber(drained) or 0
     direct_admitted = tonumber(admitted) or 0
     budget_admission_stopped = stopped_for_budget == true
-    if (tonumber(tunnel.queued_count) or 0) > 0
+    local pending_count = state.socket_admission.enabled == true
+      and BMF_socket_scheduler_total_depth()
+      or (tonumber(tunnel.queued_count) or 0)
+    if pending_count > 0
       and (budget_admission_stopped
         or BMF_socket_scheduler_budget_exhausted_for_admission(pump_started_clock))
     then
       budget_admission_stopped = true
-      budget_tunnel_dispatch_skipped = true
+      if state.socket_admission.enabled == true then
+        budget_dispatch_skipped = true
+      else
+        budget_tunnel_dispatch_skipped = true
+      end
+    elseif state.socket_admission.enabled == true then
+      local dispatched_path = BMF_socket_scheduler_execute_one()
+      if dispatched_path == "tunnel" then
+        tunnel_dispatched = 1
+      elseif dispatched_path == "direct_socket" then
+        direct_dispatched = 1
+      end
     elseif type(BMF_game_command_tunnel_pump) == "function" then
       tunnel_dispatched = tonumber(BMF_game_command_tunnel_pump()) or 0
     end
@@ -26266,8 +27954,10 @@ function BMF_poll_socket_messages()
     ingress_count,
     direct_admitted,
     tunnel_dispatched,
+    direct_dispatched,
     budget_admission_stopped,
-    budget_tunnel_dispatch_skipped)
+    budget_tunnel_dispatch_skipped,
+    budget_dispatch_skipped)
   if not pump_ok then
     state.socket_worker_started = false
     state.socket_worker_mode = "failed"
@@ -26277,6 +27967,9 @@ function BMF_poll_socket_messages()
     tunnel.last_worker_error = tostring(pump_error or "EngineTick socket tunnel pump failed")
     tunnel.last_error = tunnel.last_worker_error
     log("error", "EngineTick socket tunnel pump failed closed: " .. tunnel.last_worker_error)
+    if state.socket_admission.enabled == true then
+      BMF_socket_scheduler_fail_closed(tunnel.last_worker_error)
+    end
     BMF_socket_metadata_heartbeat(true)
     return
   end
@@ -26387,8 +28080,10 @@ function BMF_start_socket_worker(reason, options)
       local ingress_count = 0
       local direct_admitted = 0
       local tunnel_dispatched = 0
+      local direct_dispatched = 0
       local budget_admission_stopped = false
       local budget_tunnel_dispatch_skipped = false
+      local budget_dispatch_skipped = false
       local pump_ok, pump_error = pcall(function()
         local _, drained, admitted, stopped_for_budget = BMF_drain_socket_messages(
           ingress_per_tick,
@@ -26396,12 +28091,26 @@ function BMF_start_socket_worker(reason, options)
         ingress_count = tonumber(drained) or 0
         direct_admitted = tonumber(admitted) or 0
         budget_admission_stopped = stopped_for_budget == true
-        if (tonumber(tunnel.queued_count) or 0) > 0
+        local pending_count = state.socket_admission.enabled == true
+          and BMF_socket_scheduler_total_depth()
+          or (tonumber(tunnel.queued_count) or 0)
+        if pending_count > 0
           and (budget_admission_stopped
             or BMF_socket_scheduler_budget_exhausted_for_admission(pump_started_clock))
         then
           budget_admission_stopped = true
-          budget_tunnel_dispatch_skipped = true
+          if state.socket_admission.enabled == true then
+            budget_dispatch_skipped = true
+          else
+            budget_tunnel_dispatch_skipped = true
+          end
+        elseif state.socket_admission.enabled == true then
+          local dispatched_path = BMF_socket_scheduler_execute_one()
+          if dispatched_path == "tunnel" then
+            tunnel_dispatched = 1
+          elseif dispatched_path == "direct_socket" then
+            direct_dispatched = 1
+          end
         elseif type(BMF_game_command_tunnel_pump) == "function" then
           tunnel_dispatched = tonumber(BMF_game_command_tunnel_pump()) or 0
         end
@@ -26412,8 +28121,10 @@ function BMF_start_socket_worker(reason, options)
         ingress_count,
         direct_admitted,
         tunnel_dispatched,
+        direct_dispatched,
         budget_admission_stopped,
-        budget_tunnel_dispatch_skipped)
+        budget_tunnel_dispatch_skipped,
+        budget_dispatch_skipped)
       if not pump_ok then
         state.socket_worker_started = false
         state.socket_worker_mode = "failed"
@@ -26423,7 +28134,11 @@ function BMF_start_socket_worker(reason, options)
         tunnel.last_worker_error = tostring(pump_error or "persistent tunnel pump failed")
         tunnel.last_error = tunnel.last_worker_error
         log("error", "persistent socket tunnel pump failed closed: " .. tunnel.last_worker_error)
-        BMF_game_command_tunnel_schedule(0)
+        if state.socket_admission.enabled == true then
+          BMF_socket_scheduler_fail_closed(tunnel.last_worker_error)
+        else
+          BMF_game_command_tunnel_schedule(0)
+        end
         BMF_socket_metadata_heartbeat(true)
         return true
       end
@@ -27664,6 +29379,20 @@ end
 _G.BMF = BMF
 
 state.config = read_framework_config()
+BMF_player_registry_configure_from_env()
+BMF_initial_player_cache, BMF_initial_player_cache_error = load_player_cache({ force = true })
+if BMF_initial_player_cache_error ~= "" then
+  log("warn", "player registry startup cache load failed: " .. tostring(BMF_initial_player_cache_error))
+else
+  log(
+    "info",
+    "player registry initialized cache_first=" .. tostring(state.player_registry.cache_first_enabled == true)
+      .. " entries=" .. tostring(state.player_registry.entries or 0)
+      .. " generation=" .. tostring(state.player_registry.generation or 0)
+      .. " cached=" .. tostring(BMF_initial_player_cache ~= nil))
+end
+BMF_initial_player_cache = nil
+BMF_initial_player_cache_error = nil
 register_builtin_commands()
 log("info", "BMF loaded version=" .. VERSION)
 audit_record("framework.loaded", {

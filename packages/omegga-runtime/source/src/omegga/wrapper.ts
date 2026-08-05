@@ -90,6 +90,9 @@ class OmeggaWrapper extends EventEmitter {
   getWindowsControlBackend() {
     return this.#server.getWindowsControlBackend();
   }
+  getWindowsControlAdmissionStatus() {
+    return this.#server.getWindowsControlAdmissionStatus();
+  }
 
   // event emitter to catch everything
   emit(type: string, ...args: any) {

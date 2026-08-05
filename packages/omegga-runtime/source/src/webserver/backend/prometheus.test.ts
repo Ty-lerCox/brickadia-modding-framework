@@ -127,6 +127,31 @@ describe('buildPrometheusMetrics', () => {
       bmfTelemetryPath,
       JSON.stringify({
         schema_version: 2,
+        player_registry: {
+          cache_first_enabled: true,
+          repair_enabled: true,
+          legacy_discovery_enabled: false,
+          cache_loaded: true,
+          generation: 9,
+          entries: 14,
+          cache_hits: 11,
+          cache_misses: 3,
+          disk_loads: 2,
+          disk_load_failures: 1,
+          memory_syncs: 7,
+          persisted_syncs: 5,
+          controller_handle_hits: 13,
+          controller_handle_misses: 4,
+          targeted_resolutions: 6,
+          targeted_failures: 2,
+          broad_repairs: 8,
+          broad_repair_skipped: 9,
+          broad_repair_failures: 1,
+          broad_repair_matches: 12,
+          global_scans: 10,
+          repair_running: false,
+          repair_cooldown_ms: 15000,
+        },
         commands: {
           by_name: {
             'bmf.status': {
@@ -220,8 +245,32 @@ describe('buildPrometheusMetrics', () => {
           },
         },
         socket_scheduler: {
+          unified_enabled: true,
           budget_ms: 3,
           budget_enforced: true,
+          native_drains: {
+            budget_enabled: true,
+            batch_size: 1,
+            max_events_per_pump: 4,
+            by_source: {
+              tree: {
+                attempted: 9,
+                drained: 6,
+                skipped: 2,
+                overruns: 1,
+                depth: 3,
+                depth_available: true,
+              },
+              zone: {
+                attempted: 5,
+                drained: 4,
+                skipped: 1,
+                overruns: 0,
+                depth: -1,
+                depth_available: false,
+              },
+            },
+          },
           configured_ingress_per_pump: 16,
           effective_ingress_per_pump: 2,
           direct_ingress_cap_enabled: true,
@@ -231,6 +280,7 @@ describe('buildPrometheusMetrics', () => {
           budget_exhausted_total: 4,
           budget_admission_stopped_total: 3,
           budget_tunnel_dispatch_skipped_total: 2,
+          budget_dispatch_skipped_total: 5,
           slice: {
             count: 10,
             ok: 9,
@@ -250,6 +300,15 @@ describe('buildPrometheusMetrics', () => {
               duration_ms_max: 18,
               last_ms: 4,
               monolithic_overruns: 2,
+              rejected: 2,
+              dropped: 1,
+              expired: 1,
+              terminal_completed: 4,
+              terminal_failed: 1,
+              terminal_rejected: 1,
+              terminal_expired: 1,
+              terminal_outcome_unknown: 0,
+              fairness: { interactive: 5, bulk: 2 },
             },
             tunnel: {
               path: 'tunnel',
@@ -261,6 +320,15 @@ describe('buildPrometheusMetrics', () => {
               duration_ms_max: 5,
               last_ms: 2,
               monolithic_overruns: 1,
+              rejected: 1,
+              dropped: 1,
+              expired: 0,
+              terminal_completed: 2,
+              terminal_failed: 0,
+              terminal_rejected: 1,
+              terminal_expired: 0,
+              terminal_outcome_unknown: 0,
+              fairness: { interactive: 2, bulk: 1 },
             },
           },
           ingress_by_type: {
@@ -275,12 +343,22 @@ describe('buildPrometheusMetrics', () => {
           queues: {
             direct_depth: 0,
             direct_oldest_age_ms: 0,
+            direct_interactive_depth: 0,
+            direct_bulk_depth: 0,
+            direct_interactive_oldest_age_ms: 0,
+            direct_bulk_oldest_age_ms: 0,
+            direct_peak_depth: 4,
+            direct_interactive_peak_depth: 3,
+            direct_bulk_peak_depth: 1,
             tunnel_depth: 2,
             tunnel_interactive_depth: 1,
             tunnel_bulk_depth: 1,
             tunnel_oldest_age_ms: 120,
             tunnel_interactive_oldest_age_ms: 120,
             tunnel_bulk_oldest_age_ms: 80,
+            tunnel_peak_depth: 3,
+            tunnel_interactive_peak_depth: 2,
+            tunnel_bulk_peak_depth: 1,
           },
         },
       }),
@@ -306,6 +384,58 @@ describe('buildPrometheusMetrics', () => {
             lastAtMs: Date.now(),
           },
         },
+        getWindowsControlAdmissionStatus: () => ({
+          writeQueue: {
+            limits: { enabled: true },
+            pending: {
+              totalDepth: 2,
+              totalBytes: 30,
+              interactiveDepth: 1,
+              interactiveBytes: 10,
+              bulkDepth: 1,
+              bulkBytes: 20,
+              exemptDepth: 0,
+              exemptBytes: 0,
+              oldestAgeMs: 40,
+            },
+            admitted: { interactive: 4, bulk: 3, exempt: 2 },
+            rejected: { depth: 1, bytes: 2 },
+            expired: 3,
+            highWater: { depth: 5, bytes: 90 },
+          },
+          ue4ssInbox: {
+            limits: { enabled: true },
+            pending: {
+              totalRequests: 1,
+              totalBytes: 20,
+              interactiveRequests: 1,
+              interactiveBytes: 20,
+              bulkRequests: 0,
+              bulkBytes: 0,
+              exemptRequests: 0,
+              exemptBytes: 0,
+              oldestAgeMs: 50,
+            },
+            admitted: { interactive: 6, bulk: 2, exempt: 1 },
+            rejected: { depth: 2, bytes: 1 },
+            clientTimeouts: 4,
+            expired: 5,
+            highWater: { requests: 7, bytes: 120 },
+          },
+          ue4ssRuntime: {
+            enabled: true,
+            admittedInteractive: 5,
+            admittedBulk: 2,
+            expired: 3,
+            deadlineMissing: 1,
+            oversize: 2,
+            bmfDispatchBlocked: 1,
+            pendingBytes: 10,
+            pendingBytesHighWater: 100,
+            lastQueueAgeMs: 60,
+            maxQueueAgeMs: 90,
+          },
+        }),
       },
       lastReportedStatusAt: Date.now(),
       lastServerStatusPollDurationMs: 123,
@@ -357,9 +487,61 @@ describe('buildPrometheusMetrics', () => {
     expect(output).toContain(
       'omegga_console_command_sent_total{command="Chat.Command /TP"} 1',
     );
+    for (const sample of [
+      'omegga_ue4ss_admission_enabled{stage="write_queue"} 1',
+      'omegga_ue4ss_queue_depth{stage="node_inbox",service_class="total"} 1',
+      'omegga_ue4ss_queue_bytes{stage="ue4ss_runtime",service_class="total"} 10',
+      'omegga_ue4ss_queue_oldest_age_milliseconds{stage="node_inbox"} 50',
+      'omegga_ue4ss_queue_high_water{stage="node_inbox",unit="depth"} 7',
+      'omegga_ue4ss_admitted_total{stage="ue4ss_runtime",service_class="interactive"} 5',
+      'omegga_ue4ss_rejected_total{stage="ue4ss_runtime",reason="oversize"} 2',
+      'omegga_ue4ss_expired_total{stage="node_inbox"} 5',
+      'omegga_ue4ss_expired_total{stage="ue4ss_runtime"} 3',
+      'omegga_ue4ss_deadline_missing_total{stage="ue4ss_runtime"} 1',
+      'omegga_ue4ss_client_timeouts_total{stage="node_inbox"} 4',
+      'omegga_ue4ss_queue_age_high_water_milliseconds{stage="ue4ss_runtime"} 90',
+    ]) {
+      expect(output).toContain(sample);
+    }
+    expect(output).not.toContain(
+      'omegga_ue4ss_rejected_total{stage="ue4ss_runtime",reason="deadline_missing"}',
+    );
     expect(output).toContain('bmf_runtime_status_up 1');
     expect(output).toContain('bmf_telemetry_up 1');
     expect(output).toContain('bmf_telemetry_schema_version 2');
+    expect(output).toContain(
+      '# TYPE bmf_player_registry_cache_first_enabled gauge',
+    );
+    expect(output).toContain(
+      '# TYPE bmf_player_registry_cache_hits_total counter',
+    );
+    for (const sample of [
+      'bmf_player_registry_cache_first_enabled 1',
+      'bmf_player_registry_repair_enabled 1',
+      'bmf_player_registry_legacy_discovery_enabled 0',
+      'bmf_player_registry_cache_loaded 1',
+      'bmf_player_registry_generation 9',
+      'bmf_player_registry_entries 14',
+      'bmf_player_registry_repair_running 0',
+      'bmf_player_registry_repair_cooldown_milliseconds 15000',
+      'bmf_player_registry_cache_hits_total 11',
+      'bmf_player_registry_cache_misses_total 3',
+      'bmf_player_registry_disk_loads_total 2',
+      'bmf_player_registry_disk_load_failures_total 1',
+      'bmf_player_registry_memory_syncs_total 7',
+      'bmf_player_registry_persisted_syncs_total 5',
+      'bmf_player_registry_controller_handle_hits_total 13',
+      'bmf_player_registry_controller_handle_misses_total 4',
+      'bmf_player_registry_targeted_resolutions_total 6',
+      'bmf_player_registry_targeted_failures_total 2',
+      'bmf_player_registry_broad_repairs_total 8',
+      'bmf_player_registry_broad_repair_skipped_total 9',
+      'bmf_player_registry_broad_repair_failures_total 1',
+      'bmf_player_registry_broad_repair_matches_total 12',
+      'bmf_player_registry_global_scans_total 10',
+    ]) {
+      expect(output).toContain(sample);
+    }
     expect(output).toContain('brickadia_frame_telemetry_up 1');
     expect(output).toContain('brickadia_frame_telemetry_hook_registered 1');
     expect(output).toContain('brickadia_frame_telemetry_schema_version 2');
@@ -428,8 +610,34 @@ describe('buildPrometheusMetrics', () => {
     expect(output).toContain(
       'bmf_socket_ingress_messages_total{type="command"} 7',
     );
+    expect(output).toContain('bmf_native_event_drain_budget_enabled 1');
+    expect(output).toContain(
+      'bmf_native_event_drain_total{source="tree",outcome="attempted"} 9',
+    );
+    expect(output).toContain(
+      'bmf_native_event_drain_total{source="tree",outcome="drained"} 6',
+    );
+    expect(output).toContain(
+      'bmf_native_event_drain_total{source="zone",outcome="skipped"} 1',
+    );
+    expect(output).toContain(
+      'bmf_native_event_drain_total{source="tree",outcome="overrun"} 1',
+    );
+    expect(output).toContain('bmf_native_event_queue_depth{source="tree"} 3');
+    expect(output).not.toContain('bmf_native_event_queue_depth{source="zone"}');
+    expect(output).toContain('bmf_native_event_drain_max_events_per_pump 4');
     expect(output).toContain(
       'bmf_socket_admitted_total{path="direct_socket"} 7',
+    );
+    expect(output).toContain('bmf_socket_unified_admission_enabled 1');
+    expect(output).toContain(
+      'bmf_socket_admission_outcome_total{path="direct_socket",outcome="dropped"} 1',
+    );
+    expect(output).toContain(
+      'bmf_socket_terminal_total{path="direct_socket",state="failed"} 1',
+    );
+    expect(output).toContain(
+      'bmf_socket_fairness_selection_total{path="tunnel",service_class="bulk"} 1',
     );
     expect(output).toContain(
       'bmf_socket_work_duration_milliseconds{path="tunnel",statistic="max"} 5',
@@ -450,6 +658,9 @@ describe('buildPrometheusMetrics', () => {
       'bmf_game_thread_dispatch_skipped_total{worker="socket_pump",path="tunnel",reason="budget"} 2',
     );
     expect(output).toContain(
+      'bmf_game_thread_dispatch_skipped_total{worker="socket_pump",path="unified",reason="budget"} 5',
+    );
+    expect(output).toContain(
       'bmf_game_thread_monolithic_overrun_total{path="direct_socket"} 2',
     );
     expect(output).toContain(
@@ -457,6 +668,9 @@ describe('buildPrometheusMetrics', () => {
     );
     expect(output).toContain(
       'bmf_socket_queue_oldest_age_milliseconds{path="tunnel",service_class="total"} 120',
+    );
+    expect(output).toContain(
+      'bmf_socket_queue_high_watermark{path="direct_socket",service_class="interactive"} 3',
     );
     expect(output).toContain('bmf_socket_configured_ingress_per_pump 16');
     expect(output).toContain('bmf_socket_effective_ingress_per_pump 2');

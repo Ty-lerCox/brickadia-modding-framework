@@ -431,8 +431,11 @@ export function buildPrometheusMetrics(server: Webserver) {
   const bmfScheduler = objectRecord(bmfTelemetryRecord.scheduler);
   const bmfSchedulerByKey = objectRecord(bmfScheduler.by_key);
   const bmfWorkers = objectRecord(bmfTelemetryRecord.workers);
+  const bmfPlayerRegistry = objectRecord(bmfTelemetryRecord.player_registry);
   const bmfSocketScheduler = objectRecord(bmfTelemetryRecord.socket_scheduler);
   const bmfSocketSchedulerByPath = objectRecord(bmfSocketScheduler.by_path);
+  const bmfNativeDrains = objectRecord(bmfSocketScheduler.native_drains);
+  const bmfNativeDrainsBySource = objectRecord(bmfNativeDrains.by_source);
   const bmfSocketIngressByType = objectRecord(
     bmfSocketScheduler.ingress_by_type,
   );
@@ -450,6 +453,131 @@ export function buildPrometheusMetrics(server: Webserver) {
   const omeggaConsoleCommands = objectRecord(
     server.omegga.consoleCommandMetrics,
   );
+  const ue4ssAdmission = objectRecord(
+    server.omegga.getWindowsControlAdmissionStatus?.(),
+  );
+  const ue4ssWriteQueue = objectRecord(ue4ssAdmission.writeQueue);
+  const ue4ssWriteLimits = objectRecord(ue4ssWriteQueue.limits);
+  const ue4ssWritePending = objectRecord(ue4ssWriteQueue.pending);
+  const ue4ssWriteAdmitted = objectRecord(ue4ssWriteQueue.admitted);
+  const ue4ssWriteRejected = objectRecord(ue4ssWriteQueue.rejected);
+  const ue4ssWriteHighWater = objectRecord(ue4ssWriteQueue.highWater);
+  const ue4ssInbox = objectRecord(ue4ssAdmission.ue4ssInbox);
+  const ue4ssInboxLimits = objectRecord(ue4ssInbox.limits);
+  const ue4ssInboxPending = objectRecord(ue4ssInbox.pending);
+  const ue4ssInboxAdmitted = objectRecord(ue4ssInbox.admitted);
+  const ue4ssInboxRejected = objectRecord(ue4ssInbox.rejected);
+  const ue4ssInboxHighWater = objectRecord(ue4ssInbox.highWater);
+  const ue4ssRuntime = objectRecord(ue4ssAdmission.ue4ssRuntime);
+  const ue4ssAdmissionEnabledLines: MetricLine[] = [
+    {
+      name: 'omegga_ue4ss_admission_enabled',
+      labels: { stage: 'write_queue' },
+      value:
+        typeof ue4ssWriteLimits.enabled === 'boolean'
+          ? boolGauge(ue4ssWriteLimits.enabled)
+          : NaN,
+    },
+    {
+      name: 'omegga_ue4ss_admission_enabled',
+      labels: { stage: 'node_inbox' },
+      value:
+        typeof ue4ssInboxLimits.enabled === 'boolean'
+          ? boolGauge(ue4ssInboxLimits.enabled)
+          : NaN,
+    },
+    {
+      name: 'omegga_ue4ss_admission_enabled',
+      labels: { stage: 'ue4ss_runtime' },
+      value:
+        typeof ue4ssRuntime.enabled === 'boolean'
+          ? boolGauge(ue4ssRuntime.enabled)
+          : NaN,
+    },
+  ];
+  const ue4ssQueueDepthLines: MetricLine[] = [
+    ['write_queue', 'interactive', ue4ssWritePending.interactiveDepth],
+    ['write_queue', 'bulk', ue4ssWritePending.bulkDepth],
+    ['write_queue', 'exempt', ue4ssWritePending.exemptDepth],
+    ['write_queue', 'total', ue4ssWritePending.totalDepth],
+    ['node_inbox', 'interactive', ue4ssInboxPending.interactiveRequests],
+    ['node_inbox', 'bulk', ue4ssInboxPending.bulkRequests],
+    ['node_inbox', 'exempt', ue4ssInboxPending.exemptRequests],
+    ['node_inbox', 'total', ue4ssInboxPending.totalRequests],
+  ].map(([stage, serviceClass, value]) => ({
+    name: 'omegga_ue4ss_queue_depth',
+    labels: { stage: String(stage), service_class: String(serviceClass) },
+    value: finiteMetricValue(value),
+  }));
+  const ue4ssQueueByteLines: MetricLine[] = [
+    ['write_queue', 'interactive', ue4ssWritePending.interactiveBytes],
+    ['write_queue', 'bulk', ue4ssWritePending.bulkBytes],
+    ['write_queue', 'exempt', ue4ssWritePending.exemptBytes],
+    ['write_queue', 'total', ue4ssWritePending.totalBytes],
+    ['node_inbox', 'interactive', ue4ssInboxPending.interactiveBytes],
+    ['node_inbox', 'bulk', ue4ssInboxPending.bulkBytes],
+    ['node_inbox', 'exempt', ue4ssInboxPending.exemptBytes],
+    ['node_inbox', 'total', ue4ssInboxPending.totalBytes],
+    ['ue4ss_runtime', 'total', ue4ssRuntime.pendingBytes],
+  ].map(([stage, serviceClass, value]) => ({
+    name: 'omegga_ue4ss_queue_bytes',
+    labels: { stage: String(stage), service_class: String(serviceClass) },
+    value: finiteMetricValue(value),
+  }));
+  const ue4ssQueueAgeLines: MetricLine[] = [
+    {
+      name: 'omegga_ue4ss_queue_oldest_age_milliseconds',
+      labels: { stage: 'write_queue' },
+      value: finiteMetricValue(ue4ssWritePending.oldestAgeMs),
+    },
+    {
+      name: 'omegga_ue4ss_queue_oldest_age_milliseconds',
+      labels: { stage: 'node_inbox' },
+      value: finiteMetricValue(ue4ssInboxPending.oldestAgeMs),
+    },
+    {
+      name: 'omegga_ue4ss_queue_oldest_age_milliseconds',
+      labels: { stage: 'ue4ss_runtime' },
+      value: finiteMetricValue(ue4ssRuntime.lastQueueAgeMs),
+    },
+  ];
+  const ue4ssQueueHighWaterLines: MetricLine[] = [
+    ['write_queue', 'depth', ue4ssWriteHighWater.depth],
+    ['write_queue', 'bytes', ue4ssWriteHighWater.bytes],
+    ['node_inbox', 'depth', ue4ssInboxHighWater.requests],
+    ['node_inbox', 'bytes', ue4ssInboxHighWater.bytes],
+    ['ue4ss_runtime', 'bytes', ue4ssRuntime.pendingBytesHighWater],
+  ].map(([stage, unit, value]) => ({
+    name: 'omegga_ue4ss_queue_high_water',
+    labels: { stage: String(stage), unit: String(unit) },
+    value: finiteMetricValue(value),
+  }));
+  const ue4ssAdmittedLines: MetricLine[] = [
+    ['write_queue', 'interactive', ue4ssWriteAdmitted.interactive],
+    ['write_queue', 'bulk', ue4ssWriteAdmitted.bulk],
+    ['write_queue', 'exempt', ue4ssWriteAdmitted.exempt],
+    ['node_inbox', 'interactive', ue4ssInboxAdmitted.interactive],
+    ['node_inbox', 'bulk', ue4ssInboxAdmitted.bulk],
+    ['node_inbox', 'exempt', ue4ssInboxAdmitted.exempt],
+    ['ue4ss_runtime', 'interactive', ue4ssRuntime.admittedInteractive],
+    ['ue4ss_runtime', 'bulk', ue4ssRuntime.admittedBulk],
+  ].map(([stage, serviceClass, value]) => ({
+    name: 'omegga_ue4ss_admitted_total',
+    labels: { stage: String(stage), service_class: String(serviceClass) },
+    value: finiteMetricValue(value),
+  }));
+  const ue4ssRejectedLines: MetricLine[] = [
+    ['write_queue', 'depth', ue4ssWriteRejected.depth],
+    ['write_queue', 'bytes', ue4ssWriteRejected.bytes],
+    ['node_inbox', 'depth', ue4ssInboxRejected.depth],
+    ['node_inbox', 'bytes', ue4ssInboxRejected.bytes],
+    ['ue4ss_runtime', 'oversize', ue4ssRuntime.oversize],
+    ['ue4ss_runtime', 'bmf_dispatch', ue4ssRuntime.bmfDispatchBlocked],
+  ].map(([stage, reason, value]) => ({
+    name: 'omegga_ue4ss_rejected_total',
+    labels: { stage: String(stage), reason: String(reason) },
+    value: finiteMetricValue(value),
+  }));
   const omeggaConsoleCommandSentLines = Object.entries(
     omeggaConsoleCommands,
   ).map(([key, value]) => {
@@ -719,11 +847,49 @@ export function buildPrometheusMetrics(server: Webserver) {
       ),
     }),
   );
+  const bmfNativeDrainSources = ['tree', 'zone'] as const;
+  const bmfNativeDrainOutcomeLines: MetricLine[] =
+    bmfNativeDrainSources.flatMap(source => {
+      const record = objectRecord(bmfNativeDrainsBySource[source]);
+      return [
+        ['attempted', 'attempted'],
+        ['drained', 'drained'],
+        ['skipped', 'skipped'],
+        ['overrun', 'overruns'],
+      ].map(([outcome, field]) => ({
+        name: 'bmf_native_event_drain_total',
+        labels: { source, outcome },
+        value: finiteMetricValue(record[field]),
+      }));
+    });
+  const bmfNativeDrainDepthLines: MetricLine[] = bmfNativeDrainSources.flatMap(
+    source => {
+      const record = objectRecord(bmfNativeDrainsBySource[source]);
+      if (record.depth_available !== true) return [];
+      return [
+        {
+          name: 'bmf_native_event_queue_depth',
+          labels: { source },
+          value: finiteMetricValue(record.depth),
+        },
+      ];
+    },
+  );
   const bmfSocketQueueLines: MetricLine[] = [
     {
       name: 'bmf_socket_queue_depth',
       labels: { path: 'direct_socket', service_class: 'direct' },
       value: finiteMetricValue(bmfSocketQueues.direct_depth),
+    },
+    {
+      name: 'bmf_socket_queue_depth',
+      labels: { path: 'direct_socket', service_class: 'interactive' },
+      value: finiteMetricValue(bmfSocketQueues.direct_interactive_depth),
+    },
+    {
+      name: 'bmf_socket_queue_depth',
+      labels: { path: 'direct_socket', service_class: 'bulk' },
+      value: finiteMetricValue(bmfSocketQueues.direct_bulk_depth),
     },
     {
       name: 'bmf_socket_queue_depth',
@@ -749,6 +915,18 @@ export function buildPrometheusMetrics(server: Webserver) {
     },
     {
       name: 'bmf_socket_queue_oldest_age_milliseconds',
+      labels: { path: 'direct_socket', service_class: 'interactive' },
+      value: finiteMetricValue(
+        bmfSocketQueues.direct_interactive_oldest_age_ms,
+      ),
+    },
+    {
+      name: 'bmf_socket_queue_oldest_age_milliseconds',
+      labels: { path: 'direct_socket', service_class: 'bulk' },
+      value: finiteMetricValue(bmfSocketQueues.direct_bulk_oldest_age_ms),
+    },
+    {
+      name: 'bmf_socket_queue_oldest_age_milliseconds',
       labels: { path: 'tunnel', service_class: 'total' },
       value: finiteMetricValue(bmfSocketQueues.tunnel_oldest_age_ms),
     },
@@ -764,6 +942,210 @@ export function buildPrometheusMetrics(server: Webserver) {
       labels: { path: 'tunnel', service_class: 'bulk' },
       value: finiteMetricValue(bmfSocketQueues.tunnel_bulk_oldest_age_ms),
     },
+  ];
+  const bmfSocketQueueHighWaterLines: MetricLine[] = [
+    ['direct_socket', 'direct', 'direct_peak_depth'],
+    ['direct_socket', 'interactive', 'direct_interactive_peak_depth'],
+    ['direct_socket', 'bulk', 'direct_bulk_peak_depth'],
+    ['tunnel', 'total', 'tunnel_peak_depth'],
+    ['tunnel', 'interactive', 'tunnel_interactive_peak_depth'],
+    ['tunnel', 'bulk', 'tunnel_bulk_peak_depth'],
+  ].map(([pathName, serviceClass, field]) => ({
+    name: 'bmf_socket_queue_high_watermark',
+    labels: { path: pathName, service_class: serviceClass },
+    value: finiteMetricValue(bmfSocketQueues[field]),
+  }));
+  const bmfSocketAdmissionOutcomeLines: MetricLine[] = bmfSocketPaths.flatMap(
+    pathName => {
+      const record = objectRecord(bmfSocketSchedulerByPath[pathName]);
+      return [
+        ['accepted', 'admitted'],
+        ['rejected', 'rejected'],
+        ['dropped', 'dropped'],
+        ['expired', 'expired'],
+      ].map(([outcome, field]) => ({
+        name: 'bmf_socket_admission_outcome_total',
+        labels: { path: pathName, outcome },
+        value: finiteMetricValue(record[field]),
+      }));
+    },
+  );
+  const bmfSocketTerminalLines: MetricLine[] = bmfSocketPaths.flatMap(
+    pathName => {
+      const record = objectRecord(bmfSocketSchedulerByPath[pathName]);
+      return [
+        ['completed', 'terminal_completed'],
+        ['failed', 'terminal_failed'],
+        ['rejected', 'terminal_rejected'],
+        ['expired', 'terminal_expired'],
+        ['outcome_unknown', 'terminal_outcome_unknown'],
+      ].map(([resultState, field]) => ({
+        name: 'bmf_socket_terminal_total',
+        labels: { path: pathName, state: resultState },
+        value: finiteMetricValue(record[field]),
+      }));
+    },
+  );
+  const bmfSocketFairnessLines: MetricLine[] = bmfSocketPaths.flatMap(
+    pathName => {
+      const fairness = objectRecord(
+        objectRecord(bmfSocketSchedulerByPath[pathName]).fairness,
+      );
+      return ['interactive', 'bulk'].map(serviceClass => ({
+        name: 'bmf_socket_fairness_selection_total',
+        labels: { path: pathName, service_class: serviceClass },
+        value: finiteMetricValue(fairness[serviceClass]),
+      }));
+    },
+  );
+  const bmfPlayerRegistryBooleanMetricDefinitions = [
+    [
+      'bmf_player_registry_cache_first_enabled',
+      'Whether cache-first player resolution is enabled.',
+      'cache_first_enabled',
+    ],
+    [
+      'bmf_player_registry_repair_enabled',
+      'Whether player-registry repair is enabled.',
+      'repair_enabled',
+    ],
+    [
+      'bmf_player_registry_legacy_discovery_enabled',
+      'Whether legacy broad player discovery is enabled.',
+      'legacy_discovery_enabled',
+    ],
+    [
+      'bmf_player_registry_cache_loaded',
+      'Whether the persisted player-registry cache loaded successfully.',
+      'cache_loaded',
+    ],
+    [
+      'bmf_player_registry_repair_running',
+      'Whether a player-registry repair is currently running.',
+      'repair_running',
+    ],
+  ] as const;
+  const bmfPlayerRegistryGaugeMetricDefinitions = [
+    [
+      'bmf_player_registry_generation',
+      'Current player-registry generation.',
+      'generation',
+    ],
+    [
+      'bmf_player_registry_entries',
+      'Current number of cached player-registry entries.',
+      'entries',
+    ],
+    [
+      'bmf_player_registry_repair_cooldown_milliseconds',
+      'Configured player-registry repair cooldown in milliseconds.',
+      'repair_cooldown_ms',
+    ],
+  ] as const;
+  const bmfPlayerRegistryCounterMetricDefinitions = [
+    [
+      'bmf_player_registry_cache_hits_total',
+      'Player-registry cache hits.',
+      'cache_hits',
+    ],
+    [
+      'bmf_player_registry_cache_misses_total',
+      'Player-registry cache misses.',
+      'cache_misses',
+    ],
+    [
+      'bmf_player_registry_disk_loads_total',
+      'Player-registry disk cache loads.',
+      'disk_loads',
+    ],
+    [
+      'bmf_player_registry_disk_load_failures_total',
+      'Failed player-registry disk cache loads.',
+      'disk_load_failures',
+    ],
+    [
+      'bmf_player_registry_memory_syncs_total',
+      'Player-registry in-memory synchronizations.',
+      'memory_syncs',
+    ],
+    [
+      'bmf_player_registry_persisted_syncs_total',
+      'Player-registry synchronizations persisted to disk.',
+      'persisted_syncs',
+    ],
+    [
+      'bmf_player_registry_controller_handle_hits_total',
+      'Player-registry controller-handle cache hits.',
+      'controller_handle_hits',
+    ],
+    [
+      'bmf_player_registry_controller_handle_misses_total',
+      'Player-registry controller-handle cache misses.',
+      'controller_handle_misses',
+    ],
+    [
+      'bmf_player_registry_targeted_resolutions_total',
+      'Targeted player-registry resolutions.',
+      'targeted_resolutions',
+    ],
+    [
+      'bmf_player_registry_targeted_failures_total',
+      'Failed targeted player-registry resolutions.',
+      'targeted_failures',
+    ],
+    [
+      'bmf_player_registry_broad_repairs_total',
+      'Broad player-registry repair attempts.',
+      'broad_repairs',
+    ],
+    [
+      'bmf_player_registry_broad_repair_skipped_total',
+      'Broad player-registry repairs skipped by guardrails.',
+      'broad_repair_skipped',
+    ],
+    [
+      'bmf_player_registry_broad_repair_failures_total',
+      'Failed broad player-registry repairs.',
+      'broad_repair_failures',
+    ],
+    [
+      'bmf_player_registry_broad_repair_matches_total',
+      'Player matches found by broad player-registry repairs.',
+      'broad_repair_matches',
+    ],
+    [
+      'bmf_player_registry_global_scans_total',
+      'Global player scans performed by the player registry.',
+      'global_scans',
+    ],
+  ] as const;
+  const bmfPlayerRegistryMetricBlocks = [
+    ...bmfPlayerRegistryBooleanMetricDefinitions.flatMap(
+      ([name, help, field]) =>
+        metricBlock(name, help, [
+          {
+            name,
+            value:
+              typeof bmfPlayerRegistry[field] === 'boolean'
+                ? boolGauge(bmfPlayerRegistry[field])
+                : NaN,
+          },
+        ]),
+    ),
+    ...bmfPlayerRegistryGaugeMetricDefinitions.flatMap(([name, help, field]) =>
+      metricBlock(name, help, [
+        { name, value: finiteMetricValue(bmfPlayerRegistry[field]) },
+      ]),
+    ),
+    ...bmfPlayerRegistryCounterMetricDefinitions.flatMap(
+      ([name, help, field]) =>
+        metricBlock(
+          name,
+          help,
+          [{ name, value: finiteMetricValue(bmfPlayerRegistry[field]) }],
+          'counter',
+        ),
+    ),
   ];
   const bmfFrameDurationLines: MetricLine[] = [
     {
@@ -946,6 +1328,100 @@ export function buildPrometheusMetrics(server: Webserver) {
       'Age of the latest Omegga console command by normalized command family.',
       omeggaConsoleCommandAgeLines,
     ),
+    ...metricBlock(
+      'omegga_ue4ss_admission_enabled',
+      'Whether bounded UE4SS admission is enabled at each fixed stage.',
+      ue4ssAdmissionEnabledLines,
+    ),
+    ...metricBlock(
+      'omegga_ue4ss_queue_depth',
+      'Current bounded UE4SS queue depth by fixed stage and service class.',
+      ue4ssQueueDepthLines,
+    ),
+    ...metricBlock(
+      'omegga_ue4ss_queue_bytes',
+      'Current bounded UE4SS queue bytes by fixed stage and service class.',
+      ue4ssQueueByteLines,
+    ),
+    ...metricBlock(
+      'omegga_ue4ss_queue_oldest_age_milliseconds',
+      'Oldest or most recently observed UE4SS queue age by fixed stage.',
+      ue4ssQueueAgeLines,
+    ),
+    ...metricBlock(
+      'omegga_ue4ss_queue_high_water',
+      'UE4SS admission high-water marks by fixed stage and unit.',
+      ue4ssQueueHighWaterLines,
+    ),
+    ...metricBlock(
+      'omegga_ue4ss_admitted_total',
+      'UE4SS admission totals by fixed stage and service class.',
+      ue4ssAdmittedLines,
+      'counter',
+    ),
+    ...metricBlock(
+      'omegga_ue4ss_rejected_total',
+      'UE4SS admission rejection totals by fixed stage and reason.',
+      ue4ssRejectedLines,
+      'counter',
+    ),
+    ...metricBlock(
+      'omegga_ue4ss_expired_total',
+      'UE4SS work expired before execution by fixed stage.',
+      [
+        {
+          name: 'omegga_ue4ss_expired_total',
+          labels: { stage: 'write_queue' },
+          value: finiteMetricValue(ue4ssWriteQueue.expired),
+        },
+        {
+          name: 'omegga_ue4ss_expired_total',
+          labels: { stage: 'node_inbox' },
+          value: finiteMetricValue(ue4ssInbox.expired),
+        },
+        {
+          name: 'omegga_ue4ss_expired_total',
+          labels: { stage: 'ue4ss_runtime' },
+          value: finiteMetricValue(ue4ssRuntime.expired),
+        },
+      ],
+      'counter',
+    ),
+    ...metricBlock(
+      'omegga_ue4ss_client_timeouts_total',
+      'Node-side UE4SS response timeouts after inbox admission.',
+      [
+        {
+          name: 'omegga_ue4ss_client_timeouts_total',
+          labels: { stage: 'node_inbox' },
+          value: finiteMetricValue(ue4ssInbox.clientTimeouts),
+        },
+      ],
+      'counter',
+    ),
+    ...metricBlock(
+      'omegga_ue4ss_deadline_missing_total',
+      'Legacy UE4SS runtime records observed without admission deadline metadata.',
+      [
+        {
+          name: 'omegga_ue4ss_deadline_missing_total',
+          labels: { stage: 'ue4ss_runtime' },
+          value: finiteMetricValue(ue4ssRuntime.deadlineMissing),
+        },
+      ],
+      'counter',
+    ),
+    ...metricBlock(
+      'omegga_ue4ss_queue_age_high_water_milliseconds',
+      'Maximum UE4SS queue age observed before runtime execution.',
+      [
+        {
+          name: 'omegga_ue4ss_queue_age_high_water_milliseconds',
+          labels: { stage: 'ue4ss_runtime' },
+          value: finiteMetricValue(ue4ssRuntime.maxQueueAgeMs),
+        },
+      ],
+    ),
     ...metricBlock('omegga_process_uptime_seconds', 'Omegga process uptime.', [
       { name: 'omegga_process_uptime_seconds', value: process.uptime() },
     ]),
@@ -1076,6 +1552,7 @@ export function buildPrometheusMetrics(server: Webserver) {
         },
       ],
     ),
+    ...bmfPlayerRegistryMetricBlocks,
     ...metricBlock(
       'brickadia_frame_telemetry_up',
       'Whether native BMF frame telemetry is readable.',
@@ -1439,9 +1916,61 @@ export function buildPrometheusMetrics(server: Webserver) {
       'counter',
     ),
     ...metricBlock(
+      'bmf_native_event_drain_budget_enabled',
+      'Whether native tree and zone event drains share the socket-pump elapsed budget.',
+      [
+        {
+          name: 'bmf_native_event_drain_budget_enabled',
+          value:
+            typeof bmfNativeDrains.budget_enabled === 'boolean'
+              ? boolGauge(bmfNativeDrains.budget_enabled)
+              : NaN,
+        },
+      ],
+    ),
+    ...metricBlock(
+      'bmf_native_event_drain_total',
+      'Native event drain outcomes by fixed tree or zone source.',
+      bmfNativeDrainOutcomeLines,
+      'counter',
+    ),
+    ...metricBlock(
+      'bmf_native_event_queue_depth',
+      'Last exact native event queue depth when the runtime could observe it.',
+      bmfNativeDrainDepthLines,
+    ),
+    ...metricBlock(
+      'bmf_native_event_drain_max_events_per_pump',
+      'Hard event-count cap for budgeted native drains in one socket-pump slice.',
+      [
+        {
+          name: 'bmf_native_event_drain_max_events_per_pump',
+          value: finiteMetricValue(bmfNativeDrains.max_events_per_pump),
+        },
+      ],
+    ),
+    ...metricBlock(
       'bmf_socket_admitted_total',
       'Executable socket work admitted by direct-command or tunnel path.',
       bmfSocketAdmissionLines,
+      'counter',
+    ),
+    ...metricBlock(
+      'bmf_socket_admission_outcome_total',
+      'Bounded socket admission outcomes by fixed path and outcome.',
+      bmfSocketAdmissionOutcomeLines,
+      'counter',
+    ),
+    ...metricBlock(
+      'bmf_socket_terminal_total',
+      'Terminal socket request outcomes by fixed path and state.',
+      bmfSocketTerminalLines,
+      'counter',
+    ),
+    ...metricBlock(
+      'bmf_socket_fairness_selection_total',
+      'Weighted-fair scheduler selections by fixed path and service class.',
+      bmfSocketFairnessLines,
       'counter',
     ),
     ...metricBlock(
@@ -1490,6 +2019,19 @@ export function buildPrometheusMetrics(server: Webserver) {
       ],
     ),
     ...metricBlock(
+      'bmf_socket_unified_admission_enabled',
+      'Whether direct and tunnel socket work share the unified admission scheduler.',
+      [
+        {
+          name: 'bmf_socket_unified_admission_enabled',
+          value:
+            typeof bmfSocketScheduler.unified_enabled === 'boolean'
+              ? boolGauge(bmfSocketScheduler.unified_enabled)
+              : NaN,
+        },
+      ],
+    ),
+    ...metricBlock(
       'bmf_game_thread_budget_exhausted_total',
       'Socket pump slices whose elapsed time exceeded the soft game-thread budget.',
       [
@@ -1530,6 +2072,17 @@ export function buildPrometheusMetrics(server: Webserver) {
             bmfSocketScheduler.budget_tunnel_dispatch_skipped_total,
           ),
         },
+        {
+          name: 'bmf_game_thread_dispatch_skipped_total',
+          labels: {
+            worker: 'socket_pump',
+            path: 'unified',
+            reason: 'budget',
+          },
+          value: finiteMetricValue(
+            bmfSocketScheduler.budget_dispatch_skipped_total,
+          ),
+        },
       ],
       'counter',
     ),
@@ -1548,6 +2101,11 @@ export function buildPrometheusMetrics(server: Webserver) {
       'bmf_socket_queue_oldest_age_milliseconds',
       'Age of the oldest queued socket request by path and service class.',
       bmfSocketQueueAgeLines,
+    ),
+    ...metricBlock(
+      'bmf_socket_queue_high_watermark',
+      'Lifetime queue high-water mark by fixed socket path and service class.',
+      bmfSocketQueueHighWaterLines,
     ),
     ...metricBlock(
       'bmf_socket_configured_ingress_per_pump',

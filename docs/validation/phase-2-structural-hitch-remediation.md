@@ -343,4 +343,4 @@ the candidate and must repeat the dirty-world autosave and multi-player canaries
 The pre-rollout recovery bundle, including settings, active-world identity,
 deployed BMF/UE4SS payloads, and the touched Omegga tree, is at:
 
-`C:\Users\tycox\OneDrive\Documents\GitHub\Brickadia\artifacts\phase2-rollout-20260806-0110`
+`../Brickadia/artifacts/phase2-rollout-20260806-0110`

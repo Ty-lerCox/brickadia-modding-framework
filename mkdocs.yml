@@ -144,6 +144,7 @@ nav:
       - Canary Contract: validation/canary-contract.md
       - Command Tunnel Benchmark: validation/command-tunnel-benchmark.md
       - API Validation Evidence: validation/api-validation.md
+      - Phase 2 Final Integrated Validation: validation/phase-2-final-integrated-validation-20260806.md
   - Maintainers:
       - Documentation Style Guide: maintainers/docs-style-guide.md
       - Native Hook Notes: maintainers/native-hooks.md

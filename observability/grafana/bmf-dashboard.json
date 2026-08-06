@@ -5,7 +5,7 @@
   "tags": ["bmf", "brickadia", "omegga"],
   "timezone": "browser",
   "schemaVersion": 41,
-  "version": 1,
+  "version": 2,
   "refresh": "10s",
   "time": {
     "from": "now-1h",
@@ -81,9 +81,17 @@
           "uid": "-- Grafana --"
         },
         "enable": true,
-        "hide": true,
+        "hide": false,
         "iconColor": "rgba(0, 211, 255, 1)",
-        "name": "Annotations and Alerts",
+        "name": "Deployments, restarts, crashes, autosaves, reconnects, and reloads",
+        "tags": [
+          "deployment",
+          "restart",
+          "crash",
+          "autosave",
+          "reconnect",
+          "plugin-reload"
+        ],
         "type": "dashboard"
       }
     ]
@@ -256,7 +264,8 @@
     {
       "id": 8,
       "type": "stat",
-      "title": "Frame FPS / Configured Target",
+      "title": "Derived FPS (reference only) / Target",
+      "description": "Derived from frame duration. Frame duration in milliseconds is the performance source of truth; operations per second is not FPS.",
       "datasource": {
         "type": "prometheus",
         "uid": "$datasource"
@@ -309,7 +318,8 @@
     {
       "id": 4,
       "type": "timeseries",
-      "title": "Frame Time",
+      "title": "Frame Duration (source of truth)",
+      "description": "16.67 ms = 60 FPS, 33.33 ms = 30 FPS, 50 ms = 20 FPS, and 100 ms = 10 FPS.",
       "datasource": {
         "type": "prometheus",
         "uid": "$datasource"
@@ -337,6 +347,14 @@
               {
                 "color": "red",
                 "value": 33.33
+              },
+              {
+                "color": "dark-red",
+                "value": 50
+              },
+              {
+                "color": "purple",
+                "value": 100
               }
             ]
           }
@@ -604,6 +622,424 @@
           "refId": "A",
           "expr": "max(bmf_game_thread_budget_enforced{worker=\"socket_pump\",environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\"})",
           "legendFormat": "enforcement"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "stat",
+      "title": "Frame Duration: Current / p50 / p95 / p99 / Max",
+      "description": "Range percentiles are calculated from frame-duration samples. Milliseconds, not command throughput, are the source of truth.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 18,
+        "x": 6,
+        "y": 29
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 16.67 },
+              { "color": "red", "value": 33.33 },
+              { "color": "dark-red", "value": 50 },
+              { "color": "purple", "value": 100 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "textMode": "auto",
+        "colorMode": "value"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(brickadia_frame_delta_milliseconds{scope=\"window\",statistic=\"last\",environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\",brickadia_build=~\"$brickadia_build\"})",
+          "legendFormat": "Current"
+        },
+        {
+          "refId": "B",
+          "expr": "max(quantile_over_time(0.50, brickadia_frame_delta_milliseconds{scope=\"window\",statistic=\"last\",environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\",brickadia_build=~\"$brickadia_build\"}[$__range]))",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "C",
+          "expr": "max(quantile_over_time(0.95, brickadia_frame_delta_milliseconds{scope=\"window\",statistic=\"last\",environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\",brickadia_build=~\"$brickadia_build\"}[$__range]))",
+          "legendFormat": "p95"
+        },
+        {
+          "refId": "D",
+          "expr": "max(quantile_over_time(0.99, brickadia_frame_delta_milliseconds{scope=\"window\",statistic=\"last\",environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\",brickadia_build=~\"$brickadia_build\"}[$__range]))",
+          "legendFormat": "p99"
+        },
+        {
+          "refId": "E",
+          "expr": "max(max_over_time(brickadia_frame_delta_milliseconds{scope=\"window\",statistic=\"max\",environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\",brickadia_build=~\"$brickadia_build\"}[$__range]))",
+          "legendFormat": "Max"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Slow Frames per 10,000 Frames",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 34 },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "min": 0 },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "10000 * sum by (threshold_ms) (increase(brickadia_frame_slow_total{threshold_ms=~\"33.33|50|100\",environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\",brickadia_build=~\"$brickadia_build\"}[$__range])) / on() group_left() clamp_min(sum(increase(brickadia_frame_samples_total{environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\",brickadia_build=~\"$brickadia_build\"}[$__range])), 1)",
+          "legendFormat": ">= {{threshold_ms}} ms / 10k"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Hitch Attribution Overlay",
+      "description": "Individual correlation IDs remain in BMF_SLOW_OPERATION logs; Prometheus carries bounded aggregate classes only.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 34 },
+      "fieldConfig": {
+        "defaults": { "unit": "ms", "min": 0 },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(brickadia_frame_delta_milliseconds{scope=\"window\",statistic=\"max\",environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\",brickadia_build=~\"$brickadia_build\"})",
+          "legendFormat": "frame max"
+        },
+        {
+          "refId": "B",
+          "expr": "max by (operation_class) (bmf_operation_duration_milliseconds{phase=\"game_thread\",statistic=\"max\",environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\"})",
+          "legendFormat": "{{operation_class}} game thread"
+        },
+        {
+          "refId": "C",
+          "expr": "max(bmf_player_registry_duration_milliseconds{phase=\"repair\",statistic=\"max\",environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\"})",
+          "legendFormat": "controller repair"
+        },
+        {
+          "refId": "D",
+          "expr": "max(bmf_player_registry_duration_milliseconds{phase=\"global_scan\",statistic=\"max\",environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\"})",
+          "legendFormat": "global scan"
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Unified Scheduler Depth, Age, and In-flight Work",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 43 },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "min": 0 },
+        "overrides": [
+          {
+            "matcher": { "id": "byRegexp", "options": "/.*age.*/" },
+            "properties": [{ "id": "unit", "value": "ms" }]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (path, service_class) (bmf_socket_queue_depth{environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\"})",
+          "legendFormat": "{{path}} / {{service_class}} depth"
+        },
+        {
+          "refId": "B",
+          "expr": "max by (path, service_class) (bmf_socket_queue_oldest_age_milliseconds{environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\"})",
+          "legendFormat": "{{path}} / {{service_class}} age"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(bmf_operation_in_flight{environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\"})",
+          "legendFormat": "attributed in flight"
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Player Cache and Controller Resolution",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 43 },
+      "fieldConfig": {
+        "defaults": { "unit": "ops", "min": 0 },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "cache hit rate" },
+            "properties": [{ "id": "unit", "value": "percent" }]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "100 * sum(rate(bmf_player_registry_cache_hits_total{environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\"}[5m])) / clamp_min(sum(rate(bmf_player_registry_cache_hits_total{environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\"}[5m])) + sum(rate(bmf_player_registry_cache_misses_total{environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\"}[5m])), 0.000001)",
+          "legendFormat": "cache hit rate"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(bmf_player_registry_global_scans_total{environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\"}[5m]))",
+          "legendFormat": "global scans / sec"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(rate(bmf_player_registry_repair_coalesced_total{environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\"}[5m]))",
+          "legendFormat": "repairs coalesced / sec"
+        },
+        {
+          "refId": "D",
+          "expr": "sum(rate(bmf_player_registry_targeted_resolutions_total{environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\"}[5m]))",
+          "legendFormat": "targeted resolutions / sec"
+        },
+        {
+          "refId": "E",
+          "expr": "sum(rate(bmf_player_registry_connection_generation_mismatches_total{environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\"}[5m]))",
+          "legendFormat": "generation mismatches / sec"
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "Attributed Operation Outcomes and Budget Deferrals",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 52 },
+      "fieldConfig": {
+        "defaults": { "unit": "ops", "min": 0 },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (outcome) (rate(bmf_operation_outcome_total{environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\"}[5m]))",
+          "legendFormat": "{{outcome}} / sec"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(bmf_operation_admission_defer_total{environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\"}[5m]))",
+          "legendFormat": "budget deferrals / sec"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(rate(bmf_operation_budget_overrun_total{environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\"}[5m]))",
+          "legendFormat": "budget overruns / sec"
+        },
+        {
+          "refId": "D",
+          "expr": "sum(rate(bmf_operation_lifetime_guard_rejections_total{environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\"}[5m]))",
+          "legendFormat": "lifetime guard rejections / sec"
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "type": "gauge",
+      "title": "Current FPS (from frame duration)",
+      "description": "Calculated as 1000 divided by the latest frame duration; this does not average FPS samples.",
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "gridPos": { "h": 7, "w": 6, "x": 0, "y": 61 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "fps",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 30 },
+              { "color": "green", "value": 50 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "1000 / clamp_min(max(brickadia_frame_delta_milliseconds{scope=\"window\",statistic=\"last\",environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\",brickadia_build=~\"$brickadia_build\"}), 0.001)",
+          "legendFormat": "current FPS"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "type": "stat",
+      "title": "Average FPS from Average Frame Duration",
+      "description": "Each value is 1000 / average(frame duration) for the stated window.",
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "gridPos": { "h": 7, "w": 18, "x": 6, "y": 61 },
+      "fieldConfig": { "defaults": { "unit": "fps", "min": 0 }, "overrides": [] },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "horizontal",
+        "textMode": "auto",
+        "colorMode": "value"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "1000 / clamp_min(avg_over_time(brickadia_frame_delta_milliseconds{scope=\"window\",statistic=\"last\",environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\",brickadia_build=~\"$brickadia_build\"}[30s]), 0.001)",
+          "legendFormat": "30 seconds"
+        },
+        {
+          "refId": "B",
+          "expr": "1000 / clamp_min(avg_over_time(brickadia_frame_delta_milliseconds{scope=\"window\",statistic=\"last\",environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\",brickadia_build=~\"$brickadia_build\"}[5m]), 0.001)",
+          "legendFormat": "5 minutes"
+        },
+        {
+          "refId": "C",
+          "expr": "1000 / clamp_min(avg_over_time(brickadia_frame_delta_milliseconds{scope=\"window\",statistic=\"last\",environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\",brickadia_build=~\"$brickadia_build\"}[30m]), 0.001)",
+          "legendFormat": "30 minutes"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Average FPS in 30-second Blocks (last 30 minutes)",
+      "description": "Derived from average frame duration in each 30-second block.",
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 68 },
+      "fieldConfig": { "defaults": { "unit": "fps", "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "1000 / clamp_min(avg_over_time(brickadia_frame_delta_milliseconds{scope=\"window\",statistic=\"last\",environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\",brickadia_build=~\"$brickadia_build\"}[30s]), 0.001)",
+          "legendFormat": "FPS / 30s",
+          "interval": "30s"
+        }
+      ],
+      "timeFrom": "30m"
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Average and Worst Frame Time in 30-second Blocks",
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 68 },
+      "fieldConfig": { "defaults": { "unit": "ms", "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "avg_over_time(brickadia_frame_delta_milliseconds{scope=\"window\",statistic=\"last\",environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\",brickadia_build=~\"$brickadia_build\"}[30s])",
+          "legendFormat": "average / 30s",
+          "interval": "30s"
+        },
+        {
+          "refId": "B",
+          "expr": "max_over_time(brickadia_frame_delta_milliseconds{scope=\"window\",statistic=\"max\",environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\",brickadia_build=~\"$brickadia_build\"}[30s])",
+          "legendFormat": "worst / 30s",
+          "interval": "30s"
+        }
+      ],
+      "timeFrom": "30m"
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "Blocked, Expired, and Outcome-Unknown Work",
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 77 },
+      "fieldConfig": { "defaults": { "unit": "ops", "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (path, outcome) (increase(bmf_socket_admission_outcome_total{outcome=~\"rejected|dropped|expired\",environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\"}[5m]))",
+          "legendFormat": "{{path}} {{outcome}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (path, state) (increase(bmf_socket_terminal_total{state=~\"expired|outcome_unknown\",environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\"}[5m]))",
+          "legendFormat": "{{path}} {{state}}"
+        }
+      ]
+    },
+    {
+      "id": 23,
+      "type": "timeseries",
+      "title": "Player Cache Misses, Repairs, Scans, and Unresolved Players",
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 77 },
+      "fieldConfig": {
+        "defaults": { "unit": "ops", "min": 0 },
+        "overrides": [
+          {
+            "matcher": { "id": "byRegexp", "options": "/.*duration.*/" },
+            "properties": [{ "id": "unit", "value": "ms" }]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "increase(bmf_player_registry_cache_misses_total{environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\"}[5m])",
+          "legendFormat": "cache misses"
+        },
+        {
+          "refId": "B",
+          "expr": "increase(bmf_player_registry_broad_repairs_total{environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\"}[5m])",
+          "legendFormat": "repairs"
+        },
+        {
+          "refId": "C",
+          "expr": "increase(bmf_player_registry_global_scans_total{environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\"}[5m])",
+          "legendFormat": "global scans"
+        },
+        {
+          "refId": "D",
+          "expr": "max(bmf_player_registry_unresolved_players{environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\"})",
+          "legendFormat": "unresolved players"
+        },
+        {
+          "refId": "E",
+          "expr": "max(bmf_player_registry_duration_milliseconds{phase=\"global_scan\",statistic=\"max\",environment=~\"$environment\",instance=~\"$instance\",server_profile=~\"$server_profile\"})",
+          "legendFormat": "global scan duration max"
         }
       ]
     }

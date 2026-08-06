@@ -153,6 +153,94 @@ test('bmfctl telemetry dashboard upload requires confirmation and redacts token'
   }
 });
 
+test('checked-in Grafana dashboard and PromQL satisfy the performance contract', () => {
+  const dashboardPath = path.join(
+    __dirname,
+    '..',
+    '..',
+    'observability',
+    'grafana',
+    'bmf-dashboard.json',
+  );
+  const dashboard = JSON.parse(fs.readFileSync(dashboardPath, 'utf8'));
+  const panels = new Map(dashboard.panels.map(panel => [panel.title, panel]));
+  const requiredPanels = [
+    'Current FPS (from frame duration)',
+    'Average FPS from Average Frame Duration',
+    'Average FPS in 30-second Blocks (last 30 minutes)',
+    'Average and Worst Frame Time in 30-second Blocks',
+    'Frame Duration: Current / p50 / p95 / p99 / Max',
+    'Slow Frames per 10,000 Frames',
+    'Unified Scheduler Depth, Age, and In-flight Work',
+    'Blocked, Expired, and Outcome-Unknown Work',
+    'Player Cache Misses, Repairs, Scans, and Unresolved Players',
+  ];
+
+  for (const title of requiredPanels) {
+    assert.ok(panels.has(title), `missing required dashboard panel: ${title}`);
+  }
+
+  const targets = dashboard.panels.flatMap(panel => panel.targets || []);
+  assert.ok(targets.length > 0, 'dashboard must contain PromQL targets');
+  for (const target of targets) {
+    assert.equal(typeof target.expr, 'string');
+    assertPromQlStructure(target.expr);
+  }
+
+  const averageFpsTargets = panels
+    .get('Average FPS from Average Frame Duration')
+    .targets.map(target => target.expr);
+  assert.equal(averageFpsTargets.length, 3);
+  for (const range of ['30s', '5m', '30m']) {
+    assert.ok(
+      averageFpsTargets.some(expr =>
+        expr.includes(`1000 / clamp_min(avg_over_time(`) && expr.includes(`[${range}]`)),
+      `average FPS must derive from average frame duration over ${range}`,
+    );
+  }
+
+  const annotations = dashboard.annotations?.list || [];
+  const annotationTags = new Set(annotations.flatMap(annotation => annotation.tags || []));
+  for (const tag of ['deployment', 'restart', 'crash', 'autosave', 'reconnect', 'plugin-reload']) {
+    assert.ok(annotationTags.has(tag), `missing dashboard annotation tag: ${tag}`);
+  }
+});
+
+function assertPromQlStructure(expression) {
+  const stack = [];
+  const pairs = new Map([
+    [')', '('],
+    [']', '['],
+    ['}', '{'],
+  ]);
+  let inString = false;
+  let escaped = false;
+
+  for (const character of expression) {
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (character === '\\') {
+        escaped = true;
+      } else if (character === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (character === '"') {
+      inString = true;
+    } else if ('([{'.includes(character)) {
+      stack.push(character);
+    } else if (pairs.has(character)) {
+      assert.equal(stack.pop(), pairs.get(character), `unbalanced PromQL: ${expression}`);
+    }
+  }
+
+  assert.equal(inString, false, `unterminated PromQL string: ${expression}`);
+  assert.deepEqual(stack, [], `unbalanced PromQL: ${expression}`);
+  assert.doesNotMatch(expression, /\b(?:NaN|Infinity)\b/);
+}
+
 function restoreEnv(name, value) {
   if (value === undefined) {
     delete process.env[name];

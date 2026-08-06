@@ -278,3 +278,69 @@ following:
 The crash-specific items above passed. Longer-duration performance observation
 remains appropriate because a short controlled canary cannot prove the absence
 of every unrelated hitch over days of gameplay.
+
+## Unified-broker rollout gate — 2026-08-06
+
+Phase 2 is **not accepted for live use**. The unified direct/tunnel broker was
+enabled for the smallest controlled slice, exposed a connection-readiness race,
+and was rolled back with its documented single flag. The live launcher now has
+`BMF_UNIFIED_SOCKET_ADMISSION_ENABLED=0`, restoring Phase 1.5 admission while
+retaining the new attribution, cache, identity, frame-telemetry, and dashboard
+work.
+
+With the unified broker enabled, 68 CityRPG tunnel operations were accepted but
+only 12 reached an injected terminal result. The other 56 became
+`outcome_unknown`; no duplicate or expired operation was observed. Attribution
+showed the broker beginning `/cityrpgRemote` work during the post-join interval
+where a controller existed but the native implementation call was not yet
+reliably callable. Because execution had begun, exact-once semantics correctly
+forbade an automatic retry. A later harmless direct tunnel diagnostic succeeded
+in 41 ms at the `implementation_call` stage, confirming that this was a
+lifetime/readiness boundary rather than queue growth.
+
+The same evidence also leaves one structural performance issue open:
+`/cityrpgRemote` native invocation remains an indivisible 35–65 ms game-thread
+handler even when it succeeds. A 3 ms scheduler can prevent a second job from
+starting after that overrun, but cannot preempt the call itself. Performance
+work must next split or eliminate that native implementation call without
+weakening UUID-plus-generation routing or retrying unknown outcomes.
+
+After the rollback and one controlled restart:
+
+- the supervisor and Brickadia server remained healthy, UDP 7777 stayed bound,
+  and no new crash folder was created (the count remained 368);
+- the active world remained `CityRPG_ItemBufferFix_20260802_1320`, the configured
+  server name remained `CityRPG v1 - Under Maintenance`, and an exact normalized
+  settings comparison found zero semantic differences;
+- reconnect reconciliation completed 9 of 9 tunnel operations with zero unknown
+  outcomes and zero duplicates;
+- 100 cached `bmf.players.list` calls completed 100/100 with p50 1 ms, p95 1 ms,
+  p99 1 ms, and a 3 ms maximum;
+- a 12-way parallel `bmf.status` burst completed 12/12, after which direct and
+  tunnel depth and oldest age returned to zero;
+- ordinary-player global scans, repair scans, unknown outcomes, and duplicate
+  outcomes all had zero delta during those canaries;
+- direct status-message and whisper probes with incomplete controller-path
+  metadata failed closed as `PRIVATE_IDENTITY_STALE`; they did not fall back to
+  another player or global chat;
+- the 30-minute observer completed 1,800 one-second samples. Its final frame
+  window averaged 16.545 ms (about 60.44 FPS) and peaked at 17.491 ms. The
+  canary added one frame in the 33.3–50 ms band, zero frames at or above 50 ms,
+  and zero frames at or above 100 ms. Queue depth and queue age stayed zero, and
+  global-scan, unknown-outcome, and duplicate counters did not increase;
+- the autosave timer ran every 30 seconds throughout the window. It reported
+  `Skipping auto save (no bricks changed)`, so timer coexistence is proven but
+  dirty-world save I/O is not covered by this canary.
+
+The native 30-minute raw samples were not retained locally after the observer's
+final formatter exceeded its wrapper timeout, and the configured remote-write
+credential has no query scope. Exact 30-minute frame p50/p95/p99 values therefore
+cannot be reported honestly from this run. The threshold counters prove the p99
+was below 33.3 ms, but the requested p95-below-20-ms gate remains formally
+unverified. A future rollout should persist the observer samples before enabling
+the candidate and must repeat the dirty-world autosave and multi-player canaries.
+
+The pre-rollout recovery bundle, including settings, active-world identity,
+deployed BMF/UE4SS payloads, and the touched Omegga tree, is at:
+
+`C:\Users\tycox\OneDrive\Documents\GitHub\Brickadia\artifacts\phase2-rollout-20260806-0110`

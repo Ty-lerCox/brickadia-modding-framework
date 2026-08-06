@@ -5,7 +5,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 
-const { validateLuaSource } = require('./validate-lua-runtime');
+const {
+  validateLuaFile,
+  validateLuaSource,
+} = require('./validate-lua-runtime');
 
 function findingSignatures(source) {
   return validateLuaSource(source, '<test>').unsafeSchedulerFindings.map(
@@ -14,11 +17,12 @@ function findingSignatures(source) {
 }
 
 test('Lua 5.3 compiler rejects a chunk with more than 200 locals', () => {
-  const source = Array.from(
-    { length: 201 },
-    (_, index) => `local local_${index} = ${index}`,
-  ).join('\n');
-  const result = validateLuaSource(source, 'too-many-locals.lua');
+  const fixture = path.join(
+    __dirname,
+    'fixtures',
+    'lua53-main-chunk-201-locals.lua',
+  );
+  const result = validateLuaFile(fixture);
 
   assert.equal(result.compilerPassed, false);
   assert.equal(
@@ -30,6 +34,105 @@ test('Lua 5.3 compiler rejects a chunk with more than 200 locals', () => {
     result.compilerError,
     /too many local variables \(limit is 200\)/,
   );
+  assert.equal(result.mainChunkLocalCount, 201);
+});
+
+test('Lua 5.3 compiler accepts the supported 200-local boundary', () => {
+  const fixture = path.join(
+    __dirname,
+    'fixtures',
+    'lua53-main-chunk-200-locals.lua',
+  );
+  const result = validateLuaFile(fixture);
+
+  assert.equal(result.compilerPassed, true, result.compilerError);
+  assert.equal(result.syntaxPassed, true, result.syntaxError);
+  assert.equal(result.mainChunkLocalCount, 200);
+});
+
+test('exact canonical and packaged BMF runtimes compile at unchanged local count', () => {
+  const canonical = path.resolve(
+    __dirname,
+    '..',
+    '..',
+    '..',
+    '..',
+    'framework',
+    'ue4ss',
+    'Mods',
+    'BMF',
+    'Scripts',
+    'bmf',
+    'runtime.lua',
+  );
+  const packaged = path.resolve(
+    __dirname,
+    '..',
+    'templates',
+    'windows-ue4ss',
+    'ue4ss',
+    'Mods',
+    'BMF',
+    'Scripts',
+    'bmf',
+    'runtime.lua',
+  );
+
+  assert.deepEqual(fs.readFileSync(canonical), fs.readFileSync(packaged));
+  for (const runtimePath of [canonical, packaged]) {
+    const result = validateLuaFile(runtimePath);
+    assert.equal(result.compilerPassed, true, result.compilerError);
+    assert.equal(result.syntaxPassed, true, result.syntaxError);
+    assert.equal(
+      result.mainChunkLocalCount,
+      200,
+      `${runtimePath} must not add a top-level local`,
+    );
+  }
+});
+
+test('idle socket backoff reuses the existing scheduler and stays bounded', () => {
+  const runtimePath = path.resolve(
+    __dirname,
+    '..',
+    'templates',
+    'windows-ue4ss',
+    'ue4ss',
+    'Mods',
+    'BMF',
+    'Scripts',
+    'bmf',
+    'runtime.lua',
+  );
+  const source = fs.readFileSync(runtimePath, 'utf8');
+  const result = validateLuaFile(runtimePath);
+  const updateStart = source.indexOf(
+    'function BMF_socket_scheduler_update_idle_backoff(',
+  );
+  const updateEnd = source.indexOf(
+    'function BMF_schedule_socket_worker_poll',
+    updateStart,
+  );
+  const update = source.slice(updateStart, updateEnd);
+
+  assert.equal(result.mainChunkLocalCount, 200);
+  assert.notEqual(updateStart, -1, 'idle backoff update must exist');
+  assert.notEqual(updateEnd, -1, 'idle backoff boundary must exist');
+  assert.match(update, /recent_work_passes_remaining = 4/);
+  assert.match(update, /next_interval = 25/);
+  assert.match(update, /consecutive_empty_passes <= 6[\s\S]*?next_interval = 50/);
+  assert.match(update, /else[\s\S]*?next_tier = "deep_idle"[\s\S]*?next_interval = 100/);
+  assert.match(update, /work_wakeups_total/);
+  assert.match(update, /backoff_transitions_total/);
+  assert.match(
+    source,
+    /BMF_socket_scheduler_update_idle_backoff\([\s\S]*?BMF_socket_scheduler_total_depth\(\) > 0\)/,
+  );
+  assert.match(
+    source,
+    /BMF_schedule_socket_worker_poll\(\s*state\.telemetry\.socket_scheduler\.current_poll_interval_ms/,
+  );
+  assert.doesNotMatch(update, /local\s+function\s+/);
 });
 
 test('scheduler scan catches direct, pcall, alias, indexed, and broad-clear use', () => {
@@ -594,10 +697,9 @@ test('unified socket admission owns direct and tunnel dispatch with bounded weig
     /os\.time\(\) >= math\.floor\(deadline \/ 1000\)/,
     'short deadlines in the current wall-clock second must not expire immediately',
   );
-  assert.equal(
-    source.match(/"DEADLINE_REQUIRED"/g)?.length,
-    2,
-    'bounded direct and tunnel admission must fail closed when absolute deadline metadata is missing',
+  assert.ok(
+    (source.match(/"DEADLINE_REQUIRED"/g)?.length ?? 0) >= 3,
+    'direct, tunnel, and identity admission must fail closed when absolute deadline metadata is missing',
   );
 
   const executeDirectStart = source.indexOf(
@@ -749,7 +851,7 @@ test('command output and completed replay caches are bounded by count and bytes'
   );
 });
 
-test('game command tunnel never reuses a raw controller address across requests', () => {
+test('game command tunnel uses only an exact ephemeral controller address', () => {
   const runtimePath = path.join(
     __dirname,
     '..',
@@ -778,25 +880,25 @@ test('game command tunnel never reuses a raw controller address across requests'
     /cached_controller_address/,
     'raw controller addresses must not be persisted in tunnel state',
   );
+  assert.match(
+    drain,
+    /live_chat_resolve_strict_target[\s\S]*?final_controller_address ~= controller_address/,
+    'tunnel dispatch must re-resolve and compare the exact UUID+generation target before invocation',
+  );
   assert.doesNotMatch(
     drain,
-    /controllerAddress\s*=/,
-    'tunnel dispatch must not supply an address retained by another request',
+    /request\.controllerAddress|request\["controllerAddress"\]/,
+    'tunnel requests must not persist a controller address across ticks',
   );
-  assert.match(
+  assert.doesNotMatch(
     drain,
     /nativeResolverOnly = true/,
-    'tunnel dispatch must bypass Lua UObject enumeration and validation',
-  );
-  assert.doesNotMatch(
-    drain,
-    /resolved_address/,
-    'tunnel dispatch must not retain the freshly resolved raw address',
+    'tunnel dispatch must never ask the native layer to guess a controller',
   );
   assert.match(
     drain,
-    /controller_cache_refreshes[\s\S]*?BMF_player_message_implementation_probe\(request\.line, "", \{[\s\S]*?skipRateLimit = true,[\s\S]*?\}\)/,
-    'each tunnel dispatch must resolve a controller afresh and retain compatible telemetry',
+    /controller_cache_refreshes[\s\S]*?BMF_player_message_implementation_probe\(request\.line, "", \{[\s\S]*?controllerAddress = controller_address,[\s\S]*?\}\)/,
+    'each tunnel dispatch must use only the controller address proven in the same synchronous turn',
   );
   assert.match(source, /controller_address_reuse_enabled = false/);
   assert.match(source, /controllerAddressReuseEnabled = false/);

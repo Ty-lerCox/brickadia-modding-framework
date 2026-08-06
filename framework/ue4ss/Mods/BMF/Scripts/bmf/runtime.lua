@@ -35,6 +35,17 @@ local TARGET_SERVER_EXECUTABLE = "BrickadiaServer-Win64-Shipping.exe"
 local TARGET_PLATFORM = "windows-dedicated-server"
 local BUILD_DETECTION_MODE = "declared-target-only"
 local UNSUPPORTED_BUILD_POLICY = "report-only"
+do
+  local readiness_chunk, readiness_load_error = loadfile(
+    ROOT .. "/Scripts/bmf/connection_readiness.lua")
+  if type(readiness_chunk) ~= "function" then
+    error("BMF connection readiness module could not be loaded: " .. tostring(readiness_load_error))
+  end
+  BMFConnectionReadiness = readiness_chunk()
+  if type(BMFConnectionReadiness) ~= "table" then
+    error("BMF connection readiness module returned an invalid value")
+  end
+end
 local COMMAND_EMPTY_READ_RETRY_LIMIT = 5
 BMF_COMMAND_WORKER_DEFAULT_POLL_MS = 250
 BMF_COMMAND_WORKER_FALLBACK_POLL_MS = 1000
@@ -268,6 +279,15 @@ local state = {
       unified_enabled = true,
       budget_ms = 3,
       budget_enforced = true,
+      current_poll_interval_ms = 25,
+      poll_tier = "active",
+      poll_passes_total = 0,
+      idle_passes_total = 0,
+      active_passes_total = 0,
+      backoff_transitions_total = 0,
+      work_wakeups_total = 0,
+      consecutive_empty_passes = 0,
+      recent_work_passes_remaining = 4,
       native_drains = {
         budget_enabled = true,
         batch_size = 1,
@@ -548,6 +568,11 @@ local state = {
     controller_cache_hits = 0,
     controller_cache_refreshes = 0,
     controller_address_reuse_enabled = false,
+    readiness_waits = 0,
+    readiness_rejections = 0,
+    readiness_expirations = 0,
+    readiness_ack_failures = 0,
+    last_readiness_code = "",
     dispatch_count = 0,
     active_by_id = {},
     active_by_idempotency_key = {},
@@ -661,6 +686,7 @@ local state = {
     last_repair_at = "",
     last_repair_error = "",
   },
+  connection_readiness = BMFConnectionReadiness.new(),
   player_position_controller_cache = {
     records = {},
     ttl_seconds = 120,
@@ -872,6 +898,7 @@ local UNSAFE_PLUGIN_GLOBAL_NAMES = {
   "IsDelayedActionPaused",
   "IsValidDelayedActionHandle",
   "BMFSocketPlayerChatMessageImplementationProbe",
+  "BMFSocketPlayerChatMessageImplementationReadiness",
   "BMFSocketReservedChatGuardInstall",
   "BMFSocketReservedChatGuardStatus",
   "BMFSocketReceive",
@@ -1673,6 +1700,13 @@ function BMF_telemetry_snapshot()
     received_commands = tonumber(state.socket.received_commands) or 0,
     sent_responses = tonumber(state.socket.sent_responses) or 0,
     poll_count = tonumber(state.socket.poll_count) or 0,
+    current_poll_interval_ms = tonumber(state.telemetry.socket_scheduler.current_poll_interval_ms) or 25,
+    poll_tier = tostring(state.telemetry.socket_scheduler.poll_tier or "active"),
+    poll_passes_total = tonumber(state.telemetry.socket_scheduler.poll_passes_total) or 0,
+    idle_passes_total = tonumber(state.telemetry.socket_scheduler.idle_passes_total) or 0,
+    active_passes_total = tonumber(state.telemetry.socket_scheduler.active_passes_total) or 0,
+    backoff_transitions_total = tonumber(state.telemetry.socket_scheduler.backoff_transitions_total) or 0,
+    work_wakeups_total = tonumber(state.telemetry.socket_scheduler.work_wakeups_total) or 0,
     last_poll_at = tostring(state.socket.last_poll_at or ""),
     last_poll_age_ms = type(BMF_socket_poll_age_ms) == "function" and BMF_socket_poll_age_ms() or 0,
     last_drain_count = tonumber(state.socket.last_drain_count) or 0,
@@ -1687,6 +1721,9 @@ function BMF_telemetry_snapshot()
     last_watchdog_error = tostring(state.socket.last_watchdog_error or ""),
   }
   local tunnel = state.game_command_tunnel
+  local readiness = BMFConnectionReadiness.snapshot(state.connection_readiness)
+  readiness.current = nil
+  telemetry.connection_readiness = readiness
   local tunnel_ready = tunnel.enabled == true
     and tunnel.worker_started == true
     and state.socket_worker_started == true
@@ -1722,6 +1759,11 @@ function BMF_telemetry_snapshot()
     rejected = tonumber(tunnel.rejected) or 0,
     expired = tonumber(tunnel.expired) or 0,
     outcome_unknown = tonumber(tunnel.outcome_unknown) or 0,
+    readiness_waits = tonumber(tunnel.readiness_waits) or 0,
+    readiness_rejections = tonumber(tunnel.readiness_rejections) or 0,
+    readiness_expirations = tonumber(tunnel.readiness_expirations) or 0,
+    readiness_ack_failures = tonumber(tunnel.readiness_ack_failures) or 0,
+    last_readiness_code = tostring(tunnel.last_readiness_code or ""),
     duplicate_requests = tonumber(tunnel.duplicate_requests) or 0,
     scheduler_failures = tonumber(tunnel.scheduler_failures) or 0,
     worker_started = tunnel.worker_started == true,
@@ -2106,6 +2148,13 @@ write_status = function()
     "\"socket_worker_watchdog_started\":" .. tostring(state.socket_worker_watchdog_started and true or false),
     "\"socket_worker_watchdog_mode\":" .. json_string(state.socket_worker_watchdog_mode or "stopped"),
     "\"socket_poll_count\":" .. tostring(state.socket.poll_count or 0),
+    "\"socket_current_poll_interval_ms\":" .. tostring(state.telemetry.socket_scheduler.current_poll_interval_ms or 25),
+    "\"socket_poll_tier\":" .. json_string(state.telemetry.socket_scheduler.poll_tier or "active"),
+    "\"socket_poll_passes_total\":" .. tostring(state.telemetry.socket_scheduler.poll_passes_total or 0),
+    "\"socket_idle_passes_total\":" .. tostring(state.telemetry.socket_scheduler.idle_passes_total or 0),
+    "\"socket_active_passes_total\":" .. tostring(state.telemetry.socket_scheduler.active_passes_total or 0),
+    "\"socket_backoff_transitions_total\":" .. tostring(state.telemetry.socket_scheduler.backoff_transitions_total or 0),
+    "\"socket_work_wakeups_total\":" .. tostring(state.telemetry.socket_scheduler.work_wakeups_total or 0),
     "\"socket_last_poll_at\":" .. json_string(state.socket.last_poll_at or ""),
     "\"socket_last_poll_age_ms\":" .. tostring(type(BMF_socket_poll_age_ms) == "function" and BMF_socket_poll_age_ms() or 0),
     "\"socket_configured_ingress_per_pump\":" .. tostring(state.telemetry.socket_scheduler.configured_ingress_per_pump or 0),
@@ -2148,6 +2197,11 @@ write_status = function()
     "\"game_command_tunnel_rejected\":" .. tostring(state.game_command_tunnel.rejected or 0),
     "\"game_command_tunnel_expired\":" .. tostring(state.game_command_tunnel.expired or 0),
     "\"game_command_tunnel_outcome_unknown\":" .. tostring(state.game_command_tunnel.outcome_unknown or 0),
+    "\"game_command_tunnel_readiness_waits\":" .. tostring(state.game_command_tunnel.readiness_waits or 0),
+    "\"game_command_tunnel_readiness_rejections\":" .. tostring(state.game_command_tunnel.readiness_rejections or 0),
+    "\"game_command_tunnel_readiness_expirations\":" .. tostring(state.game_command_tunnel.readiness_expirations or 0),
+    "\"game_command_tunnel_readiness_ack_failures\":" .. tostring(state.game_command_tunnel.readiness_ack_failures or 0),
+    "\"game_command_tunnel_last_readiness_code\":" .. json_string(state.game_command_tunnel.last_readiness_code or ""),
     "\"game_command_tunnel_last_result_state\":" .. json_string(state.game_command_tunnel.last_result_state or ""),
     "\"game_command_tunnel_last_result_code\":" .. json_string(state.game_command_tunnel.last_result_code or ""),
     "\"command_worker_poll_interval_ms\":" .. tostring(state.command_worker_poll_interval_ms or 0),
@@ -2911,6 +2965,13 @@ local function BMF_socket_write_metadata()
     port = state.socket.port,
     token = state.socket.token,
     pollIntervalMs = state.socket.poll_interval_ms,
+    currentPollIntervalMs = state.telemetry.socket_scheduler.current_poll_interval_ms,
+    pollTier = state.telemetry.socket_scheduler.poll_tier,
+    pollPassesTotal = state.telemetry.socket_scheduler.poll_passes_total,
+    idlePassesTotal = state.telemetry.socket_scheduler.idle_passes_total,
+    activePassesTotal = state.telemetry.socket_scheduler.active_passes_total,
+    backoffTransitionsTotal = state.telemetry.socket_scheduler.backoff_transitions_total,
+    workWakeupsTotal = state.telemetry.socket_scheduler.work_wakeups_total,
     configuredIngressPerPump = state.telemetry.socket_scheduler.configured_ingress_per_pump,
     effectiveIngressPerPump = state.telemetry.socket_scheduler.effective_ingress_per_pump,
     directIngressCapEnabled = state.telemetry.socket_scheduler.direct_ingress_cap_enabled,
@@ -3059,6 +3120,10 @@ function BMF_socket_configure_from_env()
   state.socket.port = tonumber(BMF_socket_env("OMEGGA_BMF_SOCKET_PORT")) or 0
   state.socket.token = BMF_socket_env("OMEGGA_BMF_SOCKET_TOKEN")
   state.socket.poll_interval_ms = math.max(5, tonumber(BMF_socket_env("OMEGGA_BMF_SOCKET_POLL_MS")) or SOCKET_DEFAULT_POLL_MS)
+  socket_scheduler.current_poll_interval_ms = 25
+  socket_scheduler.poll_tier = "active"
+  socket_scheduler.consecutive_empty_passes = 0
+  socket_scheduler.recent_work_passes_remaining = 4
   socket_scheduler.budget_ms = math.max(1, math.min(1000, BMF_env_number(
     "BMF_GAME_THREAD_PUMP_BUDGET_MS",
     3,
@@ -3177,6 +3242,13 @@ function BMF_socket_status_snapshot()
     host = state.socket.host,
     port = state.socket.port,
     pollIntervalMs = state.socket.poll_interval_ms,
+    currentPollIntervalMs = state.telemetry.socket_scheduler.current_poll_interval_ms,
+    pollTier = state.telemetry.socket_scheduler.poll_tier,
+    pollPassesTotal = state.telemetry.socket_scheduler.poll_passes_total,
+    idlePassesTotal = state.telemetry.socket_scheduler.idle_passes_total,
+    activePassesTotal = state.telemetry.socket_scheduler.active_passes_total,
+    backoffTransitionsTotal = state.telemetry.socket_scheduler.backoff_transitions_total,
+    workWakeupsTotal = state.telemetry.socket_scheduler.work_wakeups_total,
     configuredIngressPerPump = state.telemetry.socket_scheduler.configured_ingress_per_pump,
     effectiveIngressPerPump = state.telemetry.socket_scheduler.effective_ingress_per_pump,
     directIngressCapEnabled = state.telemetry.socket_scheduler.direct_ingress_cap_enabled,
@@ -22168,6 +22240,11 @@ function live_chat_first_property_text(values, names)
   return ""
 end
 
+function live_chat_stable_uuid(value)
+  local text = trim_string(tostring(value or "")):lower()
+  return text:match("(%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x)") or ""
+end
+
 function live_chat_controller_metadata(controller)
   local metadata = {}
   if not minigame_object_valid(controller) then
@@ -22186,6 +22263,9 @@ function live_chat_controller_metadata(controller)
         "PlayerNamePrivate",
         "PlayerName",
         "DisplayName",
+        "UniqueId",
+        "SessionId",
+        "UserId",
       },
       0,
       false
@@ -22201,6 +22281,15 @@ function live_chat_controller_metadata(controller)
       metadata.username = player_name
       metadata.playerName = player_name
       metadata.displayName = player_name
+    end
+    local uuid = live_chat_stable_uuid(live_chat_first_property_text(values, {
+      "UniqueId",
+      "SessionId",
+      "UserId",
+    }))
+    if uuid ~= "" then
+      metadata.uuid = uuid
+      metadata.playerId = uuid
     end
   end
 
@@ -22265,21 +22354,17 @@ function live_chat_exact_identity_values(record)
 end
 
 function live_chat_match_cached_player(players, target)
-  local target_values = {}
-  for _, value in ipairs(live_chat_exact_identity_values(target)) do
-    target_values[value] = true
+  local target_uuid = live_chat_stable_uuid(
+    target and (target.uuid or target.id or target.playerId) or "")
+  if target_uuid == "" then
+    return nil, nil
   end
   local match_index = nil
   local match_player = nil
   for index, player in ipairs(players or {}) do
-    local matched = false
-    for _, value in ipairs(live_chat_exact_identity_values(player)) do
-      if target_values[value] then
-        matched = true
-        break
-      end
-    end
-    if matched then
+    local player_uuid = live_chat_stable_uuid(
+      player and (player.uuid or player.id or player.playerId) or "")
+    if player_uuid ~= "" and player_uuid == target_uuid then
       if match_index ~= nil then
         return nil, nil
       end
@@ -22869,6 +22954,7 @@ end
 
 function publish_player_cache(cache, options)
   if type(cache) ~= "table" then
+    BMFConnectionReadiness.sync(state.connection_readiness, {}, os.time() * 1000)
     return nil
   end
   options = type(options) == "table" and options or {}
@@ -22894,6 +22980,7 @@ function publish_player_cache(cache, options)
   registry.entries = type(players) == "table" and #players or 0
   state.player_cache = cache
   state.player_cache_error = ""
+  BMFConnectionReadiness.sync(state.connection_readiness, players, os.time() * 1000)
   return cache
 end
 
@@ -22910,6 +22997,7 @@ function load_player_cache(options)
     state.player_cache_error = ""
     registry.cache_loaded = true
     registry.entries = 0
+    BMFConnectionReadiness.sync(state.connection_readiness, {}, os.time() * 1000)
     return nil, ""
   end
 
@@ -22920,6 +23008,7 @@ function load_player_cache(options)
     registry.cache_loaded = true
     registry.entries = 0
     registry.disk_load_failures = (tonumber(registry.disk_load_failures) or 0) + 1
+    BMFConnectionReadiness.sync(state.connection_readiness, {}, os.time() * 1000)
     return nil, state.player_cache_error
   end
 
@@ -27710,6 +27799,11 @@ function BMF_game_command_tunnel_snapshot()
     rejected = tonumber(tunnel.rejected) or 0,
     expired = tonumber(tunnel.expired) or 0,
     outcomeUnknown = tonumber(tunnel.outcome_unknown) or 0,
+    readinessWaits = tonumber(tunnel.readiness_waits) or 0,
+    readinessRejections = tonumber(tunnel.readiness_rejections) or 0,
+    readinessExpirations = tonumber(tunnel.readiness_expirations) or 0,
+    readinessAckFailures = tonumber(tunnel.readiness_ack_failures) or 0,
+    lastReadinessCode = tostring(tunnel.last_readiness_code or ""),
     duplicateRequests = tonumber(tunnel.duplicate_requests) or 0,
     schedulerFailures = tonumber(tunnel.scheduler_failures) or 0,
     workerStarted = tunnel.worker_started == true,
@@ -27763,18 +27857,23 @@ local function BMF_game_command_tunnel_remember_result(record, request)
   end
   local line = trim_string(request and request.line or "")
   local idempotency_key = trim_string(request and request.idempotencyKey or "")
+  local sender_uuid = trim_string(request and request.senderUuid or ""):lower()
+  local operation_type = trim_string(request and request.operationType or "")
   local max_bytes = math.max(
     65536,
     tonumber(tunnel.completed_max_bytes) or GAME_COMMAND_TUNNEL_COMPLETED_DEFAULT_MAX_BYTES)
   local cached_record, retained_bytes, response_omitted = BMF_socket_replay_record_for_cache(
     record,
     max_bytes,
-    #request_id + #line + #idempotency_key)
+    #request_id + #line + #idempotency_key + #sender_uuid + #operation_type)
   local entry = {
     record = cached_record,
     requestId = request_id,
     line = line,
     idempotencyKey = idempotency_key,
+    senderUuid = sender_uuid,
+    connectionGeneration = tonumber(request and request.connectionGeneration) or 0,
+    operationType = operation_type,
     retainedBytes = retained_bytes,
   }
   tunnel.completed_by_id[request_id] = entry
@@ -27821,6 +27920,10 @@ BMF_game_command_tunnel_send_terminal = function(request, result_state, code, de
     code = tostring(code or "UNKNOWN"),
     detail = tostring(detail or ""),
     response = type(response) == "string" and response or nil,
+    senderUuid = trim_string(request.senderUuid or ""):lower(),
+    connectionGeneration = tonumber(request.connectionGeneration) or 0,
+    operationType = trim_string(request.operationType or ""),
+    acceptedAtMs = tonumber(request.acceptedAtMs) or 0,
     dispatchMs = tonumber(dispatch_ms) or 0,
     queueDepth = tonumber(tunnel.queued_count) or 0,
   }
@@ -27899,6 +28002,125 @@ local function BMF_game_command_tunnel_line_allowed(line)
     or normalized:match("^/cityrpgremote%s") ~= nil
     or normalized == "/cityrpgroute"
     or normalized:match("^/cityrpgroute%s") ~= nil
+end
+
+function BMF_game_command_tunnel_identity_operation(request)
+  return {
+    requestId = trim_string(request and request.id or ""),
+    senderUuid = trim_string(request and request.senderUuid or ""):lower(),
+    connectionGeneration = tonumber(request and request.connectionGeneration) or 0,
+    acceptedAtMs = tonumber(request and request.acceptedAtMs) or 0,
+    absoluteDeadlineMs = tonumber(request and request.deadlineMs) or 0,
+    operationType = trim_string(request and request.operationType or ""),
+  }
+end
+
+function BMF_game_command_tunnel_requeue(request)
+  if type(request) ~= "table" or request.terminalSent == true then return false end
+  local tunnel = state.game_command_tunnel
+  local queue = tunnel.queues[request.serviceClass]
+  if type(queue) ~= "table" then return false end
+  queue[#queue + 1] = request
+  tunnel.queued_count = (tonumber(tunnel.queued_count) or 0) + 1
+  tunnel.queued_bytes = (tonumber(tunnel.queued_bytes) or 0)
+    + (tonumber(request.retainedBytes) or tonumber(request.lineBytes) or 0)
+  tunnel.scheduled = true
+  return true
+end
+
+function BMF_game_command_tunnel_readiness_probe(request)
+  local tunnel = state.game_command_tunnel
+  local uuid = trim_string(request and request.senderUuid or ""):lower()
+  local generation = tonumber(request and request.connectionGeneration) or 0
+  local target, _, resolve_reason = live_chat_resolve_strict_target({
+    uuid = uuid,
+    connectionGeneration = generation,
+  })
+  if target == nil then
+    local code = "STRICT_TARGET_" .. tostring(resolve_reason or "unavailable"):upper()
+    BMFConnectionReadiness.note_check(
+      state.connection_readiness,
+      uuid,
+      generation,
+      false,
+      code,
+      os.time() * 1000)
+    tunnel.last_readiness_code = code
+    return false, "", code, "exact UUID and connection generation are not currently resolvable"
+  end
+
+  local controller_address = type(live_chat_object_key) == "function"
+    and trim_string(live_chat_object_key(target.controller, ""))
+    or ""
+  if controller_address == "" then
+    local code = "CONTROLLER_ADDRESS_UNAVAILABLE"
+    BMFConnectionReadiness.note_check(
+      state.connection_readiness, uuid, generation, false, code, os.time() * 1000)
+    tunnel.last_readiness_code = code
+    return false, "", code, "exact controller address is unavailable"
+  end
+  if type(BMFSocketPlayerChatMessageImplementationReadiness) ~= "function" then
+    local code = "NATIVE_READINESS_HELPER_UNAVAILABLE"
+    BMFConnectionReadiness.note_check(
+      state.connection_readiness, uuid, generation, false, code, os.time() * 1000)
+    tunnel.last_readiness_code = code
+    return false, "", code, "side-effect-free native readiness helper is unavailable"
+  end
+
+  local probe_ok, probe_text = pcall(
+    BMFSocketPlayerChatMessageImplementationReadiness,
+    controller_address,
+    "player-chat-message-implementation-readiness")
+  local _, fields = parse_key_value_lines(probe_ok and probe_text or tostring(probe_text))
+  local ready = probe_ok
+    and tostring(fields.ok or ""):lower() == "true"
+    and tostring(fields.stage or "") == "native_callable"
+    and tostring(fields.side_effect_free or ""):lower() == "true"
+    and tostring(fields.controller_hint_matched or ""):lower() == "true"
+    and tonumber(fields.controller_scanned) == 0
+  local code = ready and "NATIVE_CALLABLE"
+    or ("NATIVE_NOT_CALLABLE_" .. tostring(fields.stage or (probe_ok and "unknown" or "exception")):upper())
+  BMFConnectionReadiness.note_check(
+    state.connection_readiness,
+    uuid,
+    generation,
+    ready,
+    code,
+    os.time() * 1000)
+  tunnel.last_readiness_code = code
+  return ready, ready and controller_address or "", code,
+    tostring(fields.detail or (probe_ok and "native callable proof failed" or probe_text))
+end
+
+function BMF_game_command_tunnel_acknowledge(request)
+  if request.admissionSent == true then return true end
+  local tunnel = state.game_command_tunnel
+  local sent = BMF_game_command_tunnel_send_json({
+    type = "tunnel.ack",
+    source = "bmf",
+    v = tonumber(tunnel.protocol_version) or 1,
+    ts = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    id = request.id,
+    state = "accepted",
+    senderUuid = request.senderUuid,
+    connectionGeneration = request.connectionGeneration,
+    operationType = request.operationType,
+    acceptedAtMs = request.acceptedAtMs,
+    queueDepth = tonumber(tunnel.queued_count) or 0,
+  })
+  if not sent then
+    tunnel.readiness_ack_failures = (tonumber(tunnel.readiness_ack_failures) or 0) + 1
+    tunnel.last_readiness_code = "ACK_SEND_FAILED"
+    return false
+  end
+  request.admissionSent = true
+  request.brokerAcceptedAtMs = os.time() * 1000
+  request.acceptedClock = os.clock()
+  request.operationContext = BMF_operation_begin(request.operationType, "tunnel", request)
+  BMF_operation_update_stage(request.operationContext, "native_callable")
+  tunnel.accepted = (tonumber(tunnel.accepted) or 0) + 1
+  BMF_socket_scheduler_record_admission("tunnel")
+  return true
 end
 
 BMF_game_command_tunnel_dequeue = function(service_class)
@@ -28019,58 +28241,145 @@ BMF_game_command_tunnel_drain_once = function(request)
 
   local work_started_clock = os.clock()
   tunnel.running = true
-  BMF_operation_start_execution(request.operationContext)
   local injection_started = false
   local processing_ok, processing_error = pcall(function()
-  if BMF_game_command_tunnel_request_expired(request) then
-    BMF_game_command_tunnel_send_terminal(
-      request,
-      "expired",
-      "DEADLINE_EXPIRED",
-      "request deadline elapsed before injection",
-      nil,
-      0)
-  else
-    local dispatch_started_clock = os.clock()
-    -- Controller UObject lifetimes end on disconnect/reconnect. Resolve a
-    -- controller inside every dispatch and never carry its raw address into a
-    -- later request, where even an IsValid check can dereference freed memory.
-    tunnel.controller_cache_refreshes = (tonumber(tunnel.controller_cache_refreshes) or 0) + 1
-    injection_started = true
-    local invoked = BMF_player_message_implementation_probe(request.line, "", {
-      skipRateLimit = true,
-      nativeResolverOnly = true,
-    })
-    local controller_attempts = tonumber(invoked and invoked.data and invoked.data.controllerAttemptCount) or 0
-    for _ = 1, controller_attempts do
-      BMF_operation_note_controller_resolution(invoked and invoked.ok == true)
-    end
-
-    local dispatch_ms = BMF_telemetry_duration_ms(dispatch_started_clock)
-    tunnel.dispatch_count = (tonumber(tunnel.dispatch_count) or 0) + 1
-    tunnel.last_dispatch_ms = dispatch_ms
-    tunnel.max_dispatch_ms = math.max(tonumber(tunnel.max_dispatch_ms) or 0, dispatch_ms)
-    tunnel.dispatch_ms_sum = (tonumber(tunnel.dispatch_ms_sum) or 0) + dispatch_ms
-
-    if invoked.ok == true then
+    local now_ms = os.time() * 1000
+    local admitted, admission_code = BMFConnectionReadiness.admission(
+      state.connection_readiness,
+      BMF_game_command_tunnel_identity_operation(request),
+      now_ms)
+    if not admitted then
+      local expired = admission_code == "DEADLINE_EXPIRED"
+      if expired then
+        tunnel.readiness_expirations = (tonumber(tunnel.readiness_expirations) or 0) + 1
+      else
+        tunnel.readiness_rejections = (tonumber(tunnel.readiness_rejections) or 0) + 1
+      end
+      tunnel.last_readiness_code = tostring(admission_code or "READINESS_REJECTED")
       BMF_game_command_tunnel_send_terminal(
         request,
-        "injected",
-        "OK",
-        tostring(invoked.message or "command injected"),
-        BMF_game_command_tunnel_compact_response(invoked),
-        dispatch_ms)
+        expired and "expired" or "rejected",
+        tostring(admission_code or "READINESS_REJECTED"),
+        "identity, lifecycle, or deadline changed before native readiness",
+        nil,
+        0)
     else
-      local result_state, code = BMF_game_command_tunnel_classify_failure(invoked)
-      BMF_game_command_tunnel_send_terminal(
-        request,
-        result_state,
-        code,
-        tostring(invoked and invoked.message or "command injection failed"),
-        BMF_game_command_tunnel_compact_response(invoked),
-        dispatch_ms)
+      local ready, controller_address, readiness_code, readiness_detail =
+        BMF_game_command_tunnel_readiness_probe(request)
+      if not ready then
+        if BMF_game_command_tunnel_request_expired(request) then
+          tunnel.readiness_expirations = (tonumber(tunnel.readiness_expirations) or 0) + 1
+          BMF_game_command_tunnel_send_terminal(
+            request,
+            "expired",
+            "DEADLINE_EXPIRED",
+            "native callability was not proven before the absolute deadline: "
+              .. tostring(readiness_code),
+            nil,
+            0)
+        elseif BMF_game_command_tunnel_requeue(request) then
+          tunnel.readiness_waits = (tonumber(tunnel.readiness_waits) or 0) + 1
+          tunnel.last_readiness_code = tostring(readiness_code or "NATIVE_NOT_CALLABLE")
+        else
+          tunnel.readiness_rejections = (tonumber(tunnel.readiness_rejections) or 0) + 1
+          BMF_game_command_tunnel_send_terminal(
+            request,
+            "rejected",
+            "READINESS_REQUEUE_FAILED",
+            tostring(readiness_detail or "native readiness wait could not be queued"),
+            nil,
+            0)
+        end
+      else
+        local decision, decision_code = BMFConnectionReadiness.execution_decision(
+          state.connection_readiness,
+          BMF_game_command_tunnel_identity_operation(request),
+          os.time() * 1000)
+        local final_target, _, final_resolve_reason = live_chat_resolve_strict_target({
+          uuid = request.senderUuid,
+          connectionGeneration = request.connectionGeneration,
+        })
+        local final_controller_address = final_target ~= nil
+          and trim_string(live_chat_object_key(final_target.controller, ""))
+          or ""
+        if decision ~= "execute"
+            or final_controller_address == ""
+            or final_controller_address ~= controller_address then
+          local expired = decision == "expire"
+          local code = expired and "DEADLINE_EXPIRED"
+            or (decision ~= "execute" and tostring(decision_code) or "READINESS_CHANGED")
+          if expired then
+            tunnel.readiness_expirations = (tonumber(tunnel.readiness_expirations) or 0) + 1
+          else
+            tunnel.readiness_rejections = (tonumber(tunnel.readiness_rejections) or 0) + 1
+          end
+          BMFConnectionReadiness.note_check(
+            state.connection_readiness,
+            request.senderUuid,
+            request.connectionGeneration,
+            false,
+            code,
+            os.time() * 1000)
+          tunnel.last_readiness_code = code
+          BMF_game_command_tunnel_send_terminal(
+            request,
+            expired and "expired" or "rejected",
+            code,
+            "exact session changed after readiness proof: " .. tostring(final_resolve_reason or ""),
+            nil,
+            0)
+        elseif not BMF_game_command_tunnel_acknowledge(request) then
+          BMF_game_command_tunnel_send_terminal(
+            request,
+            "rejected",
+            "ACK_SEND_FAILED",
+            "native-ready operation was not executed because its acceptance ACK failed",
+            nil,
+            0)
+        else
+          BMF_operation_start_execution(request.operationContext)
+          local dispatch_started_clock = os.clock()
+          -- The address is derived from the exact UUID+generation and used only
+          -- in this synchronous dispatch. It is never stored across a tick.
+          tunnel.controller_cache_refreshes = (tonumber(tunnel.controller_cache_refreshes) or 0) + 1
+          injection_started = true
+          local invoked = BMF_player_message_implementation_probe(request.line, "", {
+            skipRateLimit = true,
+            controllerAddress = controller_address,
+          })
+          local controller_attempts =
+            tonumber(invoked and invoked.data and invoked.data.controllerAttemptCount) or 0
+          for _ = 1, controller_attempts do
+            BMF_operation_note_controller_resolution(invoked and invoked.ok == true)
+          end
+
+          local dispatch_ms = BMF_telemetry_duration_ms(dispatch_started_clock)
+          tunnel.dispatch_count = (tonumber(tunnel.dispatch_count) or 0) + 1
+          tunnel.last_dispatch_ms = dispatch_ms
+          tunnel.max_dispatch_ms = math.max(tonumber(tunnel.max_dispatch_ms) or 0, dispatch_ms)
+          tunnel.dispatch_ms_sum = (tonumber(tunnel.dispatch_ms_sum) or 0) + dispatch_ms
+
+          if invoked.ok == true then
+            BMF_game_command_tunnel_send_terminal(
+              request,
+              "injected",
+              "OK",
+              tostring(invoked.message or "command injected"),
+              BMF_game_command_tunnel_compact_response(invoked),
+              dispatch_ms)
+          else
+            local result_state, code = BMF_game_command_tunnel_classify_failure(invoked)
+            BMF_game_command_tunnel_send_terminal(
+              request,
+              result_state,
+              code,
+              tostring(invoked and invoked.message or "command injection failed"),
+              BMF_game_command_tunnel_compact_response(invoked),
+              dispatch_ms)
+          end
+        end
+      end
     end
-  end
   end)
   tunnel.running = false
 
@@ -28160,11 +28469,65 @@ BMF_process_game_command_tunnel_request = function(decoded)
 
   local line = trim_string(decoded.line or "")
   local idempotency_key = trim_string(decoded.idempotencyKey or "")
+  local sender_uuid = trim_string(decoded.senderUuid or ""):lower()
+  local connection_generation = tonumber(decoded.connectionGeneration) or 0
+  local accepted_at_ms = tonumber(decoded.acceptedAtMs) or 0
+  local operation_type = trim_string(decoded.operationType or "")
+  local supplied_issued_at_ms = tonumber(decoded.issuedAtMs)
+  local supplied_deadline_ms = tonumber(decoded.deadlineMs)
+  if sender_uuid == "" or #sender_uuid > 128 then
+    return BMF_game_command_tunnel_send_rejection(
+      request_id, "rejected", "SENDER_UUID_REQUIRED", "senderUuid must contain 1-128 bytes")
+  end
+  if connection_generation < 1 or connection_generation % 1 ~= 0 then
+    return BMF_game_command_tunnel_send_rejection(
+      request_id, "rejected", "CONNECTION_GENERATION_REQUIRED", "connectionGeneration must be a positive integer")
+  end
+  if accepted_at_ms <= 0 then
+    return BMF_game_command_tunnel_send_rejection(
+      request_id, "rejected", "ACCEPTED_AT_REQUIRED", "positive acceptedAtMs is required")
+  end
+  if operation_type == "" or #operation_type > 128 then
+    return BMF_game_command_tunnel_send_rejection(
+      request_id, "rejected", "OPERATION_TYPE_REQUIRED", "operationType must contain 1-128 bytes")
+  end
+  if (supplied_deadline_ms or 0) <= 0 then
+    return BMF_game_command_tunnel_send_rejection(
+      request_id, "rejected", "DEADLINE_REQUIRED", "positive absolute deadlineMs is required")
+  end
+  local current_session, current_session_reason = BMFConnectionReadiness.current(
+    state.connection_readiness,
+    sender_uuid,
+    connection_generation)
+  if current_session == nil then
+    state.game_command_tunnel.readiness_rejections =
+      (tonumber(state.game_command_tunnel.readiness_rejections) or 0) + 1
+    state.game_command_tunnel.last_readiness_code = tostring(current_session_reason or "unknown_current_session")
+    return BMF_game_command_tunnel_send_rejection(
+      request_id,
+      "rejected",
+      tostring(current_session_reason or "unknown_current_session"):upper(),
+      "sender UUID and connection generation are not the current live session")
+  end
+  local identity_now_ms = os.time() * 1000
+  if supplied_deadline_ms <= accepted_at_ms or supplied_deadline_ms <= identity_now_ms then
+    state.game_command_tunnel.readiness_expirations =
+      (tonumber(state.game_command_tunnel.readiness_expirations) or 0) + 1
+    state.game_command_tunnel.last_readiness_code = "DEADLINE_EXPIRED"
+    return BMF_game_command_tunnel_send_rejection(
+      request_id,
+      "expired",
+      "DEADLINE_EXPIRED",
+      "absolute deadlineMs elapsed before duplicate or admission handling")
+  end
   local completed = tunnel.completed_by_id[request_id]
   if completed ~= nil then
     tunnel.duplicate_requests = (tonumber(tunnel.duplicate_requests) or 0) + 1
     if tostring(completed.line or "") ~= line
-        or tostring(completed.idempotencyKey or "") ~= idempotency_key then
+        or tostring(completed.idempotencyKey or "") ~= idempotency_key
+        or tostring(completed.senderUuid or "") ~= sender_uuid
+        or tonumber(completed.connectionGeneration) ~= connection_generation
+        or tostring(completed.operationType or "") ~= operation_type then
       BMF_game_command_tunnel_send_json({
         type = "tunnel.result",
         source = "bmf",
@@ -28185,7 +28548,11 @@ BMF_process_game_command_tunnel_request = function(decoded)
   local active = tunnel.active_by_id[request_id]
   if active ~= nil then
     tunnel.duplicate_requests = (tonumber(tunnel.duplicate_requests) or 0) + 1
-    if active.line ~= line or tostring(active.idempotencyKey or "") ~= idempotency_key then
+    if active.line ~= line
+        or tostring(active.idempotencyKey or "") ~= idempotency_key
+        or tostring(active.senderUuid or "") ~= sender_uuid
+        or tonumber(active.connectionGeneration) ~= connection_generation
+        or tostring(active.operationType or "") ~= operation_type then
       BMF_game_command_tunnel_send_json({
         type = "tunnel.result",
         source = "bmf",
@@ -28199,17 +28566,35 @@ BMF_process_game_command_tunnel_request = function(decoded)
       })
       return false
     end
+    if active.admissionSent == true then
+      BMF_game_command_tunnel_send_json({
+        type = "tunnel.ack",
+        source = "bmf",
+        v = tonumber(tunnel.protocol_version) or 1,
+        ts = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+        id = request_id,
+        state = "accepted",
+        duplicate = true,
+        senderUuid = active.senderUuid,
+        connectionGeneration = active.connectionGeneration,
+        operationType = active.operationType,
+        acceptedAtMs = active.acceptedAtMs,
+        queueDepth = tonumber(tunnel.queued_count) or 0,
+      })
+      return true
+    end
     BMF_game_command_tunnel_send_json({
-      type = "tunnel.ack",
+      type = "tunnel.result",
       source = "bmf",
       v = tonumber(tunnel.protocol_version) or 1,
       ts = os.date("!%Y-%m-%dT%H:%M:%SZ"),
       id = request_id,
-      state = "accepted",
-      duplicate = true,
+      state = "rejected",
+      code = "READINESS_PENDING",
+      detail = "duplicate arrived before exact native callability was proven",
       queueDepth = tonumber(tunnel.queued_count) or 0,
     })
-    return true
+    return false
   end
 
   if #idempotency_key > GAME_COMMAND_TUNNEL_MAX_IDEMPOTENCY_KEY_BYTES then
@@ -28222,7 +28607,10 @@ BMF_process_game_command_tunnel_request = function(decoded)
   if idempotency_key ~= "" then
     local completed_key = tunnel.completed_by_idempotency_key[idempotency_key]
     if completed_key ~= nil then
-      if tostring(completed_key.line or "") ~= line then
+      if tostring(completed_key.line or "") ~= line
+          or tostring(completed_key.senderUuid or "") ~= sender_uuid
+          or tonumber(completed_key.connectionGeneration) ~= connection_generation
+          or tostring(completed_key.operationType or "") ~= operation_type then
         BMF_game_command_tunnel_send_json({
           type = "tunnel.result",
           source = "bmf",
@@ -28246,6 +28634,9 @@ BMF_process_game_command_tunnel_request = function(decoded)
 
     local active_key = tunnel.active_by_idempotency_key[idempotency_key]
     if active_key ~= nil then
+      local identity_matches = tostring(active_key.senderUuid or "") == sender_uuid
+        and tonumber(active_key.connectionGeneration) == connection_generation
+        and tostring(active_key.operationType or "") == operation_type
       BMF_game_command_tunnel_send_json({
         type = "tunnel.result",
         source = "bmf",
@@ -28253,8 +28644,9 @@ BMF_process_game_command_tunnel_request = function(decoded)
         ts = os.date("!%Y-%m-%dT%H:%M:%SZ"),
         id = request_id,
         state = "rejected",
-        code = active_key.line == line and "IDEMPOTENCY_KEY_ACTIVE" or "IDEMPOTENCY_KEY_CONFLICT",
-        detail = active_key.line == line
+        code = active_key.line == line and identity_matches
+          and "IDEMPOTENCY_KEY_ACTIVE" or "IDEMPOTENCY_KEY_CONFLICT",
+        detail = active_key.line == line and identity_matches
           and "idempotent command is already accepted under another request id"
           or "idempotencyKey is active with a different command",
         queueDepth = tonumber(tunnel.queued_count) or 0,
@@ -28296,23 +28688,46 @@ BMF_process_game_command_tunnel_request = function(decoded)
     return BMF_game_command_tunnel_send_rejection(request_id, "rejected", "INVALID_SERVICE_CLASS", "serviceClass must be interactive or bulk")
   end
   local now_ms = os.time() * 1000
-  local supplied_issued_at_ms = tonumber(decoded.issuedAtMs)
-  local supplied_deadline_ms = tonumber(decoded.deadlineMs)
   if state.socket_admission.enabled == true
-      and ((supplied_issued_at_ms or 0) <= 0 or (supplied_deadline_ms or 0) <= 0) then
+      and (supplied_issued_at_ms or 0) <= 0 then
     return BMF_game_command_tunnel_send_rejection(
       request_id,
       "rejected",
       "DEADLINE_REQUIRED",
-      "positive issuedAtMs and absolute deadlineMs are required while bounded admission is enabled")
+      "positive issuedAtMs is required while unified bounded admission is enabled")
   end
-  local issued_at_ms = supplied_issued_at_ms or now_ms
-  local deadline_ms = supplied_deadline_ms or (issued_at_ms + 5000)
+  local issued_at_ms = supplied_issued_at_ms or accepted_at_ms
+  local deadline_ms = supplied_deadline_ms
   local deadline_expired = state.socket_admission.enabled == true
     and BMF_socket_scheduler_deadline_expired(deadline_ms, issued_at_ms, nil)
     or deadline_ms <= now_ms
-  if deadline_ms <= issued_at_ms or deadline_expired then
+  if deadline_ms <= issued_at_ms or deadline_ms <= accepted_at_ms or deadline_expired then
     return BMF_game_command_tunnel_send_rejection(request_id, "expired", "DEADLINE_EXPIRED", "absolute deadlineMs has elapsed")
+  end
+  local readiness_admitted, readiness_code = BMFConnectionReadiness.admission(
+    state.connection_readiness,
+    {
+      requestId = request_id,
+      senderUuid = sender_uuid,
+      connectionGeneration = connection_generation,
+      acceptedAtMs = accepted_at_ms,
+      absoluteDeadlineMs = deadline_ms,
+      operationType = operation_type,
+    },
+    now_ms)
+  if not readiness_admitted then
+    local readiness_expired = readiness_code == "DEADLINE_EXPIRED"
+    if readiness_expired then
+      tunnel.readiness_expirations = (tonumber(tunnel.readiness_expirations) or 0) + 1
+    else
+      tunnel.readiness_rejections = (tonumber(tunnel.readiness_rejections) or 0) + 1
+    end
+    tunnel.last_readiness_code = tostring(readiness_code or "READINESS_REJECTED")
+    return BMF_game_command_tunnel_send_rejection(
+      request_id,
+      readiness_expired and "expired" or "rejected",
+      tostring(readiness_code or "READINESS_REJECTED"),
+      "request identity was not admitted for the current connection generation")
   end
 
   local queue = tunnel.queues[service_class]
@@ -28331,7 +28746,7 @@ BMF_process_game_command_tunnel_request = function(decoded)
   if #queue >= class_limit then
     return BMF_game_command_tunnel_send_rejection(request_id, "rejected", "SERVICE_CLASS_FULL", service_class .. " queue budget is full")
   end
-  local retained_bytes = #line + #request_id + #idempotency_key
+  local retained_bytes = #line + #request_id + #idempotency_key + #sender_uuid + #operation_type
   if state.socket_admission.enabled == true
       and (BMF_socket_scheduler_total_bytes() + retained_bytes) > state.socket_admission.max_bytes then
     return BMF_game_command_tunnel_send_rejection(
@@ -28357,16 +28772,14 @@ BMF_process_game_command_tunnel_request = function(decoded)
     serviceClass = service_class,
     deadlineMs = deadline_ms,
     issuedAtMs = issued_at_ms,
-    acceptedAtMs = now_ms,
-    acceptedClock = os.clock(),
+    acceptedAtMs = accepted_at_ms,
+    senderUuid = sender_uuid,
+    connectionGeneration = connection_generation,
+    operationType = operation_type,
     idempotencyKey = idempotency_key,
+    admissionSent = false,
     terminalSent = false,
   }
-  request.operationContext = BMF_operation_begin(
-    BMF_operation_class_from_text(line, "cityrpg.remote"),
-    "tunnel",
-    request)
-  BMF_operation_update_stage(request.operationContext, "queued")
   queue[#queue + 1] = request
   tunnel.active_by_id[request_id] = request
   if idempotency_key ~= "" then
@@ -28382,33 +28795,7 @@ BMF_process_game_command_tunnel_request = function(decoded)
     tonumber(tunnel.peak_bulk_depth) or 0,
     #tunnel.queues.bulk)
   tunnel.peak_bytes = math.max(tonumber(tunnel.peak_bytes) or 0, tunnel.queued_bytes)
-  tunnel.accepted = (tonumber(tunnel.accepted) or 0) + 1
-
-  local ack_sent = BMF_game_command_tunnel_send_json({
-    type = "tunnel.ack",
-    source = "bmf",
-    v = tonumber(tunnel.protocol_version) or 1,
-    ts = os.date("!%Y-%m-%dT%H:%M:%SZ"),
-    id = request_id,
-    state = "accepted",
-    queueDepth = tonumber(tunnel.queued_count) or 0,
-  })
-  if not ack_sent then
-    table.remove(queue, #queue)
-    tunnel.active_by_id[request_id] = nil
-    if idempotency_key ~= "" and tunnel.active_by_idempotency_key[idempotency_key] == request then
-      tunnel.active_by_idempotency_key[idempotency_key] = nil
-    end
-    tunnel.queued_count = math.max(0, tunnel.queued_count - 1)
-    tunnel.queued_bytes = math.max(0, tunnel.queued_bytes - retained_bytes)
-    tunnel.rejected = (tonumber(tunnel.rejected) or 0) + 1
-    tunnel.accepted = math.max(0, (tonumber(tunnel.accepted) or 0) - 1)
-    tunnel.last_error = "failed to send tunnel acknowledgement id=" .. request_id
-    BMF_operation_finish(request.operationContext, "rejected")
-    return false
-  end
-
-  BMF_socket_scheduler_record_admission("tunnel")
+  tunnel.last_readiness_code = tostring(readiness_code or "waiting")
   tunnel.scheduled = true
   return true
 end
@@ -28776,6 +29163,50 @@ function BMF_drain_socket_messages(max_count, pump_started_clock)
   return drained + native_drained, drained, direct_admitted, budget_admission_stopped
 end
 
+function BMF_socket_scheduler_update_idle_backoff(has_work, has_pending)
+  local scheduler = state.telemetry.socket_scheduler
+  local previous_tier = tostring(scheduler.poll_tier or "active")
+  local next_tier = previous_tier
+  local next_interval = tonumber(scheduler.current_poll_interval_ms) or 25
+  local active = has_work == true or has_pending == true
+  scheduler.poll_passes_total = (tonumber(scheduler.poll_passes_total) or 0) + 1
+
+  if active then
+    if previous_tier ~= "active" then
+      scheduler.work_wakeups_total = (tonumber(scheduler.work_wakeups_total) or 0) + 1
+    end
+    scheduler.active_passes_total = (tonumber(scheduler.active_passes_total) or 0) + 1
+    scheduler.consecutive_empty_passes = 0
+    scheduler.recent_work_passes_remaining = 4
+    next_tier = "active"
+    next_interval = 25
+  elseif (tonumber(scheduler.recent_work_passes_remaining) or 0) > 0 then
+    scheduler.active_passes_total = (tonumber(scheduler.active_passes_total) or 0) + 1
+    scheduler.recent_work_passes_remaining = (tonumber(scheduler.recent_work_passes_remaining) or 0) - 1
+    scheduler.consecutive_empty_passes = 0
+    next_tier = "active"
+    next_interval = 25
+  else
+    scheduler.idle_passes_total = (tonumber(scheduler.idle_passes_total) or 0) + 1
+    scheduler.consecutive_empty_passes = (tonumber(scheduler.consecutive_empty_passes) or 0) + 1
+    if scheduler.consecutive_empty_passes <= 6 then
+      next_tier = "short_idle"
+      next_interval = 50
+    else
+      next_tier = "deep_idle"
+      next_interval = 100
+    end
+  end
+
+  if previous_tier ~= next_tier
+      or (tonumber(scheduler.current_poll_interval_ms) or 25) ~= next_interval then
+    scheduler.backoff_transitions_total = (tonumber(scheduler.backoff_transitions_total) or 0) + 1
+  end
+  scheduler.poll_tier = next_tier
+  scheduler.current_poll_interval_ms = next_interval
+  return next_interval
+end
+
 function BMF_schedule_socket_worker_poll(delay_ms, generation)
   local delay = tonumber(delay_ms) or state.socket.poll_interval_ms or SOCKET_DEFAULT_POLL_MS
   return BMF_schedule_delayed_callback("socket_worker", delay, function()
@@ -28807,6 +29238,7 @@ function BMF_poll_socket_messages()
 
   local pump_started_clock = os.clock()
   local ingress_count = 0
+  local observed_work_count = 0
   local direct_admitted = 0
   local tunnel_dispatched = 0
   local direct_dispatched = 0
@@ -28814,9 +29246,10 @@ function BMF_poll_socket_messages()
   local budget_tunnel_dispatch_skipped = false
   local budget_dispatch_skipped = false
   local pump_ok, pump_error = pcall(function()
-    local _, drained, admitted, stopped_for_budget = BMF_drain_socket_messages(
+    local total_drained, drained, admitted, stopped_for_budget = BMF_drain_socket_messages(
       state.telemetry.socket_scheduler.effective_ingress_per_pump,
       pump_started_clock)
+    observed_work_count = tonumber(total_drained) or 0
     ingress_count = tonumber(drained) or 0
     direct_admitted = tonumber(admitted) or 0
     budget_admission_stopped = stopped_for_budget == true
@@ -28876,8 +29309,18 @@ function BMF_poll_socket_messages()
     BMF_socket_metadata_heartbeat(true)
   end
 
+  BMF_socket_scheduler_update_idle_backoff(
+    observed_work_count > 0
+      or direct_admitted > 0
+      or tunnel_dispatched > 0
+      or direct_dispatched > 0,
+    BMF_socket_scheduler_total_depth() > 0)
+
   if state.socket_worker_started then
-    if not BMF_schedule_socket_worker_poll(state.socket.poll_interval_ms, state.socket_worker_generation) then
+    if not BMF_schedule_socket_worker_poll(
+        state.telemetry.socket_scheduler.current_poll_interval_ms,
+        state.socket_worker_generation)
+    then
       state.socket_worker_started = false
       state.socket_worker_mode = "stopped"
       tunnel.worker_started = false
@@ -28943,6 +29386,10 @@ function BMF_start_socket_worker(reason, options)
   state.socket_worker_generation = generation
   state.socket_worker_started = true
   state.socket_worker_mode = "starting"
+  state.telemetry.socket_scheduler.current_poll_interval_ms = 25
+  state.telemetry.socket_scheduler.poll_tier = "active"
+  state.telemetry.socket_scheduler.consecutive_empty_passes = 0
+  state.telemetry.socket_scheduler.recent_work_passes_remaining = 4
   local force_delayed = options.forceDelayed == true
   local tunnel = state.game_command_tunnel
   local ingress_per_tick = math.max(
@@ -29092,7 +29539,10 @@ function BMF_start_socket_worker(reason, options)
 
   state.socket_worker_mode = "EngineTickOneShotChain"
   log("warn", "socket worker using delayed poller interval_ms=" .. tostring(state.socket.poll_interval_ms) .. " reason=" .. tostring(reason or "start") .. " generation=" .. tostring(generation))
-  if BMF_schedule_socket_worker_poll(state.socket.poll_interval_ms, generation) then
+  if BMF_schedule_socket_worker_poll(
+      state.telemetry.socket_scheduler.current_poll_interval_ms,
+      generation)
+  then
     BMF_socket_metadata_heartbeat(true)
     return true, state.socket_worker_mode
   end

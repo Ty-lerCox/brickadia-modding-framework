@@ -197,6 +197,18 @@ function schedulerFindings(ast) {
   });
 }
 
+function mainChunkLocalCount(ast) {
+  return (ast?.body || []).reduce((count, node) => {
+    if (node.type === 'LocalStatement') {
+      return count + (node.variables || []).length;
+    }
+    if (node.type === 'FunctionDeclaration' && node.isLocal) {
+      return count + 1;
+    }
+    return count;
+  }, 0);
+}
+
 function validateLuaSource(source, sourceName = '<memory>') {
   const compilation = compileLua53(source, sourceName);
   let ast;
@@ -223,6 +235,7 @@ function validateLuaSource(source, sourceName = '<memory>') {
     compilerError: compilation.error,
     astPassed: !astError,
     astError,
+    mainChunkLocalCount: ast ? mainChunkLocalCount(ast) : null,
     unsafeSchedulerFindings: ast ? schedulerFindings(ast) : [],
   };
 }
@@ -258,6 +271,7 @@ function main(argv) {
 
 module.exports = {
   forbiddenSchedulerPrimitives,
+  mainChunkLocalCount,
   validateLuaFile,
   validateLuaSource,
 };

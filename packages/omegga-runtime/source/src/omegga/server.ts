@@ -3465,6 +3465,38 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
     return true;
   }
 
+  bindPlayerControllerIdentity(
+    player: OmeggaPlayer,
+    controllerValue: string,
+    stateValue: string,
+  ) {
+    const current = this.players.find(candidate => candidate.id === player.id);
+    const active = this._activePlayerConnections.get(player.id);
+    const controller = String(controllerValue || '').trim();
+    const state = String(stateValue || '').trim();
+    if (!current || current !== player || !active || !controller || !state) {
+      this._verifiedPrivateControllers.delete(player.id);
+      return false;
+    }
+
+    const controllerReplaced =
+      Boolean(active.controller) && active.controller !== controller;
+    const stateReplaced = Boolean(active.state) && active.state !== state;
+    if (controllerReplaced || stateReplaced) {
+      const generation = (this._playerConnectionSerial.get(player.id) ?? active.generation) + 1;
+      this._playerConnectionSerial.set(player.id, generation);
+      active.generation = generation;
+      player.connectionGeneration = generation;
+    }
+
+    player.controller = controller;
+    player.state = state;
+    active.controller = controller;
+    active.state = state;
+    this._verifiedPrivateControllers.delete(player.id);
+    return this.verifyPrivateControllerIdentity(player);
+  }
+
   notePrivateDeliveryDrop(reason: string) {
     this._privateDeliveryDropCount += 1;
     if (

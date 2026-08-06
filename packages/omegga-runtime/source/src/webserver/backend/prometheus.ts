@@ -2163,6 +2163,75 @@ export function buildPrometheusMetrics(server: Webserver) {
       'counter',
     ),
     ...metricBlock(
+      'bmf_socket_scheduler_interval_milliseconds',
+      'Current bounded socket scheduler wake interval in milliseconds.',
+      [
+        {
+          name: 'bmf_socket_scheduler_interval_milliseconds',
+          value: finiteMetricValue(
+            bmfSocketScheduler.current_poll_interval_ms,
+          ),
+        },
+      ],
+    ),
+    ...metricBlock(
+      'bmf_socket_scheduler_passes_total',
+      'Total bounded socket scheduler passes.',
+      [
+        {
+          name: 'bmf_socket_scheduler_passes_total',
+          value: finiteMetricValue(bmfSocketScheduler.poll_passes_total),
+        },
+      ],
+      'counter',
+    ),
+    ...metricBlock(
+      'bmf_socket_scheduler_idle_passes_total',
+      'Socket scheduler passes with no current or recent work.',
+      [
+        {
+          name: 'bmf_socket_scheduler_idle_passes_total',
+          value: finiteMetricValue(bmfSocketScheduler.idle_passes_total),
+        },
+      ],
+      'counter',
+    ),
+    ...metricBlock(
+      'bmf_socket_scheduler_active_passes_total',
+      'Socket scheduler passes with work, queued work, or recent work.',
+      [
+        {
+          name: 'bmf_socket_scheduler_active_passes_total',
+          value: finiteMetricValue(bmfSocketScheduler.active_passes_total),
+        },
+      ],
+      'counter',
+    ),
+    ...metricBlock(
+      'bmf_socket_scheduler_backoff_transitions_total',
+      'Socket scheduler transitions among active, short-idle, and deep-idle tiers.',
+      [
+        {
+          name: 'bmf_socket_scheduler_backoff_transitions_total',
+          value: finiteMetricValue(
+            bmfSocketScheduler.backoff_transitions_total,
+          ),
+        },
+      ],
+      'counter',
+    ),
+    ...metricBlock(
+      'bmf_socket_scheduler_work_wakeups_total',
+      'Backed-off socket scheduler wakeups that discover work.',
+      [
+        {
+          name: 'bmf_socket_scheduler_work_wakeups_total',
+          value: finiteMetricValue(bmfSocketScheduler.work_wakeups_total),
+        },
+      ],
+      'counter',
+    ),
+    ...metricBlock(
       'bmf_socket_ingress_messages_total',
       'Socket envelopes admitted from the native receive queue by fixed message type.',
       bmfSocketIngressTypeLines,

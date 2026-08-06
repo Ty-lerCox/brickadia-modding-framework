@@ -3190,6 +3190,114 @@ function get_omegga_compat_player_state_records()
     return get_cached_player_state_records(nil, nil)
 end
 
+local function stable_player_uuid(value)
+    local text = trim(safe_value_to_string(value)):lower()
+    if text == "" and value ~= nil then
+        local rendered_ok, rendered = pcall(function()
+            if type(value.ToString) == "function" then
+                return value:ToString()
+            end
+            return nil
+        end)
+        if rendered_ok then
+            text = trim(safe_value_to_string(rendered)):lower()
+        end
+    end
+    return text:match("(%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x)")
+end
+
+local function stable_player_uuid_from_state(player_state)
+    if not is_valid_object(player_state) then
+        return nil
+    end
+
+    -- BRPlayerState exposes UserId directly on the supported build, while the
+    -- inherited UniqueId may be an FUniqueNetIdRepl userdata. Inspect each
+    -- candidate independently so an unreadable struct never masks UserId.
+    for _, property_name in ipairs({ "UserId", "SessionId", "UniqueId" }) do
+        local value = try_get_property_value(player_state, property_name)
+        local uuid = stable_player_uuid(value)
+        if uuid then
+            return uuid
+        end
+    end
+
+    return nil
+end
+
+local function get_current_game_state_for_player_bindings()
+    if type(UEHelpers) == "table" and type(UEHelpers.GetGameStateBase) == "function" then
+        local state_ok, game_state = pcall(UEHelpers.GetGameStateBase)
+        if state_ok and is_valid_object(game_state) then
+            return game_state, "UEHelpers.GetGameStateBase"
+        end
+    end
+
+    local world = select(1, get_cached_world())
+    local game_state = is_valid_object(world) and try_get_property_value(world, "GameState") or nil
+    if is_valid_object(game_state) then
+        return game_state, "UEHelpers.GetWorld.GameState"
+    end
+
+    return nil, "current live GameState unavailable"
+end
+
+local function build_strict_player_binding_output()
+    local game_state, game_state_source = get_current_game_state_for_player_bindings()
+    if not is_valid_object(game_state) then
+        return nil, game_state_source or "current GameState unavailable"
+    end
+
+    local world = select(1, get_cached_world())
+    local uptime_seconds = value_to_number(select(1, try_get_first_property_value(world, {
+        "TimeSeconds",
+        "RealTimeSeconds",
+    }))) or cached_status_uptime_seconds()
+    local player_records = {}
+    for index, player_state in ipairs(get_direct_game_state_player_states(game_state)) do
+        table.insert(player_records, get_player_state_record(player_state, index, uptime_seconds))
+    end
+    local lines = {}
+    local uuid_misses = 0
+    local controller_misses = 0
+    local state_misses = 0
+    for _, player in ipairs(player_records) do
+        local uuid = stable_player_uuid_from_state(player.player_state)
+        local controller = get_full_name_string(player.owner)
+        local state = get_full_name_string(player.player_state)
+        if not uuid then
+            uuid_misses = uuid_misses + 1
+        end
+        if not controller or not controller:find("BP_PlayerController_C_", 1, true) then
+            controller_misses = controller_misses + 1
+        end
+        if not state or not state:find("BP_PlayerState_C_", 1, true) then
+            state_misses = state_misses + 1
+        end
+        if uuid and controller and state
+            and controller:find("BP_PlayerController_C_", 1, true)
+            and state:find("BP_PlayerState_C_", 1, true)
+        then
+            table.insert(lines, table.concat({
+                "player_binding_" .. tostring(#lines + 1) .. "=uuid=" .. uuid,
+                "controller=" .. controller,
+                "state=" .. state,
+            }, "|"))
+        end
+    end
+
+    bridge_log("info", table.concat({
+        "Strict player binding snapshot states=" .. tostring(#player_records),
+        "bindings=" .. tostring(#lines),
+        "source=" .. tostring(game_state_source),
+        "uuid_misses=" .. tostring(uuid_misses),
+        "controller_misses=" .. tostring(controller_misses),
+        "state_misses=" .. tostring(state_misses),
+    }, " "))
+
+    return table.concat(lines, "\n"), ""
+end
+
 function build_bp_playercontroller_pawn_output(target_controller_name)
     local player_records = get_omegga_compat_player_state_records()
     local lines = {}
@@ -5914,6 +6022,14 @@ local function try_emulate_command(command)
             return true, "emulated-server-status", output
         end
         return false, detail or "status emulation failed", ""
+    end
+
+    if command == "Omegga.Bridge.ListPlayerBindings" then
+        local output, detail = build_strict_player_binding_output()
+        if output ~= nil then
+            return true, "emulated-strict-player-bindings", output
+        end
+        return false, detail or "strict player bindings unavailable", ""
     end
 
     if command == "GetAll BRPlayerState UserName" then

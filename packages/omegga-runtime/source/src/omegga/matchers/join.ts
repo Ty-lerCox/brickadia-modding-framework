@@ -1,6 +1,69 @@
 import Player from '@omegga/player';
 import { MatchGenerator } from './types';
 
+export type StrictPlayerBindingRecord = {
+  uuid: string;
+  controller: string;
+  state: string;
+};
+
+const parseFields = (value: string) => {
+  const fields: Record<string, string> = {};
+  for (const part of value.split('|')) {
+    const separator = part.indexOf('=');
+    if (separator >= 0) fields[part.slice(0, separator)] = part.slice(separator + 1);
+  }
+  return fields;
+};
+
+const outputText = (response: unknown) => {
+  if (!response || typeof response !== 'object') return String(response ?? '');
+  if ('response' in response)
+    return String((response as { response?: unknown }).response ?? '');
+  const chunks = (response as { chunks?: unknown }).chunks;
+  if (!Array.isArray(chunks)) return String(response);
+  return chunks
+    .map(chunk =>
+      chunk && typeof chunk === 'object' && 'line' in chunk
+        ? String((chunk as { line?: unknown }).line ?? '')
+        : '',
+    )
+    .filter(Boolean)
+    .join('\n');
+};
+
+export const parseStrictPlayerBindingRecords = (
+  response: unknown,
+): StrictPlayerBindingRecord[] => {
+  const stableUuid =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  const candidates: StrictPlayerBindingRecord[] = [];
+  for (const line of outputText(response).split(/\r?\n/)) {
+    const match = line.match(/^player_binding_\d+=(.*)$/);
+    if (!match) continue;
+    const fields = parseFields(match[1]);
+    const uuid = String(fields.uuid ?? '').trim().toLowerCase();
+    const controller = fields.controller?.match(/BP_PlayerController_C_\d+/)?.[0];
+    const state = fields.state?.match(/BP_PlayerState_C_\d+/)?.[0];
+    if (stableUuid.test(uuid) && controller && state)
+      candidates.push({ uuid, controller, state });
+  }
+  const counts = <T>(values: T[]) => {
+    const result = new Map<T, number>();
+    for (const value of values) result.set(value, (result.get(value) ?? 0) + 1);
+    return result;
+  };
+  const uuidCounts = counts(candidates.map(record => record.uuid));
+  const controllerCounts = counts(candidates.map(record => record.controller));
+  const stateCounts = counts(candidates.map(record => record.state));
+  return candidates.filter(
+    record =>
+      uuidCounts.get(record.uuid) === 1 &&
+      controllerCounts.get(record.controller) === 1 &&
+      stateCounts.get(record.state) === 1,
+  );
+};
+
 const join: MatchGenerator<Player> = omegga => {
   type UserJoinInfo = {
     counter: string;
@@ -22,14 +85,35 @@ const join: MatchGenerator<Player> = omegga => {
     player?: Player;
   }[] = [];
 
-  // patterns to match PlayerState and PlayerController objects in GetAll commands
-  const stateRegExp =
-    /BP_PlayerState_C .+?PersistentLevel\.(?<state>BP_PlayerState_C_\d+)\.UserName = (?<name>.+)$/;
-  const controllerRegExp =
-    /BP_PlayerState_C .+?PersistentLevel\.(?<state>BP_PlayerState_C_\d+)\.Owner = .*?BP_PlayerController_C'.+?:PersistentLevel.(?<controller>BP_PlayerController_C_\d+)'/;
   const checkpointRegExp =
     /^Ruleset .+? (?:loading|no) saved checkpoint for player (?<name>.+) \((?<id>.+)\)$/;
   let playerStateLookupScheduled = false;
+  let controllerLookupTimer: NodeJS.Timeout | null = null;
+  let controllerLookupInFlight = false;
+  let lastControllerLookupKey = '';
+  let nextLookupIdentity = 0;
+  const lookupIdentities = new WeakMap<Player, number>();
+
+  const bindControllerIdentity = (
+    player: Player,
+    controller: string,
+    state: string,
+  ): boolean => {
+    const extended = omegga as typeof omegga & {
+      bindPlayerControllerIdentity?: (
+        player: Player,
+        controller: string,
+        state: string,
+      ) => boolean;
+      verifyPrivateControllerIdentity?: (player: Player) => boolean;
+    };
+    if (typeof extended.bindPlayerControllerIdentity === 'function') {
+      return extended.bindPlayerControllerIdentity(player, controller, state);
+    }
+    player.controller = controller;
+    player.state = state;
+    return extended.verifyPrivateControllerIdentity?.(player) === true;
+  };
 
   const getJoinInfo = (counter: string) => {
     let joinData = userJoinInfo.find(l => l.counter === counter);
@@ -62,18 +146,10 @@ const join: MatchGenerator<Player> = omegga => {
       omegga.players.map(p => p.raw()),
     );
 
-  const requestPlayerStateLookup = () => {
-    if (!joiningPlayers.length) return;
-    omegga.writeln('GetAll BRPlayerState UserName');
-  };
-
   const schedulePlayerStateLookup = () => {
     if (!joiningPlayers.length || playerStateLookupScheduled) return;
     playerStateLookupScheduled = true;
-    requestPlayerStateLookup();
-    setTimeout(requestPlayerStateLookup, 250).unref?.();
     setTimeout(() => {
-      requestPlayerStateLookup();
       playerStateLookupScheduled = false;
     }, 1000).unref?.();
   };
@@ -94,6 +170,86 @@ const join: MatchGenerator<Player> = omegga => {
       });
     }
     schedulePlayerStateLookup();
+  };
+
+  const unresolvedControllerSet = () => {
+    const players = omegga.players.filter(player => !player.controller);
+    const key = players
+      .map(player => {
+        let identity = lookupIdentities.get(player);
+        if (identity === undefined) {
+          identity = ++nextLookupIdentity;
+          lookupIdentities.set(player, identity);
+        }
+        return identity;
+      })
+      .sort((a, b) => a - b)
+      .join(',');
+    return { key, players };
+  };
+
+  const reconcileExactControllerBindings = async () => {
+    const execute = (
+      omegga as typeof omegga & {
+        execControlCommandWithOutput?: (
+          command: string,
+          timeoutMs?: number,
+        ) => Promise<unknown>;
+      }
+    ).execControlCommandWithOutput;
+    if (typeof execute !== 'function') return false;
+    const unresolved = omegga.players.filter(player => !player.controller);
+    if (!unresolved.length) return true;
+    const response = await execute.call(
+      omegga,
+      'Omegga.Bridge.ListPlayerBindings',
+      5000,
+    );
+    const records = parseStrictPlayerBindingRecords(response);
+    const assignments = new Map<Player, StrictPlayerBindingRecord>();
+    for (const player of unresolved) {
+      const uuid = String(player.id || '').trim().toLowerCase();
+      const matches = records.filter(record => record.uuid === uuid);
+      if (matches.length === 1) assignments.set(player, matches[0]);
+    }
+    for (const [player, record] of assignments) {
+      if (!bindControllerIdentity(player, record.controller, record.state)) continue;
+      const pending = joiningPlayers.find(
+        candidate => candidate.player === player || candidate.id === player.id,
+      );
+      if (pending) joiningPlayers.splice(joiningPlayers.indexOf(pending), 1);
+    }
+    if (assignments.size) emitRawPlayers();
+    return assignments.size === unresolved.length;
+  };
+
+  const scheduleControllerLookup = () => {
+    if (process.env.OMEGGA_BMF_JOIN_RECONCILIATION_ENABLED === '0') return;
+    const unresolved = unresolvedControllerSet();
+    if (!unresolved.key) {
+      lastControllerLookupKey = '';
+      return;
+    }
+    if (
+      unresolved.key === lastControllerLookupKey ||
+      controllerLookupTimer ||
+      controllerLookupInFlight
+    )
+      return;
+    controllerLookupTimer = setTimeout(() => {
+      controllerLookupTimer = null;
+      const current = unresolvedControllerSet();
+      if (!current.key || current.key === lastControllerLookupKey) return;
+      lastControllerLookupKey = current.key;
+      controllerLookupInFlight = true;
+      void reconcileExactControllerBindings()
+        .catch(() => false)
+        .finally(() => {
+          controllerLookupInFlight = false;
+          scheduleControllerLookup();
+        });
+    }, 1000);
+    controllerLookupTimer.unref?.();
   };
 
   return {
@@ -185,56 +341,6 @@ const join: MatchGenerator<Player> = omegga => {
         }
 
         // only match state and controllers if we have joining players
-      } else if (joiningPlayers.length) {
-        const stateMatch = line.match(stateRegExp);
-        const controllerMatch = line.match(controllerRegExp);
-
-        // this line matches our PlayerName -> PlayerState pattern
-        if (stateMatch) {
-          const { name, state } = stateMatch.groups;
-
-          // find the joining player that has a matching name
-          const player = joiningPlayers.find(p => p.name === name);
-
-          // check if another player is already using this state or if there's any joining player with this name
-          if (!player || omegga.players.some(p => p.state === state)) return;
-
-          // this player owns this state, find the controller now
-          player.state = state;
-          omegga.writeln(`GetAll BRPlayerState Owner Name=${state}`);
-
-          // this line matches our PlayerState -> PlayerController pattern
-        } else if (controllerMatch) {
-          const { controller, state } = controllerMatch.groups;
-
-          // find the joining player that has a matching state
-          const player = joiningPlayers.find(p => p.state === state);
-
-          // no player found
-          if (!player) return;
-
-          // assign the controller and state, remove the player from the joining players
-          player.controller = controller;
-          player.state = state;
-          joiningPlayers.splice(joiningPlayers.indexOf(player), 1);
-
-          if (player.player) {
-            player.player.controller = controller;
-            player.player.state = state;
-            emitRawPlayers();
-            return;
-          }
-
-          // return the newly joined player
-          return new Player(
-            omegga,
-            player.name,
-            player.displayName,
-            player.id,
-            player.controller,
-            player.state,
-          );
-        }
       }
     },
     // when there's a match, emit a join event and add the player to the player list
@@ -250,16 +356,22 @@ const join: MatchGenerator<Player> = omegga => {
         existingPlayer.name = player.name;
         existingPlayer.displayName = player.displayName;
         existingPlayer.id = player.id;
-        if (player.controller) existingPlayer.controller = player.controller;
-        if (player.state) existingPlayer.state = player.state;
+        if (player.controller && player.state) {
+          bindControllerIdentity(existingPlayer, player.controller, player.state);
+        }
         ensurePendingStateLookup(existingPlayer);
+        scheduleControllerLookup();
         emitRawPlayers();
         return;
       }
 
       omegga.emit('join', player);
       omegga.players.push(player);
+      if (player.controller && player.state) {
+        bindControllerIdentity(player, player.controller, player.state);
+      }
       ensurePendingStateLookup(player);
+      scheduleControllerLookup();
       emitRawPlayers();
     },
   };

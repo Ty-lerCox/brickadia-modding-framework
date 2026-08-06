@@ -128,6 +128,13 @@ $pairs = @(
     canonical = 'framework/ue4ss/Mods/BMF/Scripts/bmf/runtime.lua'
     template = 'packages/omegga-runtime/source/templates/windows-ue4ss/ue4ss/Mods/BMF/Scripts/bmf/runtime.lua'
     markers = @()
+  },
+  [ordered]@{
+    id = 'connection-readiness'
+    label = 'BMF connection readiness state machine'
+    canonical = 'framework/ue4ss/Mods/BMF/Scripts/bmf/connection_readiness.lua'
+    template = 'packages/omegga-runtime/source/templates/windows-ue4ss/ue4ss/Mods/BMF/Scripts/bmf/connection_readiness.lua'
+    markers = @('native_callable', 'connection_generation_mismatch', 'execution_decision')
   }
 )
 
@@ -207,6 +214,11 @@ try {
     required = $false
   })
   $schedulerSafetyTargets.Add([ordered]@{
+    name = 'canonical BMF connection readiness state machine'
+    path = Join-Path $Root 'framework/ue4ss/Mods/BMF/Scripts/bmf/connection_readiness.lua'
+    required = $true
+  })
+  $schedulerSafetyTargets.Add([ordered]@{
     name = 'packaged BMF loader'
     path = Join-Path $Root 'packages/omegga-runtime/source/templates/windows-ue4ss/ue4ss/Mods/BMF/Scripts/main.lua'
     required = $false
@@ -215,6 +227,11 @@ try {
     name = 'packaged BMF runtime'
     path = Join-Path $Root 'packages/omegga-runtime/source/templates/windows-ue4ss/ue4ss/Mods/BMF/Scripts/bmf/runtime.lua'
     required = $false
+  })
+  $schedulerSafetyTargets.Add([ordered]@{
+    name = 'packaged BMF connection readiness state machine'
+    path = Join-Path $Root 'packages/omegga-runtime/source/templates/windows-ue4ss/ue4ss/Mods/BMF/Scripts/bmf/connection_readiness.lua'
+    required = $true
   })
   $schedulerSafetyTargets.Add([ordered]@{
     name = 'vendored OmeggaBridge runtime'

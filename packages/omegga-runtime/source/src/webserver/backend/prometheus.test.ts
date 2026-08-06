@@ -305,6 +305,12 @@ describe('buildPrometheusMetrics', () => {
           unified_enabled: true,
           budget_ms: 3,
           budget_enforced: true,
+          current_poll_interval_ms: 100,
+          poll_passes_total: 120,
+          idle_passes_total: 100,
+          active_passes_total: 20,
+          backoff_transitions_total: 4,
+          work_wakeups_total: 1,
           native_drains: {
             budget_enabled: true,
             batch_size: 1,
@@ -695,6 +701,14 @@ describe('buildPrometheusMetrics', () => {
     expect(output).toContain(
       'bmf_socket_ingress_messages_total{type="command"} 7',
     );
+    expect(output).toContain('bmf_socket_scheduler_interval_milliseconds 100');
+    expect(output).toContain('bmf_socket_scheduler_passes_total 120');
+    expect(output).toContain('bmf_socket_scheduler_idle_passes_total 100');
+    expect(output).toContain('bmf_socket_scheduler_active_passes_total 20');
+    expect(output).toContain(
+      'bmf_socket_scheduler_backoff_transitions_total 4',
+    );
+    expect(output).toContain('bmf_socket_scheduler_work_wakeups_total 1');
     expect(output).toContain('bmf_native_event_drain_budget_enabled 1');
     expect(output).toContain(
       'bmf_native_event_drain_total{source="tree",outcome="attempted"} 9',

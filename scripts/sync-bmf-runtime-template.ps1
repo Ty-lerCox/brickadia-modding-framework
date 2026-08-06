@@ -57,6 +57,11 @@ $pairs = @(
     id = 'implementation'
     source = 'bmf/runtime.lua'
     destination = 'bmf/runtime.lua'
+  },
+  [ordered]@{
+    id = 'connection-readiness'
+    source = 'bmf/connection_readiness.lua'
+    destination = 'bmf/connection_readiness.lua'
   }
 )
 

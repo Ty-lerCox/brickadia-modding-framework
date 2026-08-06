@@ -3756,8 +3756,8 @@ namespace
     }
 
     std::string execute_player_chat_message_implementation_probe_text(std::string_view raw_message,
-                                                                      std::string_view confirmation,
-                                                                      std::string_view raw_controller_address)
+                                                                       std::string_view confirmation,
+                                                                       std::string_view raw_controller_address)
     {
         std::ostringstream out;
         out << "Native player chat message implementation probe\n"
@@ -3898,6 +3898,108 @@ namespace
         out << "ok=true\n"
             << "stage=implementation_call\n"
             << "detail=ServerPushChatMessage implementation returned\n";
+        return out.str();
+    }
+
+    std::string inspect_player_chat_message_implementation_readiness_text(
+        std::string_view raw_controller_address,
+        std::string_view confirmation)
+    {
+        std::ostringstream out;
+        out << "Native player chat implementation readiness\n"
+            << "source=BMFSocketPlayerChatMessageImplementationReadiness\n";
+
+        const std::string token = trim_ascii(confirmation);
+        if (token != "player-chat-message-implementation-readiness")
+        {
+            out << "ok=false\n"
+                << "stage=confirmation\n"
+                << "detail=confirmation token player-chat-message-implementation-readiness is required\n";
+            return out.str();
+        }
+
+        const std::string controller_address = trim_ascii(raw_controller_address);
+        if (controller_address.empty())
+        {
+            out << "ok=false\n"
+                << "stage=find_controller\n"
+                << "controller_scanned=0\n"
+                << "detail=explicit controller address is required; readiness never scans for a substitute\n";
+            return out.str();
+        }
+
+        uintptr_t parsed_controller_address = 0;
+        if (!parse_uobject_address(controller_address, parsed_controller_address))
+        {
+            out << "ok=false\n"
+                << "stage=find_controller\n"
+                << "controller_hint=" << json_escape(controller_address) << "\n"
+                << "controller_scanned=0\n"
+                << "detail=explicit controller address was invalid\n";
+            return out.str();
+        }
+
+        auto* controller = reinterpret_cast<Unreal::UObject*>(parsed_controller_address);
+        if (!is_live_player_controller_object(controller) ||
+            !player_controller_lifecycle_is_usable_guarded(controller))
+        {
+            out << "ok=false\n"
+                << "stage=find_controller\n"
+                << "controller_hint=" << json_escape(controller_address) << "\n"
+                << "controller_scanned=0\n"
+                << "detail=explicit controller is not lifecycle-usable\n";
+            return out.str();
+        }
+
+        std::string controller_full_name;
+        std::string controller_class_name;
+        std::string controller_class_full_name;
+        unsigned long identity_exception_code = 0;
+        if (!read_player_controller_identity_guarded(
+                controller,
+                controller_full_name,
+                controller_class_name,
+                controller_class_full_name,
+                identity_exception_code))
+        {
+            out << "ok=false\n"
+                << "stage=controller_identity\n"
+                << "exception_code=0x" << std::uppercase << std::hex
+                << identity_exception_code << std::dec << "\n"
+                << "detail=controller expired during identity inspection\n";
+            return out.str();
+        }
+
+        void* implementation = nullptr;
+        unsigned long vtable_exception_code = 0;
+        const bool vtable_read = get_uobject_vtable_entry_guarded(
+            controller,
+            kServerPushChatMessageImplementationVTableOffset,
+            implementation,
+            vtable_exception_code);
+        out << "controller=" << json_escape(controller_full_name) << "\n"
+            << "controller_class=" << json_escape(controller_class_full_name) << "\n"
+            << "controller_hint=" << json_escape(controller_address) << "\n"
+            << "controller_hint_matched=true\n"
+            << "controller_scanned=0\n"
+            << "implementation_vtable_offset=0x" << std::uppercase << std::hex
+            << kServerPushChatMessageImplementationVTableOffset << std::dec << "\n"
+            << "implementation_vtable_read=" << (vtable_read ? "true" : "false") << "\n"
+            << "implementation_entry=" << pointer_hex(reinterpret_cast<uintptr_t>(implementation)) << "\n";
+        if (!vtable_read || !implementation)
+        {
+            out << "ok=false\n"
+                << "stage=read_vtable\n"
+                << "exception_code=0x" << std::uppercase << std::hex
+                << vtable_exception_code << std::dec << "\n"
+                << "detail=ServerPushChatMessage implementation is not callable\n";
+            return out.str();
+        }
+
+        out << "ok=true\n"
+            << "stage=native_callable\n"
+            << "side_effect_free=true\n"
+            << "detail=exact controller generation can service the native implementation path\n";
         return out.str();
     }
 
@@ -23384,6 +23486,25 @@ namespace
         return 1;
     }
 
+    int lua_socket_player_chat_message_implementation_readiness(const LuaMadeSimple::Lua& lua)
+    {
+        lua_State* state = lua.get_lua_state();
+        size_t controller_address_length = 0;
+        const char* controller_address =
+            lua_isstring(state, 1) ? lua_tolstring(state, 1, &controller_address_length) : "";
+        size_t confirmation_length = 0;
+        const char* confirmation =
+            lua_isstring(state, 2) ? lua_tolstring(state, 2, &confirmation_length) : "";
+        lua.set_string(inspect_player_chat_message_implementation_readiness_text(
+            controller_address
+                ? std::string_view(controller_address, controller_address_length)
+                : std::string_view(),
+            confirmation
+                ? std::string_view(confirmation, confirmation_length)
+                : std::string_view()));
+        return 1;
+    }
+
     int lua_socket_reserved_chat_guard_install(const LuaMadeSimple::Lua& lua)
     {
         const std::string status = install_reserved_chat_guard_text();
@@ -24365,6 +24486,7 @@ namespace
             lua.register_function("BMFSocketPlayerConsoleCommandProbe", lua_socket_player_console_command_probe);
             lua.register_function("BMFSocketPlayerChatMessageProbe", lua_socket_player_chat_message_probe);
             lua.register_function("BMFSocketPlayerChatMessageImplementationProbe", lua_socket_player_chat_message_implementation_probe);
+            lua.register_function("BMFSocketPlayerChatMessageImplementationReadiness", lua_socket_player_chat_message_implementation_readiness);
             lua.register_function("BMFSocketReservedChatGuardInstall", lua_socket_reserved_chat_guard_install);
             lua.register_function("BMFSocketReservedChatGuardStatus", lua_socket_reserved_chat_guard_status);
             lua.register_function("BMFSocketKismetConsoleCommandProbe", lua_socket_kismet_console_command_probe);

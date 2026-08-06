@@ -29,6 +29,7 @@
     "validate:desktop": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/validate-bmf-desktop.ps1",
     "validate:orchestrator": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/validate-orchestrator-core.ps1",
     "validate:runtime-packages": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/validate-bmf-runtime-packages.ps1",
+    "validate:runtime-deployment": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/validate-bmf-runtime-deployment.ps1",
     "validate:runtime-template-parity": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/validate-bmf-runtime-template-parity.ps1",
     "validate:plugin-facade-safety": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/validate-bmf-plugin-facade-safety.ps1",
     "validate:release": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/validate-release-package.ps1"

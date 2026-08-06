@@ -7,6 +7,7 @@ import { Worker } from 'node:worker_threads';
 import readline from 'readline';
 import { Plugin } from './interface';
 import { bootstrap } from './plugin_node_safe/proxyOmegga';
+import { unwrapPluginInteropResult } from './plugin_node_safe/workerTransport';
 
 // Main plugin file (like index.js)
 // this isn't named 'index.js' or 'plugin.js' because those may be filenames
@@ -275,7 +276,7 @@ export default class NodeVmPlugin extends Plugin {
   // emit a custom plugin event
   async emitPlugin(ev: string, from: string, args: any[]) {
     const [r]: any[] = (await this.emit('emitPlugin', ev, from, args)) ?? [];
-    return r;
+    return unwrapPluginInteropResult(r);
   }
 
   // documentation is based on doc.json file

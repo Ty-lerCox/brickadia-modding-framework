@@ -191,9 +191,18 @@ function Invoke-BmfSocketCommand {
     $writer = New-Object System.IO.StreamWriter($stream, [System.Text.Encoding]::UTF8)
     $writer.NewLine = "`n"
     $writer.AutoFlush = $true
-    $id = 'codex-' + ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())
+    $issuedAtMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    $id = 'codex-' + $issuedAtMs
     $writer.WriteLine((@{ type = 'hello'; role = 'plugin'; token = $token } | ConvertTo-Json -Compress))
-    $writer.WriteLine((@{ type = 'command'; id = $id; source = 'codex-bmf-start-server'; command = $Command } | ConvertTo-Json -Compress))
+    $writer.WriteLine((@{
+      type = 'command'
+      id = $id
+      source = 'codex-bmf-start-server'
+      command = $Command
+      issuedAtMs = $issuedAtMs
+      deadlineMs = $issuedAtMs + $TimeoutMs
+      serviceClass = 'interactive'
+    } | ConvertTo-Json -Compress))
     $deadline = (Get-Date).AddMilliseconds($TimeoutMs)
     while ((Get-Date) -lt $deadline) {
       $line = $reader.ReadLine()

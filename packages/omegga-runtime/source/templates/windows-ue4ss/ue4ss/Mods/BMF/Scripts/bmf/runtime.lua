@@ -517,7 +517,7 @@ local state = {
     scheduler_failures = 0,
     controller_cache_hits = 0,
     controller_cache_refreshes = 0,
-    cached_controller_address = "",
+    controller_address_reuse_enabled = false,
     dispatch_count = 0,
     active_by_id = {},
     active_by_idempotency_key = {},
@@ -596,7 +596,7 @@ local state = {
     disk_load_failures = 0,
     memory_syncs = 0,
     persisted_syncs = 0,
-    controller_handles = {},
+    controller_userdata_cache_enabled = false,
     controller_handle_hits = 0,
     controller_handle_misses = 0,
     targeted_resolutions = 0,
@@ -1564,6 +1564,7 @@ function BMF_telemetry_snapshot()
     disk_load_failures = tonumber(player_registry.disk_load_failures) or 0,
     memory_syncs = tonumber(player_registry.memory_syncs) or 0,
     persisted_syncs = tonumber(player_registry.persisted_syncs) or 0,
+    controller_userdata_cache_enabled = false,
     controller_handle_hits = tonumber(player_registry.controller_handle_hits) or 0,
     controller_handle_misses = tonumber(player_registry.controller_handle_misses) or 0,
     targeted_resolutions = tonumber(player_registry.targeted_resolutions) or 0,
@@ -1659,6 +1660,7 @@ function BMF_telemetry_snapshot()
     last_worker_error = tostring(tunnel.last_worker_error or ""),
     controller_cache_hits = tonumber(tunnel.controller_cache_hits) or 0,
     controller_cache_refreshes = tonumber(tunnel.controller_cache_refreshes) or 0,
+    controller_address_reuse_enabled = false,
     dispatch_count = tonumber(tunnel.dispatch_count) or 0,
     last_dispatch_ms = tonumber(tunnel.last_dispatch_ms) or 0,
     max_dispatch_ms = tonumber(tunnel.max_dispatch_ms) or 0,
@@ -21229,6 +21231,7 @@ local function BMF_player_message_implementation_probe(message, controller_hint,
   local text = trim_string(message or "")
   local requested_controller = trim_string(controller_hint or "")
   local preferred_controller_address = trim_string(probe_options.controllerAddress or "")
+  local native_resolver_only = probe_options.nativeResolverOnly == true
   if text == "" then
     return result(false, "INVALID_OPTIONS", "message is required", {
       lines = {
@@ -21278,65 +21281,74 @@ local function BMF_player_message_implementation_probe(message, controller_hint,
     }
   end
 
-  if preferred_controller_address ~= "" then
-    seen_candidates[preferred_controller_address] = true
-    candidates[#candidates + 1] = {
-      address = preferred_controller_address,
-      label = "cached-controller",
+  if native_resolver_only then
+    -- The native helper owns lookup and exception containment. This avoids
+    -- touching Lua UObject wrappers that can outlive a disconnected player.
+    candidates[1] = {
+      address = "",
+      label = "native-resolver",
     }
-  end
+  else
+    if preferred_controller_address ~= "" then
+      seen_candidates[preferred_controller_address] = true
+      candidates[#candidates + 1] = {
+        address = preferred_controller_address,
+        label = "cached-controller",
+      }
+    end
 
-  if requested_controller ~= "" then
-    local controller = nil
-    if type(live_chat_find_controller_by_name) == "function" then
-      controller = live_chat_find_controller_by_name(requested_controller)
-    end
-    if controller == nil or
-        type(live_chat_is_valid_object) ~= "function" or
-        not live_chat_is_valid_object(controller) then
-      return result(false, "PLAYER_CONTROLLER_NOT_FOUND", "Requested live player controller was not found.", {
-        message = text,
-        controllerHint = requested_controller,
-        lines = {
-          "ok=false",
-          "code=PLAYER_CONTROLLER_NOT_FOUND",
-          "message=" .. tostring(text),
-          "controller_hint=" .. tostring(requested_controller),
-        },
-      })
-    end
-    add_candidate(controller, requested_controller)
-    if #candidates == 0 then
-      return result(false, "PLAYER_CONTROLLER_NOT_FOUND", "Requested live player controller address was unavailable.", {
-        message = text,
-        controllerHint = requested_controller,
-        lines = {
-          "ok=false",
-          "code=PLAYER_CONTROLLER_NOT_FOUND",
-          "message=" .. tostring(text),
-          "controller_hint=" .. tostring(requested_controller),
-        },
-      })
-    end
-  elseif preferred_controller_address == "" and type(FindAllOf) == "function" then
-    -- FindAllOf returns controller instances in creation order. Trying the
-    -- newest Brickadia controller first avoids the short window where a
-    -- disconnected controller still passes UObject lifecycle checks.
-    for _, class_name in ipairs({ "BP_PlayerController_C", "BRPlayerController" }) do
-      local ok, controllers = pcall(FindAllOf, class_name)
-      if ok and type(controllers) == "table" then
-        for index = #controllers, 1, -1 do
-          add_candidate(
-            controllers[index],
-            "FindAllOf(" .. class_name .. ")[" .. tostring(index) .. "]"
-          )
-          if #candidates >= 64 then
-            break
+    if requested_controller ~= "" then
+      local controller = nil
+      if type(live_chat_find_controller_by_name) == "function" then
+        controller = live_chat_find_controller_by_name(requested_controller)
+      end
+      if controller == nil or
+          type(live_chat_is_valid_object) ~= "function" or
+          not live_chat_is_valid_object(controller) then
+        return result(false, "PLAYER_CONTROLLER_NOT_FOUND", "Requested live player controller was not found.", {
+          message = text,
+          controllerHint = requested_controller,
+          lines = {
+            "ok=false",
+            "code=PLAYER_CONTROLLER_NOT_FOUND",
+            "message=" .. tostring(text),
+            "controller_hint=" .. tostring(requested_controller),
+          },
+        })
+      end
+      add_candidate(controller, requested_controller)
+      if #candidates == 0 then
+        return result(false, "PLAYER_CONTROLLER_NOT_FOUND", "Requested live player controller address was unavailable.", {
+          message = text,
+          controllerHint = requested_controller,
+          lines = {
+            "ok=false",
+            "code=PLAYER_CONTROLLER_NOT_FOUND",
+            "message=" .. tostring(text),
+            "controller_hint=" .. tostring(requested_controller),
+          },
+        })
+      end
+    elseif preferred_controller_address == "" and type(FindAllOf) == "function" then
+      -- FindAllOf returns controller instances in creation order. Trying the
+      -- newest Brickadia controller first avoids the short window where a
+      -- disconnected controller still passes UObject lifecycle checks.
+      for _, class_name in ipairs({ "BP_PlayerController_C", "BRPlayerController" }) do
+        local ok, controllers = pcall(FindAllOf, class_name)
+        if ok and type(controllers) == "table" then
+          for index = #controllers, 1, -1 do
+            add_candidate(
+              controllers[index],
+              "FindAllOf(" .. class_name .. ")[" .. tostring(index) .. "]"
+            )
+            if #candidates >= 64 then
+              break
+            end
           end
         end
-      end
-      if #candidates > 0 then
-        break
+        if #candidates > 0 then
+          break
+        end
       end
     end
   end
@@ -21354,7 +21366,8 @@ local function BMF_player_message_implementation_probe(message, controller_hint,
   local last_lines = {}
   local last_fields = {}
   local last_detail = "Native player chat implementation probe"
-  local controller_strategy = preferred_controller_address ~= "" and "cached-then-newest-live" or "newest-live-first"
+  local controller_strategy = native_resolver_only and "native-resolver-only"
+    or (preferred_controller_address ~= "" and "cached-then-newest-live" or "newest-live-first")
   for index, candidate in ipairs(candidates) do
     local ok, response = pcall(
       BMFSocketPlayerChatMessageImplementationProbe,
@@ -21578,19 +21591,12 @@ function live_chat_cached_controller(controller_path)
     return nil
   end
   local registry = state.player_registry or {}
-  registry.controller_handles = type(registry.controller_handles) == "table"
-    and registry.controller_handles or {}
-  local controller = registry.controller_handles[path]
-  if live_chat_is_valid_object(controller) then
-    registry.controller_handle_hits = (tonumber(registry.controller_handle_hits) or 0) + 1
-    return controller
-  end
-  registry.controller_handles[path] = nil
+  -- Keep only the stable controller path across requests. UE4SS UObject
+  -- userdata can outlive its disconnected player and crash inside IsValid.
   registry.controller_handle_misses = (tonumber(registry.controller_handle_misses) or 0) + 1
-  controller = live_chat_find_controller_by_name(path)
-  if live_chat_is_valid_object(controller) then
+  local controller = live_chat_find_controller_by_name(path)
+  if controller ~= nil then
     registry.targeted_resolutions = (tonumber(registry.targeted_resolutions) or 0) + 1
-    registry.controller_handles[path] = controller
     return controller
   end
   registry.targeted_failures = (tonumber(registry.targeted_failures) or 0) + 1
@@ -21783,9 +21789,6 @@ function live_chat_collect_targets(options)
             matched_player.controllerPath = tostring(target.controllerPath or "")
             matched_player.playerStatePath = tostring(target.playerStatePath or matched_player.playerStatePath or "")
             matched_player.controllerAvailable = trim_string(matched_player.controllerPath) ~= ""
-            if trim_string(matched_player.controllerPath) ~= "" then
-              registry.controller_handles[matched_player.controllerPath] = target.controller
-            end
             repair_detail.matched = repair_detail.matched + 1
           end
         end
@@ -22036,15 +22039,6 @@ function publish_player_cache(cache, options)
   cache.generation = next_generation
   cache.snapshotGeneration = next_generation
   local players = type(cache.players) == "table" and cache.players or cache
-  local retained_handles = {}
-  for _, player in ipairs(players or {}) do
-    local controller_path = trim_string(tostring(player.controllerPath or ""))
-    local controller = registry.controller_handles[controller_path]
-    if controller_path ~= "" and live_chat_is_valid_object(controller) then
-      retained_handles[controller_path] = controller
-    end
-  end
-  registry.controller_handles = retained_handles
   registry.cache_loaded = true
   registry.generation = next_generation
   registry.entries = type(players) == "table" and #players or 0
@@ -26831,6 +26825,7 @@ function BMF_game_command_tunnel_snapshot()
     lastWorkerError = tostring(tunnel.last_worker_error or ""),
     controllerCacheHits = tonumber(tunnel.controller_cache_hits) or 0,
     controllerCacheRefreshes = tonumber(tunnel.controller_cache_refreshes) or 0,
+    controllerAddressReuseEnabled = false,
     dispatchCount = dispatch_count,
     dispatchMsAverage = dispatch_count > 0 and ((tonumber(tunnel.dispatch_ms_sum) or 0) / dispatch_count) or 0,
     lastDispatchMs = tonumber(tunnel.last_dispatch_ms) or 0,
@@ -27138,39 +27133,21 @@ BMF_game_command_tunnel_drain_once = function(request)
       0)
   else
     local dispatch_started_clock = os.clock()
-    local cached_address = trim_string(tunnel.cached_controller_address or "")
+    -- Controller UObject lifetimes end on disconnect/reconnect. Resolve a
+    -- controller inside every dispatch and never carry its raw address into a
+    -- later request, where even an IsValid check can dereference freed memory.
+    tunnel.controller_cache_refreshes = (tonumber(tunnel.controller_cache_refreshes) or 0) + 1
     injection_started = true
     local invoked = BMF_player_message_implementation_probe(request.line, "", {
       skipRateLimit = true,
-      controllerAddress = cached_address,
+      nativeResolverOnly = true,
     })
-
-    if cached_address ~= "" and invoked.ok == true then
-      tunnel.controller_cache_hits = (tonumber(tunnel.controller_cache_hits) or 0) + 1
-    elseif cached_address ~= "" then
-      local cached_failure_state = BMF_game_command_tunnel_classify_failure(invoked)
-      if cached_failure_state ~= "outcome_unknown"
-          and (state.socket_admission.enabled ~= true
-            or not BMF_game_command_tunnel_request_expired(request)) then
-        tunnel.cached_controller_address = ""
-        tunnel.controller_cache_refreshes = (tonumber(tunnel.controller_cache_refreshes) or 0) + 1
-        invoked = BMF_player_message_implementation_probe(request.line, "", {
-          skipRateLimit = true,
-        })
-      end
-    else
-      tunnel.controller_cache_refreshes = (tonumber(tunnel.controller_cache_refreshes) or 0) + 1
-    end
 
     local dispatch_ms = BMF_telemetry_duration_ms(dispatch_started_clock)
     tunnel.dispatch_count = (tonumber(tunnel.dispatch_count) or 0) + 1
     tunnel.last_dispatch_ms = dispatch_ms
     tunnel.max_dispatch_ms = math.max(tonumber(tunnel.max_dispatch_ms) or 0, dispatch_ms)
     tunnel.dispatch_ms_sum = (tonumber(tunnel.dispatch_ms_sum) or 0) + dispatch_ms
-    local resolved_address = trim_string(invoked and invoked.data and invoked.data.controllerAddress or "")
-    if invoked.ok == true and resolved_address ~= "" then
-      tunnel.cached_controller_address = resolved_address
-    end
 
     if invoked.ok == true then
       BMF_game_command_tunnel_send_terminal(

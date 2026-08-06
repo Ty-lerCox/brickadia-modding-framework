@@ -203,12 +203,6 @@ local STATUS_SNAPSHOT_CANDIDATE_PROPERTIES = {
 local SYNTHETIC_STATE_BASE = 2147483000
 local SYNTHETIC_CONTROLLER_BASE = 2147484000
 local SYNTHETIC_PATH_PREFIX = "Omegga:PersistentLevel."
-local last_hook_context = nil
-local last_hook_world = nil
-local last_hook_executor = nil
-local last_hook_game_mode = nil
-local last_hook_game_state = nil
-local last_hook_game_session = nil
 local last_hook_command = ""
 local last_hook_source = ""
 local retained_callbacks = {}
@@ -221,12 +215,13 @@ local chat_hook_attempts = {}
 local chat_logged_candidates = {}
 local observed_chat_function_name = nil
 local observed_chat_function_path = nil
-local observed_chat_context = nil
 local observed_chat_source = nil
 local call_by_name_helper_available = nil
-CHAT_WHISPER_PLAYER_SOURCE_BY_TARGET = CHAT_WHISPER_PLAYER_SOURCE_BY_TARGET or {}
-CHAT_WHISPER_LAST_PLAYER_SOURCE = CHAT_WHISPER_LAST_PLAYER_SOURCE or nil
-CHAT_WHISPER_LAST_TARGET_KEY = CHAT_WHISPER_LAST_TARGET_KEY or ""
+-- These globals used to retain player-controller UObjects across frames. Clear
+-- them explicitly so a script reload also releases any legacy stale userdata.
+CHAT_WHISPER_PLAYER_SOURCE_BY_TARGET = nil
+CHAT_WHISPER_LAST_PLAYER_SOURCE = nil
+CHAT_WHISPER_LAST_TARGET_KEY = nil
 local call_by_name_helper_error = nil
 
 local function read_file(path)
@@ -1047,63 +1042,8 @@ local function is_valid_object(object)
     return object and type(object.IsValid) == "function" and object:IsValid()
 end
 
-local function remember_cached_world(world)
-    if not is_valid_object(world) then
-        return false
-    end
-
-    last_hook_world = world
-
-    local game_mode = try_get_property_value(world, "AuthorityGameMode") or try_get_property_value(world, "GameMode")
-    if is_valid_object(game_mode) then
-        last_hook_game_mode = game_mode
-        local game_session = try_get_property_value(game_mode, "GameSession")
-        if is_valid_object(game_session) then
-            last_hook_game_session = game_session
-        end
-    end
-
-    local game_state = try_get_property_value(world, "GameState")
-    if is_valid_object(game_state) then
-        last_hook_game_state = game_state
-    end
-
-    return true
-end
-
-local function remember_object_world(object)
-    if not is_valid_object(object) then
-        return false
-    end
-
-    local ok, world = pcall(function()
-        if type(object.GetWorld) == "function" then
-            return object:GetWorld()
-        end
-
-        return nil
-    end)
-
-    if ok and is_valid_object(world) then
-        return remember_cached_world(world)
-    end
-
-    return false
-end
-
-local function remember_command_context(context, executor, command, source)
-    if is_valid_object(context) then
-        last_hook_context = context
-        remember_object_world(context)
-    end
-
-    if is_valid_object(executor) then
-        last_hook_executor = executor
-        if not is_valid_object(last_hook_world) then
-            remember_object_world(executor)
-        end
-    end
-
+local function remember_command_context(_context, _executor, command, source)
+    -- UObject arguments are callback-scoped. Retain only inert diagnostic text.
     local normalized = trim(command)
     if normalized ~= "" then
         last_hook_command = normalized
@@ -1114,15 +1054,8 @@ local function remember_command_context(context, executor, command, source)
     end
 end
 
-local function remember_command_context_shallow(context, executor, command, source)
-    if is_valid_object(context) then
-        last_hook_context = context
-    end
-
-    if is_valid_object(executor) then
-        last_hook_executor = executor
-    end
-
+local function remember_command_context_shallow(_context, _executor, command, source)
+    -- UObject arguments are callback-scoped. Retain only inert diagnostic text.
     local normalized = trim(command)
     if normalized ~= "" then
         last_hook_command = normalized
@@ -1501,93 +1434,39 @@ function OmeggaDescribeStructFieldsFromProperty(property, depth, max_fields)
 end
 
 local function get_cached_command_context()
-    local helper_error = nil
-
-    if type(OmeggaGetCachedCommandContext) == "function" then
-        local ok, context = pcall(OmeggaGetCachedCommandContext)
-        if not ok then
-            helper_error = tostring(context)
-        elseif is_valid_object(context) then
-            last_hook_context = context
-            if last_hook_source == nil or last_hook_source == "" then
-                last_hook_source = "native-helper"
-            end
-            return context, nil
-        else
-            helper_error = "No cached command context is available yet."
-        end
-    end
-
-    if is_valid_object(last_hook_context) then
-        return last_hook_context, nil
-    end
-
-    if helper_error then
-        return nil, helper_error
-    end
-
-    return nil, "Cached command context helper is unavailable and no hook-cached context exists yet."
+    return nil, "Cross-frame cached command contexts are disabled to avoid stale UObject dereferences."
 end
 
 local function get_cached_world()
     if type(UEHelpers) == "table" and type(UEHelpers.GetWorld) == "function" then
         local ok, world = pcall(UEHelpers.GetWorld)
         if ok and is_valid_object(world) then
-            remember_cached_world(world)
-            return world, nil
-        end
-    end
-
-    if is_valid_object(last_hook_world) then
-        return last_hook_world, nil
-    end
-
-    local context, context_error = get_cached_command_context()
-    if context then
-        local ok, world = pcall(function()
-            return context:GetWorld()
-        end)
-        if ok and is_valid_object(world) then
-            remember_cached_world(world)
             return world, nil
         elseif not ok then
-            bridge_log("warn", "Cached command context GetWorld failed: " .. tostring(world))
+            return nil, "Fresh game-thread world lookup failed: " .. tostring(world)
         end
     end
 
-    if context_error then
-        return nil, context_error
-    end
-
-    return nil, "Cached command context has no world."
+    return nil, "No fresh game-thread world is available; cross-frame UObject caches are disabled."
 end
 
 local function get_cached_game_objects()
     local world, world_error = get_cached_world()
-    if not world then
-        return nil, world_error
+    local game_mode = is_valid_object(world)
+            and (try_get_property_value(world, "AuthorityGameMode") or try_get_property_value(world, "GameMode"))
+        or nil
+    local game_state = is_valid_object(world) and try_get_property_value(world, "GameState") or nil
+
+    if not is_valid_object(game_mode) then
+        game_mode = find_first_valid("GameModeBase")
     end
-
-    local game_mode = nil
-    local game_state = nil
-
-    game_mode = try_get_property_value(world, "AuthorityGameMode") or try_get_property_value(world, "GameMode")
-    if not is_valid_object(game_mode) and is_valid_object(last_hook_game_mode) then
-        game_mode = last_hook_game_mode
-    end
-
-    game_state = try_get_property_value(world, "GameState")
-    if not is_valid_object(game_state) and is_valid_object(last_hook_game_state) then
-        game_state = last_hook_game_state
+    if not is_valid_object(game_state) then
+        game_state = find_first_valid("GameStateBase")
     end
 
     local game_session = is_valid_object(game_mode) and try_get_property_value(game_mode, "GameSession") or nil
-    if not is_valid_object(game_session) and is_valid_object(last_hook_game_session) then
-        game_session = last_hook_game_session
-    end
-
-    if is_valid_object(world) then
-        remember_cached_world(world)
+    if not is_valid_object(world) and not is_valid_object(game_mode) and not is_valid_object(game_state) then
+        return nil, world_error or "No fresh game-thread server objects are available."
     end
 
     return {
@@ -1602,73 +1481,35 @@ local function log_typed_chat_resolution(step)
     bridge_log("info", "Typed chat resolution " .. tostring(step or ""))
 end
 
-local function remember_cached_world_shallow(world)
-    if not is_valid_object(world) then
-        return false
-    end
-
-    last_hook_world = world
-    return true
-end
-
 local function get_chat_broadcast_objects()
-    local world = is_valid_object(last_hook_world) and last_hook_world or nil
-    local game_mode = is_valid_object(last_hook_game_mode) and last_hook_game_mode or nil
-    local game_state = is_valid_object(last_hook_game_state) and last_hook_game_state or nil
-    local game_session = is_valid_object(last_hook_game_session) and last_hook_game_session or nil
-
     log_typed_chat_resolution("begin")
-    log_typed_chat_resolution(
-        "hook-cached world="
-            .. tostring(is_valid_object(world))
-            .. " game_mode="
-            .. tostring(is_valid_object(game_mode))
-            .. " game_state="
-            .. tostring(is_valid_object(game_state))
-            .. " game_session="
-            .. tostring(is_valid_object(game_session))
-    )
+    log_typed_chat_resolution("cross-frame UObject caches disabled")
 
-    if is_valid_object(world) or is_valid_object(game_mode) or is_valid_object(game_state) or is_valid_object(game_session) then
-        log_typed_chat_resolution(
-            "resolved world="
-                .. tostring(is_valid_object(world))
-                .. " game_mode="
-                .. tostring(is_valid_object(game_mode))
-                .. " game_state="
-                .. tostring(is_valid_object(game_state))
-                .. " game_session="
-                .. tostring(is_valid_object(game_session))
-        )
-        return {
-            world = world,
-            game_mode = game_mode,
-            game_state = game_state,
-            game_session = game_session,
-        }, nil
-    end
-
-    -- Native command-context caches can outlive the UObject they reference.
-    -- Typed chat must only use hook-cached objects or objects discovered fresh
-    -- on this game-thread callback; otherwise fail closed without dereferencing
-    -- a cross-frame context.
-    game_mode = find_first_valid("GameModeBase")
-    game_state = find_first_valid("GameStateBase")
-    if is_valid_object(game_mode) then
-        last_hook_game_mode = game_mode
-        game_session = try_get_property_value(game_mode, "GameSession")
-        if is_valid_object(game_session) then
-            last_hook_game_session = game_session
+    local world = nil
+    if type(UEHelpers) == "table" and type(UEHelpers.GetWorld) == "function" then
+        local world_ok, world_value = pcall(UEHelpers.GetWorld)
+        if world_ok and is_valid_object(world_value) then
+            world = world_value
         end
     end
-    if is_valid_object(game_state) then
-        last_hook_game_state = game_state
+
+    local game_mode = is_valid_object(world)
+            and (try_get_property_value(world, "AuthorityGameMode") or try_get_property_value(world, "GameMode"))
+        or nil
+    local game_state = is_valid_object(world) and try_get_property_value(world, "GameState") or nil
+
+    if not is_valid_object(game_mode) then
+        game_mode = find_first_valid("GameModeBase")
     end
-    world = is_valid_object(last_hook_world) and last_hook_world or nil
+    if not is_valid_object(game_state) then
+        game_state = find_first_valid("GameStateBase")
+    end
+
+    local game_session = is_valid_object(game_mode) and try_get_property_value(game_mode, "GameSession") or nil
 
     if is_valid_object(world) or is_valid_object(game_mode) or is_valid_object(game_state) then
         log_typed_chat_resolution(
-            "resolved via bounded discovery world="
+            "resolved via fresh bounded discovery world="
                 .. tostring(is_valid_object(world))
                 .. " game_mode="
                 .. tostring(is_valid_object(game_mode))
@@ -2704,10 +2545,10 @@ function describe_prefab_runtime(spec)
     table.insert(lines, "hooks_registered=" .. tostring(state.registered == true))
     table.insert(lines, "capture_events=" .. tostring(#(state.hooks or {})))
     table.insert(lines, "last_capture=" .. (state.last and tostring(state.last.kind or "unknown") or "<none>"))
-    table.insert(lines, "last_hook_context_valid=" .. tostring(is_valid_object(last_hook_context)))
-    table.insert(lines, "last_hook_world_valid=" .. tostring(is_valid_object(last_hook_world)))
-    table.insert(lines, "last_hook_game_mode_valid=" .. tostring(is_valid_object(last_hook_game_mode)))
-    table.insert(lines, "cached_command_context_valid=" .. tostring(select(1, get_cached_command_context()) ~= nil))
+    table.insert(lines, "last_hook_context_retained=false")
+    table.insert(lines, "last_hook_world_retained=false")
+    table.insert(lines, "last_hook_game_mode_retained=false")
+    table.insert(lines, "cached_command_context_retained=false")
 
     local total = 0
     for _, class_name in ipairs(classes) do
@@ -3566,13 +3407,6 @@ local function collect_chat_property_sources(candidates, seen, root_label, root_
 end
 
 local function build_chat_runtime_context(objects, message)
-    local cached_context = is_valid_object(last_hook_context) and last_hook_context or nil
-
-    local cached_executor = is_valid_object(last_hook_executor) and last_hook_executor or nil
-    if not is_valid_object(cached_executor) and is_valid_object(cached_context) then
-        cached_executor = cached_context
-    end
-
     local context = {
         objects = objects,
         message = tostring(message or ""),
@@ -3582,8 +3416,8 @@ local function build_chat_runtime_context(objects, message)
         player_pawn = nil,
         engine = nil,
         game_instance = nil,
-        cached_context = cached_context,
-        cached_executor = cached_executor,
+        cached_context = nil,
+        cached_executor = nil,
     }
 
     local function object_class_matches(object, hint)
@@ -3770,7 +3604,6 @@ local function register_chat_function_hook(function_path)
 
         observed_chat_function_name = extract_short_name(hook_path)
         observed_chat_function_path = hook_path
-        observed_chat_context = context_object
         observed_chat_source = "hook"
 
         local args = {}
@@ -4082,7 +3915,6 @@ local function try_direct_chat_call(candidate, context)
             )
             observed_chat_function_name = candidate.function_name
             observed_chat_function_path = candidate.function_path
-            observed_chat_context = candidate.object
             observed_chat_source = "bridge-direct"
             chat_trace(
                 "attempt direct succeeded "
@@ -4571,7 +4403,6 @@ local function try_call_function_by_name(candidate, context)
             )
             observed_chat_function_name = candidate.function_name
             observed_chat_function_path = candidate.function_path
-            observed_chat_context = candidate.object
             observed_chat_source = "bridge-call-by-name"
             chat_trace(
                 "attempt call-by-name succeeded "
@@ -4940,7 +4771,6 @@ local function try_fast_chat_call_by_name(source, function_name, message)
                 )
                 observed_chat_function_name = function_name
                 observed_chat_function_path = tostring(source.label) .. ":" .. tostring(function_name)
-                observed_chat_context = source.object
                 observed_chat_source = "bridge-fast-call-by-name"
                 chat_trace(
                     "fast call-by-name succeeded "
@@ -4977,83 +4807,6 @@ end
 function is_player_controller_fast_source(source)
     local label = type(source) == "table" and tostring(source.label or "") or ""
     return label == "player_controller" or label:find("^player_controller%[") ~= nil
-end
-
-function normalize_chat_whisper_target_key(value)
-    return string.lower(trim(tostring(value or "")))
-end
-
-function clone_fast_chat_player_source(source, player_name)
-    if type(source) ~= "table" or not is_player_controller_fast_source(source) or not is_valid_object(source.object) then
-        return nil
-    end
-
-    local extra_contexts = {}
-    for _, value in ipairs(source.extra_contexts or {}) do
-        if is_valid_object(value) then
-            table.insert(extra_contexts, value)
-        end
-    end
-
-    return {
-        label = tostring(source.label or "player_controller[cached]"),
-        object = source.object,
-        executor = is_valid_object(source.executor) and source.executor or source.object,
-        extra_contexts = extra_contexts,
-        player_name = tostring(player_name or source.player_name or ""),
-    }
-end
-
-function remember_chat_whisper_player_source(target, source)
-    local resolved_player_name = trim(tostring(type(source) == "table" and source.player_name or ""))
-    if resolved_player_name == "" then
-        resolved_player_name = trim(tostring(target or ""))
-    end
-
-    local cached_source = clone_fast_chat_player_source(source, resolved_player_name)
-    if not cached_source then
-        return false
-    end
-
-    CHAT_WHISPER_LAST_PLAYER_SOURCE = cached_source
-    CHAT_WHISPER_LAST_TARGET_KEY = normalize_chat_whisper_target_key(target)
-
-    local target_key = CHAT_WHISPER_LAST_TARGET_KEY
-    if target_key ~= "" then
-        CHAT_WHISPER_PLAYER_SOURCE_BY_TARGET[target_key] = cached_source
-    end
-
-    local player_key = normalize_chat_whisper_target_key(resolved_player_name)
-    if player_key ~= "" then
-        CHAT_WHISPER_PLAYER_SOURCE_BY_TARGET[player_key] = cached_source
-    end
-
-    return true
-end
-
-function get_cached_chat_whisper_player_source(target)
-    local target_key = normalize_chat_whisper_target_key(target)
-    local cached_source = nil
-    if target_key ~= "" then
-        cached_source = CHAT_WHISPER_PLAYER_SOURCE_BY_TARGET[target_key]
-    end
-    if not cached_source and target_key ~= "" and CHAT_WHISPER_LAST_TARGET_KEY == target_key then
-        cached_source = CHAT_WHISPER_LAST_PLAYER_SOURCE
-    end
-
-    if cached_source and is_valid_object(cached_source.object) then
-        return clone_fast_chat_player_source(cached_source, cached_source.player_name)
-    end
-
-    if target_key ~= "" then
-        CHAT_WHISPER_PLAYER_SOURCE_BY_TARGET[target_key] = nil
-    end
-    if cached_source == CHAT_WHISPER_LAST_PLAYER_SOURCE then
-        CHAT_WHISPER_LAST_PLAYER_SOURCE = nil
-        CHAT_WHISPER_LAST_TARGET_KEY = ""
-    end
-
-    return nil
 end
 
 function try_fast_chat_client_fanout(sources, function_name, message)
@@ -5360,7 +5113,6 @@ function FAST_DIRECT_CHAT.try_call(source, function_name, message)
             remember_command_context_shallow(source.object, source.executor, function_name, "typed-chat-fast-direct")
             observed_chat_function_name = function_name
             observed_chat_function_path = tostring(source.label) .. ":" .. tostring(function_name)
-            observed_chat_context = source.object
             observed_chat_source = "bridge-fast-direct"
             chat_trace("fast direct succeeded " .. tostring(source.label) .. " -> " .. tostring(function_name))
             return true, "typed-chat-fast-direct:" .. tostring(source.label) .. "->" .. tostring(function_name)
@@ -5488,15 +5240,6 @@ function try_fast_typed_chat_whisper(target, message)
         end
     end
 
-    if #exact_sources == 0 then
-        local cached_source = get_cached_chat_whisper_player_source(target_lower)
-        if cached_source then
-            bridge_log("info", "Typed chat whisper using cached player-controller source for target=" .. tostring(target or ""))
-            table.insert(player_sources, cached_source)
-            table.insert(exact_sources, cached_source)
-        end
-    end
-
     local selected_sources = exact_sources
     if #selected_sources == 0 and #player_sources == 1 then
         selected_sources = player_sources
@@ -5515,7 +5258,6 @@ function try_fast_typed_chat_whisper(target, message)
     for _, source in ipairs(selected_sources) do
         local ok, executor_or_error = try_fast_chat_call_by_name(source, "ClientPushChatMessage", clean_message)
         if ok then
-            remember_chat_whisper_player_source(target, source)
             return true,
                 "typed-chat-whisper:"
                     .. tostring(source.label)
@@ -5567,17 +5309,6 @@ local function collect_chat_broadcast_candidates(message)
             func = hit.func,
             parameters = hit.parameters,
         })
-    end
-
-    if is_valid_object(observed_chat_context) and observed_chat_function_name then
-        local observed_source = {
-            label = "observed:" .. tostring(observed_chat_source or "unknown"),
-            object = observed_chat_context,
-            executor = observed_chat_context,
-        }
-        for _, hit in ipairs(get_named_function_hits(observed_chat_context, observed_chat_function_name)) do
-            push_candidate(observed_source, hit)
-        end
     end
 
     for _, source in ipairs(sources) do
@@ -5695,15 +5426,15 @@ local function probe_chat_api()
     push("chat_trace_path=" .. tostring(CHAT_TRACE_PATH))
     push("last_hook_source=" .. tostring(last_hook_source or ""))
     push("last_hook_command=" .. tostring(last_hook_command or ""))
-    push("last_hook_context_valid=" .. tostring(is_valid_object(last_hook_context)))
-    push("last_hook_executor_valid=" .. tostring(is_valid_object(last_hook_executor)))
-    push("last_hook_world_valid=" .. tostring(is_valid_object(last_hook_world)))
-    push("last_hook_game_mode_valid=" .. tostring(is_valid_object(last_hook_game_mode)))
-    push("last_hook_game_state_valid=" .. tostring(is_valid_object(last_hook_game_state)))
-    push("last_hook_game_session_valid=" .. tostring(is_valid_object(last_hook_game_session)))
+    push("last_hook_context_retained=false")
+    push("last_hook_executor_retained=false")
+    push("last_hook_world_retained=false")
+    push("last_hook_game_mode_retained=false")
+    push("last_hook_game_state_retained=false")
+    push("last_hook_game_session_retained=false")
     push("observed_chat_function=" .. tostring(observed_chat_function_path or "none"))
     push("observed_chat_source=" .. tostring(observed_chat_source or "none"))
-    push("observed_chat_context_valid=" .. tostring(is_valid_object(observed_chat_context)))
+    push("observed_chat_context_retained=false")
 
     if type(OmeggaHasCachedCommandContext) == "function" then
         local ok, has_context = pcall(OmeggaHasCachedCommandContext)
@@ -7277,6 +7008,34 @@ OMEGGA_PREFAB_NATIVE_CAPTURE = OMEGGA_PREFAB_NATIVE_CAPTURE or {
     replay_sequence = 0,
 }
 
+function OmeggaSanitizePrefabNativeCaptureRecord(record)
+    if type(record) ~= "table" then
+        return record
+    end
+
+    -- Older bridge builds retained callback-owned UE4SS wrappers here. Drop
+    -- those references without invoking any UObject method so an in-place
+    -- upgrade cannot reintroduce a stale cross-frame dereference.
+    record.context = nil
+    for _, argument in ipairs(record.args or {}) do
+        if type(argument) == "table" then
+            argument.raw = nil
+            argument.resolved = nil
+        end
+    end
+    return record
+end
+
+for _, capture_record_field in ipairs({
+    "last",
+    "last_client",
+    "last_replayable_client",
+    "last_replay_capture",
+}) do
+    OMEGGA_PREFAB_NATIVE_CAPTURE[capture_record_field] =
+        OmeggaSanitizePrefabNativeCaptureRecord(OMEGGA_PREFAB_NATIVE_CAPTURE[capture_record_field])
+end
+
 OMEGGA_PREFAB_NATIVE_REPLAYABLE_KINDS = OMEGGA_PREFAB_NATIVE_REPLAYABLE_KINDS or {}
 OMEGGA_PREFAB_NATIVE_REPLAYABLE_KINDS.ServerPastePrefab = true
 OMEGGA_PREFAB_NATIVE_REPLAYABLE_KINDS.ServerPlaceCurrentPrefab = true
@@ -7326,6 +7085,13 @@ function OmeggaPrefabCaptureScalar(value)
         or value_type == "string"
         or value_type == "number"
         or value_type == "boolean"
+end
+
+function OmeggaPrefabPersistentValue(value)
+    if OmeggaPrefabCaptureScalar(value) then
+        return value
+    end
+    return "<non-scalar:" .. tostring(type(value)) .. ">"
 end
 
 function OmeggaPrefabCaptureValueSummary(value)
@@ -7401,8 +7167,9 @@ function OmeggaReadHookParamMemory(value)
         local ok, address = pcall(function()
             return value:GetAddress()
         end)
-        if ok and address ~= nil then
-            memory.address = address
+        local address_number = ok and tonumber(address) or nil
+        if address_number ~= nil then
+            memory.address = address_number
         end
     end
 
@@ -7410,8 +7177,9 @@ function OmeggaReadHookParamMemory(value)
         local ok, size = pcall(function()
             return value:GetSize()
         end)
-        if ok and size ~= nil then
-            memory.size = size
+        local size_number = ok and tonumber(size) or nil
+        if size_number ~= nil then
+            memory.size = size_number
         end
     end
 
@@ -7530,7 +7298,7 @@ function OmeggaDescribeHookParam(label, value)
         end
     end
 
-    return lines, resolved, resolver, memory
+    return lines, tostring(resolver or "direct"), memory
 end
 
 function OmeggaRecordPrefabNativeCapture(kind, hook_path, Context, ...)
@@ -7544,6 +7312,7 @@ function OmeggaRecordPrefabNativeCapture(kind, hook_path, Context, ...)
         replay_id = state.active_replay_id,
         lines = {},
         args = {},
+        context_label = "nil",
     }
 
     local context_object = nil
@@ -7556,7 +7325,7 @@ function OmeggaRecordPrefabNativeCapture(kind, hook_path, Context, ...)
         end
     end
 
-    record.context = context_object
+    record.context_label = get_object_label(context_object, "nil")
     table.insert(record.lines, "Prefab native capture: " .. record.kind)
     table.insert(record.lines, "source=" .. record.source)
     if record.replay_id ~= nil then
@@ -7566,16 +7335,15 @@ function OmeggaRecordPrefabNativeCapture(kind, hook_path, Context, ...)
     table.insert(record.lines, "timestamp=" .. record.timestamp)
     table.insert(record.lines, "capture_path=" .. PREFAB_CAPTURE_PATH)
     table.insert(record.lines, "capture_latest_path=" .. PREFAB_CAPTURE_LATEST_PATH)
-    table.insert(record.lines, "context=" .. get_object_label(context_object, "nil"))
+    table.insert(record.lines, "context=" .. record.context_label)
+    table.insert(record.lines, "context_retained=false")
 
     local count = select("#", ...)
     table.insert(record.lines, "arg_count=" .. tostring(count))
     for index = 1, count do
         local raw = select(index, ...)
-        local lines, resolved, resolver, memory = OmeggaDescribeHookParam("arg[" .. tostring(index) .. "]", raw)
+        local lines, resolver, memory = OmeggaDescribeHookParam("arg[" .. tostring(index) .. "]", raw)
         table.insert(record.args, {
-            raw = raw,
-            resolved = resolved,
             resolver = resolver,
             memory = memory,
         })
@@ -9315,18 +9083,6 @@ function OmeggaGetPrefabContextPlayerStates()
 end
 
 function OmeggaFindServerPastePrefabContext()
-    local state = OMEGGA_PREFAB_NATIVE_CAPTURE or {}
-    local candidates = {
-        { label = "last-replayable-client-capture", record = state.last_replayable_client },
-        { label = "last-client-capture", record = state.last_client },
-        { label = "last-capture", record = state.last },
-    }
-    for _, candidate in ipairs(candidates) do
-        if candidate.record and is_valid_object(candidate.record.context) then
-            return candidate.record.context, candidate.label
-        end
-    end
-
     local player_states, player_state_source = OmeggaGetPrefabContextPlayerStates()
     for _, player_state in ipairs(player_states) do
         local owner = try_get_property_value(player_state, "Owner")
@@ -9521,18 +9277,6 @@ end
 function OmeggaCollectLivePlayerLocationSources(requested_name)
     local results = {}
     local seen = {}
-    local requested = trim(tostring(requested_name or ""))
-
-    local cached_source = get_cached_chat_whisper_player_source(requested)
-    if cached_source and is_valid_object(cached_source.object) then
-        OmeggaPushLivePlayerLocationSource(
-            results,
-            seen,
-            "cached_whisper_player_controller",
-            cached_source.object,
-            cached_source.player_name
-        )
-    end
 
     for _, class_name in ipairs({ "BRPlayerController", "BP_PlayerController_C", "PlayerController" }) do
         OmeggaPushLivePlayerLocationSource(
@@ -9979,21 +9723,6 @@ function OmeggaFindRawServerPlaceCurrentPrefabContext()
 end
 
 function OmeggaFindServerPlaceCurrentPrefabContext()
-    local state = OMEGGA_PREFAB_NATIVE_CAPTURE or {}
-    local candidates = {
-        { label = "last-replayable-client-place-capture", record = state.last_replayable_client },
-        { label = "last-client-place-capture", record = state.last_client },
-        { label = "last-place-capture", record = state.last },
-    }
-    for _, candidate in ipairs(candidates) do
-        local record = candidate.record
-        if record
-            and tostring(record.kind or "") == "ServerPlaceCurrentPrefab"
-            and is_valid_object(record.context) then
-            return record.context, candidate.label
-        end
-    end
-
     local raw_context, raw_context_source = OmeggaFindRawServerPlaceCurrentPrefabContext()
     if is_valid_object(raw_context) then
         return raw_context, raw_context_source
@@ -10237,12 +9966,12 @@ function OmeggaPastePrefabHash(spec)
 
     state.last_hash_paste.completed_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
     state.last_hash_paste.ok = ok
-    state.last_hash_paste.result = result
-    state.last_hash_paste.detail = detail
+    state.last_hash_paste.result = OmeggaPrefabPersistentValue(result)
+    state.last_hash_paste.detail = OmeggaPrefabPersistentValue(detail)
     state.last_replay.completed_at = state.last_hash_paste.completed_at
     state.last_replay.ok = ok
-    state.last_replay.result = result
-    state.last_replay.detail = detail
+    state.last_replay.result = OmeggaPrefabPersistentValue(result)
+    state.last_replay.detail = OmeggaPrefabPersistentValue(detail)
 
     table.insert(lines, "replay_id=" .. tostring(replay_id))
     table.insert(lines, "ok=" .. tostring(ok))
@@ -10360,12 +10089,12 @@ function OmeggaPlaceCurrentPrefab(spec)
     local overall_ok = place_call_ok and place_result == true
     state.last_hash_place.completed_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
     state.last_hash_place.place_ok = overall_ok
-    state.last_hash_place.place_result = place_result
-    state.last_hash_place.place_detail = place_detail
+    state.last_hash_place.place_result = OmeggaPrefabPersistentValue(place_result)
+    state.last_hash_place.place_detail = OmeggaPrefabPersistentValue(place_detail)
     state.last_replay.completed_at = state.last_hash_place.completed_at
     state.last_replay.ok = overall_ok
-    state.last_replay.result = place_result
-    state.last_replay.detail = place_detail
+    state.last_replay.result = OmeggaPrefabPersistentValue(place_result)
+    state.last_replay.detail = OmeggaPrefabPersistentValue(place_detail)
 
     table.insert(lines, "replay_id=" .. tostring(replay_id))
     table.insert(lines, "ok=" .. tostring(overall_ok))
@@ -10523,15 +10252,17 @@ function OmeggaPasteAndPlacePrefabHash(spec)
     local overall_ok = paste_call_ok and paste_result == true and place_call_ok and place_result == true
     state.last_hash_paste_and_place.completed_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
     state.last_hash_paste_and_place.paste_ok = paste_call_ok and paste_result == true
-    state.last_hash_paste_and_place.paste_result = paste_result
-    state.last_hash_paste_and_place.paste_detail = paste_detail
+    state.last_hash_paste_and_place.paste_result = OmeggaPrefabPersistentValue(paste_result)
+    state.last_hash_paste_and_place.paste_detail = OmeggaPrefabPersistentValue(paste_detail)
     state.last_hash_paste_and_place.place_ok = place_call_ok and place_result == true
-    state.last_hash_paste_and_place.place_result = place_result
-    state.last_hash_paste_and_place.place_detail = place_detail
+    state.last_hash_paste_and_place.place_result = OmeggaPrefabPersistentValue(place_result)
+    state.last_hash_paste_and_place.place_detail = OmeggaPrefabPersistentValue(place_detail)
     state.last_replay.completed_at = state.last_hash_paste_and_place.completed_at
     state.last_replay.ok = overall_ok
     state.last_replay.result = overall_ok and "paste-and-place-complete" or "paste-and-place-failed"
-    state.last_replay.detail = tostring(paste_detail or "") .. " | " .. tostring(place_detail or "")
+    state.last_replay.detail = tostring(OmeggaPrefabPersistentValue(paste_detail) or "")
+        .. " | "
+        .. tostring(OmeggaPrefabPersistentValue(place_detail) or "")
 
     table.insert(lines, "replay_id=" .. tostring(replay_id))
     table.insert(lines, "ok=" .. tostring(overall_ok))
@@ -10602,7 +10333,9 @@ function OmeggaDescribePrefabNativeReplay()
     table.insert(lines, "last_capture=" .. tostring(record.kind or "unknown"))
     table.insert(lines, "last_capture_source=" .. tostring(record.source or ""))
     table.insert(lines, "hook=" .. tostring(record.hook_path or ""))
-    table.insert(lines, "context=" .. get_object_label(record.context, "nil"))
+    table.insert(lines, "captured_context_label=" .. tostring(record.context_label or "nil"))
+    table.insert(lines, "context_retained=false")
+    table.insert(lines, "replay_context_resolution=fresh-on-game-thread")
 
     local buffer_hex, meta_or_error = OmeggaBuildPrefabNativeReplayBuffer(record)
     if not buffer_hex then
@@ -10695,10 +10428,6 @@ function OmeggaReplayLastPrefabNativeCapture(spec)
     if not OmeggaPrefabNativeReplayLayout(record.kind) then
         return "Last capture is " .. tostring(record.kind or "unknown") .. "; no replay layout is known for this capture kind"
     end
-    if not is_valid_object(record.context) then
-        return "Captured context is no longer valid; paste once from a connected client to refresh it"
-    end
-
     local buffer_hex, meta_or_error = OmeggaBuildPrefabNativeReplayBuffer(record, spec)
     if not buffer_hex then
         return "Could not build replay buffer: " .. tostring(meta_or_error)
@@ -10710,6 +10439,19 @@ function OmeggaReplayLastPrefabNativeCapture(spec)
     end
     if function_name == "" then
         function_name = "ServerPastePrefab"
+    end
+
+    local context = nil
+    local context_source = nil
+    if function_name == "ServerPlaceCurrentPrefab" or function_name == "ServerPlaceSimpleEntityVolume" then
+        context, context_source = OmeggaFindServerPlaceCurrentPrefabContext()
+    else
+        context, context_source = OmeggaFindServerPastePrefabContext()
+    end
+    if not is_valid_object(context) then
+        return "No fresh game-thread context is available for "
+            .. tostring(function_name)
+            .. "; replay refused without using the captured UObject"
     end
 
     local replay_id = (tonumber(state.replay_sequence) or 0) + 1
@@ -10733,13 +10475,13 @@ function OmeggaReplayLastPrefabNativeCapture(spec)
         detail = nil,
     }
 
-    local ok, result, detail = pcall(OmeggaUnsafeProcessEventWithParamBytes, record.context, function_name, buffer_hex)
+    local ok, result, detail = pcall(OmeggaUnsafeProcessEventWithParamBytes, context, function_name, buffer_hex)
     state.replay_active = false
     state.active_replay_id = nil
     state.last_replay.completed_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
     state.last_replay.ok = ok
-    state.last_replay.result = result
-    state.last_replay.detail = detail
+    state.last_replay.result = OmeggaPrefabPersistentValue(result)
+    state.last_replay.detail = OmeggaPrefabPersistentValue(detail)
 
     local lines = {
         "Replay last prefab native capture",
@@ -10747,7 +10489,10 @@ function OmeggaReplayLastPrefabNativeCapture(spec)
         "kind=" .. tostring(record.kind or ""),
         "source=" .. tostring(record.source or ""),
         "function=" .. tostring(function_name),
-        "context=" .. get_object_label(record.context, "nil"),
+        "captured_context_label=" .. tostring(record.context_label or "nil"),
+        "context_source=" .. tostring(context_source or ""),
+        "context=" .. get_object_label(context, "nil"),
+        "context_retained=false",
         "buffer_bytes=" .. tostring(meta_or_error.total or 0),
         "segments=" .. tostring(#(meta_or_error.descriptors or {})),
         "layout=" .. tostring(meta_or_error.layout or ""),

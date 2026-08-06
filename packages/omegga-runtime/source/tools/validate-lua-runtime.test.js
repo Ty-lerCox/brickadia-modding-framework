@@ -127,6 +127,194 @@ test('typed chat resolution refuses stale cached command contexts', () => {
   assert.doesNotMatch(fastSources, /get_cached_command_context\s*\(/);
 });
 
+test('OmeggaBridge does not retain typed-chat UObjects across frames', () => {
+  const bridgePath = path.join(
+    __dirname,
+    '..',
+    'templates',
+    'windows-ue4ss',
+    'ue4ss',
+    'Mods',
+    'OmeggaBridge',
+    'Scripts',
+    'main.lua',
+  );
+  const source = fs.readFileSync(bridgePath, 'utf8');
+
+  assert.doesNotMatch(
+    source,
+    /local\s+last_hook_(?:context|world|executor|game_mode|game_state|game_session)\s*=/,
+    'hook callbacks must not retain raw UObjects in Lua locals',
+  );
+  assert.doesNotMatch(
+    source,
+    /\blast_hook_(?:context|world|executor|game_mode|game_state|game_session)\s*=/,
+    'hook callbacks must not assign raw UObjects for later frames',
+  );
+  assert.doesNotMatch(source, /local\s+observed_chat_context\s*=/);
+  assert.doesNotMatch(source, /\bobserved_chat_context\s*=/);
+  assert.doesNotMatch(
+    source,
+    /is_valid_object\s*\(\s*(?:last_hook_|observed_chat_context)/,
+    'IsValid must never run against a previously retained typed-chat UObject',
+  );
+
+  assert.match(source, /CHAT_WHISPER_PLAYER_SOURCE_BY_TARGET\s*=\s*nil/);
+  assert.match(source, /CHAT_WHISPER_LAST_PLAYER_SOURCE\s*=\s*nil/);
+  assert.match(source, /CHAT_WHISPER_LAST_TARGET_KEY\s*=\s*nil/);
+  assert.doesNotMatch(source, /get_cached_chat_whisper_player_source/);
+  assert.doesNotMatch(source, /remember_chat_whisper_player_source/);
+  assert.doesNotMatch(source, /clone_fast_chat_player_source/);
+  assert.doesNotMatch(source, /normalize_chat_whisper_target_key/);
+
+  const cachedContextStart = source.indexOf(
+    'local function get_cached_command_context()',
+  );
+  const cachedContextEnd = source.indexOf(
+    'local function get_cached_world()',
+    cachedContextStart,
+  );
+  assert.notEqual(cachedContextStart, -1, 'cached context guard must exist');
+  assert.notEqual(cachedContextEnd, -1, 'cached context guard boundary must exist');
+  const cachedContextGuard = source.slice(cachedContextStart, cachedContextEnd);
+  assert.doesNotMatch(cachedContextGuard, /OmeggaGetCachedCommandContext/);
+  assert.match(
+    cachedContextGuard,
+    /Cross-frame cached command contexts are disabled/,
+  );
+
+  const resolverStart = source.indexOf(
+    'local function get_chat_broadcast_objects()',
+  );
+  const resolverEnd = source.indexOf(
+    'local function get_object_label',
+    resolverStart,
+  );
+  const resolver = source.slice(resolverStart, resolverEnd);
+  assert.doesNotMatch(resolver, /last_hook_|observed_chat_context/);
+  assert.match(resolver, /cross-frame UObject caches disabled/);
+  assert.match(resolver, /pcall\(UEHelpers\.GetWorld\)/);
+});
+
+test('prefab capture retains only inert snapshots and reacquires replay contexts', () => {
+  const bridgePath = path.join(
+    __dirname,
+    '..',
+    'templates',
+    'windows-ue4ss',
+    'ue4ss',
+    'Mods',
+    'OmeggaBridge',
+    'Scripts',
+    'main.lua',
+  );
+  const source = fs.readFileSync(bridgePath, 'utf8');
+
+  const captureStart = source.indexOf(
+    'function OmeggaRecordPrefabNativeCapture(',
+  );
+  const captureEnd = source.indexOf(
+    'function OmeggaAddPrefabHookCandidate(',
+    captureStart,
+  );
+  assert.ok(captureStart >= 0 && captureEnd > captureStart);
+  const capture = source.slice(captureStart, captureEnd);
+  assert.doesNotMatch(
+    capture,
+    /record\.context\s*=\s*(?!nil\b)/,
+    'callback-owned contexts must never enter a persistent capture record',
+  );
+  assert.doesNotMatch(
+    capture,
+    /^\s*(?:raw|resolved|context)\s*=\s*(?:raw|resolved|context(?:_object)?)\b/m,
+    'raw, resolved, and context wrappers must not be copied into record fields',
+  );
+  assert.match(capture, /context_label = "nil"/);
+  assert.match(capture, /context_retained=false/);
+  assert.match(capture, /resolver = resolver,[\s\S]*?memory = memory,/);
+
+  const sanitizerStart = source.indexOf(
+    'function OmeggaSanitizePrefabNativeCaptureRecord(',
+  );
+  const sanitizerEnd = source.indexOf(
+    'OMEGGA_PREFAB_NATIVE_REPLAYABLE_KINDS',
+    sanitizerStart,
+  );
+  assert.ok(sanitizerStart >= 0 && sanitizerEnd > sanitizerStart);
+  const sanitizer = source.slice(sanitizerStart, sanitizerEnd);
+  assert.match(sanitizer, /record\.context = nil/);
+  assert.match(sanitizer, /argument\.raw = nil/);
+  assert.match(sanitizer, /argument\.resolved = nil/);
+  assert.doesNotMatch(
+    sanitizer,
+    /IsValid|GetWorld|ProcessEvent/,
+    'legacy wrapper cleanup must drop references without touching UObjects',
+  );
+
+  const pasteResolverStart = source.indexOf(
+    'function OmeggaFindServerPastePrefabContext()',
+  );
+  const pasteResolverEnd = source.indexOf(
+    'function OmeggaAppendPrefabPlayerContextDiagnostics(',
+    pasteResolverStart,
+  );
+  const pasteResolver = source.slice(pasteResolverStart, pasteResolverEnd);
+  assert.doesNotMatch(pasteResolver, /record\.context|state\.last/);
+  assert.match(pasteResolver, /OmeggaGetPrefabContextPlayerStates\(\)/);
+  assert.match(pasteResolver, /find_first_valid\(class_name\)/);
+
+  const placeResolverStart = source.indexOf(
+    'function OmeggaFindServerPlaceCurrentPrefabContext()',
+  );
+  const placeResolverEnd = source.indexOf(
+    'function OmeggaDescribePrefabPlacementContext()',
+    placeResolverStart,
+  );
+  const placeResolver = source.slice(placeResolverStart, placeResolverEnd);
+  assert.doesNotMatch(placeResolver, /record\.context|state\.last/);
+  assert.match(placeResolver, /OmeggaFindRawServerPlaceCurrentPrefabContext\(\)/);
+  assert.match(placeResolver, /OmeggaFindServerPastePrefabContext\(\)/);
+
+  const replayStart = source.indexOf(
+    'function OmeggaReplayLastPrefabNativeCapture(',
+  );
+  const replayEnd = source.indexOf(
+    'function OmeggaSelfTestPrefabNativeReplayBuffer()',
+    replayStart,
+  );
+  assert.ok(replayStart >= 0 && replayEnd > replayStart);
+  const replay = source.slice(replayStart, replayEnd);
+  assert.doesNotMatch(replay, /record\.context\b/);
+  assert.doesNotMatch(
+    replay,
+    /(?:is_valid_object|get_object_label)\s*\(\s*(?:candidate\.)?record\.context\b/,
+  );
+  assert.doesNotMatch(
+    replay,
+    /OmeggaUnsafeProcessEventWithParamBytes\s*,\s*(?:candidate\.)?record\./,
+  );
+  assert.match(replay, /OmeggaFindServerPlaceCurrentPrefabContext\(\)/);
+  assert.match(replay, /OmeggaFindServerPastePrefabContext\(\)/);
+  assert.match(
+    replay,
+    /pcall\(OmeggaUnsafeProcessEventWithParamBytes, context, function_name, buffer_hex\)/,
+  );
+  assert.ok(
+    replay.indexOf('OmeggaBuildPrefabNativeReplayBuffer(record, spec)') <
+      replay.indexOf('OmeggaFindServerPastePrefabContext()'),
+    'the byte buffer must be built before acquiring the short-lived live context',
+  );
+
+  assert.doesNotMatch(
+    source,
+    /is_valid_object\s*\(\s*(?:candidate\.)?record\.context/,
+  );
+  assert.doesNotMatch(
+    source,
+    /OmeggaUnsafeProcessEventWithParamBytes\s*,\s*(?:candidate\.)?record\.context/,
+  );
+});
+
 test('socket pump enforces the elapsed budget only between completed envelopes', () => {
   const runtimePath = path.join(
     __dirname,
@@ -141,6 +329,7 @@ test('socket pump enforces the elapsed budget only between completed envelopes',
     'runtime.lua',
   );
   const source = fs.readFileSync(runtimePath, 'utf8');
+
   const drainStart = source.indexOf('function BMF_drain_socket_messages(');
   const drainEnd = source.indexOf(
     'function BMF_schedule_socket_worker_poll',
@@ -560,6 +749,192 @@ test('command output and completed replay caches are bounded by count and bytes'
   );
 });
 
+test('game command tunnel never reuses a raw controller address across requests', () => {
+  const runtimePath = path.join(
+    __dirname,
+    '..',
+    'templates',
+    'windows-ue4ss',
+    'ue4ss',
+    'Mods',
+    'BMF',
+    'Scripts',
+    'bmf',
+    'runtime.lua',
+  );
+  const source = fs.readFileSync(runtimePath, 'utf8');
+  const drainStart = source.indexOf(
+    'BMF_game_command_tunnel_drain_once = function',
+  );
+  const drainEnd = source.indexOf(
+    'BMF_game_command_tunnel_pump = function',
+    drainStart,
+  );
+  const drain = source.slice(drainStart, drainEnd);
+
+  assert.ok(drainStart >= 0 && drainEnd > drainStart);
+  assert.doesNotMatch(
+    source,
+    /cached_controller_address/,
+    'raw controller addresses must not be persisted in tunnel state',
+  );
+  assert.doesNotMatch(
+    drain,
+    /controllerAddress\s*=/,
+    'tunnel dispatch must not supply an address retained by another request',
+  );
+  assert.match(
+    drain,
+    /nativeResolverOnly = true/,
+    'tunnel dispatch must bypass Lua UObject enumeration and validation',
+  );
+  assert.doesNotMatch(
+    drain,
+    /resolved_address/,
+    'tunnel dispatch must not retain the freshly resolved raw address',
+  );
+  assert.match(
+    drain,
+    /controller_cache_refreshes[\s\S]*?BMF_player_message_implementation_probe\(request\.line, "", \{[\s\S]*?skipRateLimit = true,[\s\S]*?\}\)/,
+    'each tunnel dispatch must resolve a controller afresh and retain compatible telemetry',
+  );
+  assert.match(source, /controller_address_reuse_enabled = false/);
+  assert.match(source, /controllerAddressReuseEnabled = false/);
+
+  const probeStart = source.indexOf(
+    'local function BMF_player_message_implementation_probe',
+  );
+  const probeEnd = source.indexOf(
+    'function BMF.chat.playerMessageImplementationProbe',
+    probeStart,
+  );
+  const probe = source.slice(probeStart, probeEnd);
+  const nativeOnlyStart = probe.indexOf('if native_resolver_only then');
+  const luaCandidateStart = probe.indexOf(
+    '\n  else\n    if preferred_controller_address',
+    nativeOnlyStart,
+  );
+  const nativeOnlyBranch = probe.slice(nativeOnlyStart, luaCandidateStart);
+  assert.ok(nativeOnlyStart >= 0 && luaCandidateStart > nativeOnlyStart);
+  assert.match(
+    nativeOnlyBranch,
+    /address = ""[\s\S]*?label = "native-resolver"/,
+    'native-only resolution must invoke the native helper with an empty address',
+  );
+  assert.doesNotMatch(
+    nativeOnlyBranch,
+    /FindAllOf|live_chat_is_valid_object/,
+    'native-only resolution must not touch Lua UObject enumeration or validation',
+  );
+  assert.match(probe, /native_resolver_only and "native-resolver-only"/);
+});
+
+test('native controller and tree target paths reject cross-frame UObject reuse', () => {
+  const nativePath = path.join(
+    __dirname,
+    '..',
+    '..',
+    '..',
+    '..',
+    'native',
+    'bmf_socket',
+    'bmf_socket.cpp',
+  );
+  const source = fs.readFileSync(nativePath, 'utf8');
+
+  const controllerResolverStart = source.indexOf(
+    'Unreal::UObject* find_live_player_controller(uint32_t& scanned',
+    source.indexOf('bool is_live_player_controller_object'),
+  );
+  const controllerResolverEnd = source.indexOf(
+    'bool install_reserved_chat_guard',
+    controllerResolverStart,
+  );
+  const controllerResolver = source.slice(
+    controllerResolverStart,
+    controllerResolverEnd,
+  );
+  assert.doesNotMatch(
+    controllerResolver,
+    /is_live_uobject/,
+    'controller resolution must not enter the unguarded generic UObject predicate',
+  );
+  assert.ok(
+    controllerResolver.indexOf(
+      'player_controller_lifecycle_is_usable_guarded(object)',
+    ) < controllerResolver.indexOf('object_class_has_any_cast_flags_guarded'),
+    'the SEH lifecycle guard must dominate controller candidate inspection',
+  );
+
+  const implementationStart = source.indexOf(
+    'std::string execute_player_chat_message_implementation_probe_text',
+  );
+  const implementationEnd = source.indexOf(
+    'Unreal::UObject* find_kismet_system_library_default',
+    implementationStart,
+  );
+  const implementation = source.slice(implementationStart, implementationEnd);
+  assert.doesNotMatch(implementation, /is_live_uobject\(controller\)/);
+  assert.match(
+    implementation,
+    /player_controller_lifecycle_is_usable_guarded\(controller\)[\s\S]*?read_player_controller_identity_guarded/,
+    'a returned controller must be lifecycle-gated before identity logging or vtable use',
+  );
+
+  const targetStructStart = source.indexOf('struct TreeCutTargetCandidate');
+  const targetStructEnd = source.indexOf(
+    'std::vector<TreeCutTargetCandidate> g_treecut_target_cache',
+    targetStructStart,
+  );
+  const targetStruct = source.slice(targetStructStart, targetStructEnd);
+  assert.doesNotMatch(
+    targetStruct,
+    /UObject\s*\*/,
+    'tree target cache entries must contain only copied primitive metadata',
+  );
+  assert.doesNotMatch(source, /candidate\.actor/);
+
+  const refreshStart = source.indexOf('void treecut_refresh_target_cache');
+  const refreshEnd = source.indexOf(
+    'struct TreeCutResolvedTarget',
+    refreshStart,
+  );
+  const refresh = source.slice(refreshStart, refreshEnd);
+  assert.ok(
+    refresh.indexOf('uobject_lifecycle_is_usable_guarded(object)') <
+      refresh.indexOf('object_name(object)'),
+    'tree target refresh must lifecycle-gate candidates before dereference',
+  );
+
+  const cachedResolveStart = source.indexOf(
+    'TreeCutResolvedTarget treecut_resolve_target_actor',
+  );
+  const cachedResolveEnd = source.indexOf(
+    'void write_treecut_target_json',
+    cachedResolveStart,
+  );
+  const cachedResolve = source.slice(cachedResolveStart, cachedResolveEnd);
+  assert.doesNotMatch(
+    cachedResolve,
+    /UObject|is_live_uobject|uobject_lifecycle_is_usable_guarded/,
+    'cached target resolution must consume only copied metadata, never a UObject',
+  );
+
+  const damageTargetStart = source.indexOf(
+    'void write_treecut_damage_target_json',
+  );
+  const damageTargetEnd = source.indexOf(
+    'struct TreeCutProbeSlot',
+    damageTargetStart,
+  );
+  const damageTarget = source.slice(damageTargetStart, damageTargetEnd);
+  assert.ok(
+    damageTarget.indexOf('uobject_lifecycle_is_usable_guarded(source)') <
+      damageTarget.indexOf('actor_from_uobject_or_outer(source'),
+    'a retained damage-target address must be SEH lifecycle-gated before dereference',
+  );
+});
+
 test('player registry keeps ordinary player and chat paths cache-first with explicit bounded repair', () => {
   const runtimePath = path.join(
     __dirname,
@@ -574,6 +949,13 @@ test('player registry keeps ordinary player and chat paths cache-first with expl
     'runtime.lua',
   );
   const source = fs.readFileSync(runtimePath, 'utf8');
+
+  assert.doesNotMatch(
+    source,
+    /controller_handles/,
+    'player registry must never retain UE4SS controller userdata across requests',
+  );
+  assert.match(source, /controller_userdata_cache_enabled = false/);
 
   assert.match(
     source,
@@ -604,6 +986,31 @@ test('player registry keeps ordinary player and chat paths cache-first with expl
   assert.doesNotMatch(cachedPlayers, /read_file\s*\(/);
   assert.doesNotMatch(cachedPlayers, /json_decode\s*\(/);
   assert.match(cachedPlayers, /state\.player_cache/);
+
+  const cachedControllerStart = cachedPlayersEnd;
+  const cachedControllerEnd = source.indexOf(
+    'function live_chat_exact_identity_values',
+    cachedControllerStart,
+  );
+  const cachedController = source.slice(
+    cachedControllerStart,
+    cachedControllerEnd,
+  );
+  assert.match(cachedController, /live_chat_find_controller_by_name\(path\)/);
+  assert.doesNotMatch(
+    cachedController,
+    /live_chat_is_valid_object/,
+    'fresh path resolution must not revalidate userdata retained by a prior request',
+  );
+
+  const publishStart = source.indexOf('function publish_player_cache');
+  const publishEnd = source.indexOf('function load_player_cache', publishStart);
+  const publish = source.slice(publishStart, publishEnd);
+  assert.doesNotMatch(
+    publish,
+    /live_chat_is_valid_object|controller\s*=|handle/,
+    'publishing a plain player snapshot must not retain or inspect controller userdata',
+  );
 
   const collectStart = source.indexOf(
     'function live_chat_collect_targets(options)',

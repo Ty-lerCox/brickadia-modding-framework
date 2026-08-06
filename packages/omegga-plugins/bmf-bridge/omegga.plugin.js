@@ -496,6 +496,21 @@ module.exports = class BmfBridge {
     throw new Error(`unsupported BMF bridge plugin event: ${name}`);
   }
 
+  async pluginEvent(event, from, ...args) {
+    // Omegga's safe Node worker dispatches inter-plugin calls through
+    // pluginEvent(event, from, ...args), while the unsafe loader calls
+    // emitPlugin(event, from, args). Support both loader contracts.
+    try {
+      return await this.emitPlugin(event, from, args);
+    } catch (error) {
+      return {
+        ok: false,
+        code: "PLUGIN_EVENT_FAILED",
+        detail: String(error?.message ?? error ?? "unknown error").slice(0, 1024),
+      };
+    }
+  }
+
   get preferredTransport() {
     return String(this.config.preferredTransport || "socket")
       .trim()

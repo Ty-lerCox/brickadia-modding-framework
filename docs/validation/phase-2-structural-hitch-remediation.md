@@ -1,6 +1,7 @@
 # Phase 2 Structural Hitch Remediation
 
 Date: 2026-08-05
+Lifecycle addendum: 2026-08-06
 
 Phase 1.5 proved that bounded admission prevents several expensive operations
 from compounding in one frame. Phase 2 addresses the remaining structural
@@ -62,11 +63,23 @@ Ordinary player list, status-message, whisper, and broadcast paths now consume a
 memory snapshot populated by the Omegga player-sync adapter. They do not read
 `players.json`, parse the complete Brickadia log, or call `FindAllOf` per request.
 
-Live controller access remains on the game thread. A cached controller handle is
-validated before reuse; a miss performs a targeted lookup. Broad discovery is
-restricted to an explicit, deduplicated repair with cooldown and publishes one
-new registry generation for all waiting callers. Durable `players.json` writes
-are performed by Node rather than the game thread.
+The registry cache retains only plain player identity and snapshot data. It must
+not retain a raw UE `UObject`, player-controller wrapper, or controller address
+across frames or reconnects. When a command needs a live controller, the design
+target is to acquire it fresh on the game thread through a lifecycle-guarded
+resolver, use it only during that dispatch, and then discard it. If a fresh
+controller cannot be resolved safely, the command fails closed instead of
+trying an old handle or address. Broad discovery remains restricted to an
+explicit, deduplicated repair with cooldown and publishes one new registry
+generation for all waiting callers. Durable `players.json` writes are performed
+by Node rather than the game thread.
+
+This stricter rule was added after the 2026-08-06 reconnect-and-whisper crash.
+Calling `IsValid()` on a stale UE wrapper is not a safe validation strategy: the
+native pointer may already be invalid before that method can answer. Source
+hardening now prevents cross-frame raw-object retention in chat, player registry,
+game-command tunnel, native tree-target, and prefab-capture paths. The controlled
+deployment and reconnect revalidation completed on 2026-08-06.
 
 Automatic join reconciliation is cache-only and explicitly sends
 `repair=false`; broad controller repair can only be requested manually. The
@@ -156,6 +169,20 @@ Do not automatically retry a durable command whose outcome is unknown.
 
 ## Static validation
 
+The original Phase 2 scheduler, admission, and producer checks passed. The
+2026-08-06 lifecycle addendum added the following final checks:
+
+- Lua runtime/lifecycle regression suite: 13/13 passed.
+- BMF Bridge interop suite: 10/10 passed.
+- Safe-worker transport suite: 13/13 passed in both the supported and active
+  Omegga trees.
+- Supported and active Omegga backend builds: passed (109 modules).
+- Canonical and packaged Lua runtimes: byte-identical and Lua 5.3 compile/AST
+  clean.
+- Scoped diff checks: clean.
+
+Earlier Phase 2 coverage also included:
+
 - BMF Lua scheduler guards: 9/9 passed.
 - Canonical and packaged BMF runtimes: byte-identical.
 - Lua 5.3 compile/AST scheduler validation: passed.
@@ -187,7 +214,48 @@ Do not automatically retry a durable command whose outcome is unknown.
   timeouts; future bulk producers should preflight locally and use the `bulk`
   service class.
 
-## Live acceptance gate
+## Live acceptance result — 2026-08-06
+
+The crash-specific lifecycle gate is accepted after one controlled restart.
+
+- The old stack stopped through the supervisor stop marker; no process was
+  force-killed. The replacement Brickadia server is PID `118620` on UDP `7777`.
+- The live BMF runtime SHA-256 is
+  `DDF997D8620DBF318BF36021984300A179E5A9F7EA878E9995978C2E76C21825`.
+  The live OmeggaBridge SHA-256 is
+  `9A3A7EC8CBEDCD4480767297ACA6B69481289A9A69E746C03B172710F205B253`.
+  The live BMFSocket DLL SHA-256 is
+  `2A930FE6BE07930075307E68DBB7EF495CC0934EC3F0496114E40BA9FB37FC11`.
+- `Ty` joined, disconnected, and rejoined. CityRPG issued the new-session team
+  assignment, player sync published the two-player snapshot, and two whisper
+  probes ran on opposite sides of the reconnect. Both bridge traces explicitly
+  reported `cross-frame UObject caches disabled` and `fresh bounded discovery`.
+  The unsupported console execution returned false; it failed closed and the
+  server remained alive.
+- No crash folder newer than
+  `UECC-Windows-C263CC0B487D1E11B1D99E86386BEFBD_0000` at `00:24:22Z` appeared.
+- Direct and tunnel queue depths returned to zero; there were no tunnel
+  rejections, expirations, or worker errors. At the final health check the
+  60-frame window averaged `16.553 ms`, peaked at `17.566 ms`, and averaged
+  `60.411 FPS`. BMF, Omegga, CityRPG, UDP `7777`, and telemetry were healthy.
+- `ServerName=CityRPG v1 - Under Maintenance` remained unchanged. The active
+  role hashes remained
+  `7D2E02F91139209DD13492DF90344B7212ECD44830CE1B00F802175A8824F8C3`
+  and
+  `37135873DEC7E75F598857F415167079EAD13A19AF6CBCB58258B884DFFF2BA0`.
+
+This proves the stale-controller crash path is contained. It does not claim
+that every hitch is gone: one-shot startup discovery still recorded `530 ms`,
+`212 ms`, and `118 ms` command maxima, and reconnect/canary activity produced
+additional frames above `100 ms`. Those events did not come from queue growth;
+the queues remained at depth zero. They are the remaining indivisible-work
+performance boundary, not a reason to reuse Unreal objects.
+
+The rollback backup is:
+
+`C:\Users\tycox\OneDrive\Documents\GitHub\Brickadia\artifacts\service-start\pre-phase2-20260805-1959`
+
+## Original live acceptance checklist
 
 The rollout is not accepted until one controlled restart demonstrates all of the
 following:
@@ -196,6 +264,9 @@ following:
   hashes.
 - Normal `players.list`, status-message, whisper, and broadcast requests perform
   zero global controller scans.
+- No live `UObject`, controller wrapper, or controller address is retained and
+  reused across frames; reconnect-then-whisper and reconnect-then-team probes
+  resolve a fresh controller or fail closed without a crash.
 - One explicit player repair is deduplicated and obeys cooldown.
 - Direct and tunnel queues drain without growing oldest age or starvation.
 - Expired Omegga inbox requests do not execute later.
@@ -204,5 +275,6 @@ following:
 - The busy-period soak creates no unexplained frame at or above 100 ms and no new
   server crash folder.
 
-Live post-rollout hashes, probe counts, latency distributions, frame results, and
-the exact backup directory will be appended after the controlled activation.
+The crash-specific items above passed. Longer-duration performance observation
+remains appropriate because a short controlled canary cannot prove the absence
+of every unrelated hitch over days of gameplay.

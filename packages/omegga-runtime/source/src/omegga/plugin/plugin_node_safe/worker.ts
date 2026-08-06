@@ -23,6 +23,7 @@ import { parentPort } from 'node:worker_threads';
 import { NodeVM } from 'vm2';
 import webpack, { ExternalItemFunctionData, Stats } from 'webpack';
 import { injectOmeggaPrototypes, ProxyOmegga } from './proxyOmegga';
+import { runPluginInteropForWorker } from './workerTransport';
 Logger.VERBOSE = process.env.VERBOSE === 'true';
 
 const MAIN_FILE = 'omegga.plugin.js';
@@ -67,6 +68,14 @@ const emit = (action: string, ...args: any[]) => {
 
   // return the promise
   return promise;
+};
+
+// Reply to a parent-initiated request without registering a worker-side
+// response listener. Using emit() here leaked one EventEmitter listener for
+// every lifecycle or inter-plugin response because the parent never replies
+// to a reply.
+const respond = (action: string, ...args: any[]) => {
+  parentPort.postMessage({ action, args: [null, ...args] });
 };
 
 // tell omegga to exec a command
@@ -414,7 +423,7 @@ async function createVm(
 
 // kill this plugin
 parent.on('kill', resp => {
-  emit(resp);
+  respond(resp);
   process.exit(0);
 });
 
@@ -423,25 +432,25 @@ parent.on('name', (resp, name) => {
   pluginName = name;
   // temp save prefix changes to avoid collision
   omegga._tempSavePrefix = 'omegga_' + name + '_temp';
-  emit(resp);
+  respond(resp);
 });
 
 // get memory usage for this plugin
-parent.on('mem', resp => emit(resp, 'mem', process.memoryUsage()));
+parent.on('mem', resp => respond(resp, 'mem', process.memoryUsage()));
 
 // create the vm
 parent.on('load', async (resp, pluginPath, options) => {
   try {
     await createVm(pluginPath, options);
 
-    emit(resp, true);
+    respond(resp, true);
   } catch (err) {
     Logger.errorp(
       pluginName.brightRed,
       'error creating vm',
       err?.stack ?? err.toString(),
     );
-    emit(resp, false);
+    respond(resp, false);
   }
 });
 
@@ -466,10 +475,10 @@ parent.on('start', async (resp, config) => {
         emit('command.registers', JSON.stringify(cmds));
       }
     }
-    emit(resp, true, registeredCommands);
+    respond(resp, true, registeredCommands);
   } catch (err) {
     emit('error', 'error starting plugin', err?.stack ?? JSON.stringify(err));
-    emit(resp, false);
+    respond(resp, false);
     Logger.errorp(pluginName.brightRed, 'Error starting plugin', err);
   }
 });
@@ -481,18 +490,19 @@ parent.on('stop', async resp => {
       await pluginInstance.stop.bind(pluginInstance)();
     }
     pluginInstance = undefined;
-    emit(resp, true);
+    respond(resp, true);
   } catch (err) {
     emit('error', 'error stopping plugin', err?.stack ?? err.toString());
-    emit(resp, false);
+    respond(resp, false);
   }
 });
 
 // handle emitPlugins
 parent.on('emitPlugin', async (resp, ev, from, args) => {
-  if (pluginInstance?.pluginEvent) {
-    emit(resp, await pluginInstance.pluginEvent(ev, from, ...args));
-  } else {
-    emit(resp, null);
-  }
+  const result = await runPluginInteropForWorker(() =>
+    pluginInstance?.pluginEvent
+      ? pluginInstance.pluginEvent(ev, from, ...args)
+      : null,
+  );
+  respond(resp, result);
 });

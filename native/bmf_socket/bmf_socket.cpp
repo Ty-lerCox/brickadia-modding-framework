@@ -1941,6 +1941,12 @@ namespace
     using ServerPushChatMessageImplementationFn = void(__fastcall*)(void*, const Unreal::FString&);
     using ReservedChatExecFn = void(__fastcall*)(void*, void*, void*);
     bool read_process_event_locals(void* stack, uintptr_t& out_locals);
+    bool player_controller_lifecycle_is_usable_guarded(Unreal::UObject* object);
+    bool read_player_controller_identity_guarded(Unreal::UObject* object,
+                                                 std::string& full_name,
+                                                 std::string& class_name,
+                                                 std::string& class_full_name,
+                                                 unsigned long& exception_code);
 
     std::atomic<ReservedChatExecFn> g_reserved_chat_guard_original{nullptr};
     std::atomic<uintptr_t> g_reserved_chat_guard_function{0};
@@ -2194,7 +2200,7 @@ namespace
                                                          unsigned long& exception_code)
     {
         exception_code = 0;
-        if (!controller || !implementation)
+        if (!player_controller_lifecycle_is_usable_guarded(controller) || !implementation)
         {
             return false;
         }
@@ -2602,8 +2608,20 @@ namespace
         uint32_t player_scanned = 0;
         std::string player_detail;
         Unreal::UObject* player = find_live_player_controller(player_scanned, player_detail);
+        std::string player_full_name;
+        std::string player_class_name;
+        std::string player_class_full_name;
+        unsigned long player_identity_exception_code = 0;
+        const bool player_identity_read =
+            player_controller_lifecycle_is_usable_guarded(player) &&
+            read_player_controller_identity_guarded(
+                player,
+                player_full_name,
+                player_class_name,
+                player_class_full_name,
+                player_identity_exception_code);
         ChatCommandWithArgsProcessEventParams params{};
-        params.player = is_live_uobject(player) ? player : nullptr;
+        params.player = player_identity_read ? player : nullptr;
         params.command = Unreal::FName(command_name_wide.c_str(), Unreal::FNAME_Add);
         params.args.Reserve(static_cast<int32_t>(parsed_args.size()));
         for (const std::string& arg : parsed_args)
@@ -2618,9 +2636,15 @@ namespace
             << "player_scanned=" << player_scanned << "\n"
             << "player_detail=" << json_escape(player_detail) << "\n"
             << "player="
-            << (params.player ? json_escape(object_full_name(params.player)) : "null")
+            << (params.player ? json_escape(player_full_name) : "null")
             << "\n"
             << "params_size=" << sizeof(params) << "\n";
+
+        if (params.player && !player_controller_lifecycle_is_usable_guarded(params.player))
+        {
+            params.player = nullptr;
+            out << "player_expired_before_dispatch=true\n";
+        }
 
         unsigned long exception_code = 0;
         const bool called = process_event_guarded(subsystem, function, &params, exception_code);
@@ -3074,7 +3098,7 @@ namespace
         return found;
     }
 
-    bool player_controller_lifecycle_is_usable_guarded(Unreal::UObject* object)
+    bool uobject_lifecycle_is_usable_guarded(Unreal::UObject* object)
     {
         if (!object ||
             !is_accessible_memory(reinterpret_cast<uintptr_t>(object), sizeof(uintptr_t)))
@@ -3096,6 +3120,54 @@ namespace
         }
     }
 
+    bool player_controller_lifecycle_is_usable_guarded(Unreal::UObject* object)
+    {
+        return uobject_lifecycle_is_usable_guarded(object);
+    }
+
+    void read_player_controller_identity_unchecked(Unreal::UObject* object,
+                                                   std::string& full_name,
+                                                   std::string& class_name,
+                                                   std::string& class_full_name)
+    {
+        full_name = object_full_name(object);
+        class_name = object_class_name(object);
+        class_full_name = object_class_full_name(object);
+    }
+
+    bool read_player_controller_identity_guarded(Unreal::UObject* object,
+                                                 std::string& full_name,
+                                                 std::string& class_name,
+                                                 std::string& class_full_name,
+                                                 unsigned long& exception_code)
+    {
+        full_name.clear();
+        class_name.clear();
+        class_full_name.clear();
+        exception_code = 0;
+        if (!player_controller_lifecycle_is_usable_guarded(object))
+        {
+            return false;
+        }
+
+        __try
+        {
+            read_player_controller_identity_unchecked(
+                object,
+                full_name,
+                class_name,
+                class_full_name);
+            return true;
+        }
+        __except ((exception_code = GetExceptionInformation()->ExceptionRecord->ExceptionCode), EXCEPTION_EXECUTE_HANDLER)
+        {
+            full_name.clear();
+            class_name.clear();
+            class_full_name.clear();
+            return false;
+        }
+    }
+
     bool is_live_player_controller_object(Unreal::UObject* object)
     {
         if (!player_controller_lifecycle_is_usable_guarded(object))
@@ -3108,19 +3180,25 @@ namespace
             return true;
         }
 
-        try
-        {
-            const std::string class_name = ascii_lower(object_class_name(object));
-            const std::string class_full_name = ascii_lower(object_class_full_name(object));
-            return class_name.find("brplayercontroller") != std::string::npos ||
-                   class_name.find("bp_playercontroller") != std::string::npos ||
-                   class_full_name.find("brplayercontroller") != std::string::npos ||
-                   class_full_name.find("bp_playercontroller") != std::string::npos;
-        }
-        catch (...)
+        std::string full_name;
+        std::string class_name;
+        std::string class_full_name;
+        unsigned long identity_exception_code = 0;
+        if (!read_player_controller_identity_guarded(
+                object,
+                full_name,
+                class_name,
+                class_full_name,
+                identity_exception_code))
         {
             return false;
         }
+        class_name = ascii_lower(class_name);
+        class_full_name = ascii_lower(class_full_name);
+        return class_name.find("brplayercontroller") != std::string::npos ||
+               class_name.find("bp_playercontroller") != std::string::npos ||
+               class_full_name.find("brplayercontroller") != std::string::npos ||
+               class_full_name.find("bp_playercontroller") != std::string::npos;
     }
 
     Unreal::UObject* find_live_player_controller(uint32_t& scanned, std::string& detail)
@@ -3129,27 +3207,33 @@ namespace
         scanned = 0;
 
         auto is_metadata_object = [](Unreal::UObject* object) {
-            if (!is_live_uobject(object) || object->HasAnyFlags(Unreal::RF_ClassDefaultObject))
+            if (!player_controller_lifecycle_is_usable_guarded(object))
             {
                 return true;
             }
 
-            try
-            {
-                const std::string full_name = ascii_lower(object_full_name(object));
-                const std::string class_name = ascii_lower(object_class_name(object));
-                return class_name == "class" ||
-                       class_name == "function" ||
-                       class_name == "blueprintgeneratedclass" ||
-                       full_name.rfind("class ", 0) == 0 ||
-                       full_name.rfind("function ", 0) == 0 ||
-                       full_name.rfind("scriptstruct ", 0) == 0 ||
-                       full_name.rfind("enum ", 0) == 0;
-            }
-            catch (...)
+            std::string full_name;
+            std::string class_name;
+            std::string class_full_name;
+            unsigned long identity_exception_code = 0;
+            if (!read_player_controller_identity_guarded(
+                    object,
+                    full_name,
+                    class_name,
+                    class_full_name,
+                    identity_exception_code))
             {
                 return true;
             }
+            full_name = ascii_lower(full_name);
+            class_name = ascii_lower(class_name);
+            return class_name == "class" ||
+                   class_name == "function" ||
+                   class_name == "blueprintgeneratedclass" ||
+                   full_name.rfind("class ", 0) == 0 ||
+                   full_name.rfind("function ", 0) == 0 ||
+                   full_name.rfind("scriptstruct ", 0) == 0 ||
+                   full_name.rfind("enum ", 0) == 0;
         };
 
         auto looks_like_controller = [&](Unreal::UObject* object) {
@@ -3169,20 +3253,37 @@ namespace
             try
             {
                 Unreal::UObject* candidate = Unreal::UObjectGlobals::FindFirstOf(class_name);
-                if (candidate)
+                if (!player_controller_lifecycle_is_usable_guarded(candidate))
                 {
                     targeted_attempts.push_back(
                         std::string("FindFirstOf(") +
                         narrow_string(class_name) +
-                        ")=" +
-                        object_full_name(candidate) +
-                        " class=" +
-                        object_class_full_name(candidate));
+                        ")=unusable");
+                    continue;
                 }
                 if (looks_like_controller(candidate))
                 {
                     detail = "matched live player controller via " + narrow_string(class_name);
                     return candidate;
+                }
+                std::string candidate_full_name;
+                std::string candidate_class_name;
+                std::string candidate_class_full_name;
+                unsigned long identity_exception_code = 0;
+                if (read_player_controller_identity_guarded(
+                        candidate,
+                        candidate_full_name,
+                        candidate_class_name,
+                        candidate_class_full_name,
+                        identity_exception_code))
+                {
+                    targeted_attempts.push_back(
+                        std::string("FindFirstOf(") +
+                        narrow_string(class_name) +
+                        ")=" +
+                        candidate_full_name +
+                        " class=" +
+                        candidate_class_full_name);
                 }
             }
             catch (...)
@@ -3206,46 +3307,47 @@ namespace
                 detail = "player controller scan exceeded bounded object count";
                 return LoopAction::Break;
             }
-            if (!is_live_uobject(object) || object->HasAnyFlags(Unreal::RF_ClassDefaultObject))
+            if (!player_controller_lifecycle_is_usable_guarded(object))
             {
                 return LoopAction::Continue;
             }
 
-            try
+            std::string class_name;
+            std::string class_full_name;
+            std::string full_name;
+            unsigned long identity_exception_code = 0;
+            if (!read_player_controller_identity_guarded(
+                    object,
+                    full_name,
+                    class_name,
+                    class_full_name,
+                    identity_exception_code))
             {
-                const std::string class_name = object_class_name(object);
-                const std::string class_full_name = object_class_full_name(object);
-                const std::string full_name = object_full_name(object);
-                const std::string lower_class_name = ascii_lower(class_name);
-                const std::string lower_class_full_name = ascii_lower(class_full_name);
-                const std::string lower_full_name = ascii_lower(full_name);
-                if (lower_class_name == "class" ||
-                    lower_class_name == "function" ||
-                    lower_class_name == "blueprintgeneratedclass")
-                {
-                    return LoopAction::Continue;
-                }
-
-                const bool controller_candidate =
-                    object_class_has_any_cast_flags_guarded(object, Unreal::CASTCLASS_APlayerController) ||
-                    lower_class_name.find("brplayercontroller") != std::string::npos ||
-                    lower_class_name.find("bp_playercontroller") != std::string::npos ||
-                    lower_class_full_name.find("brplayercontroller") != std::string::npos ||
-                    lower_class_full_name.find("bp_playercontroller") != std::string::npos ||
-                    lower_full_name.find("brplayercontroller") != std::string::npos ||
-                    lower_full_name.find("bp_playercontroller") != std::string::npos;
-                if (controller_candidate)
-                {
-                    if (looks_like_controller(object))
-                    {
-                        found = object;
-                        detail = "matched live player controller via bounded class scan";
-                        return LoopAction::Break;
-                    }
-                }
+                return LoopAction::Continue;
             }
-            catch (...)
+            const std::string lower_class_name = ascii_lower(class_name);
+            const std::string lower_class_full_name = ascii_lower(class_full_name);
+            const std::string lower_full_name = ascii_lower(full_name);
+            if (lower_class_name == "class" ||
+                lower_class_name == "function" ||
+                lower_class_name == "blueprintgeneratedclass")
             {
+                return LoopAction::Continue;
+            }
+
+            const bool controller_candidate =
+                object_class_has_any_cast_flags_guarded(object, Unreal::CASTCLASS_APlayerController) ||
+                lower_class_name.find("brplayercontroller") != std::string::npos ||
+                lower_class_name.find("bp_playercontroller") != std::string::npos ||
+                lower_class_full_name.find("brplayercontroller") != std::string::npos ||
+                lower_class_full_name.find("bp_playercontroller") != std::string::npos ||
+                lower_full_name.find("brplayercontroller") != std::string::npos ||
+                lower_full_name.find("bp_playercontroller") != std::string::npos;
+            if (controller_candidate && looks_like_controller(object))
+            {
+                found = object;
+                detail = "matched live player controller via bounded class scan";
+                return LoopAction::Break;
             }
 
             return LoopAction::Continue;
@@ -3428,11 +3530,30 @@ namespace
         Unreal::UObject* controller = find_live_player_controller(scanned, controller_detail);
         out << "controller_scanned=" << scanned << "\n"
             << "controller_detail=" << json_escape(controller_detail) << "\n";
-        if (!is_live_uobject(controller))
+        if (!player_controller_lifecycle_is_usable_guarded(controller))
         {
             out << "ok=false\n"
                 << "stage=find_controller\n"
                 << "detail=live player controller was not found\n";
+            return out.str();
+        }
+
+        std::string controller_full_name;
+        std::string controller_class_name;
+        std::string controller_class_full_name;
+        unsigned long identity_exception_code = 0;
+        if (!read_player_controller_identity_guarded(
+                controller,
+                controller_full_name,
+                controller_class_name,
+                controller_class_full_name,
+                identity_exception_code))
+        {
+            out << "ok=false\n"
+                << "stage=controller_identity\n"
+                << "exception_code=0x" << std::uppercase << std::hex
+                << identity_exception_code << std::dec << "\n"
+                << "detail=player controller expired before identity logging\n";
             return out.str();
         }
 
@@ -3444,8 +3565,8 @@ namespace
 
         std::string resolve_detail;
         Unreal::UFunction* function = find_reflected_function(controller, console_command, resolve_detail);
-        out << "controller=" << json_escape(object_full_name(controller)) << "\n"
-            << "controller_class=" << json_escape(object_class_full_name(controller)) << "\n"
+        out << "controller=" << json_escape(controller_full_name) << "\n"
+            << "controller_class=" << json_escape(controller_class_full_name) << "\n"
             << "function_detail=" << json_escape(resolve_detail) << "\n";
         if (!is_live_uobject(function))
         {
@@ -3489,6 +3610,13 @@ namespace
         }
 
         unsigned long exception_code = 0;
+        if (!player_controller_lifecycle_is_usable_guarded(controller))
+        {
+            out << "ok=false\n"
+                << "stage=process_event\n"
+                << "detail=player controller expired before ProcessEvent\n";
+            return out.str();
+        }
         const bool called = process_event_guarded(controller, function, params.data(), exception_code);
         out << "process_event_called=" << (called ? "true" : "false") << "\n";
         if (!called)
@@ -3535,11 +3663,30 @@ namespace
         Unreal::UObject* controller = find_live_player_controller(scanned, controller_detail);
         out << "controller_scanned=" << scanned << "\n"
             << "controller_detail=" << json_escape(controller_detail) << "\n";
-        if (!is_live_uobject(controller))
+        if (!player_controller_lifecycle_is_usable_guarded(controller))
         {
             out << "ok=false\n"
                 << "stage=find_controller\n"
                 << "detail=live player controller was not found\n";
+            return out.str();
+        }
+
+        std::string controller_full_name;
+        std::string controller_class_name;
+        std::string controller_class_full_name;
+        unsigned long identity_exception_code = 0;
+        if (!read_player_controller_identity_guarded(
+                controller,
+                controller_full_name,
+                controller_class_name,
+                controller_class_full_name,
+                identity_exception_code))
+        {
+            out << "ok=false\n"
+                << "stage=controller_identity\n"
+                << "exception_code=0x" << std::uppercase << std::hex
+                << identity_exception_code << std::dec << "\n"
+                << "detail=player controller expired before identity logging\n";
             return out.str();
         }
 
@@ -3554,8 +3701,8 @@ namespace
             controller,
             server_push_chat_message,
             resolve_detail);
-        out << "controller=" << json_escape(object_full_name(controller)) << "\n"
-            << "controller_class=" << json_escape(object_class_full_name(controller)) << "\n"
+        out << "controller=" << json_escape(controller_full_name) << "\n"
+            << "controller_class=" << json_escape(controller_class_full_name) << "\n"
             << "function_detail=" << json_escape(resolve_detail) << "\n";
         if (!is_live_uobject(function))
         {
@@ -3585,6 +3732,13 @@ namespace
 
         out << "params_layout=FString@0\n";
         unsigned long exception_code = 0;
+        if (!player_controller_lifecycle_is_usable_guarded(controller))
+        {
+            out << "ok=false\n"
+                << "stage=process_event\n"
+                << "detail=player controller expired before ProcessEvent\n";
+            return out.str();
+        }
         const bool called = process_event_guarded(controller, function, &params, exception_code);
         out << "process_event_called=" << (called ? "true" : "false") << "\n";
         if (!called)
@@ -3668,11 +3822,30 @@ namespace
         }
         out << "controller_scanned=" << scanned << "\n"
             << "controller_detail=" << json_escape(controller_detail) << "\n";
-        if (!is_live_uobject(controller))
+        if (!player_controller_lifecycle_is_usable_guarded(controller))
         {
             out << "ok=false\n"
                 << "stage=find_controller\n"
                 << "detail=live player controller was not found\n";
+            return out.str();
+        }
+
+        std::string controller_full_name;
+        std::string controller_class_name;
+        std::string controller_class_full_name;
+        unsigned long identity_exception_code = 0;
+        if (!read_player_controller_identity_guarded(
+                controller,
+                controller_full_name,
+                controller_class_name,
+                controller_class_full_name,
+                identity_exception_code))
+        {
+            out << "ok=false\n"
+                << "stage=controller_identity\n"
+                << "exception_code=0x" << std::uppercase << std::hex
+                << identity_exception_code << std::dec << "\n"
+                << "detail=player controller expired before identity logging\n";
             return out.str();
         }
 
@@ -3683,8 +3856,8 @@ namespace
             kServerPushChatMessageImplementationVTableOffset,
             implementation,
             vtable_exception_code);
-        out << "controller=" << json_escape(object_full_name(controller)) << "\n"
-            << "controller_class=" << json_escape(object_class_full_name(controller)) << "\n"
+        out << "controller=" << json_escape(controller_full_name) << "\n"
+            << "controller_class=" << json_escape(controller_class_full_name) << "\n"
             << "implementation_vtable_offset=0x" << std::uppercase << std::hex
             << kServerPushChatMessageImplementationVTableOffset << std::dec << "\n"
             << "implementation_vtable_read=" << (vtable_read ? "true" : "false") << "\n"
@@ -4972,7 +5145,7 @@ namespace
                                                 std::string& actor_source,
                                                 bool allow_component_scan = true)
     {
-        if (!is_live_uobject(object))
+        if (!uobject_lifecycle_is_usable_guarded(object))
         {
             return nullptr;
         }
@@ -4999,7 +5172,7 @@ namespace
             object,
             get_owner,
             owner_detail);
-        if (is_live_uobject(owner))
+        if (uobject_lifecycle_is_usable_guarded(owner))
         {
             try
             {
@@ -5017,7 +5190,7 @@ namespace
         try
         {
             Unreal::AActor* outer_actor = object->GetTypedOuter<Unreal::AActor>();
-            if (is_live_uobject(outer_actor))
+            if (uobject_lifecycle_is_usable_guarded(outer_actor))
             {
                 actor_source = "typed_outer";
                 return outer_actor;
@@ -5031,7 +5204,7 @@ namespace
             env_flag_enabled("BMF_UOBJECT_PHYSICAL_GLOBAL_COMPONENT_SCAN_ENABLED"))
         {
             Unreal::AActor* scanned_actor = actor_from_component_scan(object, actor_source);
-            if (is_live_uobject(scanned_actor))
+            if (uobject_lifecycle_is_usable_guarded(scanned_actor))
             {
                 return scanned_actor;
             }
@@ -5743,7 +5916,6 @@ namespace
 
     struct TreeCutTargetCandidate
     {
-        Unreal::UObject* actor{nullptr};
         std::string address;
         std::string name;
         std::string full_name;
@@ -6466,7 +6638,7 @@ namespace
         {
             info.source = std::string(source);
         }
-        if (info.source_object.empty() && is_live_uobject(object))
+        if (info.source_object.empty() && uobject_lifecycle_is_usable_guarded(object))
         {
             info.source_object = object_address_hex(object);
         }
@@ -6517,7 +6689,7 @@ namespace
 
     bool treecut_read_console_tag_property(Unreal::UObject* object, std::vector<std::string>& tags)
     {
-        if (!is_live_uobject(object))
+        if (!uobject_lifecycle_is_usable_guarded(object))
         {
             return false;
         }
@@ -6552,7 +6724,7 @@ namespace
                                                   std::string_view source,
                                                   int depth)
     {
-        if (!is_live_uobject(object))
+        if (!uobject_lifecycle_is_usable_guarded(object))
         {
             return;
         }
@@ -6585,7 +6757,7 @@ namespace
                 }
 
                 auto value = property->ContainerPtrToValuePtr<Unreal::UObject*>(object);
-                if (!value || !is_live_uobject(*value) || *value == object)
+                if (!value || !uobject_lifecycle_is_usable_guarded(*value) || *value == object)
                 {
                     continue;
                 }
@@ -6668,7 +6840,7 @@ namespace
                     }
 
                     Unreal::UObject* value = *reinterpret_cast<Unreal::UObject**>(raw);
-                    if (!is_live_uobject(value) || value == object)
+                    if (!uobject_lifecycle_is_usable_guarded(value) || value == object)
                     {
                         continue;
                     }
@@ -6730,7 +6902,7 @@ namespace
         for (uintptr_t offset : object_offsets)
         {
             Unreal::UObject* object = read_uobject_at(locals + offset);
-            if (!is_live_uobject(object))
+            if (!uobject_lifecycle_is_usable_guarded(object))
             {
                 continue;
             }
@@ -7312,6 +7484,11 @@ namespace
 
     bool treecut_object_text_may_have_console_tag(Unreal::UObject* object)
     {
+        if (!uobject_lifecycle_is_usable_guarded(object))
+        {
+            return false;
+        }
+
         const std::string text = ascii_lower(
             object_name(object) + " " +
             object_full_name(object) + " " +
@@ -7328,6 +7505,11 @@ namespace
     bool treecut_try_actor_location(Unreal::UObject* actor, Unreal::FVector& out_vector, std::string& method)
     {
         method.clear();
+        if (!uobject_lifecycle_is_usable_guarded(actor))
+        {
+            return false;
+        }
+
         if (try_actor_k2_location(actor, out_vector))
         {
             method = "K2_GetActorLocation";
@@ -7348,7 +7530,7 @@ namespace
     bool treecut_try_object_location(Unreal::UObject* object, Unreal::FVector& out_vector, std::string& method)
     {
         method.clear();
-        if (!is_live_uobject(object))
+        if (!uobject_lifecycle_is_usable_guarded(object))
         {
             return false;
         }
@@ -7374,7 +7556,9 @@ namespace
             outer = nullptr;
         }
 
-        for (int depth = 0; depth < 4 && is_live_uobject(outer) && outer != object; ++depth)
+        for (int depth = 0;
+             depth < 4 && uobject_lifecycle_is_usable_guarded(outer) && outer != object;
+             ++depth)
         {
             std::string outer_method;
             if (object_is_actor(outer) && treecut_try_actor_location(outer, out_vector, outer_method))
@@ -7552,7 +7736,7 @@ namespace
             }
             ++scanned;
 
-            if (!is_live_uobject(object))
+            if (!uobject_lifecycle_is_usable_guarded(object))
             {
                 return LoopAction::Continue;
             }
@@ -7672,7 +7856,7 @@ namespace
 
     bool treecut_try_direct_tree_id_console_tag(Unreal::UObject* object, TreeCutConsoleTagInfo& info)
     {
-        if (!is_live_uobject(object))
+        if (!uobject_lifecycle_is_usable_guarded(object))
         {
             return false;
         }
@@ -7702,13 +7886,12 @@ namespace
                                                     std::string_view resolver,
                                                     TreeCutTargetCandidate& candidate)
     {
-        if (!is_live_uobject(object))
+        if (!uobject_lifecycle_is_usable_guarded(object))
         {
             return false;
         }
 
         candidate = TreeCutTargetCandidate{};
-        candidate.actor = object;
         candidate.address = object_address_hex(object);
         candidate.name = object_name(object);
         candidate.full_name = object_full_name(object);
@@ -7758,7 +7941,7 @@ namespace
                 return LoopAction::Break;
             }
 
-            if (!is_live_uobject(object))
+            if (!uobject_lifecycle_is_usable_guarded(object))
             {
                 return LoopAction::Continue;
             }
@@ -7770,7 +7953,6 @@ namespace
                     treecut_try_direct_tree_id_console_tag(object, tag_info))
                 {
                     TreeCutTargetCandidate candidate;
-                    candidate.actor = object;
                     candidate.address = object_address_hex(object);
                     candidate.name = object_name(object);
                     candidate.full_name = object_full_name(object);
@@ -7797,7 +7979,6 @@ namespace
                 }
 
                 TreeCutTargetCandidate candidate;
-                candidate.actor = object;
                 candidate.address = object_address_hex(object);
                 candidate.name = object_name(object);
                 candidate.full_name = object_full_name(object);
@@ -7897,7 +8078,7 @@ namespace
         for (uintptr_t offset = 0; offset + sizeof(uintptr_t) <= 0x300; offset += sizeof(uintptr_t))
         {
             Unreal::UObject* object = read_uobject_at(locals + offset);
-            if (!is_live_uobject(object) ||
+            if (!uobject_lifecycle_is_usable_guarded(object) ||
                 std::find(seen.begin(), seen.end(), object) != seen.end())
             {
                 continue;
@@ -7977,11 +8158,6 @@ namespace
         double best_tagged_distance_sq = kTreeCutTargetResolveRadiusSq;
         for (const TreeCutTargetCandidate& candidate : candidates)
         {
-            if (!is_live_uobject(candidate.actor))
-            {
-                continue;
-            }
-
             const double dx = static_cast<double>(candidate.location.X()) - values[1];
             const double dy = static_cast<double>(candidate.location.Y()) - values[2];
             const double dz = static_cast<double>(candidate.location.Z()) - values[3];
@@ -8099,7 +8275,7 @@ namespace
         }
 
         Unreal::UObject* source = reinterpret_cast<Unreal::UObject*>(target_address);
-        if (!is_live_uobject(source))
+        if (!uobject_lifecycle_is_usable_guarded(source))
         {
             out << ",\"damageTargetResolved\":false";
             return;
@@ -8107,7 +8283,8 @@ namespace
 
         std::string actor_source;
         Unreal::AActor* actor = actor_from_uobject_or_outer(source, actor_source);
-        Unreal::UObject* primary = is_live_uobject(actor) ? static_cast<Unreal::UObject*>(actor) : source;
+        const bool actor_usable = uobject_lifecycle_is_usable_guarded(actor);
+        Unreal::UObject* primary = actor_usable ? static_cast<Unreal::UObject*>(actor) : source;
 
         const uintptr_t source_offset = g_treecut_last_damage_target_offset.load();
         std::string source_label;
@@ -8131,7 +8308,7 @@ namespace
             << ",\"damageTargetAddress\":\"" << json_escape(source_address) << "\""
             << ",\"damageTargetSource\":\"" << json_escape(source_label) << "\""
             << ",\"damageTargetAgeMs\":" << (now_ms - target_tick_ms)
-            << ",\"damageTargetActorResolved\":" << (is_live_uobject(actor) ? "true" : "false");
+            << ",\"damageTargetActorResolved\":" << (actor_usable ? "true" : "false");
 
         if (write_primary_target)
         {
@@ -12641,10 +12818,6 @@ namespace
         for (const TreeCutTargetCandidate& candidate : candidates)
         {
             ++inspected;
-            if (!is_live_uobject(candidate.actor))
-            {
-                continue;
-            }
             if (ascii_lower(trim_ascii(candidate.console_tag)) != wanted)
             {
                 continue;
@@ -12681,7 +12854,7 @@ namespace
                     return LoopAction::Break;
                 }
                 ++scanned;
-                if (!is_live_uobject(object))
+                if (!uobject_lifecycle_is_usable_guarded(object))
                 {
                     return LoopAction::Continue;
                 }
@@ -12715,14 +12888,18 @@ namespace
                         parse_uobject_address(tag_info.source_object, source_address))
                     {
                         Unreal::UObject* source_object = reinterpret_cast<Unreal::UObject*>(source_address);
-                        if (is_live_uobject(source_object))
+                        if (uobject_lifecycle_is_usable_guarded(source_object))
                         {
                             target_object = source_object;
                         }
                     }
 
+                    if (!uobject_lifecycle_is_usable_guarded(target_object))
+                    {
+                        return LoopAction::Continue;
+                    }
+
                     TreeCutTargetCandidate candidate;
-                    candidate.actor = target_object;
                     candidate.address = object_address_hex(target_object);
                     candidate.name = object_name(target_object);
                     candidate.full_name = object_full_name(target_object);

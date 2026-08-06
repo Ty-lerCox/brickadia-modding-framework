@@ -108,6 +108,46 @@ test("default command path requires a connected socket instead of file fallback"
   );
 });
 
+test("safe-plugin interop forwards pluginEvent calls to the socket command helper", async () => {
+  const bridge = new BmfBridge({}, { socketReconnectMs: 0 });
+  let invocation;
+  bridge.invokeCommand = async (command, options) => {
+    invocation = { command, options };
+    return { ok: true, transport: "socket" };
+  };
+
+  const response = await bridge.pluginEvent(
+    "invokeCommand",
+    "BMF Player Sync",
+    "bmf.players.sync players=[]",
+    { timeoutMs: 1000, serviceClass: "bulk" },
+  );
+
+  assert.deepStrictEqual(invocation, {
+    command: "bmf.players.sync players=[]",
+    options: { timeoutMs: 1000, serviceClass: "bulk" },
+  });
+  assert.deepStrictEqual(response, { ok: true, transport: "socket" });
+});
+
+test("safe-plugin interop returns a bounded failure when invocation rejects", async () => {
+  const bridge = new BmfBridge({}, { socketReconnectMs: 0 });
+  bridge.invokeCommand = async () => {
+    throw new Error(`socket failed ${"x".repeat(2048)}`);
+  };
+
+  const response = await bridge.pluginEvent(
+    "invokeCommand",
+    "BMF Player Sync",
+    "bmf.players.sync players=[]",
+  );
+
+  assert.equal(response.ok, false);
+  assert.equal(response.code, "PLUGIN_EVENT_FAILED");
+  assert.match(response.detail, /^socket failed /);
+  assert.equal(response.detail.length, 1024);
+});
+
 test("socket transport sends hello, subscribes, receives events, and resolves commands", async (t) => {
   const root = tempRoot(t);
   const received = [];

@@ -49,12 +49,9 @@ export const bootstrap = (omegga: Omegga): Record<string, unknown[]> => ({
 });
 
 // prototypes that can be directly stolen from omegga
-const STEAL_PROTOTYPES: Record<keyof Required<OmeggaCore>, true> = {
+const STEAL_PROTOTYPES: Partial<Record<keyof Required<OmeggaCore>, true>> = {
   broadcast: true,
-  whisper: true,
-  middlePrint: true,
   getPlayer: true,
-  getPlayers: true,
   findPlayerByName: true,
   getHostId: true,
   clearBricks: true,
@@ -137,6 +134,14 @@ export class ProxyOmegga extends EventEmitter implements OmeggaLike {
     command: string,
     timeoutMs?: number,
   ) => Promise<unknown>;
+  privateWhisperTransport: (
+    target: string | OmeggaPlayer,
+    messages: string[],
+  ) => Promise<void>;
+  privateMiddlePrintTransport: (
+    target: string | OmeggaPlayer,
+    message: string,
+  ) => Promise<void>;
 
   constructor(
     exec: (line: string) => void,
@@ -144,6 +149,14 @@ export class ProxyOmegga extends EventEmitter implements OmeggaLike {
       command: string,
       timeoutMs?: number,
     ) => Promise<unknown>,
+    privateWhisperTransport?: (
+      target: string | OmeggaPlayer,
+      messages: string[],
+    ) => Promise<void>,
+    privateMiddlePrintTransport?: (
+      target: string | OmeggaPlayer,
+      message: string,
+    ) => Promise<void>,
   ) {
     super();
     this.setMaxListeners(Infinity);
@@ -153,6 +166,12 @@ export class ProxyOmegga extends EventEmitter implements OmeggaLike {
     this.execControlCommandWithOutput =
       execControlCommandWithOutput ??
       (() => Promise.reject(badBorrow('execControlCommandWithOutput')));
+    this.privateWhisperTransport =
+      privateWhisperTransport ??
+      (() => Promise.reject(badBorrow('privateWhisperTransport')));
+    this.privateMiddlePrintTransport =
+      privateMiddlePrintTransport ??
+      (() => Promise.reject(badBorrow('privateMiddlePrintTransport')));
 
     this.version = -1;
 
@@ -183,7 +202,7 @@ export class ProxyOmegga extends EventEmitter implements OmeggaLike {
     // create players from raw constructor data
     this.on(
       'plugin:players:raw',
-      (players: [string, string, string, string, string][]) =>
+      (players: [string, string, string, string, string, number][]) =>
         (this.players = players.map(p => new Player(this as OmeggaLike, ...p))),
     );
 
@@ -261,8 +280,16 @@ export class ProxyOmegga extends EventEmitter implements OmeggaLike {
     displayName: string;
     controller: string;
     state: string;
+    connectionGeneration: number;
   }[] {
-    throw badBorrow('getPlayers');
+    return this.players.map(player => ({
+      id: player.id,
+      name: player.name,
+      displayName: player.displayName,
+      controller: player.controller,
+      state: player.state,
+      connectionGeneration: player.connectionGeneration,
+    }));
   }
   getPlayer(target: string): OmeggaPlayer {
     throw badBorrow('getPlayer');
@@ -276,11 +303,17 @@ export class ProxyOmegga extends EventEmitter implements OmeggaLike {
   broadcast(...messages: string[]): void {
     throw badBorrow('broadcast');
   }
-  whisper(target: string | OmeggaPlayer, ...messages: string[]): void {
-    throw badBorrow('whisper');
+  async whisper(
+    target: string | OmeggaPlayer,
+    ...messages: string[]
+  ): Promise<void> {
+    await this.privateWhisperTransport(target, messages);
   }
-  middlePrint(target: string | OmeggaPlayer, message: string): void {
-    throw badBorrow('middlePrint');
+  async middlePrint(
+    target: string | OmeggaPlayer,
+    message: string,
+  ): Promise<void> {
+    await this.privateMiddlePrintTransport(target, message);
   }
   saveMinigame(index: number, name: string): void {
     throw badBorrow('saveMinigame');

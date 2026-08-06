@@ -28,6 +28,11 @@
       "default": 65536,
       "type": "number"
     },
+    "connectionGeneration": {
+      "description": "Attach a UUID-keyed connection generation to plain player snapshots so BMF can reject controller identities from an earlier reconnect. OMEGGA_BMF_PLAYER_CONNECTION_GENERATION_ENABLED=1 also enables it.",
+      "default": false,
+      "type": "boolean"
+    },
     "brickadiaLogPath": {
       "description": "Configurable explicit Brickadia.log path used when Omegga's live player list is empty.",
       "default": "",

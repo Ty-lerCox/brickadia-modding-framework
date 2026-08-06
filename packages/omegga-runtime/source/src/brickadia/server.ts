@@ -111,6 +111,7 @@ const UNKNOWN_COMMAND_MESSAGE_RETRY_DELAYS_MS = [1000, 2000, 4000, 8000];
 const UNKNOWN_COMMAND_MESSAGE_EXECUTORS = new Set([
   'kismet-message-for-unknown-commands',
   'bmf-kismet-message-for-unknown-commands',
+  'bmf-native-unknown-command-flag',
 ]);
 
 type SyntheticPlayerLookup = {
@@ -129,6 +130,16 @@ const encodeBmfCommandArg = (value: string) =>
     /[!'()*]/g,
     char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`,
   );
+
+export type BmfPrivateDeliveryEnvelope = {
+  requestId: string;
+  senderUuid: string;
+  connectionGeneration: number;
+  issuedAtMs: number;
+  deadlineMs: number;
+  operationType: 'whisper' | 'statusmessage';
+  message: string;
+};
 
 const parseConsoleArgs = (value: string) => {
   const args: string[] = [];
@@ -633,7 +644,7 @@ export default class BrickadiaServer extends EventEmitter {
     if (this.#ue4ssBridge !== bridge) return;
     if (UNKNOWN_COMMAND_MESSAGE_EXECUTORS.has(executor)) {
       Logger.verbose(
-        'Disabled Brickadia native unknown-command messages through Kismet.',
+        'Disabled Brickadia native unknown-command messages through a verified executor.',
       );
       return;
     }
@@ -831,6 +842,71 @@ export default class BrickadiaServer extends EventEmitter {
       diagnostics,
       buildInfo,
     });
+  }
+
+  async deliverBmfPrivateMessage(envelope: BmfPrivateDeliveryEnvelope) {
+    const now = Date.now();
+    const requestId = String(envelope?.requestId ?? '').trim();
+    const senderUuid = String(envelope?.senderUuid ?? '').trim();
+    const generation = Number(envelope?.connectionGeneration);
+    const issuedAtMs = Number(envelope?.issuedAtMs);
+    const deadlineMs = Number(envelope?.deadlineMs);
+    const message = String(envelope?.message ?? '');
+    const operationType = envelope?.operationType;
+
+    if (
+      !requestId ||
+      !senderUuid ||
+      !Number.isSafeInteger(generation) ||
+      generation < 1 ||
+      !Number.isSafeInteger(issuedAtMs) ||
+      !Number.isSafeInteger(deadlineMs) ||
+      deadlineMs <= now ||
+      deadlineMs <= issuedAtMs ||
+      deadlineMs - issuedAtMs > 10000 ||
+      (operationType !== 'whisper' && operationType !== 'statusmessage') ||
+      message.length < 1 ||
+      message.length >= 512
+    ) {
+      throw new Error('Invalid fail-closed private delivery envelope.');
+    }
+    if (!this.#bmfSocketBridge?.hasBmfClients) {
+      throw new Error('BMF private delivery transport is unavailable.');
+    }
+
+    const commandName =
+      operationType === 'whisper'
+        ? 'bmf.chat.whisper'
+        : 'bmf.chat.statusmessage';
+    const command = [
+      commandName,
+      `requestid=${encodeBmfCommandArg(requestId)}`,
+      `senderuuid=${encodeBmfCommandArg(senderUuid)}`,
+      `connectiongeneration=${generation}`,
+      `issuedat=${issuedAtMs}`,
+      `deadline=${deadlineMs}`,
+      `operation=${operationType}`,
+      `message=${encodeBmfCommandArg(message)}`,
+    ].join(' ');
+    const timeoutMs = Math.max(100, Math.min(5000, deadlineMs - now));
+    const response = (await this.#bmfSocketBridge.execCommand(
+      command,
+      timeoutMs,
+      {
+        serviceClass: 'interactive',
+        issuedAtMs,
+        deadlineMs,
+        senderUuid,
+        connectionGeneration: generation,
+        operationRequestId: requestId,
+        offThreadMs: Math.max(0, Date.now() - issuedAtMs),
+      },
+    )) as { response?: unknown };
+    const responseText = String(response?.response ?? '');
+    if (!/^delivered=true$/im.test(responseText)) {
+      throw new Error('BMF private delivery was rejected.');
+    }
+    return response;
   }
 
   async writeToUe4ssControl(
@@ -1039,6 +1115,13 @@ export default class BrickadiaServer extends EventEmitter {
       const whisperMatch = normalizedLine.match(
         /^Chat\.Whisper\s+"([^"]+)"\s+(.+)$/,
       );
+      if (whisperMatch) {
+        Logger.warnp(
+          'Legacy name-only private whisper dropped by identity containment'
+            .yellow,
+        );
+        return true;
+      }
       if (whisperMatch && shouldRouteBmfChat) {
         const target = whisperMatch[1];
         const message = decodeConsoleChatText(whisperMatch[2]);
@@ -1067,6 +1150,13 @@ export default class BrickadiaServer extends EventEmitter {
       const statusMessageMatch = normalizedLine.match(
         /^Chat\.StatusMessage\s+"([^"]+)"\s+(.+)$/,
       );
+      if (statusMessageMatch) {
+        Logger.warnp(
+          'Legacy name-only private status message dropped by identity containment'
+            .yellow,
+        );
+        return true;
+      }
       if (statusMessageMatch && shouldRouteBmfChat) {
         const target = statusMessageMatch[1];
         const message = decodeConsoleChatText(statusMessageMatch[2]);

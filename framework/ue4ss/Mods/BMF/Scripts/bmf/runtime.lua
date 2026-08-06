@@ -88,6 +88,9 @@ local TIMER_PUMP_MAX_QUEUE_SCANS_PER_FRAME = 64
 local TIMER_PUMP_MAX_CALLBACKS_PER_OWNER_PER_FRAME = 4
 local PLUGIN_UNSAFE_GLOBAL_STATUS_WRITE_INTERVAL_SECONDS = 5
 BMF_PLAYER_REGISTRY_DEFAULT_REPAIR_COOLDOWN_MS = 5000
+OPERATION_ATTRIBUTION_DEFAULT_GAME_THREAD_SLOW_MS = 3
+OPERATION_ATTRIBUTION_DEFAULT_TOTAL_SLOW_MS = 10
+OPERATION_ATTRIBUTION_MAX_CLASSES = 128
 
 local state = {
   started_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
@@ -232,6 +235,33 @@ local state = {
         last_ms = 0,
         messages = 0,
       },
+    },
+    operations = {
+      enabled = false,
+      game_thread_slow_ms = OPERATION_ATTRIBUTION_DEFAULT_GAME_THREAD_SLOW_MS,
+      total_slow_ms = OPERATION_ATTRIBUTION_DEFAULT_TOTAL_SLOW_MS,
+      total = 0,
+      slow_total = 0,
+      budget_overrun_total = 0,
+      admission_defer_total = 0,
+      deadline_expired_total = 0,
+      global_scan_total = 0,
+      global_scan_duration_ms_sum = 0,
+      global_scan_duration_ms_max = 0,
+      repair_total = 0,
+      repair_duration_ms_sum = 0,
+      repair_duration_ms_max = 0,
+      lifetime_guard_rejections_total = 0,
+      controller_resolutions_total = 0,
+      active = 0,
+      active_peak = 0,
+      class_count = 0,
+      classes_dropped = 0,
+      by_class = {},
+      by_source = {},
+      by_outcome = {},
+      by_cache_result = {},
+      last = nil,
     },
     player_registry = {},
     socket_scheduler = {
@@ -567,6 +597,11 @@ local state = {
     completed_by_id = {},
     completed_order = {},
   },
+  operation_attribution = {
+    enabled = false,
+    next_id = 1,
+    current = nil,
+  },
   reserved_chat_command_guard = {
     enabled = true,
     installed = false,
@@ -605,8 +640,23 @@ local state = {
     broad_repair_skipped = 0,
     broad_repair_failures = 0,
     broad_repair_matches = 0,
+    repair_requests = 0,
+    repair_coalesced = 0,
+    repair_duration_ms_sum = 0,
+    repair_duration_ms_max = 0,
+    global_scan_duration_ms_sum = 0,
+    global_scan_duration_ms_max = 0,
+    unresolved_players = 0,
+    connection_generation_mismatches = 0,
+    private_delivery_delivered = 0,
+    private_delivery_dropped = 0,
+    private_delivery_expired = 0,
+    private_delivery_invalid = 0,
+    private_delivery_stale = 0,
     global_scans = 0,
     repair_running = false,
+    repair_failure_streak = 0,
+    repair_backoff_ms = BMF_PLAYER_REGISTRY_DEFAULT_REPAIR_COOLDOWN_MS,
     last_repair_epoch = 0,
     last_repair_at = "",
     last_repair_error = "",
@@ -1551,6 +1601,15 @@ function BMF_telemetry_snapshot()
     telemetry.timers.owner_counts[owner] = tonumber(count) or 0
   end
   local player_registry = state.player_registry or {}
+  local current_operation = state.operation_attribution.current
+  telemetry.operations.current = type(current_operation) == "table" and {
+    operation_class = tostring(current_operation.operation_class or "unknown"),
+    source = tostring(current_operation.source or "unknown"),
+    priority = tostring(current_operation.priority or "interactive"),
+    current_stage = tostring(current_operation.current_stage or "unknown"),
+    start_timestamp_ms = tonumber(current_operation.start_timestamp_ms) or 0,
+    deadline_ms = tonumber(current_operation.deadline_ms) or 0,
+  } or nil
   telemetry.player_registry = {
     cache_first_enabled = player_registry.cache_first_enabled == true,
     repair_enabled = player_registry.repair_enabled == true,
@@ -1573,8 +1632,23 @@ function BMF_telemetry_snapshot()
     broad_repair_skipped = tonumber(player_registry.broad_repair_skipped) or 0,
     broad_repair_failures = tonumber(player_registry.broad_repair_failures) or 0,
     broad_repair_matches = tonumber(player_registry.broad_repair_matches) or 0,
+    repair_requests = tonumber(player_registry.repair_requests) or 0,
+    repair_coalesced = tonumber(player_registry.repair_coalesced) or 0,
+    repair_duration_ms_sum = tonumber(player_registry.repair_duration_ms_sum) or 0,
+    repair_duration_ms_max = tonumber(player_registry.repair_duration_ms_max) or 0,
+    global_scan_duration_ms_sum = tonumber(player_registry.global_scan_duration_ms_sum) or 0,
+    global_scan_duration_ms_max = tonumber(player_registry.global_scan_duration_ms_max) or 0,
+    unresolved_players = tonumber(player_registry.unresolved_players) or 0,
+    connection_generation_mismatches = tonumber(player_registry.connection_generation_mismatches) or 0,
+    private_delivery_delivered = tonumber(player_registry.private_delivery_delivered) or 0,
+    private_delivery_dropped = tonumber(player_registry.private_delivery_dropped) or 0,
+    private_delivery_expired = tonumber(player_registry.private_delivery_expired) or 0,
+    private_delivery_invalid = tonumber(player_registry.private_delivery_invalid) or 0,
+    private_delivery_stale = tonumber(player_registry.private_delivery_stale) or 0,
     global_scans = tonumber(player_registry.global_scans) or 0,
     repair_running = player_registry.repair_running == true,
+    repair_failure_streak = tonumber(player_registry.repair_failure_streak) or 0,
+    repair_backoff_ms = tonumber(player_registry.repair_backoff_ms) or 0,
     repair_cooldown_ms = tonumber(player_registry.repair_cooldown_ms) or 0,
     last_repair_at = tostring(player_registry.last_repair_at or ""),
     last_repair_error = tostring(player_registry.last_repair_error or ""),
@@ -2210,6 +2284,509 @@ function BMF_env_number(name, default_value, minimum)
   return math.floor(value + 0.5)
 end
 
+function BMF_operation_attribution_configure_from_env()
+  local attribution = state.operation_attribution
+  local telemetry = state.telemetry.operations
+  attribution.enabled = BMF_env_bool("BMF_OPERATION_ATTRIBUTION_ENABLED", true)
+  telemetry.enabled = attribution.enabled == true
+  telemetry.game_thread_slow_ms = math.max(1, math.min(1000, BMF_env_number(
+    "BMF_OPERATION_SLOW_GAME_THREAD_MS",
+    OPERATION_ATTRIBUTION_DEFAULT_GAME_THREAD_SLOW_MS,
+    1)))
+  telemetry.total_slow_ms = math.max(1, math.min(10000, BMF_env_number(
+    "BMF_OPERATION_SLOW_TOTAL_MS",
+    OPERATION_ATTRIBUTION_DEFAULT_TOTAL_SLOW_MS,
+    1)))
+end
+
+function BMF_operation_class(value, fallback)
+  local normalized = trim_string(tostring(value or "")):lower()
+  normalized = normalized:gsub("^/", "")
+  normalized = normalized:gsub("[^%w%._%-]", "_")
+  normalized = normalized:gsub("_+", "_")
+  normalized = normalized:sub(1, 96)
+  if normalized == "" then
+    normalized = tostring(fallback or "unknown")
+  end
+  if normalized == "cityrpgremote" then
+    return "cityrpg.remote"
+  end
+  if normalized == "cityrpgroute" then
+    return "cityrpg.route"
+  end
+  return normalized
+end
+
+function BMF_operation_class_from_text(text, fallback)
+  local token = trim_string(tostring(text or "")):match("^(%S+)")
+  return BMF_operation_class(token, fallback)
+end
+
+function BMF_operation_begin(operation_class, source, request)
+  if state.operation_attribution.enabled ~= true then
+    return nil
+  end
+  request = type(request) == "table" and request or {}
+  local next_id = tonumber(state.operation_attribution.next_id) or 1
+  state.operation_attribution.next_id = next_id + 1
+  local accepted_clock = tonumber(request.acceptedClock) or os.clock()
+  local accepted_at_ms = tonumber(request.acceptedAtMs) or (os.time() * 1000)
+  local request_id = trim_string(tostring(request.operationRequestId or request.requestId or request.id or ""))
+  if #request_id > 128 then request_id = request_id:sub(1, 128) end
+  local sender_uuid = trim_string(tostring(request.senderUuid or request.senderUUID or "")):lower()
+  if #sender_uuid > 128 then sender_uuid = sender_uuid:sub(1, 128) end
+  local connection_generation = tonumber(request.connectionGeneration) or 0
+  if connection_generation < 1 or connection_generation % 1 ~= 0 then
+    connection_generation = 0
+  end
+  local context = {
+    correlation_id = "bmf-" .. tostring(state.started_epoch or 0) .. "-" .. tostring(next_id),
+    request_id = request_id,
+    operation_class = BMF_operation_class(operation_class, "unknown"),
+    source = BMF_operation_class(source, "unknown"),
+    sender_uuid = sender_uuid,
+    connection_generation = connection_generation,
+    priority = request.serviceClass == "bulk" and "bulk" or "interactive",
+    current_stage = "accepted",
+    issued_at_ms = tonumber(request.issuedAtMs) or accepted_at_ms,
+    accepted_at_ms = accepted_at_ms,
+    accepted_clock = accepted_clock,
+    deadline_ms = tonumber(request.deadlineMs) or 0,
+    queue_wait_ms = 0,
+    admission_defer_ms = 0,
+    admission_defer_count = 0,
+    game_thread_ms = 0,
+    off_thread_ms = math.max(0, tonumber(request.offThreadMs) or 0),
+    total_ms = 0,
+    deadline_state = "accepted",
+    cache_result = "none",
+    controller_resolution_count = 0,
+    global_scan_count = 0,
+    global_scan_duration_ms = 0,
+    repair_count = 0,
+    repair_duration_ms = 0,
+    lifetime_guard_rejections = 0,
+    start_timestamp_ms = 0,
+    finish_timestamp_ms = 0,
+    frame_sample_near_completion = 0,
+    frame_observed_at_ms = 0,
+    frame_duration_ms_near_completion = 0,
+    outcome = "accepted",
+    budget_exceeded = false,
+    finished = false,
+  }
+  local telemetry = state.telemetry.operations
+  telemetry.active = (tonumber(telemetry.active) or 0) + 1
+  telemetry.active_peak = math.max(tonumber(telemetry.active_peak) or 0, telemetry.active)
+  return context
+end
+
+function BMF_operation_update_class(context, operation_class)
+  if type(context) == "table" and context.finished ~= true then
+    context.operation_class = BMF_operation_class(operation_class, context.operation_class)
+  end
+end
+
+function BMF_operation_update_stage(context, stage)
+  if type(context) == "table" and context.finished ~= true then
+    context.current_stage = BMF_operation_class(stage, context.current_stage or "unknown")
+  end
+end
+
+function BMF_operation_note_private_identity(request_id, sender_uuid, connection_generation)
+  local context = state.operation_attribution.current
+  if type(context) ~= "table" or context.finished == true then
+    return
+  end
+  local normalized_request_id = trim_string(tostring(request_id or ""))
+  local normalized_uuid = trim_string(tostring(sender_uuid or "")):lower()
+  local normalized_generation = tonumber(connection_generation) or 0
+  if normalized_request_id ~= "" and #normalized_request_id <= 128 then
+    context.request_id = normalized_request_id
+  end
+  if normalized_uuid ~= "" and #normalized_uuid <= 128 then
+    context.sender_uuid = normalized_uuid
+  end
+  if normalized_generation >= 1 and normalized_generation % 1 == 0 then
+    context.connection_generation = normalized_generation
+  end
+  BMF_operation_update_stage(context, "private_identity_validated")
+end
+
+function BMF_operation_frame_snapshot()
+  if type(BMFFrameTelemetryOperationSnapshot) ~= "function" then
+    return nil
+  end
+  local ok, raw = pcall(BMFFrameTelemetryOperationSnapshot)
+  if not ok or type(raw) ~= "string" then
+    return nil
+  end
+  local decoded = json_decode(raw)
+  if type(decoded) ~= "table" then
+    return nil
+  end
+  return {
+    sample = math.max(0, tonumber(decoded.sample) or 0),
+    observed_at_unix_ms = math.max(0, tonumber(decoded.observed_at_unix_ms) or 0),
+    delta_ms = math.max(0, tonumber(decoded.delta_ms) or 0),
+  }
+end
+
+function BMF_operation_start_execution(context)
+  if type(context) ~= "table" or context.finished == true then
+    return
+  end
+  local now_clock = os.clock()
+  context.execution_started_clock = now_clock
+  context.queue_wait_ms = math.max(0, (now_clock - (tonumber(context.accepted_clock) or now_clock)) * 1000)
+  if tonumber(context.defer_started_clock) ~= nil then
+    context.admission_defer_ms = math.max(
+      tonumber(context.admission_defer_ms) or 0,
+      (now_clock - tonumber(context.defer_started_clock)) * 1000)
+  end
+  context.start_timestamp_ms = (tonumber(context.accepted_at_ms) or (os.time() * 1000))
+    + context.queue_wait_ms
+  context.deadline_state = "started"
+  context.current_stage = "game_thread"
+  if state.operation_attribution.current ~= context then
+    context.previous_context = state.operation_attribution.current
+  end
+  state.operation_attribution.current = context
+end
+
+function BMF_operation_note_budget_defer(context)
+  if type(context) ~= "table" or context.finished == true then
+    return
+  end
+  context.admission_defer_count = (tonumber(context.admission_defer_count) or 0) + 1
+  if tonumber(context.defer_started_clock) == nil then
+    context.defer_started_clock = os.clock()
+  end
+end
+
+function BMF_operation_current_deadline_expired()
+  local context = state.operation_attribution.current
+  if type(context) ~= "table" or (tonumber(context.deadline_ms) or 0) <= 0 then
+    return false
+  end
+  if type(BMF_socket_scheduler_deadline_expired) == "function" then
+    return BMF_socket_scheduler_deadline_expired(
+      context.deadline_ms,
+      context.issued_at_ms,
+      context.accepted_clock)
+  end
+  return (os.time() * 1000) >= (tonumber(context.deadline_ms) or 0)
+end
+
+function BMF_operation_note_queued_budget_defer()
+  if state.operation_attribution.enabled ~= true then
+    return
+  end
+  local admission = state.socket_admission or {}
+  local tunnel = state.game_command_tunnel or {}
+  for _, request in ipairs({
+    admission.direct_queues and admission.direct_queues.interactive and admission.direct_queues.interactive[1],
+    admission.direct_queues and admission.direct_queues.bulk and admission.direct_queues.bulk[1],
+    tunnel.queues and tunnel.queues.interactive and tunnel.queues.interactive[1],
+    tunnel.queues and tunnel.queues.bulk and tunnel.queues.bulk[1],
+  }) do
+    if type(request) == "table" then
+      BMF_operation_note_budget_defer(request.operationContext)
+    end
+  end
+end
+
+function BMF_operation_note_cache_result(cache_result)
+  local context = state.operation_attribution.current
+  if type(context) == "table" and context.finished ~= true then
+    context.cache_result = BMF_operation_class(cache_result, "none")
+  end
+end
+
+function BMF_operation_note_controller_resolution(ok)
+  local context = state.operation_attribution.current
+  if type(context) == "table" and context.finished ~= true then
+    context.controller_resolution_count = (tonumber(context.controller_resolution_count) or 0) + 1
+    if ok == false and context.cache_result == "none" then
+      context.cache_result = "miss"
+    elseif ok ~= false and context.cache_result == "none" then
+      context.cache_result = "hit"
+    end
+  end
+end
+
+function BMF_operation_note_global_scan(duration_ms)
+  local context = state.operation_attribution.current
+  if type(context) == "table" and context.finished ~= true then
+    local duration = math.max(0, tonumber(duration_ms) or 0)
+    context.global_scan_count = (tonumber(context.global_scan_count) or 0) + 1
+    context.global_scan_duration_ms = (tonumber(context.global_scan_duration_ms) or 0) + duration
+    context.cache_result = "repair"
+  end
+end
+
+function BMF_operation_find_all(class_name, operation_class, source)
+  local owned_context = nil
+  if state.operation_attribution.enabled == true
+      and type(state.operation_attribution.current) ~= "table" then
+    owned_context = BMF_operation_begin(
+      operation_class or "uobject.global_scan",
+      source or "diagnostic_scan",
+      { serviceClass = "bulk" })
+    BMF_operation_start_execution(owned_context)
+  end
+  local scan_started_clock = os.clock()
+  local ok, found = pcall(FindAllOf, class_name)
+  local duration_ms = BMF_telemetry_duration_ms(scan_started_clock)
+  BMF_operation_note_global_scan(duration_ms)
+  if owned_context ~= nil then
+    BMF_operation_finish(owned_context, ok and "completed" or "known_failure")
+  end
+  return ok, found, duration_ms
+end
+
+function BMF_operation_note_repair(duration_ms)
+  local context = state.operation_attribution.current
+  if type(context) == "table" and context.finished ~= true then
+    local duration = math.max(0, tonumber(duration_ms) or 0)
+    context.repair_count = (tonumber(context.repair_count) or 0) + 1
+    context.repair_duration_ms = (tonumber(context.repair_duration_ms) or 0) + duration
+    context.cache_result = "repair"
+  end
+end
+
+function BMF_operation_note_lifetime_guard_rejection()
+  local telemetry = state.telemetry.operations
+  telemetry.lifetime_guard_rejections_total =
+    (tonumber(telemetry.lifetime_guard_rejections_total) or 0) + 1
+  local context = state.operation_attribution.current
+  if type(context) == "table" and context.finished ~= true then
+    context.lifetime_guard_rejections = (tonumber(context.lifetime_guard_rejections) or 0) + 1
+  end
+end
+
+function BMF_operation_series(map, key, fields, bounded_class)
+  local telemetry = state.telemetry.operations
+  local normalized = BMF_operation_class(key, "unknown")
+  if bounded_class == true and type(map[normalized]) ~= "table" then
+    if (tonumber(telemetry.class_count) or 0) >= OPERATION_ATTRIBUTION_MAX_CLASSES then
+      telemetry.classes_dropped = (tonumber(telemetry.classes_dropped) or 0) + 1
+      normalized = "other"
+    else
+      telemetry.class_count = (tonumber(telemetry.class_count) or 0) + 1
+    end
+  end
+  return BMF_telemetry_series(map, normalized, fields)
+end
+
+function BMF_operation_observe_series(item, context)
+  if type(item) ~= "table" or type(context) ~= "table" then
+    return
+  end
+  BMF_telemetry_observe(item, context.game_thread_ms, context.outcome == "completed")
+  BMF_telemetry_add(item, "queue_wait_ms_sum", context.queue_wait_ms)
+  item.queue_wait_ms_max = math.max(tonumber(item.queue_wait_ms_max) or 0, tonumber(context.queue_wait_ms) or 0)
+  BMF_telemetry_add(item, "admission_defer_ms_sum", context.admission_defer_ms)
+  item.admission_defer_ms_max = math.max(
+    tonumber(item.admission_defer_ms_max) or 0,
+    tonumber(context.admission_defer_ms) or 0)
+  BMF_telemetry_add(item, "admission_defer_count", context.admission_defer_count)
+  BMF_telemetry_add(item, "game_thread_ms_sum", context.game_thread_ms)
+  item.game_thread_ms_max = math.max(tonumber(item.game_thread_ms_max) or 0, tonumber(context.game_thread_ms) or 0)
+  BMF_telemetry_add(item, "off_thread_ms_sum", context.off_thread_ms)
+  item.off_thread_ms_max = math.max(tonumber(item.off_thread_ms_max) or 0, tonumber(context.off_thread_ms) or 0)
+  BMF_telemetry_add(item, "total_ms_sum", context.total_ms)
+  item.total_ms_max = math.max(tonumber(item.total_ms_max) or 0, tonumber(context.total_ms) or 0)
+  BMF_telemetry_add(item, "controller_resolutions", context.controller_resolution_count)
+  BMF_telemetry_add(item, "global_scans", context.global_scan_count)
+  BMF_telemetry_add(item, "global_scan_duration_ms_sum", context.global_scan_duration_ms)
+  item.global_scan_duration_ms_max = math.max(
+    tonumber(item.global_scan_duration_ms_max) or 0,
+    tonumber(context.global_scan_duration_ms) or 0)
+  BMF_telemetry_add(item, "repairs", context.repair_count)
+  if context.budget_exceeded == true then
+    BMF_telemetry_add(item, "budget_overruns", 1)
+  end
+end
+
+function BMF_operation_finish(context, outcome)
+  if type(context) ~= "table" or context.finished == true then
+    return context
+  end
+  local now_clock = os.clock()
+  local accepted_clock = tonumber(context.accepted_clock) or now_clock
+  local execution_clock = tonumber(context.execution_started_clock)
+  context.game_thread_ms = execution_clock and math.max(0, (now_clock - execution_clock) * 1000) or 0
+  context.total_ms = math.max(0, (now_clock - accepted_clock) * 1000)
+  context.finish_timestamp_ms = (tonumber(context.accepted_at_ms) or (os.time() * 1000)) + context.total_ms
+  context.outcome = BMF_operation_class(outcome, "known_failure")
+  if context.outcome == "injected" then
+    context.outcome = "completed"
+  elseif context.outcome == "failed" then
+    context.outcome = "known_failure"
+  end
+  local deadline_elapsed = false
+  if (tonumber(context.deadline_ms) or 0) > 0
+      and type(BMF_socket_scheduler_deadline_expired) == "function" then
+    deadline_elapsed = BMF_socket_scheduler_deadline_expired(
+      context.deadline_ms,
+      context.issued_at_ms,
+      context.accepted_clock)
+  end
+  if context.outcome == "expired" then
+    context.deadline_state = "expired_before_execution"
+  elseif deadline_elapsed then
+    context.deadline_state = "elapsed_after_execution"
+  elseif (tonumber(context.deadline_ms) or 0) > 0 then
+    context.deadline_state = "within_deadline"
+  else
+    context.deadline_state = "not_set"
+  end
+  context.current_stage = "finished"
+  local frame = BMF_operation_frame_snapshot()
+  if type(frame) == "table" then
+    context.frame_sample_near_completion = frame.sample
+    context.frame_observed_at_ms = frame.observed_at_unix_ms
+    context.frame_duration_ms_near_completion = frame.delta_ms
+  end
+  context.budget_exceeded = context.game_thread_ms > (tonumber(state.telemetry.socket_scheduler.budget_ms) or 3)
+  context.finished = true
+  local previous_context = context.previous_context
+  context.previous_context = nil
+  context.accepted_clock = nil
+  context.execution_started_clock = nil
+  context.defer_started_clock = nil
+
+  local telemetry = state.telemetry.operations
+  telemetry.active = math.max(0, (tonumber(telemetry.active) or 0) - 1)
+  telemetry.total = (tonumber(telemetry.total) or 0) + 1
+  telemetry.admission_defer_total = (tonumber(telemetry.admission_defer_total) or 0)
+    + (tonumber(context.admission_defer_count) or 0)
+  telemetry.controller_resolutions_total = (tonumber(telemetry.controller_resolutions_total) or 0)
+    + (tonumber(context.controller_resolution_count) or 0)
+  telemetry.global_scan_total = (tonumber(telemetry.global_scan_total) or 0)
+    + (tonumber(context.global_scan_count) or 0)
+  telemetry.global_scan_duration_ms_sum = (tonumber(telemetry.global_scan_duration_ms_sum) or 0)
+    + (tonumber(context.global_scan_duration_ms) or 0)
+  telemetry.global_scan_duration_ms_max = math.max(
+    tonumber(telemetry.global_scan_duration_ms_max) or 0,
+    tonumber(context.global_scan_duration_ms) or 0)
+  telemetry.repair_total = (tonumber(telemetry.repair_total) or 0) + (tonumber(context.repair_count) or 0)
+  telemetry.repair_duration_ms_sum = (tonumber(telemetry.repair_duration_ms_sum) or 0)
+    + (tonumber(context.repair_duration_ms) or 0)
+  telemetry.repair_duration_ms_max = math.max(
+    tonumber(telemetry.repair_duration_ms_max) or 0,
+    tonumber(context.repair_duration_ms) or 0)
+  if context.budget_exceeded == true then
+    telemetry.budget_overrun_total = (tonumber(telemetry.budget_overrun_total) or 0) + 1
+  end
+  if context.outcome == "expired" then
+    telemetry.deadline_expired_total = (tonumber(telemetry.deadline_expired_total) or 0) + 1
+  end
+
+  local class_item = BMF_operation_series(telemetry.by_class, context.operation_class, {
+    operation_class = context.operation_class,
+  }, true)
+  local source_item = BMF_operation_series(telemetry.by_source, context.source, {
+    source = context.source,
+  }, false)
+  BMF_operation_observe_series(class_item, context)
+  BMF_operation_observe_series(source_item, context)
+  local outcome_item = BMF_operation_series(telemetry.by_outcome, context.outcome, {
+    outcome = context.outcome,
+  }, false)
+  outcome_item.count = (tonumber(outcome_item.count) or 0) + 1
+  local cache_item = BMF_operation_series(telemetry.by_cache_result, context.cache_result, {
+    cache_result = context.cache_result,
+  }, false)
+  cache_item.count = (tonumber(cache_item.count) or 0) + 1
+
+  local slow = context.game_thread_ms > (tonumber(telemetry.game_thread_slow_ms) or 3)
+    or context.total_ms > (tonumber(telemetry.total_slow_ms) or 10)
+    or (tonumber(context.frame_duration_ms_near_completion) or 0) >= 33.3
+    or (tonumber(context.global_scan_count) or 0) > 0
+    or (tonumber(context.repair_count) or 0) > 0
+    or (tonumber(context.lifetime_guard_rejections) or 0) > 0
+  if slow then
+    telemetry.slow_total = (tonumber(telemetry.slow_total) or 0) + 1
+    local slow_record = {
+      correlation_id = context.correlation_id,
+      request_id = context.request_id,
+      operation_class = context.operation_class,
+      source = context.source,
+      sender_uuid = context.sender_uuid,
+      connection_generation = context.connection_generation,
+      current_stage = context.current_stage,
+      queue_wait_ms = context.queue_wait_ms,
+      admission_defer_ms = context.admission_defer_ms,
+      admission_defer_count = context.admission_defer_count,
+      game_thread_ms = context.game_thread_ms,
+      off_thread_ms = context.off_thread_ms,
+      total_ms = context.total_ms,
+      deadline_state = context.deadline_state,
+      priority = context.priority,
+      cache_result = context.cache_result,
+      controller_resolution_count = context.controller_resolution_count,
+      global_scan_count = context.global_scan_count,
+      global_scan_duration_ms = context.global_scan_duration_ms,
+      repair_count = context.repair_count,
+      repair_duration_ms = context.repair_duration_ms,
+      lifetime_guard_rejections = context.lifetime_guard_rejections,
+      start_timestamp_ms = context.start_timestamp_ms,
+      finish_timestamp_ms = context.finish_timestamp_ms,
+      frame_sample_near_completion = context.frame_sample_near_completion,
+      frame_observed_at_ms = context.frame_observed_at_ms,
+      frame_duration_ms_near_completion = context.frame_duration_ms_near_completion,
+      outcome = context.outcome,
+      budget_exceeded = context.budget_exceeded,
+    }
+    local slow_event = {
+      ts = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+      level = "warn",
+      source = "operation",
+      message = "BMF_SLOW_OPERATION",
+      data = slow_record,
+    }
+    if type(BMF_socket_send_event_record) == "function" then
+      BMF_socket_send_event_record(slow_event, json_encode(slow_event))
+    end
+  end
+  -- copy_table is declared later in this file, so calling it here resolves to
+  -- a nil global in Lua. Keep the last-operation snapshot explicit.
+  telemetry.last = {
+    correlation_id = context.correlation_id,
+    operation_class = context.operation_class,
+    source = context.source,
+    current_stage = context.current_stage,
+    queue_wait_ms = context.queue_wait_ms,
+    admission_defer_ms = context.admission_defer_ms,
+    admission_defer_count = context.admission_defer_count,
+    game_thread_ms = context.game_thread_ms,
+    off_thread_ms = context.off_thread_ms,
+    total_ms = context.total_ms,
+    deadline_state = context.deadline_state,
+    priority = context.priority,
+    cache_result = context.cache_result,
+    controller_resolution_count = context.controller_resolution_count,
+    global_scan_count = context.global_scan_count,
+    global_scan_duration_ms = context.global_scan_duration_ms,
+    repair_count = context.repair_count,
+    repair_duration_ms = context.repair_duration_ms,
+    lifetime_guard_rejections = context.lifetime_guard_rejections,
+    start_timestamp_ms = context.start_timestamp_ms,
+    finish_timestamp_ms = context.finish_timestamp_ms,
+    frame_sample_near_completion = context.frame_sample_near_completion,
+    frame_observed_at_ms = context.frame_observed_at_ms,
+    frame_duration_ms_near_completion = context.frame_duration_ms_near_completion,
+    outcome = context.outcome,
+    budget_exceeded = context.budget_exceeded,
+  }
+  if state.operation_attribution.current == context then
+    state.operation_attribution.current = previous_context
+  end
+  return context
+end
+
 local function join_path(base, child)
   local left = tostring(base or ""):gsub("\\", "/"):gsub("/+$", "")
   local right = tostring(child or ""):gsub("\\", "/"):gsub("^/+", "")
@@ -2472,6 +3049,7 @@ function BMF_socket_configure_from_env()
   local socket_scheduler = state.telemetry.socket_scheduler
   local admission = state.socket_admission
   BMF_command_output_configure_from_env()
+  BMF_operation_attribution_configure_from_env()
   state.socket.enabled = BMF_socket_enabled_from_env()
   state.socket.available = BMF_socket_native_available()
   state.socket.host = BMF_socket_env("OMEGGA_BMF_SOCKET_HOST")
@@ -3510,7 +4088,13 @@ BMF.events.emit = function(name, data)
     else
       local handler_payload = copy_table(data or {})
       local handler_started_clock = os.clock()
+      local operation_context = BMF_operation_begin(
+        "event." .. event_name,
+        item.owner and "plugin_callback" or "event_callback",
+        { serviceClass = "interactive" })
+      BMF_operation_start_execution(operation_context)
       local ok, err = pcall(item.handler, handler_payload, event_name)
+      BMF_operation_finish(operation_context, ok and "completed" or "known_failure")
       handlers_called = handlers_called + 1
       BMF_telemetry_record_event_handler(event_name, item.owner, BMF_telemetry_duration_ms(handler_started_clock), ok)
       if not ok then
@@ -3782,7 +4366,13 @@ local function run_plugin_hook(name, plugin, hook, data)
     return false, "PLUGIN_ISOLATED"
   end
   local hook_started_clock = os.clock()
+  local operation_context = BMF_operation_begin(
+    "plugin." .. tostring(hook or "unknown"),
+    hook == "onLoad" and "startup_diagnostic" or "plugin_callback",
+    { serviceClass = "interactive" })
+  BMF_operation_start_execution(operation_context)
   local ok, err = pcall(plugin[hook], plugin.bmf_api or BMF, copy_table(data or {}))
+  BMF_operation_finish(operation_context, ok and "completed" or "known_failure")
   BMF_telemetry_record_plugin_hook(name, hook, BMF_telemetry_duration_ms(hook_started_clock), ok)
   if not ok then
     record_plugin_error(name, hook, err, data, plugin)
@@ -5712,73 +6302,114 @@ local function register_builtin_commands()
     return broadcast
   end)
 
-  BMF.commands.register("bmf.chat.whisper", "Send a private chat message to a player.", function(args)
+  local function parse_private_delivery_envelope(args, expected_operation)
     local text = tostring(args or "")
     local options = parse_command_options(text)
-    local target = options.target or options.player or options.uuid or text:match("target=([^%s]+)") or text:match("player=([^%s]+)") or text:match("uuid=([^%s]+)")
-    if target ~= nil then
-      target = percent_decode(target)
-    end
+    local request_id = percent_decode(options.requestid or "")
+    local sender_uuid = percent_decode(options.senderuuid or "")
+    local connection_generation = tonumber(options.connectiongeneration) or 0
+    local issued_at_ms = tonumber(options.issuedat) or 0
+    local deadline_ms = tonumber(options.deadline) or 0
+    local operation = trim_string(options.operation or "")
     local message = text:match("message=(.*)$") or options.message or ""
     message = percent_decode(message)
-    local whispered = BMF.chat.whisper(target, trim_string(message))
+    local now_ms = os.time() * 1000
+    if request_id == ""
+        or #request_id > 128
+        or sender_uuid == ""
+        or connection_generation < 1
+        or connection_generation % 1 ~= 0
+        or issued_at_ms < 1
+        or deadline_ms <= issued_at_ms
+        or deadline_ms - issued_at_ms > 10000
+        or operation ~= expected_operation
+        or trim_string(message) == "" then
+      state.player_registry.private_delivery_invalid =
+        (tonumber(state.player_registry.private_delivery_invalid) or 0) + 1
+      state.player_registry.private_delivery_dropped =
+        (tonumber(state.player_registry.private_delivery_dropped) or 0) + 1
+      return nil, result(false, "PRIVATE_IDENTITY_REQUIRED", "Strict private delivery envelope is required", {
+        delivered = false,
+        deliveredCount = 0,
+        lines = {
+          "delivered=false",
+          "delivered_count=0",
+          "reason=invalid_identity_envelope",
+        },
+      })
+    end
+    if deadline_ms <= now_ms then
+      state.player_registry.private_delivery_expired =
+        (tonumber(state.player_registry.private_delivery_expired) or 0) + 1
+      return nil, result(false, "PRIVATE_DELIVERY_EXPIRED", "Private delivery deadline elapsed", {
+        delivered = false,
+        deliveredCount = 0,
+        lines = {
+          "request_id=" .. request_id,
+          "delivered=false",
+          "delivered_count=0",
+          "reason=expired",
+        },
+      })
+    end
+    BMF_operation_note_private_identity(request_id, sender_uuid, connection_generation)
+    return {
+      uuid = sender_uuid,
+      requestId = request_id,
+      connectionGeneration = connection_generation,
+      issuedAtMs = issued_at_ms,
+      deadlineMs = deadline_ms,
+      strictPrivateIdentity = true,
+    }, nil, trim_string(message)
+  end
+
+  local function private_delivery_lines(response, identity)
     local lines = {
-      "target=" .. tostring(target or ""),
-      "message=" .. tostring(trim_string(message)),
-      "code=" .. tostring(whispered.code or ""),
+      "request_id=" .. tostring(identity.requestId or ""),
+      "connection_generation=" .. tostring(identity.connectionGeneration or 0),
+      "code=" .. tostring(response.code or ""),
     }
-    if whispered.data then
-      lines[#lines + 1] = "delivered=" .. tostring(whispered.data.delivered or false)
-      lines[#lines + 1] = "delivered_count=" .. tostring(whispered.data.deliveredCount or 0)
-      lines[#lines + 1] = "attempted_count=" .. tostring(whispered.data.attemptedCount or 0)
-      lines[#lines + 1] = "delivery_mode=" .. tostring(whispered.data.deliveryMode or "")
-      lines[#lines + 1] = "validation=" .. tostring(whispered.data.validation or "")
-      if whispered.data.adapter ~= nil then
-        lines[#lines + 1] = "adapter=" .. tostring(whispered.data.adapter or "")
-      end
-      if whispered.data.validationRequired ~= nil then
-        lines[#lines + 1] = "validation_required=" .. tostring(whispered.data.validationRequired or "")
+    if response.data then
+      lines[#lines + 1] = "delivered=" .. tostring(response.data.delivered or false)
+      lines[#lines + 1] = "delivered_count=" .. tostring(response.data.deliveredCount or 0)
+      lines[#lines + 1] = "attempted_count=" .. tostring(response.data.attemptedCount or 0)
+      lines[#lines + 1] = "delivery_mode=" .. tostring(response.data.deliveryMode or "")
+      lines[#lines + 1] = "validation=" .. tostring(response.data.validation or "")
+      if response.data.identityReason ~= nil then
+        lines[#lines + 1] = "reason=" .. tostring(response.data.identityReason or "")
       end
     end
+    return lines
+  end
+
+  BMF.commands.register("bmf.chat.whisper", "Send a private chat message to a player.", function(args)
+    local identity, envelope_error, message = parse_private_delivery_envelope(args, "whisper")
+    if envelope_error ~= nil then return envelope_error end
+    local whispered = BMF.chat.whisper(identity, message)
     whispered.data = whispered.data or {}
-    whispered.data.lines = lines
+    whispered.data.lines = private_delivery_lines(whispered, identity)
     return whispered
   end)
 
   BMF.commands.register("bmf.chat.statusmessage", "Send a private status message to a player.", function(args)
-    local text = tostring(args or "")
-    local options = parse_command_options(text)
-    local target = options.target or options.player or options.uuid or text:match("target=([^%s]+)") or text:match("player=([^%s]+)") or text:match("uuid=([^%s]+)")
-    if target ~= nil then
-      target = percent_decode(target)
-    end
-    local message = text:match("message=(.*)$") or options.message or ""
-    message = percent_decode(message)
-    local sent = BMF.chat.statusMessage(target, trim_string(message))
-    local lines = {
-      "target=" .. tostring(target or ""),
-      "message=" .. tostring(trim_string(message)),
-      "code=" .. tostring(sent.code or ""),
-    }
-    if sent.data then
-      lines[#lines + 1] = "delivered=" .. tostring(sent.data.delivered or false)
-      lines[#lines + 1] = "delivered_count=" .. tostring(sent.data.deliveredCount or 0)
-      lines[#lines + 1] = "attempted_count=" .. tostring(sent.data.attemptedCount or 0)
-      lines[#lines + 1] = "delivery_mode=" .. tostring(sent.data.deliveryMode or "")
-      lines[#lines + 1] = "validation=" .. tostring(sent.data.validation or "")
-      if sent.data.adapter ~= nil then
-        lines[#lines + 1] = "adapter=" .. tostring(sent.data.adapter or "")
-      end
-      if sent.data.validationRequired ~= nil then
-        lines[#lines + 1] = "validation_required=" .. tostring(sent.data.validationRequired or "")
-      end
-    end
+    local identity, envelope_error, message = parse_private_delivery_envelope(args, "statusmessage")
+    if envelope_error ~= nil then return envelope_error end
+    local sent = BMF.chat.statusMessage(identity, message)
     sent.data = sent.data or {}
-    sent.data.lines = lines
+    sent.data.lines = private_delivery_lines(sent, identity)
     return sent
   end)
 
   BMF.commands.register("bmf.chat.player-message-impl", "Invoke native player chat-message implementation for one explicit message.", function(args)
+    if not BMF_env_bool("BMF_UNSAFE_PLAYER_MESSAGE_IMPL_DIAGNOSTIC_ENABLED", false) then
+      return result(false, "DIAGNOSTIC_DISABLED", "The monolithic native player-message implementation probe is disabled outside explicit diagnostics.", {
+        lines = {
+          "ok=false",
+          "code=DIAGNOSTIC_DISABLED",
+          "normal_path=false",
+        },
+      })
+    end
     local text = tostring(args or "")
     local options = parse_command_options(text)
     local message = percent_decode(options.message or options.messageenc or "")
@@ -9930,7 +10561,11 @@ local function tool_object_valid(object)
   local ok, is_valid = pcall(function()
     return object:IsValid()
   end)
-  return ok and is_valid == true
+  local valid = ok and is_valid == true
+  if not valid then
+    BMF_operation_note_lifetime_guard_rejection()
+  end
+  return valid
 end
 
 local function tool_object_address_from_string(object)
@@ -10250,7 +10885,10 @@ local function applicator_find_server_function(function_name, candidates)
 
   if type(FindAllOf) == "function" then
     for _, class_name in ipairs({ "Function", "UFunction" }) do
-      local ok, objects = pcall(FindAllOf, class_name)
+      local ok, objects = BMF_operation_find_all(
+        class_name,
+        "applicator.native_targets",
+        "startup_diagnostic")
       if ok and type(objects) == "table" then
         for _, object in pairs(objects) do
           local full_name = tool_object_full_name(object)
@@ -15843,7 +16481,10 @@ local function minigame_find_objects(class_name, limit)
   end
 
   if type(FindAllOf) == "function" then
-    local ok, found = pcall(FindAllOf, class_name)
+    local ok, found = BMF_operation_find_all(
+      class_name,
+      "minigame.global_scan",
+      "diagnostic_scan")
     if ok and type(found) == "table" then
       for _, object in ipairs(found) do
         add_object(object)
@@ -16257,7 +16898,10 @@ function minigame_live_player_states(options)
   if #records == 0 and opts.fallbackFindAll == true and type(FindAllOf) == "function" then
     source = "FindAllOf"
     for _, class_name in ipairs({ "BP_PlayerState_C", "BRPlayerState", "PlayerState" }) do
-      local ok, found = pcall(FindAllOf, class_name)
+      local ok, found = BMF_operation_find_all(
+        class_name,
+        "minigame.player_state_scan",
+        "diagnostic_scan")
       if ok and type(found) == "table" then
         for index, player_state in ipairs(found) do
           add_player_state(player_state, index, "FindAllOf(" .. class_name .. ")")
@@ -16794,21 +17438,24 @@ function minigame_live_player_assignment_candidates(player_state)
   return candidates
 end
 
+function BMF_minigame_player_cache_records()
+  local cache = state.player_cache
+  if type(cache) ~= "table" then
+    return nil, "player_cache.missing"
+  end
+  local players = type(cache.players) == "table" and cache.players or cache
+  if type(players) ~= "table" then
+    return nil, "player_cache.invalid"
+  end
+  return players, "player_cache.memory"
+end
+
 local function minigame_cached_player_record(query)
   local needle = trim_string(query or ""):lower()
-  if needle == "" or type(read_file) ~= "function" or type(json_decode) ~= "function" then
+  if needle == "" then
     return nil, ""
   end
-
-  local raw = read_file(PLAYER_CACHE_PATH)
-  if not raw or trim_string(raw) == "" then
-    return nil, ""
-  end
-  local ok, decoded = pcall(json_decode, raw)
-  if not ok or type(decoded) ~= "table" then
-    return nil, ""
-  end
-  local players = type(decoded.players) == "table" and decoded.players or decoded
+  local players = BMF_minigame_player_cache_records()
   if type(players) ~= "table" then
     return nil, ""
   end
@@ -16974,26 +17621,10 @@ function minigame_cached_single_player_match(query)
   if needle == "" then
     return false, "player_cache.empty_query"
   end
-  if type(read_file) ~= "function" or type(json_decode) ~= "function" then
-    return false, "player_cache.unavailable"
-  end
-
-  local raw = read_file(PLAYER_CACHE_PATH)
-  if not raw or trim_string(raw) == "" then
-    return false, "player_cache.missing"
-  end
-
-  local ok, decoded = pcall(json_decode, raw)
-  if not ok or type(decoded) ~= "table" then
-    return false, "player_cache.invalid"
-  end
-
-  local players = decoded.players
-  if type(players) ~= "table" then
-    players = decoded
-  end
+  local players, cache_source = BMF_minigame_player_cache_records()
   if type(players) ~= "table" or #players ~= 1 then
-    return false, "player_cache.count=" .. tostring(type(players) == "table" and #players or 0)
+    return false, tostring(cache_source or "player_cache.invalid")
+      .. ".count=" .. tostring(type(players) == "table" and #players or 0)
   end
 
   local player = players[1]
@@ -17053,7 +17684,10 @@ function minigame_live_controller_candidates_for_assignment()
 
   if type(FindAllOf) == "function" then
     for _, class_name in ipairs(classes) do
-      local ok, found = pcall(FindAllOf, class_name)
+      local ok, found = BMF_operation_find_all(
+        class_name,
+        "minigame.controller_scan",
+        "diagnostic_scan")
       if ok and type(found) == "table" then
         for index, controller in ipairs(found) do
           add(controller, "FindAllOf(" .. class_name .. ")[" .. tostring(index) .. "]")
@@ -21334,7 +21968,10 @@ local function BMF_player_message_implementation_probe(message, controller_hint,
       -- newest Brickadia controller first avoids the short window where a
       -- disconnected controller still passes UObject lifecycle checks.
       for _, class_name in ipairs({ "BP_PlayerController_C", "BRPlayerController" }) do
-        local ok, controllers = pcall(FindAllOf, class_name)
+        local ok, controllers = BMF_operation_find_all(
+          class_name,
+          "chat.controller_scan",
+          "diagnostic_scan")
         if ok and type(controllers) == "table" then
           for index = #controllers, 1, -1 do
             add_candidate(
@@ -21595,6 +22232,7 @@ function live_chat_cached_controller(controller_path)
   -- userdata can outlive its disconnected player and crash inside IsValid.
   registry.controller_handle_misses = (tonumber(registry.controller_handle_misses) or 0) + 1
   local controller = live_chat_find_controller_by_name(path)
+  BMF_operation_note_controller_resolution(controller ~= nil)
   if controller ~= nil then
     registry.targeted_resolutions = (tonumber(registry.targeted_resolutions) or 0) + 1
     return controller
@@ -21656,7 +22294,9 @@ function live_chat_repair_allowed(registry)
   if registry.repair_enabled ~= true or registry.repair_running == true then
     return false
   end
-  local cooldown_ms = math.max(0, tonumber(registry.repair_cooldown_ms) or 0)
+  local cooldown_ms = math.max(
+    math.max(0, tonumber(registry.repair_cooldown_ms) or 0),
+    math.max(0, tonumber(registry.repair_backoff_ms) or 0))
   local last_epoch = tonumber(registry.last_repair_epoch) or 0
   if last_epoch > 0 and cooldown_ms > 0 then
     local elapsed_ms = math.max(0, os.time() - last_epoch) * 1000
@@ -21681,6 +22321,9 @@ function live_chat_collect_targets(options)
     globalScans = 0,
     error = "",
   }
+  if repair_detail.requested then
+    registry.repair_requests = (tonumber(registry.repair_requests) or 0) + 1
+  end
 
   local function add_target(controller, source, metadata)
     if #targets >= LIVE_CHAT_MAX_CONTROLLER_TARGETS then
@@ -21725,11 +22368,19 @@ function live_chat_collect_targets(options)
   end
 
   local unresolved_count = math.max(0, #cached_players - #targets)
+  registry.unresolved_players = unresolved_count
+  if #cached_players > 0 and unresolved_count == 0 then
+    BMF_operation_note_cache_result("hit")
+  elseif #cached_players > 0 then
+    BMF_operation_note_cache_result("miss")
+  end
   local repair_needed = repair_detail.requested and (#cached_players == 0 or unresolved_count > 0)
   if repair_needed and not live_chat_repair_allowed(registry) then
     registry.broad_repair_skipped = (tonumber(registry.broad_repair_skipped) or 0) + 1
+    registry.repair_coalesced = (tonumber(registry.repair_coalesced) or 0) + 1
     repair_detail.skipped = true
   elseif repair_needed then
+    local repair_started_clock = os.clock()
     registry.repair_running = true
     registry.last_repair_epoch = os.time()
     registry.last_repair_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
@@ -21741,10 +22392,21 @@ function live_chat_collect_targets(options)
         error("FindAllOf is unavailable")
       end
       for _, class_name in ipairs(LIVE_CHAT_CONTROLLER_CLASSES) do
+        if BMF_operation_current_deadline_expired() then
+          error("repair deadline elapsed before global scan")
+        end
         local target_count_before_scan = #targets
         registry.global_scans = (tonumber(registry.global_scans) or 0) + 1
         repair_detail.globalScans = repair_detail.globalScans + 1
-        local ok, controllers = pcall(FindAllOf, class_name)
+        local ok, controllers, scan_duration_ms = BMF_operation_find_all(
+          class_name,
+          "player_registry.repair",
+          "explicit_repair")
+        registry.global_scan_duration_ms_sum =
+          (tonumber(registry.global_scan_duration_ms_sum) or 0) + scan_duration_ms
+        registry.global_scan_duration_ms_max = math.max(
+          tonumber(registry.global_scan_duration_ms_max) or 0,
+          scan_duration_ms)
         if ok and type(controllers) == "table" then
           for index, controller in ipairs(controllers) do
             add_target(
@@ -21766,11 +22428,28 @@ function live_chat_collect_targets(options)
       end
     end)
     registry.repair_running = false
+    local repair_duration_ms = BMF_telemetry_duration_ms(repair_started_clock)
+    registry.repair_duration_ms_sum =
+      (tonumber(registry.repair_duration_ms_sum) or 0) + repair_duration_ms
+    registry.repair_duration_ms_max = math.max(
+      tonumber(registry.repair_duration_ms_max) or 0,
+      repair_duration_ms)
+    BMF_operation_note_repair(repair_duration_ms)
     if not repair_ok then
       registry.broad_repair_failures = (tonumber(registry.broad_repair_failures) or 0) + 1
+      registry.repair_failure_streak = (tonumber(registry.repair_failure_streak) or 0) + 1
+      registry.repair_backoff_ms = math.min(
+        60000,
+        math.max(
+          tonumber(registry.repair_cooldown_ms) or BMF_PLAYER_REGISTRY_DEFAULT_REPAIR_COOLDOWN_MS,
+          (tonumber(registry.repair_cooldown_ms) or BMF_PLAYER_REGISTRY_DEFAULT_REPAIR_COOLDOWN_MS)
+            * (2 ^ math.min(6, math.max(0, registry.repair_failure_streak - 1)))))
       registry.last_repair_error = tostring(repair_error or "controller repair failed")
       repair_detail.error = registry.last_repair_error
     else
+      registry.repair_failure_streak = 0
+      registry.repair_backoff_ms = tonumber(registry.repair_cooldown_ms)
+        or BMF_PLAYER_REGISTRY_DEFAULT_REPAIR_COOLDOWN_MS
       local updated_cache = type(state.player_cache) == "table" and copy_table(state.player_cache) or {
         schemaVersion = 1,
         adapter = "live-controller-repair",
@@ -21863,18 +22542,182 @@ function live_chat_query_text(player)
   return tostring(player or "")
 end
 
-function live_chat_resolve_target(player)
-  local query = live_chat_query_text(player)
-  local targets = live_chat_collect_targets()
-  if trim_string(query) ~= "" and #targets == 1 then
-    return targets[1], targets
+function live_chat_resolve_strict_target(identity)
+  local registry = state.player_registry or {}
+  local expected_uuid = trim_string(tostring(identity.uuid or "")):lower()
+  local expected_generation = tonumber(identity.connectionGeneration) or 0
+  if expected_uuid == ""
+      or expected_generation < 1
+      or expected_generation % 1 ~= 0 then
+    BMF_operation_note_cache_result("miss")
+    return nil, {}, "invalid_identity"
   end
-  for _, target in ipairs(targets) do
-    if live_chat_target_matches(target, query) then
-      return target, targets
+
+  local cached_player = nil
+  for _, candidate in ipairs(live_chat_cached_players()) do
+    local candidate_uuid = trim_string(tostring(
+      candidate.uuid or candidate.id or candidate.playerId or "")):lower()
+    if candidate_uuid == expected_uuid then
+      if cached_player ~= nil then
+        return nil, {}, "ambiguous_uuid"
+      end
+      cached_player = candidate
     end
   end
-  return nil, targets
+  if cached_player == nil then
+    BMF_operation_note_cache_result("miss")
+    return nil, {}, "uuid_not_found"
+  end
+
+  local cached_generation = tonumber(cached_player.connectionGeneration) or 0
+  if cached_generation ~= expected_generation then
+    registry.connection_generation_mismatches =
+      (tonumber(registry.connection_generation_mismatches) or 0) + 1
+    BMF_operation_note_cache_result("generation_mismatch")
+    return nil, {}, "connection_generation_mismatch"
+  end
+  local expected_controller_path =
+    trim_string(tostring(cached_player.controllerPath or ""))
+  local expected_player_state_path =
+    trim_string(tostring(cached_player.playerStatePath or ""))
+  if expected_controller_path == "" or expected_player_state_path == "" then
+    BMF_operation_note_cache_result("miss")
+    return nil, {}, "current_paths_unavailable"
+  end
+
+  local snapshot_generation = tonumber(cached_player.snapshotGeneration) or 0
+  local current_generation = tonumber(registry.generation) or 0
+  if snapshot_generation > 0
+      and current_generation > 0
+      and snapshot_generation ~= current_generation then
+    registry.connection_generation_mismatches =
+      (tonumber(registry.connection_generation_mismatches) or 0) + 1
+    BMF_operation_note_cache_result("generation_mismatch")
+    return nil, {}, "snapshot_generation_mismatch"
+  end
+
+  local controller = live_chat_cached_controller(expected_controller_path)
+  if controller == nil then
+    BMF_operation_note_cache_result("miss")
+    return nil, {}, "controller_unavailable"
+  end
+  local live_metadata = live_chat_controller_metadata(controller)
+  if trim_string(tostring(live_metadata.playerStatePath or ""))
+      ~= expected_player_state_path then
+    registry.connection_generation_mismatches =
+      (tonumber(registry.connection_generation_mismatches) or 0) + 1
+    BMF_operation_note_cache_result("generation_mismatch")
+    return nil, {}, "live_player_state_mismatch"
+  end
+
+  local cached_names = {}
+  for _, value in ipairs({
+    cached_player.username,
+    cached_player.playerName,
+    cached_player.displayName,
+    cached_player.originalName,
+  }) do
+    local normalized = trim_string(tostring(value or "")):lower()
+    if normalized ~= "" then cached_names[normalized] = true end
+  end
+  local live_name = trim_string(tostring(first_string(
+    live_metadata.username,
+    live_metadata.playerName,
+    live_metadata.displayName,
+    live_metadata.name) or "")):lower()
+  if live_name == "" or next(cached_names) == nil or cached_names[live_name] ~= true then
+    registry.connection_generation_mismatches =
+      (tonumber(registry.connection_generation_mismatches) or 0) + 1
+    BMF_operation_note_cache_result("generation_mismatch")
+    return nil, {}, "live_name_mismatch"
+  end
+
+  BMF_operation_note_cache_result("hit")
+  local target = {
+    controller = controller,
+    name = tostring(cached_player.name or cached_player.playerName or cached_player.username or ""),
+    userName = tostring(cached_player.userName or cached_player.username or cached_player.playerName or ""),
+    displayName = tostring(cached_player.displayName or cached_player.name or cached_player.username or ""),
+    playerId = tostring(cached_player.uuid or cached_player.id or cached_player.playerId or ""),
+    controllerPath = expected_controller_path,
+    playerStatePath = expected_player_state_path,
+    label = expected_controller_path,
+    source = "player_cache.strict_uuid_generation",
+  }
+  return target, { target }, "ok"
+end
+
+function live_chat_resolve_target(player)
+  if type(player) == "table" and player.strictPrivateIdentity == true then
+    return live_chat_resolve_strict_target(player)
+  end
+  local registry = state.player_registry or {}
+  local resolved = BMF.players.find(player)
+  if not resolved.ok or type(resolved.data) ~= "table" or type(resolved.data.player) ~= "table" then
+    BMF_operation_note_cache_result("miss")
+    registry.unresolved_players = math.max(1, tonumber(registry.unresolved_players) or 0)
+    return nil, {}
+  end
+
+  local cached_player = resolved.data.player
+  local snapshot_generation = tonumber(cached_player.snapshotGeneration) or 0
+  local current_generation = tonumber(registry.generation) or 0
+  if snapshot_generation > 0 and current_generation > 0 and snapshot_generation ~= current_generation then
+    registry.connection_generation_mismatches =
+      (tonumber(registry.connection_generation_mismatches) or 0) + 1
+    BMF_operation_note_cache_result("generation_mismatch")
+    return nil, {}
+  end
+
+  local controller = live_chat_cached_controller(cached_player.controllerPath)
+  if controller == nil then
+    BMF_operation_note_cache_result("miss")
+    registry.unresolved_players = math.max(1, tonumber(registry.unresolved_players) or 0)
+    return nil, {}
+  end
+
+  -- Validate the freshly resolved controller against the current plain-data
+  -- snapshot. The wrapper exists only for this dispatch and is discarded when
+  -- this function returns to the caller.
+  local live_metadata = live_chat_controller_metadata(controller)
+  local cached_names = {}
+  for _, value in ipairs({
+    cached_player.username,
+    cached_player.playerName,
+    cached_player.displayName,
+    cached_player.originalName,
+  }) do
+    local normalized = trim_string(tostring(value or "")):lower()
+    if normalized ~= "" then
+      cached_names[normalized] = true
+    end
+  end
+  local live_name = trim_string(tostring(first_string(
+    live_metadata.username,
+    live_metadata.playerName,
+    live_metadata.displayName,
+    live_metadata.name) or "")):lower()
+  if live_name ~= "" and next(cached_names) ~= nil and cached_names[live_name] ~= true then
+    registry.connection_generation_mismatches =
+      (tonumber(registry.connection_generation_mismatches) or 0) + 1
+    BMF_operation_note_cache_result("generation_mismatch")
+    return nil, {}
+  end
+
+  BMF_operation_note_cache_result("hit")
+  registry.unresolved_players = math.max(0, (tonumber(registry.unresolved_players) or 0) - 1)
+  local target = {
+    controller = controller,
+    name = tostring(cached_player.name or cached_player.playerName or cached_player.username or ""),
+    userName = tostring(cached_player.userName or cached_player.username or cached_player.playerName or ""),
+    displayName = tostring(cached_player.displayName or cached_player.name or cached_player.username or ""),
+    playerId = tostring(cached_player.uuid or cached_player.id or cached_player.playerId or ""),
+    controllerPath = tostring(cached_player.controllerPath or ""),
+    playerStatePath = tostring(cached_player.playerStatePath or ""),
+    label = tostring(cached_player.controllerPath or "player_controller"),
+    source = "player_cache.targeted_controller",
+  }
+  return target, { target }
 end
 
 function live_chat_send_to_controller(controller, message)
@@ -22039,6 +22882,13 @@ function publish_player_cache(cache, options)
   cache.generation = next_generation
   cache.snapshotGeneration = next_generation
   local players = type(cache.players) == "table" and cache.players or cache
+  if type(players) == "table" then
+    for _, player in ipairs(players) do
+      if type(player) == "table" then
+        player.snapshotGeneration = next_generation
+      end
+    end
+  end
   registry.cache_loaded = true
   registry.generation = next_generation
   registry.entries = type(players) == "table" and #players or 0
@@ -22279,8 +23129,10 @@ BMF.players.list = function(options)
   local raw_records = use_legacy_discovery and #native_records > 0 and native_records or cached_records
   if type(cache) == "table" then
     registry.cache_hits = (tonumber(registry.cache_hits) or 0) + 1
+    BMF_operation_note_cache_result("hit")
   else
     registry.cache_misses = (tonumber(registry.cache_misses) or 0) + 1
+    BMF_operation_note_cache_result("miss")
   end
   local adapter = "headless-empty"
   local source = ""
@@ -24137,6 +24989,12 @@ BMF.players.normalize = function(record)
   if type(record.controllerPath) == "string" then
     normalized.controllerPath = record.controllerPath
   end
+  if type(record.connectionGeneration) == "number" then
+    normalized.connectionGeneration = math.max(0, math.floor(record.connectionGeneration))
+  end
+  if type(record.snapshotGeneration) == "number" then
+    normalized.snapshotGeneration = math.max(0, math.floor(record.snapshotGeneration))
+  end
   if type(record.position) == "table" then
     normalized.position = {
       x = finite_number(record.position.x or record.position.X, 0),
@@ -24881,83 +25739,101 @@ function private_chat_result(kind, player, message)
     return limited
   end
 
-  local live_target, live_targets = live_chat_resolve_target(player)
-  if live_target ~= nil then
-    local delivered, failed, command = live_chat_send_to_targets({ live_target }, text)
-    local response = result(#delivered > 0, #delivered > 0 and "OK" or "PLAYER_DELIVERY_UNAVAILABLE", #delivered > 0 and "Private message delivered to live player controller" or "Live player controller rejected private message", {
-      channel = kind,
-      query = player_query_text(player),
-      target = live_chat_target_summary(live_target),
-      message = text,
-      delivered = #delivered > 0,
-      deliveredCount = #delivered,
-      attemptedCount = 1,
-      failedCount = #failed,
-      targets = delivered,
-      failures = failed,
-      command = command,
-      executor = "player_controller.client_push_chat_message",
-      deliveryMode = "player-controller-client-push-chat-message",
-      validation = "L3 Live Player UI confirmed",
-    })
-    audit_record("chat." .. tostring(kind or "private"), {
-      channel = kind,
-      query = player_query_text(player),
-      target = response.data.target,
-      message = text,
-      deliveredCount = #delivered,
-      deliveryMode = response.data.deliveryMode,
-    }, {
-      source = "framework",
-      severity = response.ok and "info" or "warn",
-      ok = response.ok,
-      code = response.code,
-    })
-    return response
+  if type(player) == "table" and player.strictPrivateIdentity == true then
+    local registry = state.player_registry or {}
+    local request_id = trim_string(tostring(player.requestId or ""))
+    local deadline_ms = tonumber(player.deadlineMs) or 0
+    if deadline_ms <= os.time() * 1000 then
+      registry.private_delivery_dropped =
+        (tonumber(registry.private_delivery_dropped) or 0) + 1
+      registry.private_delivery_expired =
+        (tonumber(registry.private_delivery_expired) or 0) + 1
+      return result(false, "PRIVATE_DELIVERY_EXPIRED", "Private delivery deadline elapsed", {
+        requestId = request_id,
+        delivered = false,
+        deliveredCount = 0,
+        attemptedCount = 0,
+        identityReason = "expired",
+      })
+    end
+
+    local live_target, _, identity_reason = live_chat_resolve_target(player)
+    if live_target == nil then
+      registry.private_delivery_dropped =
+        (tonumber(registry.private_delivery_dropped) or 0) + 1
+      registry.private_delivery_stale =
+        (tonumber(registry.private_delivery_stale) or 0) + 1
+      local dropped = tonumber(registry.private_delivery_dropped) or 0
+      if dropped <= 5 or dropped % 100 == 0 then
+        log(
+          "warn",
+          "P0 private delivery dropped"
+            .. " reason=" .. tostring(identity_reason or "identity_unproven")
+            .. " request_id=" .. request_id
+            .. " count=" .. tostring(dropped))
+      end
+      return result(false, "PRIVATE_IDENTITY_STALE", "Private recipient identity could not be proven", {
+        requestId = request_id,
+        delivered = false,
+        deliveredCount = 0,
+        attemptedCount = 0,
+        identityReason = tostring(identity_reason or "identity_unproven"),
+      })
+    end
+
+    -- Re-check the deadline immediately before invoking the client RPC. A
+    -- request that expired in the queue is dropped, never retargeted.
+    if deadline_ms <= os.time() * 1000 then
+      registry.private_delivery_dropped =
+        (tonumber(registry.private_delivery_dropped) or 0) + 1
+      registry.private_delivery_expired =
+        (tonumber(registry.private_delivery_expired) or 0) + 1
+      return result(false, "PRIVATE_DELIVERY_EXPIRED", "Private delivery deadline elapsed", {
+        requestId = request_id,
+        delivered = false,
+        deliveredCount = 0,
+        attemptedCount = 0,
+        identityReason = "expired",
+      })
+    end
+
+    local delivered, failed = live_chat_send_to_targets({ live_target }, text)
+    if #delivered > 0 then
+      registry.private_delivery_delivered =
+        (tonumber(registry.private_delivery_delivered) or 0) + 1
+    else
+      registry.private_delivery_dropped =
+        (tonumber(registry.private_delivery_dropped) or 0) + 1
+    end
+    return result(
+      #delivered > 0,
+      #delivered > 0 and "OK" or "PLAYER_DELIVERY_UNAVAILABLE",
+      #delivered > 0 and "Private message delivered" or "Private delivery rejected",
+      {
+        requestId = request_id,
+        connectionGeneration = tonumber(player.connectionGeneration) or 0,
+        delivered = #delivered > 0,
+        deliveredCount = #delivered,
+        attemptedCount = 1,
+        failedCount = #failed,
+        identityReason = #delivered > 0 and "exact_uuid_generation" or "client_rpc_rejected",
+        executor = "player_controller.client_push_chat_message",
+        deliveryMode = "strict-uuid-generation-controller",
+        validation = "exact UUID, connection generation, controller and PlayerState",
+      })
   end
 
-  local resolved = BMF.players.resolve(player)
-  if not resolved.ok then
-    audit_record("chat." .. tostring(kind or "private") .. ".target_not_found", {
-      channel = kind,
-      query = player_query_text(player),
-      message = text,
-      adapter = resolved.data and resolved.data.adapter or "",
-      liveTargets = #(live_targets or {}),
-    }, {
-      source = "framework",
-      severity = "warn",
-      ok = false,
-      code = resolved.code,
-    })
-    return resolved
-  end
-
-  local response = result(false, "PLAYER_DELIVERY_UNAVAILABLE", "Private player message delivery requires a live player adapter", {
-    channel = kind,
-    player = resolved.data.player,
-    target = resolved.data.player.uuid,
-    message = text,
+  local registry = state.player_registry or {}
+  registry.private_delivery_invalid =
+    (tonumber(registry.private_delivery_invalid) or 0) + 1
+  registry.private_delivery_dropped =
+    (tonumber(registry.private_delivery_dropped) or 0) + 1
+  return result(false, "PRIVATE_IDENTITY_REQUIRED", "Private delivery requires an exact UUID and connection generation envelope", {
     delivered = false,
     deliveredCount = 0,
-    source = resolved.data.source,
-    adapter = resolved.data.adapter,
-    liveTargets = #(live_targets or {}),
-    validationRequired = "L3 Live Player",
+    attemptedCount = 0,
+    identityReason = "strict_envelope_required",
   })
-  audit_record("chat." .. tostring(kind or "private") .. ".delivery_unavailable", {
-    channel = kind,
-    target = response.data.target,
-    message = text,
-    adapter = response.data.adapter,
-    validationRequired = response.data.validationRequired,
-  }, {
-    source = "framework",
-    severity = "warn",
-    ok = false,
-    code = response.code,
-  })
-  return response
 end
 
 BMF.chat.whisper = function(player, message)
@@ -25547,7 +26423,7 @@ function BMF_bounded_output_finalize(collector, command_name, transport)
   return collector.lines
 end
 
-function BMF_dispatch_bmf_command_text(request_id, command_text, transport)
+function BMF_dispatch_bmf_command_text(request_id, command_text, transport, operation_context)
   local process_started_clock = os.clock()
   local process_started_epoch = os.time()
   local output_collector = BMF_new_bounded_output_collector()
@@ -25559,6 +26435,8 @@ function BMF_dispatch_bmf_command_text(request_id, command_text, transport)
   }
 
   local command_name, args = command_text:match("^(%S+)%s*(.*)$")
+  BMF_operation_update_class(operation_context, command_name or "unknown")
+  BMF_operation_update_stage(operation_context, "command_dispatch")
   local ok = false
   local detail = ""
   local dispatch_started_clock = os.clock()
@@ -25589,6 +26467,7 @@ function BMF_dispatch_bmf_command_text(request_id, command_text, transport)
     BMF_socket_scheduler_record_work("direct_socket", total_duration_ms, ok, total_duration_exact_ms)
   end
   BMF_telemetry_record_command(command_name or "unknown", transport or "file", ok, detail, total_duration_ms, dispatch_duration_ms, request_age_ms)
+  BMF_operation_update_stage(operation_context, "command_complete")
   local lines = BMF_bounded_output_finalize(output_collector, command_name, transport)
 
   local response = {
@@ -25631,7 +26510,17 @@ function process_command_request(file_name)
   os.remove(request_path)
   state.command_empty_reads[request_id] = nil
 
-  local response = BMF_dispatch_bmf_command_text(request_id, command_text, "file")
+  local operation_context = BMF_operation_begin(
+    BMF_operation_class_from_text(command_text, "unknown"),
+    "file_worker",
+    { id = request_id, serviceClass = "bulk" })
+  BMF_operation_start_execution(operation_context)
+  local response, ok = BMF_dispatch_bmf_command_text(
+    request_id,
+    command_text,
+    "file",
+    operation_context)
+  BMF_operation_finish(operation_context, ok == true and "completed" or "known_failure")
   write_file(response_path, response)
   return true
 end
@@ -26289,6 +27178,7 @@ function BMF_socket_scheduler_send_direct_terminal(request, result_state, code, 
   end
 
   local normalized_state = tostring(result_state or "rejected")
+  BMF_operation_finish(request.operationContext, normalized_state)
   local record = {
     type = "response",
     source = "bmf",
@@ -26477,6 +27367,11 @@ function BMF_socket_scheduler_admit_direct(decoded)
     executionStarted = false,
     terminalSent = false,
   }
+  request.operationContext = BMF_operation_begin(
+    BMF_operation_class_from_text(command_text, "unknown"),
+    "direct_socket",
+    request)
+  BMF_operation_update_stage(request.operationContext, "queued")
   queue[#queue + 1] = request
   admission.active_by_id[request_id] = request
   admission.direct_queued_count = admission.direct_queued_count + 1
@@ -26552,11 +27447,13 @@ function BMF_socket_scheduler_execute_direct(request)
 
   local work_started_clock = os.clock()
   request.executionStarted = true
+  BMF_operation_start_execution(request.operationContext)
   local processing_ok, response, command_ok, detail = pcall(
     BMF_dispatch_bmf_command_text,
     request.id,
     request.command,
-    "socket")
+    "socket",
+    request.operationContext)
   if processing_ok then
     local result_state = command_ok == true and "completed" or "failed"
     local result_code = command_ok == true and "OK" or "COMMAND_FAILED"
@@ -26913,6 +27810,7 @@ BMF_game_command_tunnel_send_terminal = function(request, result_state, code, de
   end
   local request_id = trim_string(request and request.id or "")
   local normalized_state = tostring(result_state or "rejected")
+  BMF_operation_finish(request.operationContext, normalized_state)
   local record = {
     type = "tunnel.result",
     source = "bmf",
@@ -27121,6 +28019,7 @@ BMF_game_command_tunnel_drain_once = function(request)
 
   local work_started_clock = os.clock()
   tunnel.running = true
+  BMF_operation_start_execution(request.operationContext)
   local injection_started = false
   local processing_ok, processing_error = pcall(function()
   if BMF_game_command_tunnel_request_expired(request) then
@@ -27142,6 +28041,10 @@ BMF_game_command_tunnel_drain_once = function(request)
       skipRateLimit = true,
       nativeResolverOnly = true,
     })
+    local controller_attempts = tonumber(invoked and invoked.data and invoked.data.controllerAttemptCount) or 0
+    for _ = 1, controller_attempts do
+      BMF_operation_note_controller_resolution(invoked and invoked.ok == true)
+    end
 
     local dispatch_ms = BMF_telemetry_duration_ms(dispatch_started_clock)
     tunnel.dispatch_count = (tonumber(tunnel.dispatch_count) or 0) + 1
@@ -27459,6 +28362,11 @@ BMF_process_game_command_tunnel_request = function(decoded)
     idempotencyKey = idempotency_key,
     terminalSent = false,
   }
+  request.operationContext = BMF_operation_begin(
+    BMF_operation_class_from_text(line, "cityrpg.remote"),
+    "tunnel",
+    request)
+  BMF_operation_update_stage(request.operationContext, "queued")
   queue[#queue + 1] = request
   tunnel.active_by_id[request_id] = request
   if idempotency_key ~= "" then
@@ -27496,6 +28404,7 @@ BMF_process_game_command_tunnel_request = function(decoded)
     tunnel.rejected = (tonumber(tunnel.rejected) or 0) + 1
     tunnel.accepted = math.max(0, (tonumber(tunnel.accepted) or 0) - 1)
     tunnel.last_error = "failed to send tunnel acknowledgement id=" .. request_id
+    BMF_operation_finish(request.operationContext, "rejected")
     return false
   end
 
@@ -27551,7 +28460,17 @@ function BMF_process_socket_message(line)
 
   state.socket.received_commands = state.socket.received_commands + 1
   BMF_socket_scheduler_record_admission("direct_socket")
-  local response, ok, detail = BMF_dispatch_bmf_command_text(request_id, command_text, "socket")
+  local operation_context = BMF_operation_begin(
+    BMF_operation_class_from_text(command_text, "unknown"),
+    "direct_socket_bypass",
+    decoded)
+  BMF_operation_start_execution(operation_context)
+  local response, ok, detail = BMF_dispatch_bmf_command_text(
+    request_id,
+    command_text,
+    "socket",
+    operation_context)
+  BMF_operation_finish(operation_context, ok == true and "completed" or "known_failure")
   local sent = BMF_socket_send_json({
     type = "response",
     source = "bmf",
@@ -27909,6 +28828,7 @@ function BMF_poll_socket_messages()
         or BMF_socket_scheduler_budget_exhausted_for_admission(pump_started_clock))
     then
       budget_admission_stopped = true
+      BMF_operation_note_queued_budget_defer()
       if state.socket_admission.enabled == true then
         budget_dispatch_skipped = true
       else

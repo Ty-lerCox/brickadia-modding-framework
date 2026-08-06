@@ -97,6 +97,48 @@ test("writes a BMF player cache from Omegga player records", async (t) => {
   assert.deepEqual(requestFiles(commandDir), []);
 });
 
+test("tracks simultaneous reconnect generations by UUID instead of array order", () => {
+  const adapter = new BmfPlayerSync({}, { connectionGeneration: true });
+  const first = adapter.applyConnectionGenerations([
+    {
+      uuid: "11111111-1111-4111-8111-111111111111",
+      controllerPath: "BP_PlayerController_C_10",
+    },
+    {
+      uuid: "22222222-2222-4222-8222-222222222222",
+      controllerPath: "BP_PlayerController_C_20",
+    },
+  ]);
+  assert.deepEqual(
+    first.map((record) => [record.uuid, record.connectionGeneration]),
+    [
+      ["11111111-1111-4111-8111-111111111111", 1],
+      ["22222222-2222-4222-8222-222222222222", 1],
+    ],
+  );
+
+  adapter.applyConnectionGenerations([]);
+  const reconnected = adapter.applyConnectionGenerations([
+    {
+      uuid: "22222222-2222-4222-8222-222222222222",
+      controllerPath: "BP_PlayerController_C_21",
+    },
+    {
+      uuid: "11111111-1111-4111-8111-111111111111",
+      controllerPath: "BP_PlayerController_C_11",
+    },
+  ]);
+  assert.deepEqual(
+    Object.fromEntries(
+      reconnected.map((record) => [record.uuid, record.connectionGeneration]),
+    ),
+    {
+      "11111111-1111-4111-8111-111111111111": 2,
+      "22222222-2222-4222-8222-222222222222": 2,
+    },
+  );
+});
+
 test("uses current Brickadia interaction records for exact controller identity", async (t) => {
   const root = tempRoot(t);
   const logPath = path.join(root, "Brickadia.log");

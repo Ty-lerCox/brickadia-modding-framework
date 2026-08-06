@@ -50,8 +50,6 @@ import {
 } from './types';
 import OmeggaWrapper from './wrapper';
 
-const MISSING_CMD =
-  '"Command not found. Type <color=\\"ffff00\\">/help</> for a list of commands or <color=\\"ffff00\\">/plugins</> for plugin information."';
 const NATIVE_PREFAB_COMMANDS = [
   'spawn',
   'spawncar',
@@ -157,14 +155,9 @@ const parseBoxCorners = (args: unknown[]) => {
   ];
 };
 
-const regionFromCorners = (corners: [
-  number,
-  number,
-  number,
-  number,
-  number,
-  number,
-]) => {
+const regionFromCorners = (
+  corners: [number, number, number, number, number, number],
+) => {
   const min = [
     Math.min(corners[0], corners[3]),
     Math.min(corners[1], corners[4]),
@@ -192,7 +185,9 @@ const regionFromCorners = (corners: [
 };
 
 const sanitizeWorldBundleName = (value: unknown, fallback: string) => {
-  const raw = String(value || '').trim().replace(/\.brdb$/i, '');
+  const raw = String(value || '')
+    .trim()
+    .replace(/\.brdb$/i, '');
   const safe = raw.replace(/[^A-Za-z0-9_.-]/g, '_').replace(/^_+|_+$/g, '');
   return safe || fallback;
 };
@@ -235,7 +230,7 @@ const appendCoordinatePrefabRecord = (record: Record<string, unknown>) => {
       records = Array.isArray(parsed)
         ? parsed
         : Array.isArray((parsed as { records?: unknown[] })?.records)
-          ? ((parsed as { records: Record<string, unknown>[] }).records || [])
+          ? (parsed as { records: Record<string, unknown>[] }).records || []
           : [];
     } catch (error) {
       debugNativePrefab('coordinate prefab state parse failed', error);
@@ -260,7 +255,7 @@ const appendSavedEntityRecord = (record: Record<string, unknown>) => {
       records = Array.isArray(parsed)
         ? parsed
         : Array.isArray((parsed as { records?: unknown[] })?.records)
-          ? ((parsed as { records: Record<string, unknown>[] }).records || [])
+          ? (parsed as { records: Record<string, unknown>[] }).records || []
           : [];
     } catch (error) {
       debugNativePrefab('saved entity state parse failed', error);
@@ -314,18 +309,16 @@ const summarizeDynamicActorGroups = (
     const relatedEntityIds = numberArray(graph.relatedEntityIds);
     const relatedGridIds = numberArray(graph.relatedGridIds);
     const key = dynamicActorGroupKey(graph);
-    const group =
-      grouped.get(key) ||
-      {
-        seedEntityIds: [],
-        seedEntities: [],
-        statuses: new Set<string>(),
-        relatedEntityIds,
-        relatedGridIds,
-        relatedEntityCount: relatedEntityIds.length,
-        relatedGridCount: relatedGridIds.length,
-        chunkPathCounts: graph.chunkPathCounts,
-      };
+    const group = grouped.get(key) || {
+      seedEntityIds: [],
+      seedEntities: [],
+      statuses: new Set<string>(),
+      relatedEntityIds,
+      relatedGridIds,
+      relatedEntityCount: relatedEntityIds.length,
+      relatedGridCount: relatedGridIds.length,
+      chunkPathCounts: graph.chunkPathCounts,
+    };
 
     const seedEntityId = Number(graph.seedEntityId);
     if (Number.isFinite(seedEntityId)) group.seedEntityIds.push(seedEntityId);
@@ -411,7 +404,9 @@ const nativePrefabCommitLines = (text: string) =>
     .filter(
       line =>
         /\b(shared_submit_hit|additive_hit)=/.test(line) ||
-        /\bspawn_accepted_(?:shared|file_shared|file_spawn|action)\b/.test(line),
+        /\bspawn_accepted_(?:shared|file_shared|file_spawn|action)\b/.test(
+          line,
+        ),
     );
 
 type NativePrefabDefinition = {
@@ -460,9 +455,11 @@ const readNativePrefabDefinitions = () => {
     return {} as Record<string, NativePrefabDefinition>;
   }
   try {
-    const parsed = JSON.parse(readFileSync(NATIVE_PREFAB_DEFINITIONS_PATH, 'utf8'));
+    const parsed = JSON.parse(
+      readFileSync(NATIVE_PREFAB_DEFINITIONS_PATH, 'utf8'),
+    );
     return parsed && typeof parsed === 'object'
-      ? (parsed.prefabs || parsed)
+      ? parsed.prefabs || parsed
       : ({} as Record<string, NativePrefabDefinition>);
   } catch (error) {
     Logger.warnp('native prefab definitions parse failed', error);
@@ -492,8 +489,10 @@ const writeNativePrefabDefinition = (
   }
 
   const prefabs = wrapped
-    ? ({ ...((parsed as { prefabs?: Record<string, NativePrefabDefinition> })
-        .prefabs || {}) } as Record<string, NativePrefabDefinition>)
+    ? ({
+        ...((parsed as { prefabs?: Record<string, NativePrefabDefinition> })
+          .prefabs || {}),
+      } as Record<string, NativePrefabDefinition>)
     : ({ ...(parsed as Record<string, NativePrefabDefinition>) } as Record<
         string,
         NativePrefabDefinition
@@ -510,8 +509,8 @@ const writeNativePrefabDefinition = (
 
 const bridgeOutputLines = (output: unknown) =>
   Array.isArray((output as { chunks?: unknown[] })?.chunks)
-    ? ((output as { chunks: Array<{ line?: unknown }> }).chunks || []).map(chunk =>
-        String(chunk?.line ?? ''),
+    ? ((output as { chunks: Array<{ line?: unknown }> }).chunks || []).map(
+        chunk => String(chunk?.line ?? ''),
       )
     : [];
 
@@ -725,6 +724,16 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
   currentMap: string;
   _startedAtMs = 0;
   _playerJoinedAt = new Map<string, number>();
+  _playerConnectionSerial = new Map<string, number>();
+  _activePlayerConnections = new Map<
+    string,
+    { generation: number; controller: string; state: string }
+  >();
+  _verifiedPrivateControllers = new Map<
+    string,
+    { generation: number; controller: string; state: string }
+  >();
+  _privateDeliveryDropCount = 0;
   _nativePrefabFallbackCount = 0;
 
   getServerStatus: () => Promise<IServerStatus>;
@@ -833,6 +842,9 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
       this.currentMap = map;
       this._startedAtMs = Date.now();
       this._playerJoinedAt.clear();
+      this._playerConnectionSerial.clear();
+      this._activePlayerConnections.clear();
+      this._verifiedPrivateControllers.clear();
       this.writeln('Chat.MessageForUnknownCommands 0');
 
       this.restoreServer();
@@ -851,10 +863,28 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
 
     this.on('join', (player: OmeggaPlayer) => {
       this._playerJoinedAt.set(player.id, Date.now());
+      const generation = (this._playerConnectionSerial.get(player.id) ?? 0) + 1;
+      this._playerConnectionSerial.set(player.id, generation);
+      player.connectionGeneration = generation;
+      this._verifiedPrivateControllers.delete(player.id);
+      this._activePlayerConnections.set(player.id, {
+        generation,
+        controller: player.controller,
+        state: player.state,
+      });
     });
 
     this.on('leave', (player: OmeggaPlayer) => {
       this._playerJoinedAt.delete(player.id);
+      const active = this._activePlayerConnections.get(player.id);
+      if (
+        active &&
+        active.controller === player.controller &&
+        active.state === player.state
+      ) {
+        this._activePlayerConnections.delete(player.id);
+      }
+      this._verifiedPrivateControllers.delete(player.id);
     });
 
     this.on('cmd:spawn', (name, ...args) => {
@@ -923,10 +953,12 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
 
     this.on('cmd:saveprefab', (name, ...args) => {
       debugNativePrefab('event cmd:saveprefab', name, args);
-      void this.handleCoordinatePrefabSaveCommand(name, ...args).catch(error => {
-        debugNativePrefab('event cmd:saveprefab error', name, error);
-        Logger.errorp('coordinate prefab save command failed', error);
-      });
+      void this.handleCoordinatePrefabSaveCommand(name, ...args).catch(
+        error => {
+          debugNativePrefab('event cmd:saveprefab error', name, error);
+          Logger.errorp('coordinate prefab save command failed', error);
+        },
+      );
     });
 
     this.on('cmd:listentities', (name, ...args) => {
@@ -959,19 +991,6 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
         debugNativePrefab('event cmd:savedynamicactor error', name, error);
         Logger.errorp('dynamic actor save command failed', error);
       });
-    });
-
-    // detect when a missing command is sent
-    this.on('cmd', (cmd, name, ...args) => {
-      // if it's not in the default commands and it's not registered to a plugin,
-      // it's okay to send the missing command message
-      if (
-        !default_commands.includes(cmd) &&
-        !NATIVE_PREFAB_COMMANDS.includes(String(cmd).toLowerCase()) &&
-        (!this.pluginLoader || !this.pluginLoader.isCommand(cmd))
-      ) {
-        this.whisper(name, MISSING_CMD);
-      }
     });
 
     this.on('chatcmd:spawn', (name, ...args) => {
@@ -1014,7 +1033,11 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
       debugNativePrefab('event chatcmd:savevehicleprobe', name, args);
       void this.handleAdditiveVehicleProbeSaveCommand(name, ...args).catch(
         error => {
-          debugNativePrefab('event chatcmd:savevehicleprobe error', name, error);
+          debugNativePrefab(
+            'event chatcmd:savevehicleprobe error',
+            name,
+            error,
+          );
           Logger.errorp('additive vehicle probe save command failed', error);
         },
       );
@@ -1024,7 +1047,11 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
       debugNativePrefab('event chatcmd:loadvehicleprobe', name, args);
       void this.handleAdditiveVehicleProbeLoadCommand(name, ...args).catch(
         error => {
-          debugNativePrefab('event chatcmd:loadvehicleprobe error', name, error);
+          debugNativePrefab(
+            'event chatcmd:loadvehicleprobe error',
+            name,
+            error,
+          );
           Logger.errorp('additive vehicle probe load command failed', error);
         },
       );
@@ -1040,10 +1067,12 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
 
     this.on('chatcmd:saveprefab', (name, ...args) => {
       debugNativePrefab('event chatcmd:saveprefab', name, args);
-      void this.handleCoordinatePrefabSaveCommand(name, ...args).catch(error => {
-        debugNativePrefab('event chatcmd:saveprefab error', name, error);
-        Logger.errorp('coordinate prefab save command failed', error);
-      });
+      void this.handleCoordinatePrefabSaveCommand(name, ...args).catch(
+        error => {
+          debugNativePrefab('event chatcmd:saveprefab error', name, error);
+          Logger.errorp('coordinate prefab save command failed', error);
+        },
+      );
     });
 
     this.on('chatcmd:listentities', (name, ...args) => {
@@ -1095,7 +1124,11 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
       if (text === 'savevehicleprobe' || text === 'save vehicle probe') {
         debugNativePrefab('event chat plain savevehicleprobe', name, message);
         void this.handleAdditiveVehicleProbeSaveCommand(name).catch(error => {
-          debugNativePrefab('event chat plain savevehicleprobe error', name, error);
+          debugNativePrefab(
+            'event chat plain savevehicleprobe error',
+            name,
+            error,
+          );
           Logger.errorp('additive vehicle probe save command failed', error);
         });
         return;
@@ -1104,7 +1137,11 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
       if (text === 'loadvehicleprobe' || text === 'load vehicle probe') {
         debugNativePrefab('event chat plain loadvehicleprobe', name, message);
         void this.handleAdditiveVehicleProbeLoadCommand(name).catch(error => {
-          debugNativePrefab('event chat plain loadvehicleprobe error', name, error);
+          debugNativePrefab(
+            'event chat plain loadvehicleprobe error',
+            name,
+            error,
+          );
           Logger.errorp('additive vehicle probe load command failed', error);
         });
         return;
@@ -1118,7 +1155,11 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
       ) {
         debugNativePrefab('event chat plain dynamic actor list', name, message);
         void this.handleEntityListCommand(name, ...plainArgs).catch(error => {
-          debugNativePrefab('event chat plain dynamic actor list error', name, error);
+          debugNativePrefab(
+            'event chat plain dynamic actor list error',
+            name,
+            error,
+          );
           Logger.errorp('dynamic actor list command failed', error);
         });
         return;
@@ -1135,10 +1176,16 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
 
       if (normalizedPlainCommand === 'savedynamicactor') {
         debugNativePrefab('event chat plain savedynamicactor', name, message);
-        void this.handleDynamicActorSaveCommand(name, ...plainArgs).catch(error => {
-          debugNativePrefab('event chat plain savedynamicactor error', name, error);
-          Logger.errorp('dynamic actor save command failed', error);
-        });
+        void this.handleDynamicActorSaveCommand(name, ...plainArgs).catch(
+          error => {
+            debugNativePrefab(
+              'event chat plain savedynamicactor error',
+              name,
+              error,
+            );
+            Logger.errorp('dynamic actor save command failed', error);
+          },
+        );
         return;
       }
 
@@ -1168,9 +1215,7 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
     if (!corners) {
       await this.tryNativePrefabWhisper(
         name,
-        quoteChatMessage(
-          'Usage: /savebrickregion <name> x1 y1 z1 x2 y2 z2',
-        ),
+        quoteChatMessage('Usage: /savebrickregion <name> x1 y1 z1 x2 y2 z2'),
       );
       return;
     }
@@ -1373,7 +1418,9 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
     selectedEntityGraph?: Record<string, unknown> | null;
   } {
     if (!existsSync(WORLD_ENTITY_LIST_SCRIPT_PATH)) {
-      throw new Error(`Entity inspector script missing: ${WORLD_ENTITY_LIST_SCRIPT_PATH}`);
+      throw new Error(
+        `Entity inspector script missing: ${WORLD_ENTITY_LIST_SCRIPT_PATH}`,
+      );
     }
 
     const worldPath = this.getWorldPath(bundleName);
@@ -1404,10 +1451,7 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
       rawArgs[0],
       'EntitySnapshot',
     );
-    const snapshot = this.snapshotAndListSavedEntities(
-      name,
-      requestedPrefix,
-    );
+    const snapshot = this.snapshotAndListSavedEntities(name, requestedPrefix);
     if (!snapshot) return;
 
     debugNativePrefab('entity list snapshot start', name, {
@@ -1569,8 +1613,7 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
         extractionStatus: entityList.selectedEntityGraph
           ? 'entity-graph-captured-pending-brdb-slicer'
           : 'pending-entity-graph-extractor',
-        note:
-          'This records the selected saved-world entity and its resolved graph. The next step is BRDB slicing: copy only the related entity rows, brick grids, component chunks, and wire chunks into an additive-loadable bundle.',
+        note: 'This records the selected saved-world entity and its resolved graph. The next step is BRDB slicing: copy only the related entity rows, brick grids, component chunks, and wire chunks into an additive-loadable bundle.',
       };
       appendSavedEntityRecord(record);
       debugNativePrefab('entity save record complete', name, record);
@@ -1611,9 +1654,7 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
     if (!Number.isFinite(dynamicActorId)) {
       await this.tryNativePrefabWhisper(
         name,
-        quoteChatMessage(
-          'Usage: /savedynamicactor <name> <dynamicActorId>',
-        ),
+        quoteChatMessage('Usage: /savedynamicactor <name> <dynamicActorId>'),
       );
       return;
     }
@@ -1719,8 +1760,7 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
         sourceBundle: `${snapshot.bundleName}.brdb`,
         entityListPath: snapshot.outputPath,
         extractionStatus: 'dynamic-actor-graph-captured-pending-brdb-slicer',
-        note:
-          'This records the selected dynamic actor group and its resolved graph. The next step is BRDB slicing: copy only related entity rows, brick grids, component chunks, and wire chunks into an additive-loadable bundle.',
+        note: 'This records the selected dynamic actor group and its resolved graph. The next step is BRDB slicing: copy only related entity rows, brick grids, component chunks, and wire chunks into an additive-loadable bundle.',
       };
       appendSavedEntityRecord(record);
       debugNativePrefab('dynamic actor save record complete', name, record);
@@ -1757,10 +1797,14 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
       `VehiclePersistenceProbe_${timestamp}`,
     );
 
-    debugNativePrefab('additive vehicle probe save start', name, { bundleName });
+    debugNativePrefab('additive vehicle probe save start', name, {
+      bundleName,
+    });
     const ok = await this.saveWorldAs(bundleName);
     if (!ok) {
-      debugNativePrefab('additive vehicle probe save failed', name, { bundleName });
+      debugNativePrefab('additive vehicle probe save failed', name, {
+        bundleName,
+      });
       await this.tryNativePrefabWhisper(
         name,
         quoteChatMessage(
@@ -1790,17 +1834,22 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
 
   async handleAdditiveVehicleProbeLoadCommand(name: string, ...args: string[]) {
     const probeState = readAdditiveVehicleProbeState();
-    const defaultBundleName = probeState?.bundleName || 'VehiclePersistenceProbe';
+    const defaultBundleName =
+      probeState?.bundleName || 'VehiclePersistenceProbe';
     const rawArgs = [...args].filter(arg => String(arg || '').trim() !== '');
     const firstArgNumber = Number.isFinite(Number(rawArgs[0]));
     const bundleName = sanitizeWorldBundleName(
-      !firstArgNumber && rawArgs.length > 0 ? rawArgs.shift() : defaultBundleName,
+      !firstArgNumber && rawArgs.length > 0
+        ? rawArgs.shift()
+        : defaultBundleName,
       defaultBundleName,
     );
     const target =
       parseTriple(rawArgs) ||
       ([
-        Math.round(finiteOr(process.env.OMEGGA_ADDITIVE_VEHICLE_PROBE_X, 20000)),
+        Math.round(
+          finiteOr(process.env.OMEGGA_ADDITIVE_VEHICLE_PROBE_X, 20000),
+        ),
         Math.round(finiteOr(process.env.OMEGGA_ADDITIVE_VEHICLE_PROBE_Y, 0)),
         Math.round(finiteOr(process.env.OMEGGA_ADDITIVE_VEHICLE_PROBE_Z, 1000)),
       ] as [number, number, number]);
@@ -1825,11 +1874,15 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
     );
 
     if (!ok) {
-      debugNativePrefab('additive vehicle probe load failed before command', name, {
-        bundleName,
-        target,
-        orientation,
-      });
+      debugNativePrefab(
+        'additive vehicle probe load failed before command',
+        name,
+        {
+          bundleName,
+          target,
+          orientation,
+        },
+      );
       await this.tryNativePrefabWhisper(
         name,
         quoteChatMessage(
@@ -1887,7 +1940,10 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
       });
       return capture;
     } catch (error) {
-      debugNativePrefab('specific raw capture bridge error', name, { label, error });
+      debugNativePrefab('specific raw capture bridge error', name, {
+        label,
+        error,
+      });
       Logger.warnp('native prefab specific raw capture failed', label, error);
       return null;
     }
@@ -1901,7 +1957,10 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
     if (kind !== 'car') {
       debugNativePrefab('capture handler usage', name, { kind, args });
       Logger.warnp('native prefab capture usage', name, 'Usage: /capturecar');
-      await this.tryNativePrefabWhisper(name, quoteChatMessage('Usage: /capturecar'));
+      await this.tryNativePrefabWhisper(
+        name,
+        quoteChatMessage('Usage: /capturecar'),
+      );
       return;
     }
 
@@ -1917,7 +1976,9 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
       Logger.warnp('native prefab capture bridge failed', error);
       await this.tryNativePrefabWhisper(
         name,
-        quoteChatMessage('Vehicle snapshot failed: raw native capture bridge did not respond.'),
+        quoteChatMessage(
+          'Vehicle snapshot failed: raw native capture bridge did not respond.',
+        ),
       );
       return;
     }
@@ -1956,7 +2017,12 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
       pasteCapture.paramBytes === 0x40 &&
       pasteCapture.paramHex.length === 0x40 * 2;
 
-    if (!validPlaceSeed || !validPasteSeed || !capture.clientPaste || !capture.clientPlace) {
+    if (
+      !validPlaceSeed ||
+      !validPasteSeed ||
+      !capture.clientPaste ||
+      !capture.clientPlace
+    ) {
       Logger.warnp(
         'native prefab capture incomplete',
         `target=${capture.targetLabel || '<none>'}`,
@@ -1974,16 +2040,26 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
     }
 
     if (!cacheHash || cleanHex(cacheHash.hash).length !== 64) {
-      debugNativePrefab('capture hash missing', name, { log: NATIVE_PREFAB_LOG_PATH });
-      Logger.warnp('native prefab capture hash missing', NATIVE_PREFAB_LOG_PATH);
+      debugNativePrefab('capture hash missing', name, {
+        log: NATIVE_PREFAB_LOG_PATH,
+      });
+      Logger.warnp(
+        'native prefab capture hash missing',
+        NATIVE_PREFAB_LOG_PATH,
+      );
       await this.tryNativePrefabWhisper(
         name,
-        quoteChatMessage('Vehicle snapshot failed: no prefab cache hash was found in Brickadia.log.'),
+        quoteChatMessage(
+          'Vehicle snapshot failed: no prefab cache hash was found in Brickadia.log.',
+        ),
       );
       return;
     }
 
-    const prefabPath = findNativePrefabSourceByHash(cacheHash.hash, cacheHash.size);
+    const prefabPath = findNativePrefabSourceByHash(
+      cacheHash.hash,
+      cacheHash.size,
+    );
     if (!prefabPath) {
       debugNativePrefab('capture source missing', name, {
         hash: cacheHash.hash,
@@ -2011,7 +2087,10 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
       ),
       ...(existing.ownership != null ? { ownership: existing.ownership } : {}),
       ...(existing.temp != null ? { temp: existing.temp } : {}),
-      target: existing.target && existing.target !== '0' ? existing.target : undefined,
+      target:
+        existing.target && existing.target !== '0'
+          ? existing.target
+          : undefined,
       placeAdjust: 'full',
       placeOnly: false,
       pasteSeedHex: pasteCapture!.paramHex,
@@ -2044,7 +2123,9 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
     );
     await this.tryNativePrefabWhisper(
       name,
-      quoteChatMessage('Vehicle snapshot saved. /spawncar will use it from disk.'),
+      quoteChatMessage(
+        'Vehicle snapshot saved. /spawncar will use it from disk.',
+      ),
     );
   }
 
@@ -2057,16 +2138,24 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
 
     if (kind !== 'car') {
       debugNativePrefab('handler usage', name, { kind, mode, rest });
-      Logger.warnp('native prefab spawn usage', name, 'Usage: /spawncar or /spawn car');
-      await this.tryNativePrefabWhisper(name, quoteChatMessage('Usage: /spawncar or /spawn car'));
+      Logger.warnp(
+        'native prefab spawn usage',
+        name,
+        'Usage: /spawncar or /spawn car',
+      );
+      await this.tryNativePrefabWhisper(
+        name,
+        quoteChatMessage('Usage: /spawncar or /spawn car'),
+      );
       return;
     }
 
-    const playerOffset = () => [
-      finiteOr(process.env.OMEGGA_NATIVE_PREFAB_OFFSET_X, 0),
-      finiteOr(process.env.OMEGGA_NATIVE_PREFAB_OFFSET_Y, 600),
-      finiteOr(process.env.OMEGGA_NATIVE_PREFAB_OFFSET_Z, 250),
-    ] as [number, number, number];
+    const playerOffset = () =>
+      [
+        finiteOr(process.env.OMEGGA_NATIVE_PREFAB_OFFSET_X, 0),
+        finiteOr(process.env.OMEGGA_NATIVE_PREFAB_OFFSET_Y, 600),
+        finiteOr(process.env.OMEGGA_NATIVE_PREFAB_OFFSET_Z, 250),
+      ] as [number, number, number];
 
     const targetNearPlayer = async (offset: [number, number, number]) => {
       const player = this.getPlayer(name);
@@ -2118,7 +2207,10 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
           }
         } catch (error) {
           debugNativePrefab('target bridge error', name, error);
-          Logger.warnp('native prefab spawn bridge position lookup failed', error);
+          Logger.warnp(
+            'native prefab spawn bridge position lookup failed',
+            error,
+          );
         }
       }
 
@@ -2239,12 +2331,7 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
 
     let status = '';
     try {
-      Logger.logp(
-        'native prefab spawn queued',
-        name,
-        target.join(', '),
-        nonce,
-      );
+      Logger.logp('native prefab spawn queued', name, target.join(', '), nonce);
       debugNativePrefab('legacy queued', name, { target, nonce });
 
       for (let attempt = 0; attempt < 30; attempt++) {
@@ -2262,7 +2349,9 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
         Logger.warnp('native prefab spawn status timeout', nonce);
         await this.tryNativePrefabWhisper(
           name,
-          quoteChatMessage('Vehicle spawn timed out before the native hook responded.'),
+          quoteChatMessage(
+            'Vehicle spawn timed out before the native hook responded.',
+          ),
         );
         return;
       }
@@ -2349,7 +2438,9 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
       Logger.warnp('native prefab broker request failed', error);
       await this.tryNativePrefabWhisper(
         name,
-        quoteChatMessage('Vehicle spawn request could not be queued for the prefab worker.'),
+        quoteChatMessage(
+          'Vehicle spawn request could not be queued for the prefab worker.',
+        ),
       );
     }
 
@@ -2413,12 +2504,18 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
       const normalizedStatus = status.trim().replace(/\s+/g, ' ');
       if (status.includes('ok=1')) {
         debugNativePrefab('live shared accepted', name, normalizedStatus);
-        Logger.logp('native prefab live shared replay accepted', normalizedStatus);
+        Logger.logp(
+          'native prefab live shared replay accepted',
+          normalizedStatus,
+        );
         void this.tryNativePrefabWhisper(
           name,
           quoteChatMessage('Vehicle spawn accepted by native shared replay.'),
         ).catch(error =>
-          Logger.warnp('native prefab live shared replay whisper failed', error),
+          Logger.warnp(
+            'native prefab live shared replay whisper failed',
+            error,
+          ),
         );
         return true;
       }
@@ -2489,7 +2586,9 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
       1000,
       Math.min(
         30000,
-        Math.round(finiteOr(process.env.OMEGGA_NATIVE_PREFAB_SEED_WAIT_MS, 12000)),
+        Math.round(
+          finiteOr(process.env.OMEGGA_NATIVE_PREFAB_SEED_WAIT_MS, 12000),
+        ),
       ),
     );
     const deadline = Date.now() + seedWaitMs;
@@ -2508,14 +2607,21 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
           prefabHash ? `hash=${prefabHash}` : '',
           `prefab_path=${prefabPath}`,
           '',
-        ].filter(Boolean).join('\n'),
+        ]
+          .filter(Boolean)
+          .join('\n'),
         'utf8',
       );
 
       let status = '';
       try {
         seedAttempt++;
-        Logger.logp('native prefab snapshot seed queued', name, prefabPath, nonce);
+        Logger.logp(
+          'native prefab snapshot seed queued',
+          name,
+          prefabPath,
+          nonce,
+        );
         debugNativePrefab('snapshot seed queued', name, {
           nonce,
           cacheOwner,
@@ -2542,12 +2648,18 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
           );
         } catch (error) {
           debugNativePrefab('snapshot seed reset failed', name, error);
-          Logger.warnp('native prefab snapshot seed command reset failed', error);
+          Logger.warnp(
+            'native prefab snapshot seed command reset failed',
+            error,
+          );
         }
       }
 
       if (!status.includes(`nonce=${nonce}`)) {
-        debugNativePrefab('snapshot seed timeout attempt', name, { nonce, status });
+        debugNativePrefab('snapshot seed timeout attempt', name, {
+          nonce,
+          status,
+        });
         lastStatus = status.trim().replace(/\s+/g, ' ');
         await sleep(250);
         continue;
@@ -2575,8 +2687,14 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
       return false;
     }
 
-    debugNativePrefab('snapshot seed timeout', name, { seedWaitMs, lastStatus });
-    Logger.warnp('native prefab snapshot seed status timeout', lastStatus || '<empty>');
+    debugNativePrefab('snapshot seed timeout', name, {
+      seedWaitMs,
+      lastStatus,
+    });
+    Logger.warnp(
+      'native prefab snapshot seed status timeout',
+      lastStatus || '<empty>',
+    );
     return false;
   }
 
@@ -2603,7 +2721,9 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
     }
 
     const definition = readNativePrefabDefinitions()[kind] || {};
-    const prefabPath = String(definition.prefabPath || NATIVE_PREFAB_CAR_PATH).trim();
+    const prefabPath = String(
+      definition.prefabPath || NATIVE_PREFAB_CAR_PATH,
+    ).trim();
     const prefabHash = cleanHex(definition.hash);
     const orientation = Math.max(
       0,
@@ -2674,7 +2794,9 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
         `absolute_y=${target[1]}`,
         `absolute_z=${target[2]}`,
         '',
-      ].filter(Boolean).join('\n'),
+      ]
+        .filter(Boolean)
+        .join('\n'),
       'utf8',
     );
 
@@ -2712,7 +2834,9 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
         Logger.warnp('native prefab file spawn status timeout', nonce);
         await this.tryNativePrefabWhisper(
           name,
-          quoteChatMessage('Vehicle spawn timed out before the native file hook responded.'),
+          quoteChatMessage(
+            'Vehicle spawn timed out before the native file hook responded.',
+          ),
         );
         return true;
       }
@@ -2725,15 +2849,24 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
           name,
           quoteChatMessage('Vehicle spawn accepted by native file hook.'),
         ).catch(error =>
-          Logger.warnp('native prefab file shared success whisper failed', error),
+          Logger.warnp(
+            'native prefab file shared success whisper failed',
+            error,
+          ),
         );
         return true;
       } else {
         debugNativePrefab('file failed', name, normalizedStatus);
         Logger.warnp('native prefab file seed failed', normalizedStatus);
         const error = getNativeStatusField(status, 'error');
-        debugNativePrefab('file fallback hash', name, { error, status: normalizedStatus });
-        Logger.warnp('native prefab file seed falling back to hash bridge', error);
+        debugNativePrefab('file fallback hash', name, {
+          error,
+          status: normalizedStatus,
+        });
+        Logger.warnp(
+          'native prefab file seed falling back to hash bridge',
+          error,
+        );
         return false;
       }
     } finally {
@@ -2760,7 +2893,10 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
       handledOnFailure?: boolean;
     } = {},
   ) {
-    if (!options.force && process.env.OMEGGA_NATIVE_PREFAB_FORCE_LEGACY_HOOK === '1') {
+    if (
+      !options.force &&
+      process.env.OMEGGA_NATIVE_PREFAB_FORCE_LEGACY_HOOK === '1'
+    ) {
       debugNativePrefab('hash skipped force legacy hook', name, {
         kind,
         target,
@@ -2836,7 +2972,10 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
           kind,
           length: placeSeedHex.length,
         });
-        Logger.warnp('native prefab place seed length invalid; using default', kind);
+        Logger.warnp(
+          'native prefab place seed length invalid; using default',
+          kind,
+        );
         placeSeedHex = '';
       }
     }
@@ -2852,7 +2991,8 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
     }
 
     const spec = parts.slice(1).join(' ');
-    const combinedModeSetting = process.env.OMEGGA_NATIVE_PREFAB_COMBINED_PASTE_PLACE;
+    const combinedModeSetting =
+      process.env.OMEGGA_NATIVE_PREFAB_COMBINED_PASTE_PLACE;
     const combinedPastePlace =
       combinedModeSetting === '1' ||
       (combinedModeSetting !== '0' && Boolean(pasteSeedHex));
@@ -2862,7 +3002,9 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
       0,
       Math.min(
         5000,
-        Math.round(finiteOr(process.env.OMEGGA_NATIVE_PREFAB_COMMIT_WAIT_MS, 1000)),
+        Math.round(
+          finiteOr(process.env.OMEGGA_NATIVE_PREFAB_COMMIT_WAIT_MS, 1000),
+        ),
       ),
     );
     const command = combinedPastePlace
@@ -2882,10 +3024,14 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
       const lines = bridgeOutputLines(output);
       const fields = bridgeLineFields(lines);
       const ok = fields.get('ok') === 'true';
-      debugNativePrefab(combinedPastePlace ? 'hash bridge output' : 'hash paste bridge output', name, {
-        ok,
-        lines: lines.slice(0, 30),
-      });
+      debugNativePrefab(
+        combinedPastePlace ? 'hash bridge output' : 'hash paste bridge output',
+        name,
+        {
+          ok,
+          lines: lines.slice(0, 30),
+        },
+      );
       const detail =
         fields.get('paste_detail') ||
         fields.get('place_detail') ||
@@ -2894,17 +3040,24 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
         '';
 
       if (!ok) {
-        debugNativePrefab(combinedPastePlace ? 'hash failed' : 'hash paste failed', name, {
-          result: fields.get('result') || '',
-          detail,
-        });
+        debugNativePrefab(
+          combinedPastePlace ? 'hash failed' : 'hash paste failed',
+          name,
+          {
+            result: fields.get('result') || '',
+            detail,
+          },
+        );
         Logger.warnp(
-          combinedPastePlace ? 'native prefab hash spawn failed' : 'native prefab hash paste failed',
+          combinedPastePlace
+            ? 'native prefab hash spawn failed'
+            : 'native prefab hash paste failed',
           fields.get('result') || detail || '<no detail>',
         );
         const result = fields.get('result') || '';
         const message =
-          result === 'no-place-context' && /after ServerPastePrefab/i.test(detail)
+          result === 'no-place-context' &&
+          /after ServerPastePrefab/i.test(detail)
             ? 'Vehicle spawn reached native paste, but the prefab cache/placer context was not materialized server-side.'
             : result === 'no-place-context'
               ? 'Vehicle spawn failed: no valid prefab placer context is available.'
@@ -2935,7 +3088,11 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
             );
             return false;
           }
-          debugNativePrefab('hash native commit observed', name, commitLines.slice(0, 8));
+          debugNativePrefab(
+            'hash native commit observed',
+            name,
+            commitLines.slice(0, 8),
+          );
         }
         debugNativePrefab('hash accepted', name, detail);
         Logger.logp('native prefab hash spawn accepted', detail);
@@ -2943,7 +3100,10 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
           name,
           quoteChatMessage('Vehicle spawn accepted by prefab hash bridge.'),
         ).catch(error =>
-          Logger.warnp('native prefab hash spawn success whisper failed', error),
+          Logger.warnp(
+            'native prefab hash spawn success whisper failed',
+            error,
+          ),
         );
         return true;
       }
@@ -2953,7 +3113,12 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
         0,
         Math.min(
           5000,
-          Math.round(finiteOr(process.env.OMEGGA_NATIVE_PREFAB_PASTE_PLACE_DELAY_MS, 750)),
+          Math.round(
+            finiteOr(
+              process.env.OMEGGA_NATIVE_PREFAB_PASTE_PLACE_DELAY_MS,
+              750,
+            ),
+          ),
         ),
       );
       if (delayMs > 0) {
@@ -2968,7 +3133,10 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
         command: placeCommand,
       });
 
-      const placeOutput = await this.execControlCommandWithOutput(placeCommand, 15000);
+      const placeOutput = await this.execControlCommandWithOutput(
+        placeCommand,
+        15000,
+      );
       const placeLines = bridgeOutputLines(placeOutput);
       const placeFields = bridgeLineFields(placeLines);
       const placeOk = placeFields.get('ok') === 'true';
@@ -3013,7 +3181,10 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
           name,
           quoteChatMessage('Vehicle spawn accepted by prefab hash bridge.'),
         ).catch(error =>
-          Logger.warnp('native prefab hash spawn success whisper failed', error),
+          Logger.warnp(
+            'native prefab hash spawn success whisper failed',
+            error,
+          ),
         );
         return true;
       }
@@ -3043,17 +3214,12 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
     }
   }
 
-  async whisperName(name: string, message: string) {
-    await this.writelnAsync(`Chat.Whisper "${name}" ${message}`);
+  async whisperName(_name: string, _message: string) {
+    this.notePrivateDeliveryDrop('name-only-private-route-disabled');
   }
 
-  async tryNativePrefabWhisper(name: string, message: string) {
-    try {
-      await this.writelnAsync(`Chat.Broadcast ${message}`);
-    } catch (error) {
-      debugNativePrefab('feedback broadcast failed', name, error);
-      Logger.warnp('native prefab command feedback failed', error);
-    }
+  async tryNativePrefabWhisper(_name: string, _message: string) {
+    this.notePrivateDeliveryDrop('name-only-native-feedback-disabled');
   }
 
   /** attempt to save server state */
@@ -3212,6 +3378,9 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
     this.starting = false;
     this._startedAtMs = 0;
     this._playerJoinedAt.clear();
+    this._playerConnectionSerial.clear();
+    this._activePlayerConnections.clear();
+    this._verifiedPrivateControllers.clear();
     this.players = [];
   }
 
@@ -3242,64 +3411,113 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
     }
   }
 
-  async whisper(target: string | OmeggaPlayer, ...messages: string[]) {
-    const targetName =
+  privateDeliveryTarget(target: string | OmeggaPlayer) {
+    // A player name is not an identity. Legacy callers must pass the Player
+    // object they captured at ingress, or an exact UUID. This deliberately
+    // drops name-only output until each caller is migrated.
+    const requested =
       typeof target === 'object'
-        ? target?.name
-        : this.getPlayer(target)?.name ?? target;
-
-    if (!targetName) {
-      Logger.warnp('skipping whisper to unresolved player');
-      return;
+        ? target
+        : this.players.find(player => player.id === target);
+    if (!requested) return null;
+    const current = this.players.find(player => player.id === requested.id);
+    const active = this._activePlayerConnections.get(requested.id);
+    const verified = this._verifiedPrivateControllers.get(requested.id);
+    if (
+      !current ||
+      !active ||
+      !verified ||
+      requested.connectionGeneration !== active.generation ||
+      current.connectionGeneration !== active.generation ||
+      current.controller !== requested.controller ||
+      current.state !== requested.state ||
+      active.controller !== current.controller ||
+      active.state !== current.state ||
+      verified.generation !== active.generation ||
+      verified.controller !== current.controller ||
+      verified.state !== current.state
+    ) {
+      return null;
     }
+    return { player: current, generation: active.generation };
+  }
 
-    // whisper the messages to that player
+  verifyPrivateControllerIdentity(player: OmeggaPlayer) {
+    const current = this.players.find(candidate => candidate.id === player.id);
+    const active = this._activePlayerConnections.get(player.id);
+    if (
+      !current ||
+      current !== player ||
+      !active ||
+      !player.controller ||
+      !player.state ||
+      player.connectionGeneration !== active.generation
+    ) {
+      return false;
+    }
+    active.controller = player.controller;
+    active.state = player.state;
+    this._verifiedPrivateControllers.set(player.id, {
+      generation: active.generation,
+      controller: player.controller,
+      state: player.state,
+    });
+    return true;
+  }
+
+  notePrivateDeliveryDrop(reason: string) {
+    this._privateDeliveryDropCount += 1;
+    if (
+      this._privateDeliveryDropCount <= 5 ||
+      this._privateDeliveryDropCount % 100 === 0
+    ) {
+      Logger.warnp(
+        'P0 private delivery dropped'.yellow,
+        `reason=${reason} count=${this._privateDeliveryDropCount}`,
+      );
+    }
+  }
+
+  async deliverPrivateOutput(
+    operation: 'whisper' | 'statusmessage',
+    target: string | OmeggaPlayer,
+    message: string,
+  ) {
+    const resolved = this.privateDeliveryTarget(target);
+    if (!resolved) {
+      this.notePrivateDeliveryDrop('unproven-or-stale-recipient');
+      return false;
+    }
+    const issuedAtMs = Date.now();
+    const requestId = uuid.random();
+    try {
+      await this.deliverBmfPrivateMessage({
+        requestId,
+        senderUuid: resolved.player.id,
+        connectionGeneration: resolved.generation,
+        issuedAtMs,
+        deadlineMs: issuedAtMs + 3000,
+        operationType: operation,
+        message,
+      });
+      return true;
+    } catch (_error) {
+      this.notePrivateDeliveryDrop('transport-or-identity-rejected');
+      return false;
+    }
+  }
+
+  async whisper(target: string | OmeggaPlayer, ...messages: string[]) {
     for (const message of messages
-      .flatMap(m => m.toString().split('\n'))
-      .filter(m => m.length < 512)) {
-      try {
-        await this.writelnAsync(`Chat.Whisper "${targetName}" ${message}`);
-      } catch (error) {
-        Logger.warnp(
-          'whisper failed; broadcasting message instead',
-          error instanceof Error ? error.message : String(error),
-        );
-        try {
-          await this.writelnAsync(`Chat.Broadcast ${message}`);
-        } catch (broadcastError) {
-          Logger.warnp(
-            'broadcast fallback failed',
-            broadcastError instanceof Error
-              ? broadcastError.message
-              : String(broadcastError),
-          );
-        }
-      }
+      .flatMap(value => value.toString().split('\n'))
+      .filter(value => value.length > 0 && value.length < 512)) {
+      await this.deliverPrivateOutput('whisper', target, message);
     }
   }
 
   async middlePrint(target: string | OmeggaPlayer, message: string) {
-    const targetName =
-      typeof target === 'object'
-        ? target?.name
-        : this.getPlayer(target)?.name ?? target;
-
-    if (!targetName) {
-      Logger.warnp('skipping status message to unresolved player');
-      return;
-    }
-
-    // whisper the messages to that player
-    if (message.length > 512) return;
-    try {
-      await this.writelnAsync(`Chat.StatusMessage "${targetName}" ${message}`);
-    } catch (error) {
-      Logger.warnp(
-        'status message failed; falling back to whisper',
-        error instanceof Error ? error.message : String(error),
-      );
-      await this.whisper(targetName, message);
-    }
+    if (message.length < 1 || message.length >= 512) return;
+    await this.deliverPrivateOutput('statusmessage', target, message);
   }
 
   getPlayers(): {
@@ -3308,8 +3526,13 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
     displayName: string;
     controller: string;
     state: string;
+    connectionGeneration: number;
   }[] {
-    return this.players.map(p => ({ ...p }));
+    return this.players.map(player => ({
+      ...player,
+      connectionGeneration:
+        this._activePlayerConnections.get(player.id)?.generation ?? 0,
+    }));
   }
 
   getRoleSetup(): BRRoleSetup {
@@ -3466,7 +3689,11 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
       try {
         if (existsSync(path)) unlinkSync(path);
       } catch (err) {
-        Logger.verbose('Failed to remove temporary environment preset', path, err);
+        Logger.verbose(
+          'Failed to remove temporary environment preset',
+          path,
+          err,
+        );
       }
     }, 5000);
   }

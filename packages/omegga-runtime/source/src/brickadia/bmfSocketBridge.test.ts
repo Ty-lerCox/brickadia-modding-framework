@@ -12,6 +12,10 @@ type DirectCommandEnvelope = {
   issuedAtMs: number;
   deadlineMs: number;
   serviceClass: 'interactive' | 'bulk';
+  senderUuid?: string;
+  connectionGeneration?: number;
+  operationRequestId?: string;
+  offThreadMs?: number;
 };
 
 const bridges: BmfSocketBridgeHost[] = [];
@@ -136,6 +140,31 @@ describe('BmfSocketBridgeHost direct command metadata', () => {
     const envelope = await envelopePromise;
 
     expect(envelope).toMatchObject({ issuedAtMs, deadlineMs });
+    completeCommand(socket, envelope);
+    await expect(commandPromise).resolves.toMatchObject({ ok: true });
+  });
+
+  it('carries only copied private identity attribution metadata', async () => {
+    const { bridge, socket } = await startBridge();
+    const envelopePromise = readNextEnvelope(socket);
+    const commandPromise = bridge.execCommand('bmf.chat.whisper', 1_000, {
+      senderUuid: '11111111-2222-4333-8444-555555555555',
+      connectionGeneration: 7,
+      operationRequestId: 'private-request-7',
+      offThreadMs: 2.5,
+    });
+    const envelope = await envelopePromise;
+
+    expect(envelope).toMatchObject({
+      senderUuid: '11111111-2222-4333-8444-555555555555',
+      connectionGeneration: 7,
+      operationRequestId: 'private-request-7',
+      offThreadMs: 2.5,
+    });
+    expect(JSON.stringify(envelope)).not.toMatch(
+      /controller|playerState|UObject/i,
+    );
+
     completeCommand(socket, envelope);
     await expect(commandPromise).resolves.toMatchObject({ ok: true });
   });

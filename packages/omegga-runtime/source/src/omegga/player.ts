@@ -45,6 +45,7 @@ class Player implements OmeggaPlayer {
   id: string;
   controller: string;
   state: string;
+  connectionGeneration: number;
 
   static getRoles(omegga: OmeggaLike, id: string): readonly string[] {
     const data = omegga.getRoleAssignments().savedPlayerRoles[id];
@@ -332,6 +333,7 @@ class Player implements OmeggaPlayer {
     id: string,
     controller: string,
     state: string,
+    connectionGeneration = 0,
   ) {
     this.#omegga = omegga;
     this.name = username;
@@ -339,6 +341,7 @@ class Player implements OmeggaPlayer {
     this.id = id;
     this.controller = controller;
     this.state = state;
+    this.connectionGeneration = connectionGeneration;
   }
 
   getOmegga(): OmeggaLike {
@@ -353,11 +356,19 @@ class Player implements OmeggaPlayer {
       this.id,
       this.controller,
       this.state,
+      this.connectionGeneration,
     );
   }
 
-  raw(): [string, string, string, string, string] {
-    return [this.name, this.displayName, this.id, this.controller, this.state];
+  raw(): [string, string, string, string, string, number] {
+    return [
+      this.name,
+      this.displayName,
+      this.id,
+      this.controller,
+      this.state,
+      this.connectionGeneration,
+    ];
   }
 
   isHost(): boolean {

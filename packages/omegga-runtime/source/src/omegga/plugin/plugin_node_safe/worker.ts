@@ -113,6 +113,44 @@ const execControlCommandWithOutput = async (
   return payload.output;
 };
 
+const privateTargetSnapshot = (target: unknown) => {
+  if (typeof target === 'string') return target;
+  const player = target as Record<string, unknown> | null;
+  return {
+    id: String(player?.id ?? ''),
+    name: String(player?.name ?? ''),
+    displayName: String(player?.displayName ?? ''),
+    controller: String(player?.controller ?? ''),
+    state: String(player?.state ?? ''),
+    connectionGeneration: Number(player?.connectionGeneration ?? 0),
+  };
+};
+
+const privateWhisperTransport = async (target: unknown, messages: string[]) => {
+  const payload = (await emit(
+    'private.whisper',
+    privateTargetSnapshot(target),
+    messages,
+  )) as { ok?: boolean; error?: string } | undefined;
+  if (!payload?.ok) {
+    throw new Error(payload?.error || 'private whisper was dropped');
+  }
+};
+
+const privateMiddlePrintTransport = async (
+  target: unknown,
+  message: string,
+) => {
+  const payload = (await emit(
+    'private.middlePrint',
+    privateTargetSnapshot(target),
+    message,
+  )) as { ok?: boolean; error?: string } | undefined;
+  if (!payload?.ok) {
+    throw new Error(payload?.error || 'private status message was dropped');
+  }
+};
+
 const getAllPlayerPositions = async () => {
   const payload = (await emit('getAllPlayerPositions')) as
     | { ok: true; positions: unknown }
@@ -127,7 +165,12 @@ const getAllPlayerPositions = async () => {
 
 // create the proxy omegga
 injectOmeggaPrototypes(ProxyOmegga, Omegga);
-const omegga = new ProxyOmegga(exec, execControlCommandWithOutput);
+const omegga = new ProxyOmegga(
+  exec,
+  execControlCommandWithOutput,
+  privateWhisperTransport,
+  privateMiddlePrintTransport,
+);
 omegga.getAllPlayerPositions = getAllPlayerPositions as any;
 
 // add plugin fetcher

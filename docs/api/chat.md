@@ -44,20 +44,20 @@ The result records `data.deliveryMode`, `data.deliveredCount`,
 
 ## `BMF.chat.whisper(player, message)`
 
-Finds one live player controller and calls `ClientPushChatMessage(message)` on
-that controller. With exactly one live controller, any non-empty target string
-routes to that controller. Name/UUID matching remains pending because the
-validated route deliberately does not read `PlayerState` identity fields yet.
-The intended identity source for named targeting is the supported Omegga player
-sync adapter plus the Brickadia saved/log adapter, not unsafe live `PlayerState`
-reflection.
+Private delivery is fail-closed. The supported route requires a plain immutable
+request envelope containing an exact player UUID and current connection
+generation. At dispatch time, BMF revalidates the current UUID, generation,
+controller, and PlayerState association before calling
+`ClientPushChatMessage(message)`.
 
-With a single joined player, visible delivery is live-confirmed. Two-player
-negative targeting and live identity matching are still pending.
+A name, controller-list position, cached UObject, or the presence of exactly one
+live controller is never enough to select a recipient. If the exact association
+cannot be proven, BMF drops the message and reports a bounded identity failure.
+The supported identity source is the Omegga player sync adapter plus safe
+Brickadia saved/log evidence, not crash-prone live `PlayerState` reflection.
 
-If no live target is matched, BMF falls back to `BMF.players.resolve(player)`
-for the older structured errors (`PLAYER_NOT_FOUND` or
-`PLAYER_DELIVERY_UNAVAILABLE`).
+Legacy name-only calls return `PRIVATE_IDENTITY_REQUIRED`; they do not fall back
+to another player or to global chat.
 
 Server-console command route:
 
@@ -72,9 +72,8 @@ The response includes `delivered`, `delivered_count`, `attempted_count`,
 
 ## `BMF.chat.statusMessage(player, message)`
 
-Same target resolution behavior as `BMF.chat.whisper`, but for private
-status/UI feedback. Live visible delivery still requires `L3 Live Player`
-validation.
+Uses the same strict UUID, connection-generation, controller, and PlayerState
+validation as `BMF.chat.whisper`. A mismatch drops the private status/UI output.
 
 Server-console command route:
 
@@ -85,4 +84,6 @@ bmf.chat.statusmessage target=<uuid-or-name> message=<text>
 ## Validation
 
 Chat proof and remaining live-player gaps are tracked in
-[API Validation Evidence](../validation/api-validation.md#chat).
+[API Validation Evidence](../validation/api-validation.md#chat). A live
+three-player reconnect/reordering canary is still required before the August
+2026 cross-player routing incident can be closed.

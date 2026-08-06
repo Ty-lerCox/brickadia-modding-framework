@@ -147,6 +147,50 @@ export default class NodeVmPlugin extends Plugin {
         });
       }
     });
+    this.plugin.on('private.whisper', async (resp, target, messages) => {
+      try {
+        const lines = Array.isArray(messages)
+          ? messages
+              .flatMap(value => String(value).split('\n'))
+              .filter(value => value.length > 0 && value.length < 512)
+          : [];
+        if (lines.length === 0 || lines.length > 16) {
+          throw new Error('private whisper payload is invalid or unbounded');
+        }
+        for (const line of lines) {
+          if (!(await omegga.deliverPrivateOutput('whisper', target, line))) {
+            throw new Error(
+              'private whisper identity or transport was rejected',
+            );
+          }
+        }
+        this.notify(resp, { ok: true });
+      } catch (err) {
+        this.notify(resp, {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    });
+    this.plugin.on('private.middlePrint', async (resp, target, message) => {
+      try {
+        const text = String(message ?? '');
+        if (text.length < 1 || text.length >= 512) {
+          throw new Error('private status payload is invalid');
+        }
+        if (
+          !(await omegga.deliverPrivateOutput('statusmessage', target, text))
+        ) {
+          throw new Error('private status identity or transport was rejected');
+        }
+        this.notify(resp, { ok: true });
+      } catch (err) {
+        this.notify(resp, {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    });
 
     // storage interface
     this.plugin.on('store.get', async (resp, key) => {

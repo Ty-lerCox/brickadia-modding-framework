@@ -5240,10 +5240,10 @@ function try_fast_typed_chat_whisper(target, message)
         end
     end
 
+    -- Private delivery must never guess. In particular, do not redirect a
+    -- missing target to the only connected controller: that can disclose one
+    -- player's private response to another player after a disconnect.
     local selected_sources = exact_sources
-    if #selected_sources == 0 and #player_sources == 1 then
-        selected_sources = player_sources
-    end
 
     if #selected_sources == 0 then
         return false,
@@ -5399,12 +5399,8 @@ local function handle_typed_chat_broadcast(message)
 end
 
 local function handle_typed_chat_whisper(target, message)
-    local success, executor_or_error = try_fast_typed_chat_whisper(target, message)
-    if success then
-        return true, executor_or_error
-    end
-
-    return false, tostring(executor_or_error)
+    return false,
+        "Legacy name-only Chat.Whisper is disabled; use the strict BMF UUID and connection-generation envelope."
 end
 
 local function handle_typed_chat_status_message(target, message)

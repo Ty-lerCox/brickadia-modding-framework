@@ -20,6 +20,10 @@ type BridgeMessage = {
   detail?: string;
   response?: string;
   deadlineMs?: number;
+  senderUuid?: string;
+  connectionGeneration?: number;
+  operationRequestId?: string;
+  offThreadMs?: number;
 };
 
 export type BmfCommandServiceClass = 'interactive' | 'bulk';
@@ -28,6 +32,10 @@ export type BmfCommandOptions = {
   serviceClass?: BmfCommandServiceClass;
   issuedAtMs?: number;
   deadlineMs?: number;
+  senderUuid?: string;
+  connectionGeneration?: number;
+  operationRequestId?: string;
+  offThreadMs?: number;
 };
 
 export type BmfSocketBridgeOptions = {
@@ -245,6 +253,7 @@ export default class BmfSocketBridgeHost extends EventEmitter {
     timeoutMs = DEFAULT_COMMAND_TIMEOUT_MS,
     options: BmfCommandOptions = {},
   ) {
+    const commandLabel = command.trim().split(/\s+/, 1)[0] || '<empty>';
     if (this.#stopped || !this.#server) {
       return Promise.reject(new Error('BMF socket bridge is not running.'));
     }
@@ -281,7 +290,9 @@ export default class BmfSocketBridgeHost extends EventEmitter {
         : issuedAtMs + effectiveTimeoutMs;
     if (deadlineMs <= nowMs) {
       return Promise.reject(
-        new Error(`BMF socket command expired before dispatch: ${command}.`),
+        new Error(
+          `BMF socket command expired before dispatch: ${commandLabel}.`,
+        ),
       );
     }
     const responseTimeoutMs = Math.max(
@@ -304,13 +315,34 @@ export default class BmfSocketBridgeHost extends EventEmitter {
       issuedAtMs,
       deadlineMs,
       serviceClass,
+      ...(options.senderUuid
+        ? { senderUuid: String(options.senderUuid).slice(0, 128) }
+        : {}),
+      ...(Number.isSafeInteger(options.connectionGeneration) &&
+      Number(options.connectionGeneration) > 0
+        ? { connectionGeneration: Number(options.connectionGeneration) }
+        : {}),
+      ...(options.operationRequestId
+        ? {
+            operationRequestId: String(options.operationRequestId).slice(
+              0,
+              128,
+            ),
+          }
+        : {}),
+      ...(Number.isFinite(options.offThreadMs) &&
+      Number(options.offThreadMs) >= 0
+        ? { offThreadMs: Number(options.offThreadMs) }
+        : {}),
     })}\n`;
 
     return new Promise<BridgeMessage>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.#pendingCommands.delete(id);
         reject(
-          new Error(`Timed out waiting for BMF socket response to ${command}.`),
+          new Error(
+            `Timed out waiting for BMF socket response to ${commandLabel}.`,
+          ),
         );
       }, responseTimeoutMs);
 

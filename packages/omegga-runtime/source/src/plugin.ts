@@ -84,6 +84,9 @@ export interface OmeggaPlayer {
   /** player state id */
   state: string;
 
+  /** monotonically increasing connection generation for this UUID */
+  connectionGeneration: number;
+
   /**
    * Returns omegga
    */
@@ -97,7 +100,7 @@ export interface OmeggaPlayer {
   /**
    * Get raw player info (to feed into a constructor)
    */
-  raw(): [string, string, string, string, string];
+  raw(): [string, string, string, string, string, number];
 
   /**
    * True if the player is the host
@@ -544,6 +547,7 @@ export interface OmeggaCore {
     displayName: string;
     controller: string;
     state: string;
+    connectionGeneration: number;
   }[];
 
   /**

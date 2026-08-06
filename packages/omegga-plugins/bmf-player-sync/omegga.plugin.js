@@ -108,6 +108,10 @@ function copyPlayerMetadata(target, source, positionSource) {
     target.rootComponentPath = String(root);
 
   if (typeof source.isDead === "boolean") target.isDead = source.isDead;
+  const connectionGeneration = Number(source.connectionGeneration);
+  if (Number.isSafeInteger(connectionGeneration) && connectionGeneration > 0) {
+    target.connectionGeneration = connectionGeneration;
+  }
   return target;
 }
 
@@ -246,6 +250,10 @@ function mergePlayerMetadata(target, source) {
   if (source.rootComponentPath)
     target.rootComponentPath = source.rootComponentPath;
   if (typeof source.isDead === "boolean") target.isDead = source.isDead;
+  const connectionGeneration = Number(source.connectionGeneration);
+  if (Number.isSafeInteger(connectionGeneration) && connectionGeneration > 0) {
+    target.connectionGeneration = connectionGeneration;
+  }
   return target;
 }
 
@@ -296,6 +304,13 @@ function cachePlayerRecord(player) {
     roles: [],
   };
 
+  if (
+    Number.isSafeInteger(Number(player.connectionGeneration)) &&
+    Number(player.connectionGeneration) > 0
+  ) {
+    record.connectionGeneration = Number(player.connectionGeneration);
+  }
+
   if (player.position) {
     record.position = player.position;
     record.positionSource = String(
@@ -321,6 +336,12 @@ function commandPlayerRecord(record) {
   }
   if (record.controllerPath) compact.controllerPath = record.controllerPath;
   if (record.playerStatePath) compact.playerStatePath = record.playerStatePath;
+  if (Number.isFinite(record.connectionGeneration)) {
+    compact.connectionGeneration = Math.max(
+      0,
+      Math.floor(record.connectionGeneration),
+    );
+  }
   if (record.position) compact.position = record.position;
   return compact;
 }
@@ -555,6 +576,7 @@ module.exports = class BmfPlayerSync {
     this.lastRejectedPlayerCommandSignature = "";
     this.syncInFlight = null;
     this.pendingSyncReason = "";
+    this.connectionGenerationByUuid = new Map();
     this.syncCounters = {
       triggersCoalesced: 0,
       cacheWrites: 0,
@@ -1432,14 +1454,70 @@ module.exports = class BmfPlayerSync {
     }
   }
 
-  writePlayerCache(players, source) {
+  applyConnectionGenerations(records) {
+    const enabled =
+      envValue("OMEGGA_BMF_PLAYER_CONNECTION_GENERATION_ENABLED") === "1" ||
+      this.config.connectionGeneration === true;
+    if (!enabled) return records;
+
+    const present = new Set();
+    for (const record of records || []) {
+      const uuid = String(record?.uuid || record?.id || "")
+        .trim()
+        .toLowerCase();
+      if (!uuid) continue;
+      present.add(uuid);
+      const controllerPath = String(record.controllerPath || "").trim();
+      const previous = this.connectionGenerationByUuid.get(uuid);
+      const authoritativeGeneration = Number(record.connectionGeneration);
+      let generation;
+      if (
+        Number.isSafeInteger(authoritativeGeneration) &&
+        authoritativeGeneration > 0
+      ) {
+        generation = authoritativeGeneration;
+      } else {
+        generation = Math.max(1, Number(previous?.generation) || 1);
+        if (
+          previous &&
+          (previous.present === false ||
+            (previous.controllerPath &&
+              controllerPath &&
+              previous.controllerPath !== controllerPath))
+        ) {
+          generation += 1;
+        }
+      }
+      record.connectionGeneration = generation;
+      this.connectionGenerationByUuid.set(uuid, {
+        generation,
+        controllerPath: controllerPath || previous?.controllerPath || "",
+        present: true,
+      });
+    }
+    for (const [uuid, previous] of this.connectionGenerationByUuid) {
+      if (!present.has(uuid)) {
+        this.connectionGenerationByUuid.set(uuid, {
+          ...previous,
+          present: false,
+        });
+      }
+    }
+    return records;
+  }
+
+  writePlayerCache(players, source, preparedRecords = null) {
     const cachePath = this.playerCachePath;
     if (!cachePath) {
       console.warn("[bmf-player-sync] player cache path is not configured");
       return false;
     }
 
-    const records = stablePlayerRecords(players.map(cachePlayerRecord));
+    const records =
+      preparedRecords ||
+      this.applyConnectionGenerations(
+        stablePlayerRecords(players.map(cachePlayerRecord)),
+      );
     const signature = playerCacheSignature(records);
     if (!this.lastPlayerCacheSignature && fs.existsSync(cachePath)) {
       this.lastPlayerCacheSignature =
@@ -1537,7 +1615,9 @@ module.exports = class BmfPlayerSync {
       ? reason || "sync"
       : `${reason || "sync"}.log-fallback`;
     const source = `omegga.players.raw.${sourceSuffix}`;
-    const records = stablePlayerRecords(players.map(cachePlayerRecord));
+    const records = this.applyConnectionGenerations(
+      stablePlayerRecords(players.map(cachePlayerRecord)),
+    );
     const positionSnapshot = this.writePositionSnapshot(
       positionPlayers,
       source,
@@ -1561,7 +1641,7 @@ module.exports = class BmfPlayerSync {
     ) {
       // Keep the durable JSON snapshot on the Node side so the game-thread
       // command only publishes the already-copied records into BMF memory.
-      const cacheWritten = this.writePlayerCache(players, source);
+      const cacheWritten = this.writePlayerCache(players, source, records);
       if (cacheWritten) this.syncCounters.cacheWrites += 1;
       else this.syncCounters.cacheWritesSuppressed += 1;
       const commandRecords = records.map(commandPlayerRecord);
@@ -1630,7 +1710,7 @@ module.exports = class BmfPlayerSync {
       return;
     }
 
-    const cacheWritten = this.writePlayerCache(players, source);
+    const cacheWritten = this.writePlayerCache(players, source, records);
     if (cacheWritten) {
       this.syncCounters.cacheWrites += 1;
       console.log(

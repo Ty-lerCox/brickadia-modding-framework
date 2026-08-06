@@ -1023,13 +1023,13 @@ test('player registry keeps ordinary player and chat paths cache-first with expl
   assert.notEqual(collectEnd, -1);
   const collectTargets = source.slice(collectStart, collectEnd);
   assert.equal(
-    collectTargets.match(/pcall\(FindAllOf/g)?.length,
+    collectTargets.match(/BMF_operation_find_all\(/g)?.length,
     1,
     'global discovery must exist only in the explicit repair branch',
   );
   assert.ok(
     collectTargets.indexOf('elseif repair_needed then') <
-      collectTargets.indexOf('pcall(FindAllOf'),
+      collectTargets.indexOf('BMF_operation_find_all('),
     'global discovery must be dominated by the explicit repair gate',
   );
   assert.doesNotMatch(
@@ -1073,4 +1073,281 @@ test('player registry keeps ordinary player and chat paths cache-first with expl
     1,
     'the durable player cache must be force-loaded exactly once at startup',
   );
+
+  const assignmentCacheStart = source.indexOf(
+    'function BMF_minigame_player_cache_records()',
+  );
+  const assignmentCacheEnd = source.indexOf(
+    'local function minigame_find_cached_object',
+    assignmentCacheStart,
+  );
+  const assignmentCache = source.slice(
+    assignmentCacheStart,
+    assignmentCacheEnd,
+  );
+  assert.match(assignmentCache, /state\.player_cache/);
+  assert.doesNotMatch(assignmentCache, /read_file\s*\(|json_decode\s*\(/);
+  assert.match(
+    source,
+    /BMF_UNSAFE_PLAYER_MESSAGE_IMPL_DIAGNOSTIC_ENABLED", false/,
+    'the previously monolithic native player-message route must be diagnostic-only',
+  );
+});
+
+test('operation attribution stays bounded, plain-data-only, and attached to the unified broker', () => {
+  const runtimePath = path.join(
+    __dirname,
+    '..',
+    'templates',
+    'windows-ue4ss',
+    'ue4ss',
+    'Mods',
+    'BMF',
+    'Scripts',
+    'bmf',
+    'runtime.lua',
+  );
+  const source = fs.readFileSync(runtimePath, 'utf8');
+
+  assert.match(
+    source,
+    /BMF_OPERATION_ATTRIBUTION_ENABLED", true/,
+    'attribution must be default-on with an explicit rollback flag',
+  );
+  const beginStart = source.indexOf('function BMF_operation_begin');
+  const beginEnd = source.indexOf(
+    'function BMF_operation_update_class',
+    beginStart,
+  );
+  const begin = source.slice(beginStart, beginEnd);
+  assert.doesNotMatch(
+    begin,
+    /UObject|controller\s*=|object_path|player_name|address/i,
+    'cross-frame operation envelopes may contain only copied scalar attribution data',
+  );
+  assert.match(begin, /correlation_id = "bmf-"/);
+  assert.match(begin, /request_id = request_id/);
+  assert.match(begin, /sender_uuid = sender_uuid/);
+  assert.match(begin, /connection_generation = connection_generation/);
+  assert.match(begin, /current_stage = "accepted"/);
+  assert.match(begin, /queue_wait_ms = 0/);
+  assert.match(begin, /admission_defer_count = 0/);
+  assert.match(begin, /global_scan_count = 0/);
+  assert.match(begin, /deadline_state = "accepted"/);
+
+  const finishStart = source.indexOf('function BMF_operation_finish');
+  const finishEnd = source.indexOf('\nlocal function join_path', finishStart);
+  const finish = source.slice(finishStart, finishEnd);
+  assert.match(finish, /BMF_SLOW_OPERATION/);
+  assert.match(finish, /game_thread_ms/);
+  assert.match(finish, /total_ms/);
+  assert.match(finish, /global_scan_duration_ms/);
+  assert.match(finish, /budget_exceeded/);
+  assert.match(finish, /frame_duration_ms_near_completion/);
+  assert.match(finish, /request_id = context\.request_id/);
+  assert.match(finish, /sender_uuid = context\.sender_uuid/);
+  assert.match(finish, /context\.accepted_clock = nil/);
+  assert.match(finish, /context\.execution_started_clock = nil/);
+  assert.equal(
+    source.match(/pcall\(FindAllOf/g)?.length,
+    1,
+    'every global UObject scan must route through the attributed scan wrapper',
+  );
+  assert.match(
+    source,
+    /function BMF_operation_find_all[\s\S]*?BMF_operation_note_global_scan\(duration_ms\)/,
+  );
+
+  const directAdmissionStart = source.indexOf(
+    'function BMF_socket_scheduler_admit_direct',
+  );
+  const directAdmissionEnd = source.indexOf(
+    'function BMF_socket_scheduler_lane_queue',
+    directAdmissionStart,
+  );
+  const directAdmission = source.slice(
+    directAdmissionStart,
+    directAdmissionEnd,
+  );
+  assert.match(directAdmission, /request\.operationContext = BMF_operation_begin/);
+  assert.match(source, /BMF_operation_start_execution\(request\.operationContext\)/);
+  assert.match(source, /BMF_operation_finish\(request\.operationContext, normalized_state\)/);
+  assert.match(
+    source,
+    /budget_admission_stopped = true\s+BMF_operation_note_queued_budget_defer\(\)/,
+    'the existing elapsed-time budget must attribute admission deferrals without a second queue',
+  );
+  assert.match(source, /BMF_operation_update_stage\(request\.operationContext, "queued"\)/);
+  assert.match(source, /BMFFrameTelemetryOperationSnapshot/);
+
+  const prometheusPath = path.join(
+    __dirname,
+    '..',
+    'src',
+    'webserver',
+    'backend',
+    'prometheus.ts',
+  );
+  const prometheus = fs.readFileSync(prometheusPath, 'utf8');
+  assert.doesNotMatch(
+    prometheus,
+    /labels:\s*\{[^}]*correlation_id/,
+    'correlation IDs must never enter Prometheus labels',
+  );
+  assert.match(prometheus, /bmf_operation_duration_milliseconds/);
+  assert.match(prometheus, /labels: \{ operation_class: operationClass, phase, statistic:/);
+});
+
+test('private delivery requires an immutable UUID and generation envelope with zero global scans', () => {
+  const runtimePath = path.join(
+    __dirname,
+    '..',
+    'templates',
+    'windows-ue4ss',
+    'ue4ss',
+    'Mods',
+    'BMF',
+    'Scripts',
+    'bmf',
+    'runtime.lua',
+  );
+  const source = fs.readFileSync(runtimePath, 'utf8');
+  const strictStart = source.indexOf('function live_chat_resolve_strict_target(identity)');
+  const strictEnd = source.indexOf(
+    'function live_chat_resolve_target(player)',
+    strictStart,
+  );
+  const targetedResolve = source.slice(strictStart, strictEnd);
+  assert.match(targetedResolve, /candidate_uuid == expected_uuid/);
+  assert.match(targetedResolve, /cached_generation ~= expected_generation/);
+  assert.match(
+    targetedResolve,
+    /live_chat_cached_controller\(expected_controller_path\)/,
+  );
+  assert.match(targetedResolve, /snapshot_generation ~= current_generation/);
+  assert.match(targetedResolve, /cached_names\[live_name\] ~= true/);
+  assert.doesNotMatch(targetedResolve, /identity\.controllerPath/);
+  assert.doesNotMatch(targetedResolve, /identity\.playerStatePath/);
+  assert.doesNotMatch(targetedResolve, /FindAllOf|FindFirstOf/);
+  assert.doesNotMatch(targetedResolve, /live_chat_collect_targets/);
+
+  const privateStart = source.indexOf('function private_chat_result');
+  const privateEnd = source.indexOf('BMF.timers = {}', privateStart);
+  const privateChat = source.slice(privateStart, privateEnd);
+  assert.match(privateChat, /live_chat_resolve_target\(player\)/);
+  assert.doesNotMatch(privateChat, /FindAllOf|FindFirstOf/);
+  assert.match(privateChat, /strictPrivateIdentity == true/);
+  assert.match(privateChat, /PRIVATE_IDENTITY_REQUIRED/);
+  assert.match(privateChat, /strict_envelope_required/);
+  assert.doesNotMatch(privateChat, /BMF\.players\.resolve\(player\)/);
+  assert.match(privateChat, /BMF\.chat\.whisper = function/);
+  assert.match(privateChat, /BMF\.chat\.statusMessage = function/);
+
+  const envelopeStart = source.indexOf('local function parse_private_delivery_envelope');
+  const envelopeEnd = source.indexOf('local function private_delivery_lines', envelopeStart);
+  const envelope = source.slice(envelopeStart, envelopeEnd);
+  assert.match(envelope, /sender_uuid/);
+  assert.match(envelope, /connection_generation/);
+  assert.match(envelope, /deadline_ms/);
+  assert.doesNotMatch(envelope, /controllerpath|playerstatepath|senderhash/i);
+
+  const collectStart = source.indexOf('function live_chat_collect_targets(options)');
+  const collectEnd = source.indexOf('function live_chat_target_summary', collectStart);
+  const collectTargets = source.slice(collectStart, collectEnd);
+  assert.match(
+    collectTargets,
+    /repair_needed and not live_chat_repair_allowed[\s\S]*?registry\.repair_coalesced/,
+    'burst misses must coalesce behind active-repair/cooldown ownership instead of scanning repeatedly',
+  );
+  assert.ok(
+    collectTargets.indexOf('repair_detail.requested') <
+      collectTargets.indexOf('BMF_operation_find_all('),
+    'a global scan must remain dominated by an explicit repair request',
+  );
+});
+
+test('legacy OmeggaBridge name-only private delivery is disabled', () => {
+  const bridgePath = path.join(
+    __dirname,
+    '..',
+    'templates',
+    'windows-ue4ss',
+    'ue4ss',
+    'Mods',
+    'OmeggaBridge',
+    'Scripts',
+    'main.lua',
+  );
+  const source = fs.readFileSync(bridgePath, 'utf8');
+  const handlerStart = source.indexOf('local function handle_typed_chat_whisper');
+  const handlerEnd = source.indexOf(
+    'local function handle_typed_chat_status_message',
+    handlerStart,
+  );
+  const handler = source.slice(handlerStart, handlerEnd);
+  assert.match(handler, /Legacy name-only Chat\.Whisper is disabled/);
+  assert.doesNotMatch(handler, /try_fast_typed_chat_whisper\(/);
+  assert.doesNotMatch(
+    source,
+    /#selected_sources\s*==\s*0\s+and\s+#player_sources\s*==\s*1/,
+  );
+});
+
+test('Omegga accepts the native unknown-command flag only after verified application', () => {
+  const bridgePath = path.join(
+    __dirname,
+    '..',
+    'templates',
+    'windows-ue4ss',
+    'ue4ss',
+    'Mods',
+    'OmeggaBridge',
+    'Scripts',
+    'main.lua',
+  );
+  const serverPath = path.join(__dirname, '..', 'src', 'brickadia', 'server.ts');
+  const bridgeSource = fs.readFileSync(bridgePath, 'utf8');
+  const serverSource = fs.readFileSync(serverPath, 'utf8');
+
+  assert.match(
+    bridgeSource,
+    /local call_ok, applied, output = pcall\(BMFSocketSetUnknownCommandMessages, false\)/,
+  );
+  assert.match(bridgeSource, /if call_ok and applied then/);
+  assert.match(bridgeSource, /"bmf-native-unknown-command-flag"/);
+  assert.match(serverSource, /'bmf-native-unknown-command-flag'/);
+});
+
+test('frame hitch logging records 33.3 ms frames off the game thread', () => {
+  const nativePath = path.join(
+    __dirname,
+    '..',
+    '..',
+    '..',
+    '..',
+    'native',
+    'bmf_frame_telemetry',
+    'bmf_frame_telemetry.cpp',
+  );
+  const source = fs.readFileSync(nativePath, 'utf8');
+  assert.match(source, /BMF_FRAME_HITCH_ATTRIBUTION_ENABLED", true/);
+  assert.match(
+    source,
+    /if \(delta_us >= kSlow33ThresholdUs\)[\s\S]*?record_spike\(delta_us, idle, sample\)/,
+  );
+  assert.doesNotMatch(
+    source.slice(
+      source.indexOf('void observe(float delta_seconds'),
+      source.indexOf('std::string status_json', source.indexOf('void observe(float delta_seconds')),
+    ),
+    /printf|BMF_SLOW_FRAME/,
+    'the game-thread frame observer must not perform synchronous logging',
+  );
+  const writerStart = source.indexOf('void writer_loop()');
+  const writerEnd = source.indexOf('void write_snapshot()', writerStart);
+  assert.match(source.slice(writerStart, writerEnd), /log_pending_spikes\(\)/);
+  assert.match(source, /\[BMF_SLOW_FRAME\] %s/);
+  assert.match(source, /threshold_ms\\\":\" << us_to_ms\(kSlow33ThresholdUs\)/);
+  assert.match(source, /BMFFrameTelemetryOperationSnapshot/);
+  assert.match(source, /operation_snapshot_json\(\)/);
 });

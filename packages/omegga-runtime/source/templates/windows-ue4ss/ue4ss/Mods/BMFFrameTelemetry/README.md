@@ -70,7 +70,7 @@ The JSON uses schema version `2` and contains:
   frame delta, FPS estimate, and slow-frame counts.
 - `lifetime`: lifetime samples, idle samples, average/max/last frame delta, and
   slow-frame totals.
-- `spikes`: recent frames over the `100 ms` spike threshold.
+- `spikes`: recent frames over the `33.33 ms` hitch threshold.
 
 The supported Omegga fork exports this file to Prometheus metrics:
 
@@ -94,12 +94,14 @@ brickadia_frame_delta_milliseconds{scope="window",statistic="avg"}
 brickadia_frame_delta_milliseconds{scope="window",statistic="max"}
 brickadia_frame_fps{scope="window",statistic="avg"}
 brickadia_frame_slow_total{threshold_ms}
-brickadia_frame_spikes_total{threshold_ms="100"}
+brickadia_frame_spikes_total{threshold_ms="33.333"}
 brickadia_frame_spike_last_delta_milliseconds
 brickadia_frame_spike_last_age_seconds
 ```
 
 Treat `brickadia_frame_pacing_target_fps` as the requested target and
-`brickadia_frame_fps` as the measured result. Use max frame delta and slow-frame
-counters to diagnose visible hitches. Average frame time can look acceptable
-while repeated `100+ ms` spikes are still player-visible.
+`brickadia_frame_fps` as a derived reference. Frame duration in milliseconds is
+the performance source of truth. Set
+`BMF_FRAME_HITCH_ATTRIBUTION_ENABLED=1` during a controlled rollout to emit
+`BMF_SLOW_FRAME` JSON records from the native writer thread for every frame at
+or above `33.33 ms`; the game-thread sampler never performs the log I/O.

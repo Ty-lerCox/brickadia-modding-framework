@@ -127,6 +127,50 @@ describe('buildPrometheusMetrics', () => {
       bmfTelemetryPath,
       JSON.stringify({
         schema_version: 2,
+        operations: {
+          enabled: true,
+          active: 1,
+          slow_total: 2,
+          budget_overrun_total: 3,
+          admission_defer_total: 4,
+          lifetime_guard_rejections_total: 5,
+          by_class: {
+            'bmf.players.list': {
+              count: 4,
+              ok: 3,
+              error: 1,
+              duration_ms_sum: 8,
+              duration_ms_max: 4,
+              last_ms: 2,
+              queue_wait_ms_sum: 20,
+              queue_wait_ms_max: 8,
+              admission_defer_ms_sum: 4,
+              admission_defer_ms_max: 3,
+              game_thread_ms_sum: 8,
+              game_thread_ms_max: 4,
+              off_thread_ms_sum: 0,
+              off_thread_ms_max: 0,
+              total_ms_sum: 28,
+              total_ms_max: 10,
+              global_scan_duration_ms_sum: 0,
+              global_scan_duration_ms_max: 0,
+            },
+          },
+          by_source: {
+            direct_socket: { count: 4 },
+          },
+          by_outcome: {
+            completed: { count: 3 },
+            known_failure: { count: 1 },
+          },
+          by_cache_result: {
+            hit: { count: 4 },
+          },
+          last: {
+            correlation_id: 'bmf-secret-correlation-id',
+            operation_class: 'bmf.players.list',
+          },
+        },
         player_registry: {
           cache_first_enabled: true,
           repair_enabled: true,
@@ -148,6 +192,19 @@ describe('buildPrometheusMetrics', () => {
           broad_repair_skipped: 9,
           broad_repair_failures: 1,
           broad_repair_matches: 12,
+          repair_requests: 14,
+          repair_coalesced: 6,
+          repair_duration_ms_sum: 48,
+          repair_duration_ms_max: 12,
+          global_scan_duration_ms_sum: 20,
+          global_scan_duration_ms_max: 5,
+          unresolved_players: 2,
+          connection_generation_mismatches: 7,
+          private_delivery_delivered: 21,
+          private_delivery_dropped: 8,
+          private_delivery_expired: 2,
+          private_delivery_invalid: 3,
+          private_delivery_stale: 4,
           global_scans: 10,
           repair_running: false,
           repair_cooldown_ms: 15000,
@@ -509,6 +566,23 @@ describe('buildPrometheusMetrics', () => {
     expect(output).toContain('bmf_runtime_status_up 1');
     expect(output).toContain('bmf_telemetry_up 1');
     expect(output).toContain('bmf_telemetry_schema_version 2');
+    for (const sample of [
+      'bmf_operation_attribution_enabled 1',
+      'bmf_operation_in_flight 1',
+      'bmf_operation_total{operation_class="bmf.players.list"} 4',
+      'bmf_operation_source_total{source="direct_socket"} 4',
+      'bmf_operation_outcome_total{outcome="completed"} 3',
+      'bmf_operation_cache_result_total{cache_result="hit"} 4',
+      'bmf_operation_duration_milliseconds{operation_class="bmf.players.list",phase="queue_wait",statistic="avg"} 5',
+      'bmf_operation_duration_milliseconds{operation_class="bmf.players.list",phase="game_thread",statistic="max"} 4',
+      'bmf_operation_slow_total 2',
+      'bmf_operation_budget_overrun_total 3',
+      'bmf_operation_admission_defer_total 4',
+      'bmf_operation_lifetime_guard_rejections_total 5',
+    ]) {
+      expect(output).toContain(sample);
+    }
+    expect(output).not.toContain('bmf-secret-correlation-id');
     expect(output).toContain(
       '# TYPE bmf_player_registry_cache_first_enabled gauge',
     );
@@ -539,6 +613,17 @@ describe('buildPrometheusMetrics', () => {
       'bmf_player_registry_broad_repair_failures_total 1',
       'bmf_player_registry_broad_repair_matches_total 12',
       'bmf_player_registry_global_scans_total 10',
+      'bmf_player_registry_repair_requests_total 14',
+      'bmf_player_registry_repair_coalesced_total 6',
+      'bmf_player_registry_connection_generation_mismatches_total 7',
+      'bmf_private_delivery_delivered_total 21',
+      'bmf_private_delivery_dropped_total 8',
+      'bmf_private_delivery_expired_total 2',
+      'bmf_private_delivery_invalid_total 3',
+      'bmf_private_delivery_stale_total 4',
+      'bmf_player_registry_unresolved_players 2',
+      'bmf_player_registry_duration_milliseconds{phase="repair",statistic="avg"} 6',
+      'bmf_player_registry_duration_milliseconds{phase="global_scan",statistic="max"} 5',
     ]) {
       expect(output).toContain(sample);
     }

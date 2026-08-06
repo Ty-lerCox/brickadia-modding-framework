@@ -96,6 +96,37 @@ test("status snapshot exposes bounded retained socket records", () => {
   );
 });
 
+test("writes slow-operation socket events from Node with the correlation ID kept out of metrics", (t) => {
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (message) => warnings.push(String(message));
+  t.after(() => {
+    console.warn = originalWarn;
+  });
+  const bridge = new BmfBridge({}, { maxRecords: 4 });
+  bridge.handleSocketLine(
+    JSON.stringify({
+      type: "event",
+      source: "bmf",
+      record: {
+        ts: "2026-08-06T00:00:00Z",
+        level: "warn",
+        source: "operation",
+        message: "BMF_SLOW_OPERATION",
+        data: {
+          correlation_id: "bmf-1-2",
+          operation_class: "bmf.players.list",
+          game_thread_ms: 4.5,
+        },
+      },
+    }),
+  );
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /^\[BMF_SLOW_OPERATION\] /);
+  assert.match(warnings[0], /"correlation_id":"bmf-1-2"/);
+  assert.equal(bridge.counters.socketEvents, 1);
+});
+
 test("default command path requires a connected socket instead of file fallback", async () => {
   const bridge = new BmfBridge({}, { socketReconnectMs: 0 });
   await assert.rejects(

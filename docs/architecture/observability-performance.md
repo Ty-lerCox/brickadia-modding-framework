@@ -32,6 +32,9 @@ worker mode, command worker intervals, and command worker limits.
 - plugin-owned Lua handler counts/durations by plugin and hook
 - scheduler callback counts/durations
 - command/socket worker poll counts, durations, and processed item counts
+- bounded operation attribution by handler class, source, outcome, cache result,
+  queue wait, admission deferral, game-thread time, total time, controller
+  resolution, global scans, repairs, deadlines, and budget overruns
 
 `frame-telemetry.json` is written by the optional native `BMFFrameTelemetry`
 UE4SS C++ mod. It contains Unreal engine tick `DeltaSeconds` aggregates,
@@ -178,7 +181,7 @@ brickadia_frame_delta_milliseconds{scope="window",statistic="avg"}
 brickadia_frame_delta_milliseconds{scope="window",statistic="max"}
 brickadia_frame_fps{scope="window",statistic="avg"}
 brickadia_frame_slow_total{threshold_ms}
-brickadia_frame_spikes_total{threshold_ms="100"}
+brickadia_frame_spikes_total{threshold_ms="33.333"}
 brickadia_frame_spike_last_delta_milliseconds
 ```
 
@@ -191,6 +194,47 @@ Build and deploy with:
 Restart the Brickadia server after deploying so Omegga can stage and enable the
 native mod. Disable the sampler with `BMF_FRAME_TELEMETRY_ENABLED=0` or override
 the output path with `BMF_FRAME_TELEMETRY_PATH`.
+
+## Phase 2 Hitch Attribution
+
+Operation attribution is source-available but rollout-gated:
+
+```text
+BMF_OPERATION_ATTRIBUTION_ENABLED=0
+BMF_OPERATION_SLOW_GAME_THREAD_MS=3
+BMF_OPERATION_SLOW_TOTAL_MS=10
+BMF_FRAME_HITCH_ATTRIBUTION_ENABLED=0
+OMEGGA_BMF_PLAYER_CONNECTION_GENERATION_ENABLED=0
+```
+
+When operation attribution is enabled, direct socket, tunnel, file-worker,
+plugin callback, event callback, explicit repair, and startup-diagnostic work
+receive a short correlation ID. The ID exists only in `BMF_SLOW_OPERATION`
+structured records; it is never a Prometheus label. The request envelope keeps
+only copied strings, numbers, booleans, and timing state. It never retains a
+UObject, controller wrapper, pointer, player name, UUID, or object path for
+attribution.
+
+Every `FindAllOf` call routes through one attributed wrapper. Normal
+`players.list`, whisper, and status-message execution uses the current plain
+player snapshot and performs zero global scans. Whisper/status resolve only the
+matched cached controller path on the current game-thread dispatch, compare the
+fresh controller identity with the current snapshot generation, use it, and
+discard it. A global scan is available only through an explicit, cooldown- and
+deadline-bounded repair; burst repair requests coalesce and failed repairs use
+bounded exponential backoff.
+
+Slow operation records cross the existing BMF event socket. The Node bridge
+writes them as `BMF_SLOW_OPERATION` JSON so logging I/O does not lengthen the
+game frame being measured. Native `BMF_SLOW_FRAME` records are likewise emitted
+by the frame telemetry writer thread. In Grafana, use frame duration as the
+source of truth and join the two structured streams by timestamp; operations
+per second is throughput, not FPS.
+
+Enable one flag at a time. Native frame attribution requires one controlled
+stack restart. Do not declare the rollout stable until reconnect, command
+burst, autosave, busy-period, and 24-hour soak gates pass without a new crash
+folder or stale-UObject signature.
 
 ## Performance Guardrails
 

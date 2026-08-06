@@ -506,7 +506,10 @@ module.exports = class BmfBridge {
       return {
         ok: false,
         code: "PLUGIN_EVENT_FAILED",
-        detail: String(error?.message ?? error ?? "unknown error").slice(0, 1024),
+        detail: String(error?.message ?? error ?? "unknown error").slice(
+          0,
+          1024,
+        ),
       };
     }
   }
@@ -794,6 +797,21 @@ module.exports = class BmfBridge {
 
     if (message.type === "event") {
       this.counters.socketEvents += 1;
+      const structuredRecord =
+        message.record && typeof message.record === "object"
+          ? message.record
+          : null;
+      if (
+        structuredRecord?.source === "operation" &&
+        structuredRecord?.message === "BMF_SLOW_OPERATION"
+      ) {
+        // The Lua game thread only enqueues the existing socket event. Perform
+        // the actual log I/O here on Node so attribution cannot lengthen the
+        // frame it is measuring.
+        console.warn(
+          `[BMF_SLOW_OPERATION] ${JSON.stringify(structuredRecord.data || {})}`,
+        );
+      }
       this.recordEnvelope(message, { transport: "socket" });
       return;
     }

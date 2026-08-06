@@ -6,6 +6,7 @@
 #include <windows.h>
 #include <timeapi.h>
 
+#include <LuaMadeSimple/LuaMadeSimple.hpp>
 #include <Mod/CppUserModBase.hpp>
 #include <UEngine.hpp>
 #include <Unreal/Hooks/Hooks.hpp>
@@ -872,7 +873,11 @@ namespace
     class FrameSampler
     {
       public:
-        FrameSampler() : output_path_(default_output_path()), started_at_ms_(unix_time_ms()), enabled_(env_enabled())
+        FrameSampler()
+            : output_path_(default_output_path()),
+              started_at_ms_(unix_time_ms()),
+              enabled_(env_enabled()),
+              hitch_attribution_enabled_(env_flag_enabled("BMF_FRAME_HITCH_ATTRIBUTION_ENABLED", true))
         {
         }
 
@@ -945,6 +950,7 @@ namespace
             {
                 slow_33_total_.fetch_add(1, std::memory_order_relaxed);
                 window_slow_33_.fetch_add(1, std::memory_order_relaxed);
+                record_spike(delta_us, idle, sample);
             }
             if (delta_us >= kSlow50ThresholdUs)
             {
@@ -955,8 +961,22 @@ namespace
             {
                 slow_100_total_.fetch_add(1, std::memory_order_relaxed);
                 window_slow_100_.fetch_add(1, std::memory_order_relaxed);
-                record_spike(delta_us, idle, sample);
             }
+        }
+
+        std::string operation_snapshot_json() const
+        {
+            const uint64_t sample = samples_total_.load(std::memory_order_relaxed);
+            const uint64_t delta_us = last_delta_us_.load(std::memory_order_relaxed);
+            std::ostringstream out;
+            out.setf(std::ios::fixed);
+            out.precision(3);
+            out << "{"
+                << "\"sample\":" << sample << ","
+                << "\"observed_at_unix_ms\":" << unix_time_ms() << ","
+                << "\"delta_ms\":" << us_to_ms(delta_us)
+                << "}";
+            return out.str();
         }
 
         std::string status_json(WindowSnapshot window) const
@@ -977,6 +997,7 @@ namespace
                 << "\"schema_version\":2,"
                 << "\"source\":\"BMFFrameTelemetry\","
                 << "\"enabled\":" << (enabled_ ? "true" : "false") << ","
+                << "\"hitch_attribution_enabled\":" << (hitch_attribution_enabled_ ? "true" : "false") << ","
                 << "\"hook_registered\":" << (hook_registered_.load(std::memory_order_relaxed) ? "true" : "false") << ","
                 << "\"pid\":" << GetCurrentProcessId() << ","
                 << "\"started_at_unix_ms\":" << started_at_ms_ << ","
@@ -1060,7 +1081,7 @@ namespace
             out.setf(std::ios::fixed);
             out.precision(3);
             out << "{"
-                << "\"threshold_ms\":" << us_to_ms(kSlow100ThresholdUs) << ","
+                << "\"threshold_ms\":" << us_to_ms(kSlow33ThresholdUs) << ","
                 << "\"total\":" << spike_sequence_ << ","
                 << "\"last\":";
             if (spike_sequence_ > 0)
@@ -1130,8 +1151,43 @@ namespace
                     break;
                 }
                 write_snapshot();
+                log_pending_spikes();
             }
             write_snapshot();
+            log_pending_spikes();
+        }
+
+        void log_pending_spikes()
+        {
+            if (!hitch_attribution_enabled_)
+            {
+                return;
+            }
+            std::array<FrameSpike, 32> pending{};
+            size_t pending_count = 0;
+            {
+                std::lock_guard lock(spike_mutex_);
+                const uint64_t first_available =
+                    spike_sequence_ > recent_spike_count_ ? spike_sequence_ - recent_spike_count_ + 1 : 1;
+                const uint64_t first = std::max(first_available, last_logged_spike_sequence_ + 1);
+                for (uint64_t sequence = first;
+                     sequence <= spike_sequence_ && pending_count < pending.size();
+                     ++sequence)
+                {
+                    const size_t index = static_cast<size_t>((sequence - 1) % recent_spikes_.size());
+                    const FrameSpike& spike = recent_spikes_[index];
+                    if (spike.sequence == sequence)
+                    {
+                        pending[pending_count++] = spike;
+                    }
+                }
+                last_logged_spike_sequence_ = spike_sequence_;
+            }
+            for (size_t index = 0; index < pending_count; ++index)
+            {
+                const std::string record = spike_json(pending[index]);
+                std::printf("[BMF_SLOW_FRAME] %s\n", record.c_str());
+            }
         }
 
         void write_snapshot()
@@ -1157,6 +1213,7 @@ namespace
         std::filesystem::path output_path_;
         uint64_t started_at_ms_ = 0;
         bool enabled_ = true;
+        bool hitch_attribution_enabled_ = false;
         std::atomic<bool> running_{false};
         std::atomic<bool> hook_registered_{false};
         std::thread writer_;
@@ -1166,6 +1223,7 @@ namespace
         std::array<FrameSpike, 32> recent_spikes_{};
         size_t recent_spike_count_ = 0;
         uint64_t spike_sequence_ = 0;
+        uint64_t last_logged_spike_sequence_ = 0;
         FrameSpike last_spike_{};
 
         std::atomic<uint64_t> samples_total_{0};
@@ -1190,6 +1248,12 @@ namespace
     };
 
     FrameSampler g_sampler;
+
+    int lua_frame_telemetry_operation_snapshot(const LuaMadeSimple::Lua& lua)
+    {
+        lua.set_string(g_sampler.operation_snapshot_json());
+        return 1;
+    }
 
     class BMFFrameTelemetryMod : public CppUserModBase
     {
@@ -1229,6 +1293,17 @@ namespace
                 {false, false, STR("BMFFrameTelemetry"), STR("EngineTickSampler")});
             g_sampler.mark_hook_registered();
             std::printf("[BMFFrameTelemetry] engine tick callback registered\n");
+        }
+
+        auto on_lua_start(StringViewType,
+                          LuaMadeSimple::Lua& lua,
+                          LuaMadeSimple::Lua&,
+                          LuaMadeSimple::Lua&,
+                          LuaMadeSimple::Lua*) -> void override
+        {
+            lua.register_function(
+                "BMFFrameTelemetryOperationSnapshot",
+                lua_frame_telemetry_operation_snapshot);
         }
     };
 } // namespace

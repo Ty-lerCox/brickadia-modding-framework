@@ -431,6 +431,13 @@ export function buildPrometheusMetrics(server: Webserver) {
   const bmfScheduler = objectRecord(bmfTelemetryRecord.scheduler);
   const bmfSchedulerByKey = objectRecord(bmfScheduler.by_key);
   const bmfWorkers = objectRecord(bmfTelemetryRecord.workers);
+  const bmfOperations = objectRecord(bmfTelemetryRecord.operations);
+  const bmfOperationsByClass = objectRecord(bmfOperations.by_class);
+  const bmfOperationsBySource = objectRecord(bmfOperations.by_source);
+  const bmfOperationsByOutcome = objectRecord(bmfOperations.by_outcome);
+  const bmfOperationsByCacheResult = objectRecord(
+    bmfOperations.by_cache_result,
+  );
   const bmfPlayerRegistry = objectRecord(bmfTelemetryRecord.player_registry);
   const bmfSocketScheduler = objectRecord(bmfTelemetryRecord.socket_scheduler);
   const bmfSocketSchedulerByPath = objectRecord(bmfSocketScheduler.by_path);
@@ -1041,6 +1048,21 @@ export function buildPrometheusMetrics(server: Webserver) {
       'Configured player-registry repair cooldown in milliseconds.',
       'repair_cooldown_ms',
     ],
+    [
+      'bmf_player_registry_unresolved_players',
+      'Current unresolved players in the player-registry snapshot.',
+      'unresolved_players',
+    ],
+    [
+      'bmf_player_registry_repair_backoff_milliseconds',
+      'Current bounded player-registry repair backoff.',
+      'repair_backoff_ms',
+    ],
+    [
+      'bmf_player_registry_repair_failure_streak',
+      'Current consecutive player-registry repair failure count.',
+      'repair_failure_streak',
+    ],
   ] as const;
   const bmfPlayerRegistryCounterMetricDefinitions = [
     [
@@ -1118,6 +1140,46 @@ export function buildPrometheusMetrics(server: Webserver) {
       'Global player scans performed by the player registry.',
       'global_scans',
     ],
+    [
+      'bmf_player_registry_repair_requests_total',
+      'Explicit player-registry repair requests.',
+      'repair_requests',
+    ],
+    [
+      'bmf_player_registry_repair_coalesced_total',
+      'Player-registry repair requests coalesced by an active repair or cooldown.',
+      'repair_coalesced',
+    ],
+    [
+      'bmf_player_registry_connection_generation_mismatches_total',
+      'Controller resolutions rejected because the cached connection generation was not current.',
+      'connection_generation_mismatches',
+    ],
+    [
+      'bmf_private_delivery_delivered_total',
+      'Private replies delivered after exact UUID and connection-generation validation.',
+      'private_delivery_delivered',
+    ],
+    [
+      'bmf_private_delivery_dropped_total',
+      'Private replies dropped instead of guessing or falling back to another recipient.',
+      'private_delivery_dropped',
+    ],
+    [
+      'bmf_private_delivery_expired_total',
+      'Private replies dropped because their immutable delivery deadline elapsed.',
+      'private_delivery_expired',
+    ],
+    [
+      'bmf_private_delivery_invalid_total',
+      'Private replies rejected because the strict identity envelope was invalid.',
+      'private_delivery_invalid',
+    ],
+    [
+      'bmf_private_delivery_stale_total',
+      'Private replies rejected because the UUID session or controller identity was stale.',
+      'private_delivery_stale',
+    ],
   ] as const;
   const bmfPlayerRegistryMetricBlocks = [
     ...bmfPlayerRegistryBooleanMetricDefinitions.flatMap(
@@ -1147,6 +1209,94 @@ export function buildPrometheusMetrics(server: Webserver) {
         ),
     ),
   ];
+  const bmfPlayerRegistryDurationLines: MetricLine[] = [
+    [
+      'repair',
+      'repair_duration_ms_sum',
+      'repair_duration_ms_max',
+      'broad_repairs',
+    ],
+    [
+      'global_scan',
+      'global_scan_duration_ms_sum',
+      'global_scan_duration_ms_max',
+      'global_scans',
+    ],
+  ].flatMap(([phase, sumField, maxField, countField]) => {
+    const count = finiteNumber(bmfPlayerRegistry[countField], 0);
+    return [
+      {
+        name: 'bmf_player_registry_duration_milliseconds',
+        labels: { phase, statistic: 'avg' },
+        value:
+          count > 0
+            ? finiteNumber(bmfPlayerRegistry[sumField], 0) / count
+            : NaN,
+      },
+      {
+        name: 'bmf_player_registry_duration_milliseconds',
+        labels: { phase, statistic: 'max' },
+        value: finiteMetricValue(bmfPlayerRegistry[maxField]),
+      },
+    ];
+  });
+  const bmfOperationClassTotalLines: MetricLine[] = Object.entries(
+    bmfOperationsByClass,
+  ).map(([operationClass, value]) => ({
+    name: 'bmf_operation_total',
+    labels: { operation_class: operationClass },
+    value: finiteMetricValue(objectRecord(value).count),
+  }));
+  const bmfOperationSourceTotalLines: MetricLine[] = Object.entries(
+    bmfOperationsBySource,
+  ).map(([source, value]) => ({
+    name: 'bmf_operation_source_total',
+    labels: { source },
+    value: finiteMetricValue(objectRecord(value).count),
+  }));
+  const bmfOperationOutcomeLines: MetricLine[] = Object.entries(
+    bmfOperationsByOutcome,
+  ).map(([outcome, value]) => ({
+    name: 'bmf_operation_outcome_total',
+    labels: { outcome },
+    value: finiteMetricValue(objectRecord(value).count),
+  }));
+  const bmfOperationCacheResultLines: MetricLine[] = Object.entries(
+    bmfOperationsByCacheResult,
+  ).map(([cacheResult, value]) => ({
+    name: 'bmf_operation_cache_result_total',
+    labels: { cache_result: cacheResult },
+    value: finiteMetricValue(objectRecord(value).count),
+  }));
+  const bmfOperationDurationLines: MetricLine[] = Object.entries(
+    bmfOperationsByClass,
+  ).flatMap(([operationClass, value]) => {
+    const record = objectRecord(value);
+    const count = finiteNumber(record.count, 0);
+    return [
+      ['queue_wait', 'queue_wait_ms_sum', 'queue_wait_ms_max'],
+      ['admission_defer', 'admission_defer_ms_sum', 'admission_defer_ms_max'],
+      ['game_thread', 'game_thread_ms_sum', 'game_thread_ms_max'],
+      ['off_thread', 'off_thread_ms_sum', 'off_thread_ms_max'],
+      ['total', 'total_ms_sum', 'total_ms_max'],
+      [
+        'global_scan',
+        'global_scan_duration_ms_sum',
+        'global_scan_duration_ms_max',
+      ],
+    ].flatMap(([phase, sumField, maxField]) => [
+      {
+        name: 'bmf_operation_duration_milliseconds',
+        labels: { operation_class: operationClass, phase, statistic: 'avg' },
+        value: count > 0 ? finiteNumber(record[sumField], 0) / count : NaN,
+      },
+      {
+        name: 'bmf_operation_duration_milliseconds',
+        labels: { operation_class: operationClass, phase, statistic: 'max' },
+        value: finiteMetricValue(record[maxField]),
+      },
+    ]);
+  });
   const bmfFrameDurationLines: MetricLine[] = [
     {
       name: 'brickadia_frame_delta_milliseconds',
@@ -1552,7 +1702,110 @@ export function buildPrometheusMetrics(server: Webserver) {
         },
       ],
     ),
+    ...metricBlock(
+      'bmf_operation_attribution_enabled',
+      'Whether bounded BMF operation attribution is enabled.',
+      [
+        {
+          name: 'bmf_operation_attribution_enabled',
+          value:
+            typeof bmfOperations.enabled === 'boolean'
+              ? boolGauge(bmfOperations.enabled)
+              : NaN,
+        },
+      ],
+    ),
+    ...metricBlock(
+      'bmf_operation_in_flight',
+      'Current attributed BMF operations in flight.',
+      [
+        {
+          name: 'bmf_operation_in_flight',
+          value: finiteMetricValue(bmfOperations.active),
+        },
+      ],
+    ),
+    ...metricBlock(
+      'bmf_operation_total',
+      'Attributed BMF operations by bounded handler class.',
+      bmfOperationClassTotalLines,
+      'counter',
+    ),
+    ...metricBlock(
+      'bmf_operation_source_total',
+      'Attributed BMF operations by fixed source path.',
+      bmfOperationSourceTotalLines,
+      'counter',
+    ),
+    ...metricBlock(
+      'bmf_operation_outcome_total',
+      'Attributed BMF operations by bounded terminal outcome.',
+      bmfOperationOutcomeLines,
+      'counter',
+    ),
+    ...metricBlock(
+      'bmf_operation_cache_result_total',
+      'Attributed BMF operations by cache result.',
+      bmfOperationCacheResultLines,
+      'counter',
+    ),
+    ...metricBlock(
+      'bmf_operation_duration_milliseconds',
+      'Attributed operation phase duration by bounded handler class.',
+      bmfOperationDurationLines,
+    ),
+    ...metricBlock(
+      'bmf_operation_slow_total',
+      'Attributed operations that crossed a slow-operation threshold.',
+      [
+        {
+          name: 'bmf_operation_slow_total',
+          value: finiteMetricValue(bmfOperations.slow_total),
+        },
+      ],
+      'counter',
+    ),
+    ...metricBlock(
+      'bmf_operation_budget_overrun_total',
+      'Attributed operations exceeding the configured game-thread budget.',
+      [
+        {
+          name: 'bmf_operation_budget_overrun_total',
+          value: finiteMetricValue(bmfOperations.budget_overrun_total),
+        },
+      ],
+      'counter',
+    ),
+    ...metricBlock(
+      'bmf_operation_admission_defer_total',
+      'Budget admission deferrals observed by attributed operations.',
+      [
+        {
+          name: 'bmf_operation_admission_defer_total',
+          value: finiteMetricValue(bmfOperations.admission_defer_total),
+        },
+      ],
+      'counter',
+    ),
+    ...metricBlock(
+      'bmf_operation_lifetime_guard_rejections_total',
+      'Raw-object lifetime guard rejections observed by attributed operations.',
+      [
+        {
+          name: 'bmf_operation_lifetime_guard_rejections_total',
+          value: finiteMetricValue(
+            bmfOperations.lifetime_guard_rejections_total,
+          ),
+        },
+      ],
+      'counter',
+    ),
     ...bmfPlayerRegistryMetricBlocks,
+    ...metricBlock(
+      'bmf_player_registry_duration_milliseconds',
+      'Player-registry repair and global-scan duration.',
+      bmfPlayerRegistryDurationLines,
+    ),
     ...metricBlock(
       'brickadia_frame_telemetry_up',
       'Whether native BMF frame telemetry is readable.',

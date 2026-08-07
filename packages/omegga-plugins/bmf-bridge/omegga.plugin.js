@@ -74,6 +74,24 @@ function env(name) {
   return String(process.env[name] || "").trim();
 }
 
+function runtimeProvenance(writer) {
+  const identity = readJsonFile(env("BMF_PROVENANCE_IDENTITY_PATH")) || {};
+  return {
+    environment: String(identity.environment || "unverified"),
+    brickadiaPid: asNumber(identity.brickadiaPid, 0),
+    omeggaPid: asNumber(identity.omeggaPid, process.pid),
+    processStartTimestamp: asNumber(identity.processStartTimestamp, 0),
+    brickadiaStartTimestamp: asNumber(identity.brickadiaStartTimestamp, 0),
+    omeggaStartTimestamp: asNumber(identity.omeggaStartTimestamp, 0),
+    udpPort: asNumber(identity.udpPort, 0),
+    installationRoot: String(identity.installationRoot || ""),
+    runtimeRoot: String(identity.runtimeRoot || ""),
+    runtimeHash: String(identity.runtimeHash || ""),
+    telemetryWriterIdentity: String(writer || "bmf.omegga.unknown"),
+    telemetryGenerationTimestamp: Date.now(),
+  };
+}
+
 function standardRuntimeDir() {
   const appData =
     env("APPDATA") || path.join(os.homedir(), "AppData", "Roaming");
@@ -811,6 +829,23 @@ module.exports = class BmfBridge {
         console.warn(
           `[BMF_SLOW_OPERATION] ${JSON.stringify(structuredRecord.data || {})}`,
         );
+        if (typeof this.omegga.reportJoinAttributionOperation === "function") {
+          this.omegga.reportJoinAttributionOperation({
+            operationClass: String(
+              structuredRecord.data?.operation_class || "bmf_operation",
+            ),
+            observedAtUnixMs:
+              Number(structuredRecord.data?.finish_timestamp_ms) || Date.now(),
+            durationMs: Number(structuredRecord.data?.total_ms) || 0,
+          });
+        }
+      }
+      if (
+        structuredRecord?.source === "join_correlation" &&
+        structuredRecord?.message === "BMF_JOIN_PHASE" &&
+        typeof this.omegga.reportJoinCorrelationPhase === "function"
+      ) {
+        this.omegga.reportJoinCorrelationPhase(structuredRecord.data || {});
       }
       this.recordEnvelope(message, { transport: "socket" });
       return;
@@ -1162,6 +1197,7 @@ module.exports = class BmfBridge {
     return {
       updatedAt: isoSeconds(),
       version: VERSION,
+      provenance: runtimeProvenance("bmf.omegga.bridge_status"),
       guardrails: GUARDRAILS,
       transport: this.counters.transport,
       paused: this.paused,

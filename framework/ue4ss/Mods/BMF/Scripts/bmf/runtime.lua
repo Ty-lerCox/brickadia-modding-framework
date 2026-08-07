@@ -1,6 +1,19 @@
 local MOD_NAME = "BMF"
 local VERSION = "0.1.0-ea3.cl24045983"
-local ROOT = "ue4ss/main/Mods/" .. MOD_NAME
+local ROOT = (function()
+  if type(debug) == "table" and type(debug.getinfo) == "function" then
+    local info = debug.getinfo(1, "S")
+    local source = info and tostring(info.source or "") or ""
+    if source:sub(1, 1) == "@" then
+      local script_path = source:sub(2):gsub("\\", "/")
+      local discovered_root = script_path:match("^(.*)/Scripts/bmf/runtime%.lua$")
+      if discovered_root and discovered_root ~= "" then
+        return discovered_root
+      end
+    end
+  end
+  return "ue4ss/main/Mods/" .. MOD_NAME
+end)()
 local function append_package_path(path)
   if type(package) ~= "table" or type(package.path) ~= "string" then
     return
@@ -272,6 +285,12 @@ local state = {
       by_source = {},
       by_outcome = {},
       by_cache_result = {},
+      last = nil,
+    },
+    join_correlation = {
+      total = 0,
+      invalid = 0,
+      phases = {},
       last = nil,
     },
     player_registry = {},
@@ -661,6 +680,10 @@ local state = {
     controller_handle_misses = 0,
     targeted_resolutions = 0,
     targeted_failures = 0,
+    authoritative_name_resolutions = 0,
+    authoritative_name_failures = 0,
+    authoritative_name_ambiguities = 0,
+    authoritative_name_scans = 0,
     broad_repairs = 0,
     broad_repair_skipped = 0,
     broad_repair_failures = 0,
@@ -1359,6 +1382,32 @@ local function json_decode(raw)
   return value, nil
 end
 
+function BMF_runtime_provenance(writer)
+  local identity = {}
+  local identity_path = tostring(os.getenv("BMF_PROVENANCE_IDENTITY_PATH") or "")
+  if identity_path ~= "" then
+    local raw = read_file(identity_path)
+    local decoded = raw and json_decode(raw) or nil
+    if type(decoded) == "table" then
+      identity = decoded
+    end
+  end
+  return {
+    environment = tostring(identity.environment or "unverified"),
+    brickadiaPid = tonumber(identity.brickadiaPid) or 0,
+    omeggaPid = tonumber(identity.omeggaPid) or 0,
+    processStartTimestamp = tonumber(identity.processStartTimestamp) or 0,
+    brickadiaStartTimestamp = tonumber(identity.brickadiaStartTimestamp) or 0,
+    omeggaStartTimestamp = tonumber(identity.omeggaStartTimestamp) or 0,
+    udpPort = tonumber(identity.udpPort) or 0,
+    installationRoot = tostring(identity.installationRoot or ""),
+    runtimeRoot = tostring(identity.runtimeRoot or ""),
+    runtimeHash = tostring(identity.runtimeHash or ""),
+    telemetryWriterIdentity = tostring(writer or "bmf.lua.unknown"),
+    telemetryGenerationTimestamp = os.time() * 1000,
+  }
+end
+
 local function result(ok, code, message, data)
   return {
     ok = ok and true or false,
@@ -1611,6 +1660,7 @@ end
 function BMF_telemetry_snapshot()
   local telemetry = state.telemetry
   telemetry.updated_at = BMF_telemetry_now()
+  telemetry.provenance = BMF_runtime_provenance("bmf.lua.telemetry")
   if type(BMF_socket_scheduler_refresh_queue_telemetry) == "function" then
     BMF_socket_scheduler_refresh_queue_telemetry()
   end
@@ -1655,6 +1705,10 @@ function BMF_telemetry_snapshot()
     controller_handle_misses = tonumber(player_registry.controller_handle_misses) or 0,
     targeted_resolutions = tonumber(player_registry.targeted_resolutions) or 0,
     targeted_failures = tonumber(player_registry.targeted_failures) or 0,
+    authoritative_name_resolutions = tonumber(player_registry.authoritative_name_resolutions) or 0,
+    authoritative_name_failures = tonumber(player_registry.authoritative_name_failures) or 0,
+    authoritative_name_ambiguities = tonumber(player_registry.authoritative_name_ambiguities) or 0,
+    authoritative_name_scans = tonumber(player_registry.authoritative_name_scans) or 0,
     broad_repairs = tonumber(player_registry.broad_repairs) or 0,
     broad_repair_skipped = tonumber(player_registry.broad_repair_skipped) or 0,
     broad_repair_failures = tonumber(player_registry.broad_repair_failures) or 0,
@@ -2127,6 +2181,7 @@ write_status = function()
   local parts = {
     "\"state\":\"running\"",
     "\"mod\":\"BMF\"",
+    "\"provenance\":" .. json_encode(BMF_runtime_provenance("bmf.lua.status")),
     "\"version\":" .. json_string(VERSION),
     "\"target_build\":" .. json_string(TARGET_BRICKADIA_BUILD),
     "\"build_detection\":" .. json_string(BUILD_DETECTION_MODE),
@@ -2374,6 +2429,61 @@ end
 function BMF_operation_class_from_text(text, fallback)
   local token = trim_string(tostring(text or "")):match("^(%S+)")
   return BMF_operation_class(token, fallback)
+end
+
+function BMF_join_correlation_phase(correlation_value, phase_value, started_clock, outcome_value, detail)
+  local correlation_id = trim_string(tostring(correlation_value or ""))
+  local phase = trim_string(tostring(phase_value or "")):lower()
+  local outcome = trim_string(tostring(outcome_value or "ok")):lower()
+  local allowed_phases = {
+    bmf_snapshot_ingestion = true,
+    bmf_readiness_transition = true,
+  }
+  local telemetry = state.telemetry.join_correlation
+  if correlation_id == "" then
+    return false
+  end
+  if not correlation_id:match("^join%-%w[%w%-]*$")
+      or #correlation_id > 96
+      or allowed_phases[phase] ~= true
+      or (outcome ~= "ok" and outcome ~= "error" and outcome ~= "dropped") then
+    telemetry.invalid = (tonumber(telemetry.invalid) or 0) + 1
+    return false
+  end
+  local duration_ms = math.max(0, (os.clock() - (tonumber(started_clock) or os.clock())) * 1000)
+  local frame = BMF_operation_frame_snapshot()
+  local ended_at_ms = type(frame) == "table" and tonumber(frame.observed_at_unix_ms) or (os.time() * 1000)
+  local started_at_ms = math.max(0, ended_at_ms - duration_ms)
+  local item = telemetry.phases[phase]
+  if type(item) ~= "table" then
+    item = { count = 0, duration_ms_sum = 0, duration_ms_max = 0, duration_ms_last = 0 }
+    telemetry.phases[phase] = item
+  end
+  item.count = (tonumber(item.count) or 0) + 1
+  item.duration_ms_sum = (tonumber(item.duration_ms_sum) or 0) + duration_ms
+  item.duration_ms_max = math.max(tonumber(item.duration_ms_max) or 0, duration_ms)
+  item.duration_ms_last = duration_ms
+  telemetry.total = (tonumber(telemetry.total) or 0) + 1
+  telemetry.last = {
+    correlationId = correlation_id,
+    phase = phase,
+    outcome = outcome,
+    startedAtUnixMs = started_at_ms,
+    endedAtUnixMs = ended_at_ms,
+    durationMs = duration_ms,
+    detail = type(detail) == "table" and detail or nil,
+  }
+  if type(BMF_socket_send_event_record) == "function" then
+    local event = {
+      ts = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+      level = outcome == "ok" and "info" or "warn",
+      source = "join_correlation",
+      message = "BMF_JOIN_PHASE",
+      data = telemetry.last,
+    }
+    BMF_socket_send_event_record(event, json_encode(event))
+  end
+  return true
 end
 
 function BMF_operation_begin(operation_class, source, request)
@@ -2958,6 +3068,7 @@ local function BMF_socket_write_metadata()
     and state.socket_worker_mode == "EngineTickOneShotChain"
   state.socket.metadata_last_write_epoch = os.time()
   write_file(RUNTIME_DIR .. "/socket.json", json_encode({
+    provenance = BMF_runtime_provenance("bmf.lua.socket_metadata"),
     enabled = state.socket.enabled,
     available = state.socket.available,
     started = state.socket.started,
@@ -6674,6 +6785,13 @@ local function register_builtin_commands()
     local raw = ""
     local source = tostring(options.source or "command")
     local adapter = tostring(options.adapter or "external-cache")
+    local correlation_id = percent_decode(options.correlation or options.correlationid or "")
+    if correlation_id ~= ""
+        and type(state.operation_attribution.current) == "table"
+        and state.operation_attribution.current.finished ~= true then
+      state.operation_attribution.current.request_id = correlation_id
+      BMF_operation_update_stage(state.operation_attribution.current, "player_sync_ingest")
+    end
 
     if options.file and tostring(options.file) ~= "" then
       raw = read_file(tostring(options.file)) or ""
@@ -6718,6 +6836,7 @@ local function register_builtin_commands()
       source = source,
       adapter = adapter,
       persist = option_boolean(options, "persist", true),
+      correlationId = correlation_id,
     })
     local lines = {
       "source=" .. source,
@@ -17606,28 +17725,33 @@ local function minigame_native_player_state_from_controller(controller)
     return nil, ""
   end
 
-  for line in response:gmatch("[^\r\n]+") do
-    local object_name = line:match("^memory_ref_%d+_name=(.+)$")
-    if object_name and object_name:lower():find("playerstate", 1, true) then
-      local player_state = minigame_find_cached_object(
-        object_name,
-        { "BP_PlayerState_C", "BRPlayerState", "PlayerState" }
-      )
-      if minigame_object_valid(player_state) then
-        minigame_player_state_path_by_controller_cache[controller_address] = minigame_object_full_name(player_state)
-        return player_state, "native.BMFSocketDescribeUObject.controller.PlayerState"
-      end
+  local function resolve_player_state_candidate(candidate)
+    local value = trim_string(tostring(candidate or ""))
+    if value == "" or not value:lower():find("playerstate", 1, true) then
+      return nil
     end
-    local full_name = line:match("^memory_ref_%d+_full_name=(.+)$")
-    if full_name and full_name:lower():find("playerstate", 1, true) then
-      local player_state = minigame_find_cached_object(
-        full_name,
-        { "BP_PlayerState_C", "BRPlayerState", "PlayerState" }
-      )
-      if minigame_object_valid(player_state) then
-        minigame_player_state_path_by_controller_cache[controller_address] = minigame_object_full_name(player_state)
-        return player_state, "native.BMFSocketDescribeUObject.controller.PlayerState"
-      end
+    local player_state = minigame_find_cached_object(
+      value,
+      { "BP_PlayerState_C", "BRPlayerState", "PlayerState" }
+    )
+    if not minigame_object_valid(player_state) then
+      return nil
+    end
+    minigame_player_state_path_by_controller_cache[controller_address] =
+      minigame_object_full_name(player_state)
+    return player_state
+  end
+
+  for line in response:gmatch("[^\r\n]+") do
+    -- BMFSocketDescribeUObject emits the explicit player_state_* fields for
+    -- controller objects. Retain memory_ref_* parsing for older native builds.
+    local candidate = line:match("^player_state_full_name=(.+)$")
+      or line:match("^player_state_name=(.+)$")
+      or line:match("^memory_ref_%d+_full_name=(.+)$")
+      or line:match("^memory_ref_%d+_name=(.+)$")
+    local player_state = resolve_player_state_candidate(candidate)
+    if player_state ~= nil then
+      return player_state, "native.BMFSocketDescribeUObject.controller.PlayerState"
     end
   end
   return nil, ""
@@ -22245,16 +22369,119 @@ function live_chat_stable_uuid(value)
   return text:match("(%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x)") or ""
 end
 
-function live_chat_controller_metadata(controller)
+function live_chat_native_controller_binding_metadata(controller, expected_uuid)
   local metadata = {}
+  local canonical_expected_uuid = live_chat_stable_uuid(expected_uuid)
+  if not minigame_object_valid(controller)
+      or canonical_expected_uuid == ""
+      or type(BMFSocketDescribePlayerControllerBinding) ~= "function" then
+    return metadata
+  end
+  local controller_address = minigame_object_address(controller)
+  if controller_address == "" then
+    return metadata
+  end
+  local ok, response = pcall(
+    BMFSocketDescribePlayerControllerBinding,
+    controller_address,
+    canonical_expected_uuid)
+  if not ok or type(response) ~= "string" then
+    return metadata
+  end
+
+  local fields = {}
+  for line in response:gmatch("[^\r\n]+") do
+    local key, value = line:match("^([%w_]+)=(.*)$")
+    if key ~= nil then
+      fields[key] = trim_string(tostring(value or ""))
+    end
+  end
+  if fields.ok ~= "true" then
+    return metadata
+  end
+
+  local function identity_text(value)
+    local text = trim_string(tostring(value or ""))
+    if #text >= 2 and text:sub(1, 1) == '"' and text:sub(-1) == '"' then
+      text = text:sub(2, -2)
+    end
+    return text
+  end
+
+  -- Persist the exact UObject instance name, not GetFullName(). This UE4SS
+  -- build can resolve BP_PlayerController_C_<id> with FindObject but cannot
+  -- round-trip the decorated "Class /Package:Level.Object" label. The native
+  -- helper has already proven this specific controller owns expected_uuid,
+  -- and every use re-proves that UUID before delivery.
+  metadata.controllerPath = first_string(
+    identity_text(fields.controller_name),
+    identity_text(fields.controller_full_name)
+  ) or ""
+  metadata.controllerFullName = identity_text(fields.controller_full_name)
+  metadata.controllerAddress = tostring(fields.controller_address or "")
+  metadata.playerStatePath = first_string(
+    identity_text(fields.player_state_name),
+    identity_text(fields.player_state_full_name)
+  ) or ""
+  metadata.playerStateFullName = identity_text(fields.player_state_full_name)
+  metadata.playerStateAddress = tostring(fields.player_state_address or "")
+  metadata.playerStateSource = "native.BMFSocketDescribePlayerControllerBinding"
+  metadata.bindingSource = tostring(fields.binding_source or "")
+  metadata.uuidMatched = fields.identity_uuid_match == "true"
+
+  local player_name = first_string(
+    identity_text(fields.identity_user_name),
+    identity_text(fields.identity_player_name_private),
+    identity_text(fields.identity_player_name),
+    identity_text(fields.identity_display_name)
+  ) or ""
+  if player_name ~= "" then
+    metadata.name = player_name
+    metadata.username = player_name
+    metadata.userName = player_name
+    metadata.playerName = player_name
+    metadata.displayName = player_name
+  end
+
+  if metadata.uuidMatched == true then
+    metadata.uuid = canonical_expected_uuid
+    metadata.playerId = canonical_expected_uuid
+  end
+  return metadata
+end
+
+function live_chat_controller_metadata(controller, expected_uuid)
+  local canonical_expected_uuid = live_chat_stable_uuid(expected_uuid)
+  local metadata = live_chat_native_controller_binding_metadata(
+    controller,
+    canonical_expected_uuid)
   if not minigame_object_valid(controller) then
     return metadata
   end
 
+  if trim_string(tostring(metadata.playerStatePath or "")) ~= ""
+      and live_chat_stable_uuid(metadata.uuid or metadata.playerId) ~= "" then
+    return metadata
+  end
+
+  -- An exact UUID request must never fall back to the broken generic UE4SS
+  -- property wrappers or infer identity from another field. The bounded native
+  -- reciprocal-object check either proves this controller owns that UUID or
+  -- the caller fails closed.
+  if canonical_expected_uuid ~= "" then
+    return metadata
+  end
+
   local player_state = minigame_try_property(controller, "PlayerState")
+  local player_state_source = "controller.PlayerState"
+  if not minigame_object_valid(player_state) then
+    player_state, player_state_source =
+      minigame_native_player_state_from_controller(controller)
+  end
   if minigame_object_valid(player_state) then
     metadata.playerStatePath = minigame_object_full_name(player_state)
     metadata.playerStateAddress = minigame_object_address(player_state)
+    metadata.playerStateSource = tostring(player_state_source or "")
 
     local values = minigame_live_collect_property_values(
       player_state,
@@ -22394,6 +22621,7 @@ end
 
 function live_chat_collect_targets(options)
   local opts = type(options) == "table" and options or {}
+  local expected_uuid = live_chat_stable_uuid(opts.expectedUuid or opts.uuid)
   local registry = state.player_registry or {}
   local targets = {}
   local seen = {}
@@ -22497,7 +22725,7 @@ function live_chat_collect_targets(options)
             add_target(
               controller,
               "repair.FindAllOf(" .. class_name .. ")[" .. tostring(index) .. "]",
-              live_chat_controller_metadata(controller)
+              live_chat_controller_metadata(controller, expected_uuid)
             )
             if #targets >= LIVE_CHAT_MAX_CONTROLLER_TARGETS then
               break
@@ -22686,13 +22914,22 @@ function live_chat_resolve_strict_target(identity)
     BMF_operation_note_cache_result("miss")
     return nil, {}, "controller_unavailable"
   end
-  local live_metadata = live_chat_controller_metadata(controller)
+  local live_metadata = live_chat_controller_metadata(controller, expected_uuid)
   if trim_string(tostring(live_metadata.playerStatePath or ""))
       ~= expected_player_state_path then
     registry.connection_generation_mismatches =
       (tonumber(registry.connection_generation_mismatches) or 0) + 1
     BMF_operation_note_cache_result("generation_mismatch")
     return nil, {}, "live_player_state_mismatch"
+  end
+
+  local live_uuid = live_chat_stable_uuid(
+    live_metadata.uuid or live_metadata.playerId or "")
+  if live_uuid == "" or live_uuid ~= live_chat_stable_uuid(expected_uuid) then
+    registry.connection_generation_mismatches =
+      (tonumber(registry.connection_generation_mismatches) or 0) + 1
+    BMF_operation_note_cache_result("generation_mismatch")
+    return nil, {}, "live_uuid_mismatch"
   end
 
   local cached_names = {}
@@ -22710,7 +22947,8 @@ function live_chat_resolve_strict_target(identity)
     live_metadata.playerName,
     live_metadata.displayName,
     live_metadata.name) or "")):lower()
-  if live_name == "" or next(cached_names) == nil or cached_names[live_name] ~= true then
+  if live_name ~= "" and
+      (next(cached_names) == nil or cached_names[live_name] ~= true) then
     registry.connection_generation_mismatches =
       (tonumber(registry.connection_generation_mismatches) or 0) + 1
     BMF_operation_note_cache_result("generation_mismatch")
@@ -22730,6 +22968,229 @@ function live_chat_resolve_strict_target(identity)
     source = "player_cache.strict_uuid_generation",
   }
   return target, { target }, "ok"
+end
+
+-- Validate the immutable Omegga-authored identity envelope using plain player
+-- snapshot data only. UUID and connection generation remain authoritative;
+-- senderName is the current, exact runtime address used only when a fresh
+-- controller path must be repaired.
+function live_chat_validate_authoritative_identity(identity)
+  local registry = state.player_registry or {}
+  local expected_uuid = trim_string(tostring(identity and identity.uuid or "")):lower()
+  local expected_name = trim_string(tostring(identity and identity.senderName or ""))
+  local expected_generation = tonumber(identity and identity.connectionGeneration) or 0
+  if expected_uuid == "" or expected_name == ""
+      or #expected_uuid > 128 or #expected_name > 128
+      or expected_name:find("[%c]") ~= nil
+      or expected_generation < 1 or expected_generation % 1 ~= 0 then
+    return nil, "invalid_authoritative_identity"
+  end
+
+  local cached_player = nil
+  for _, candidate in ipairs(live_chat_cached_players()) do
+    local candidate_uuid = trim_string(tostring(
+      candidate.uuid or candidate.id or candidate.playerId or "")):lower()
+    if candidate_uuid == expected_uuid then
+      if cached_player ~= nil then
+        registry.authoritative_name_ambiguities =
+          (tonumber(registry.authoritative_name_ambiguities) or 0) + 1
+        return nil, "ambiguous_uuid"
+      end
+      cached_player = candidate
+    end
+  end
+  if cached_player == nil then
+    return nil, "uuid_not_found"
+  end
+  if (tonumber(cached_player.connectionGeneration) or 0) ~= expected_generation then
+    registry.connection_generation_mismatches =
+      (tonumber(registry.connection_generation_mismatches) or 0) + 1
+    return nil, "connection_generation_mismatch"
+  end
+
+  local expected_name_normalized = expected_name:lower()
+  local current_name_matches = false
+  for _, value in ipairs({
+    tostring(cached_player.name or ""),
+    tostring(cached_player.username or ""),
+    tostring(cached_player.userName or ""),
+    tostring(cached_player.playerName or ""),
+    tostring(cached_player.displayName or ""),
+    tostring(cached_player.originalName or ""),
+  }) do
+    if trim_string(tostring(value or "")):lower() == expected_name_normalized then
+      current_name_matches = true
+      break
+    end
+  end
+  if not current_name_matches then
+    registry.connection_generation_mismatches =
+      (tonumber(registry.connection_generation_mismatches) or 0) + 1
+    return nil, "sender_name_mismatch"
+  end
+  return cached_player, "ok"
+end
+
+function live_chat_controller_exact_name_matches(controller, expected_name)
+  if not live_chat_is_valid_object(controller) then
+    return false, {}
+  end
+  local normalized = trim_string(tostring(expected_name or "")):lower()
+  if normalized == "" then
+    return false, {}
+  end
+  local metadata = live_chat_controller_metadata(controller)
+  for _, value in ipairs({
+    tostring(metadata.name or ""),
+    tostring(metadata.username or ""),
+    tostring(metadata.userName or ""),
+    tostring(metadata.playerName or ""),
+    tostring(metadata.displayName or ""),
+  }) do
+    if trim_string(tostring(value or "")):lower() == normalized then
+      return true, metadata
+    end
+  end
+  return false, metadata
+end
+
+function live_chat_controller_authoritative_identity_matches(
+    controller,
+    expected_uuid,
+    expected_name)
+  local metadata = live_chat_controller_metadata(controller, expected_uuid)
+  local live_uuid = live_chat_stable_uuid(
+    metadata.uuid or metadata.playerId or "")
+  local expected_name_normalized = trim_string(
+    tostring(expected_name or "")):lower()
+  if expected_name_normalized == "" or live_uuid == ""
+      or live_uuid ~= live_chat_stable_uuid(expected_uuid) then
+    return false, metadata
+  end
+
+  -- The name is already required to match the current Omegga UUID/generation
+  -- snapshot before this function is reached. If the build exposes a readable
+  -- live name, retain it as an additional assertion; otherwise the reciprocal
+  -- PlayerState UUID match remains the authoritative native proof.
+  local live_name = trim_string(tostring(first_string(
+    metadata.name,
+    metadata.username,
+    metadata.userName,
+    metadata.playerName,
+    metadata.displayName) or "")):lower()
+  if live_name ~= "" and live_name ~= expected_name_normalized then
+    return false, metadata
+  end
+  return true, metadata
+end
+
+-- Resolve a controller without ever inferring identity from controller count,
+-- array order, a previous recipient, or a partial name. A broad scan is only
+-- allowed as a bounded repair after the UUID+generation+name envelope matches
+-- the current Omegga snapshot. The resulting UObject wrapper is never stored.
+function live_chat_resolve_authoritative_name_target(identity)
+  local registry = state.player_registry or {}
+  local cached_player, identity_reason = live_chat_validate_authoritative_identity(identity)
+  if cached_player == nil then
+    registry.authoritative_name_failures =
+      (tonumber(registry.authoritative_name_failures) or 0) + 1
+    return nil, {}, identity_reason
+  end
+  local expected_uuid = live_chat_stable_uuid(identity.uuid)
+  local expected_name = trim_string(tostring(identity.senderName or ""))
+
+  local strict_target, strict_targets, strict_reason = live_chat_resolve_strict_target({
+    uuid = identity.uuid,
+    connectionGeneration = identity.connectionGeneration,
+  })
+  if strict_target ~= nil then
+    local exact = live_chat_controller_authoritative_identity_matches(
+      strict_target.controller,
+      expected_uuid,
+      expected_name)
+    if exact then
+      registry.authoritative_name_resolutions =
+        (tonumber(registry.authoritative_name_resolutions) or 0) + 1
+      return strict_target, strict_targets, "ok"
+    end
+    registry.authoritative_name_failures =
+      (tonumber(registry.authoritative_name_failures) or 0) + 1
+    return nil, {}, "live_sender_name_mismatch"
+  end
+  if strict_reason ~= "current_paths_unavailable"
+      and strict_reason ~= "controller_unavailable" then
+    registry.authoritative_name_failures =
+      (tonumber(registry.authoritative_name_failures) or 0) + 1
+    return nil, {}, strict_reason
+  end
+
+  local targets, repair_detail = live_chat_collect_targets({
+    repair = true,
+    expectedUuid = expected_uuid,
+  })
+  registry.authoritative_name_scans =
+    (tonumber(registry.authoritative_name_scans) or 0)
+      + (tonumber(repair_detail and repair_detail.globalScans) or 0)
+  local matches = {}
+  for _, target in ipairs(targets or {}) do
+    local exact, metadata = live_chat_controller_authoritative_identity_matches(
+      target.controller,
+      expected_uuid,
+      expected_name)
+    local controller_path = trim_string(tostring(
+      metadata.controllerPath or target.controllerPath or ""))
+    local player_state_path = trim_string(tostring(
+      metadata.playerStatePath or target.playerStatePath or ""))
+    if exact and controller_path ~= "" and player_state_path ~= "" then
+      target.controllerPath = controller_path
+      target.playerStatePath = player_state_path
+      matches[#matches + 1] = target
+    end
+  end
+
+  if #matches ~= 1 then
+    registry.authoritative_name_failures =
+      (tonumber(registry.authoritative_name_failures) or 0) + 1
+    if #matches > 1 then
+      registry.authoritative_name_ambiguities =
+        (tonumber(registry.authoritative_name_ambiguities) or 0) + 1
+      return nil, matches, "exact_name_ambiguous"
+    end
+    if repair_detail and repair_detail.skipped == true then
+      return nil, {}, "exact_name_repair_deferred"
+    end
+    return nil, {}, "exact_name_not_found"
+  end
+
+  local repaired = matches[1]
+  -- Persist plain paths only. Never retain `repaired.controller` or any other
+  -- UObject wrapper beyond this synchronous resolution.
+  cached_player.controllerPath = repaired.controllerPath
+  cached_player.playerStatePath = repaired.playerStatePath
+  cached_player.controllerAvailable = true
+
+  local verified, verified_targets, verified_reason = live_chat_resolve_strict_target({
+    uuid = identity.uuid,
+    connectionGeneration = identity.connectionGeneration,
+  })
+  local verified_exact = verified ~= nil
+    and live_chat_controller_authoritative_identity_matches(
+      verified.controller,
+      expected_uuid,
+      expected_name)
+  if verified == nil or not verified_exact then
+    cached_player.controllerPath = ""
+    cached_player.playerStatePath = ""
+    cached_player.controllerAvailable = false
+    registry.authoritative_name_failures =
+      (tonumber(registry.authoritative_name_failures) or 0) + 1
+    return nil, {}, verified_reason ~= "ok" and verified_reason or "live_sender_name_mismatch"
+  end
+
+  verified.source = "player_cache.authoritative_name_repair"
+  registry.authoritative_name_resolutions =
+    (tonumber(registry.authoritative_name_resolutions) or 0) + 1
+  return verified, verified_targets, "ok"
 end
 
 function live_chat_resolve_target(player)
@@ -22764,7 +23225,17 @@ function live_chat_resolve_target(player)
   -- Validate the freshly resolved controller against the current plain-data
   -- snapshot. The wrapper exists only for this dispatch and is discarded when
   -- this function returns to the caller.
-  local live_metadata = live_chat_controller_metadata(controller)
+  local expected_uuid = live_chat_stable_uuid(
+    cached_player.uuid or cached_player.id or cached_player.playerId or "")
+  local live_metadata = live_chat_controller_metadata(controller, expected_uuid)
+  local live_uuid = live_chat_stable_uuid(
+    live_metadata.uuid or live_metadata.playerId or "")
+  if expected_uuid == "" or live_uuid ~= expected_uuid then
+    registry.connection_generation_mismatches =
+      (tonumber(registry.connection_generation_mismatches) or 0) + 1
+    BMF_operation_note_cache_result("generation_mismatch")
+    return nil, {}
+  end
   local cached_names = {}
   for _, value in ipairs({
     cached_player.username,
@@ -22980,7 +23451,19 @@ function publish_player_cache(cache, options)
   registry.entries = type(players) == "table" and #players or 0
   state.player_cache = cache
   state.player_cache_error = ""
+  local readiness_started_clock = os.clock()
+  local readiness_transitions_before = tonumber(state.connection_readiness.transitions) or 0
   BMFConnectionReadiness.sync(state.connection_readiness, players, os.time() * 1000)
+  BMF_join_correlation_phase(
+    cache.correlationId,
+    "bmf_readiness_transition",
+    readiness_started_clock,
+    "ok",
+    {
+      transitions = math.max(
+        0,
+        (tonumber(state.connection_readiness.transitions) or 0) - readiness_transitions_before),
+    })
   return cache
 end
 
@@ -25129,6 +25612,7 @@ BMF.players.sync = function(records, options)
   end
 
   options = type(options) == "table" and options or {}
+  local ingestion_started_clock = os.clock()
   local normalized = BMF.players.normalizeList(records)
   if not normalized.ok then
     return normalized
@@ -25141,6 +25625,7 @@ BMF.players.sync = function(records, options)
     adapter = tostring(options.adapter or "external-cache"),
     source = tostring(options.source or "external"),
     updatedAt = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    correlationId = trim_string(tostring(options.correlationId or options.correlation or "")),
     players = players,
     invalid = invalid,
   }
@@ -25163,6 +25648,12 @@ BMF.players.sync = function(records, options)
       state.player_registry.persisted_syncs = (tonumber(state.player_registry.persisted_syncs) or 0) + 1
     end
   end
+  BMF_join_correlation_phase(
+    cache.correlationId,
+    "bmf_snapshot_ingestion",
+    ingestion_started_clock,
+    synced and "ok" or "error",
+    { players = #players, invalid = #invalid })
   local response = result(synced, synced and (#invalid > 0 and "PARTIAL" or "OK") or "CACHE_WRITE_FAILED", synced and "Player registry snapshot synced" or "Player registry snapshot could not be published", {
     players = players,
     invalid = invalid,
@@ -27858,6 +28349,7 @@ local function BMF_game_command_tunnel_remember_result(record, request)
   local line = trim_string(request and request.line or "")
   local idempotency_key = trim_string(request and request.idempotencyKey or "")
   local sender_uuid = trim_string(request and request.senderUuid or ""):lower()
+  local sender_name = trim_string(request and request.senderName or "")
   local operation_type = trim_string(request and request.operationType or "")
   local max_bytes = math.max(
     65536,
@@ -27865,15 +28357,17 @@ local function BMF_game_command_tunnel_remember_result(record, request)
   local cached_record, retained_bytes, response_omitted = BMF_socket_replay_record_for_cache(
     record,
     max_bytes,
-    #request_id + #line + #idempotency_key + #sender_uuid + #operation_type)
+    #request_id + #line + #idempotency_key + #sender_uuid + #sender_name + #operation_type)
   local entry = {
     record = cached_record,
     requestId = request_id,
     line = line,
     idempotencyKey = idempotency_key,
     senderUuid = sender_uuid,
+    senderName = sender_name,
     connectionGeneration = tonumber(request and request.connectionGeneration) or 0,
     operationType = operation_type,
+    acceptedAtMs = tonumber(request and request.acceptedAtMs) or 0,
     retainedBytes = retained_bytes,
   }
   tunnel.completed_by_id[request_id] = entry
@@ -27921,6 +28415,7 @@ BMF_game_command_tunnel_send_terminal = function(request, result_state, code, de
     detail = tostring(detail or ""),
     response = type(response) == "string" and response or nil,
     senderUuid = trim_string(request.senderUuid or ""):lower(),
+    senderName = trim_string(request.senderName or ""),
     connectionGeneration = tonumber(request.connectionGeneration) or 0,
     operationType = trim_string(request.operationType or ""),
     acceptedAtMs = tonumber(request.acceptedAtMs) or 0,
@@ -27959,7 +28454,7 @@ BMF_game_command_tunnel_send_terminal = function(request, result_state, code, de
   return record
 end
 
-local function BMF_game_command_tunnel_send_rejection(request_id, result_state, code, detail)
+local function BMF_game_command_tunnel_send_rejection(request_id, result_state, code, detail, identity)
   local tunnel = state.game_command_tunnel
   local normalized_id = trim_string(request_id or "")
   if normalized_id == "" then
@@ -27989,6 +28484,11 @@ local function BMF_game_command_tunnel_send_rejection(request_id, result_state, 
     state = normalized_state,
     code = tostring(code or "UNKNOWN"),
     detail = tostring(detail or ""),
+    senderUuid = trim_string(identity and identity.senderUuid or ""):lower(),
+    senderName = trim_string(identity and identity.senderName or ""),
+    connectionGeneration = tonumber(identity and identity.connectionGeneration) or 0,
+    operationType = trim_string(identity and identity.operationType or ""),
+    acceptedAtMs = tonumber(identity and identity.acceptedAtMs) or 0,
     dispatchMs = 0,
     queueDepth = tonumber(tunnel.queued_count) or 0,
   })
@@ -28008,6 +28508,7 @@ function BMF_game_command_tunnel_identity_operation(request)
   return {
     requestId = trim_string(request and request.id or ""),
     senderUuid = trim_string(request and request.senderUuid or ""):lower(),
+    senderName = trim_string(request and request.senderName or ""),
     connectionGeneration = tonumber(request and request.connectionGeneration) or 0,
     acceptedAtMs = tonumber(request and request.acceptedAtMs) or 0,
     absoluteDeadlineMs = tonumber(request and request.deadlineMs) or 0,
@@ -28032,8 +28533,9 @@ function BMF_game_command_tunnel_readiness_probe(request)
   local tunnel = state.game_command_tunnel
   local uuid = trim_string(request and request.senderUuid or ""):lower()
   local generation = tonumber(request and request.connectionGeneration) or 0
-  local target, _, resolve_reason = live_chat_resolve_strict_target({
+  local target, _, resolve_reason = live_chat_resolve_authoritative_name_target({
     uuid = uuid,
+    senderName = request and request.senderName,
     connectionGeneration = generation,
   })
   if target == nil then
@@ -28046,7 +28548,7 @@ function BMF_game_command_tunnel_readiness_probe(request)
       code,
       os.time() * 1000)
     tunnel.last_readiness_code = code
-    return false, "", code, "exact UUID and connection generation are not currently resolvable"
+    return false, "", code, "exact UUID, current name, and connection generation are not currently resolvable"
   end
 
   local controller_address = type(live_chat_object_key) == "function"
@@ -28092,6 +28594,12 @@ function BMF_game_command_tunnel_readiness_probe(request)
     tostring(fields.detail or (probe_ok and "native callable proof failed" or probe_text))
 end
 
+function BMF_game_command_tunnel_readiness_retryable(code)
+  local normalized = tostring(code or "")
+  return normalized == "STRICT_TARGET_EXACT_NAME_REPAIR_DEFERRED"
+    or normalized:find("^NATIVE_NOT_CALLABLE_") ~= nil
+end
+
 function BMF_game_command_tunnel_acknowledge(request)
   if request.admissionSent == true then return true end
   local tunnel = state.game_command_tunnel
@@ -28103,6 +28611,7 @@ function BMF_game_command_tunnel_acknowledge(request)
     id = request.id,
     state = "accepted",
     senderUuid = request.senderUuid,
+    senderName = request.senderName,
     connectionGeneration = request.connectionGeneration,
     operationType = request.operationType,
     acceptedAtMs = request.acceptedAtMs,
@@ -28277,6 +28786,15 @@ BMF_game_command_tunnel_drain_once = function(request)
               .. tostring(readiness_code),
             nil,
             0)
+        elseif not BMF_game_command_tunnel_readiness_retryable(readiness_code) then
+          tunnel.readiness_rejections = (tonumber(tunnel.readiness_rejections) or 0) + 1
+          BMF_game_command_tunnel_send_terminal(
+            request,
+            "rejected",
+            tostring(readiness_code or "NATIVE_NOT_CALLABLE"),
+            tostring(readiness_detail or "native callability could not be proven exactly"),
+            nil,
+            0)
         elseif BMF_game_command_tunnel_requeue(request) then
           tunnel.readiness_waits = (tonumber(tunnel.readiness_waits) or 0) + 1
           tunnel.last_readiness_code = tostring(readiness_code or "NATIVE_NOT_CALLABLE")
@@ -28295,8 +28813,9 @@ BMF_game_command_tunnel_drain_once = function(request)
           state.connection_readiness,
           BMF_game_command_tunnel_identity_operation(request),
           os.time() * 1000)
-        local final_target, _, final_resolve_reason = live_chat_resolve_strict_target({
+        local final_target, _, final_resolve_reason = live_chat_resolve_authoritative_name_target({
           uuid = request.senderUuid,
+          senderName = request.senderName,
           connectionGeneration = request.connectionGeneration,
         })
         local final_controller_address = final_target ~= nil
@@ -28463,37 +28982,50 @@ BMF_process_game_command_tunnel_request = function(decoded)
   local tunnel = state.game_command_tunnel
   state.socket.received_commands = (tonumber(state.socket.received_commands) or 0) + 1
   local request_id = trim_string(decoded and decoded.id or "")
-  if request_id == "" or #request_id > 128 then
-    return BMF_game_command_tunnel_send_rejection(request_id, "rejected", "INVALID_ID", "id must contain 1-128 bytes")
-  end
-
   local line = trim_string(decoded.line or "")
   local idempotency_key = trim_string(decoded.idempotencyKey or "")
   local sender_uuid = trim_string(decoded.senderUuid or ""):lower()
+  local sender_name = trim_string(decoded.senderName or "")
   local connection_generation = tonumber(decoded.connectionGeneration) or 0
   local accepted_at_ms = tonumber(decoded.acceptedAtMs) or 0
   local operation_type = trim_string(decoded.operationType or "")
   local supplied_issued_at_ms = tonumber(decoded.issuedAtMs)
   local supplied_deadline_ms = tonumber(decoded.deadlineMs)
-  if sender_uuid == "" or #sender_uuid > 128 then
+  local rejection_identity = {
+    senderUuid = sender_uuid,
+    senderName = sender_name,
+    connectionGeneration = connection_generation,
+    acceptedAtMs = accepted_at_ms,
+    operationType = operation_type,
+  }
+  local function reject(result_state, code, detail)
     return BMF_game_command_tunnel_send_rejection(
-      request_id, "rejected", "SENDER_UUID_REQUIRED", "senderUuid must contain 1-128 bytes")
+      request_id,
+      result_state,
+      code,
+      detail,
+      rejection_identity)
+  end
+  if request_id == "" or #request_id > 128 then
+    return reject("rejected", "INVALID_ID", "id must contain 1-128 bytes")
+  end
+  if sender_uuid == "" or #sender_uuid > 128 then
+    return reject("rejected", "SENDER_UUID_REQUIRED", "senderUuid must contain 1-128 bytes")
+  end
+  if sender_name == "" or #sender_name > 128 or sender_name:find("[%c]") ~= nil then
+    return reject("rejected", "SENDER_NAME_REQUIRED", "senderName must contain 1-128 non-control bytes")
   end
   if connection_generation < 1 or connection_generation % 1 ~= 0 then
-    return BMF_game_command_tunnel_send_rejection(
-      request_id, "rejected", "CONNECTION_GENERATION_REQUIRED", "connectionGeneration must be a positive integer")
+    return reject("rejected", "CONNECTION_GENERATION_REQUIRED", "connectionGeneration must be a positive integer")
   end
   if accepted_at_ms <= 0 then
-    return BMF_game_command_tunnel_send_rejection(
-      request_id, "rejected", "ACCEPTED_AT_REQUIRED", "positive acceptedAtMs is required")
+    return reject("rejected", "ACCEPTED_AT_REQUIRED", "positive acceptedAtMs is required")
   end
   if operation_type == "" or #operation_type > 128 then
-    return BMF_game_command_tunnel_send_rejection(
-      request_id, "rejected", "OPERATION_TYPE_REQUIRED", "operationType must contain 1-128 bytes")
+    return reject("rejected", "OPERATION_TYPE_REQUIRED", "operationType must contain 1-128 bytes")
   end
   if (supplied_deadline_ms or 0) <= 0 then
-    return BMF_game_command_tunnel_send_rejection(
-      request_id, "rejected", "DEADLINE_REQUIRED", "positive absolute deadlineMs is required")
+    return reject("rejected", "DEADLINE_REQUIRED", "positive absolute deadlineMs is required")
   end
   local current_session, current_session_reason = BMFConnectionReadiness.current(
     state.connection_readiness,
@@ -28503,19 +29035,32 @@ BMF_process_game_command_tunnel_request = function(decoded)
     state.game_command_tunnel.readiness_rejections =
       (tonumber(state.game_command_tunnel.readiness_rejections) or 0) + 1
     state.game_command_tunnel.last_readiness_code = tostring(current_session_reason or "unknown_current_session")
-    return BMF_game_command_tunnel_send_rejection(
-      request_id,
+    return reject(
       "rejected",
       tostring(current_session_reason or "unknown_current_session"):upper(),
       "sender UUID and connection generation are not the current live session")
+  end
+  local current_player, current_player_reason = live_chat_validate_authoritative_identity({
+    uuid = sender_uuid,
+    senderName = sender_name,
+    connectionGeneration = connection_generation,
+  })
+  if current_player == nil then
+    state.game_command_tunnel.readiness_rejections =
+      (tonumber(state.game_command_tunnel.readiness_rejections) or 0) + 1
+    state.game_command_tunnel.last_readiness_code = tostring(
+      current_player_reason or "authoritative_identity_unavailable")
+    return reject(
+      "rejected",
+      tostring(current_player_reason or "authoritative_identity_unavailable"):upper(),
+      "sender UUID, current Omegga name, and connection generation did not match")
   end
   local identity_now_ms = os.time() * 1000
   if supplied_deadline_ms <= accepted_at_ms or supplied_deadline_ms <= identity_now_ms then
     state.game_command_tunnel.readiness_expirations =
       (tonumber(state.game_command_tunnel.readiness_expirations) or 0) + 1
     state.game_command_tunnel.last_readiness_code = "DEADLINE_EXPIRED"
-    return BMF_game_command_tunnel_send_rejection(
-      request_id,
+    return reject(
       "expired",
       "DEADLINE_EXPIRED",
       "absolute deadlineMs elapsed before duplicate or admission handling")
@@ -28526,8 +29071,10 @@ BMF_process_game_command_tunnel_request = function(decoded)
     if tostring(completed.line or "") ~= line
         or tostring(completed.idempotencyKey or "") ~= idempotency_key
         or tostring(completed.senderUuid or "") ~= sender_uuid
+        or tostring(completed.senderName or "") ~= sender_name
         or tonumber(completed.connectionGeneration) ~= connection_generation
-        or tostring(completed.operationType or "") ~= operation_type then
+        or tostring(completed.operationType or "") ~= operation_type
+        or tonumber(completed.acceptedAtMs) ~= accepted_at_ms then
       BMF_game_command_tunnel_send_json({
         type = "tunnel.result",
         source = "bmf",
@@ -28537,6 +29084,11 @@ BMF_process_game_command_tunnel_request = function(decoded)
         state = "rejected",
         code = "DUPLICATE_ID_CONFLICT",
         detail = "id was already completed with a different command or idempotency key",
+        senderUuid = sender_uuid,
+        senderName = sender_name,
+        connectionGeneration = connection_generation,
+        operationType = operation_type,
+        acceptedAtMs = accepted_at_ms,
         queueDepth = tonumber(tunnel.queued_count) or 0,
       })
       return false
@@ -28551,8 +29103,10 @@ BMF_process_game_command_tunnel_request = function(decoded)
     if active.line ~= line
         or tostring(active.idempotencyKey or "") ~= idempotency_key
         or tostring(active.senderUuid or "") ~= sender_uuid
+        or tostring(active.senderName or "") ~= sender_name
         or tonumber(active.connectionGeneration) ~= connection_generation
-        or tostring(active.operationType or "") ~= operation_type then
+        or tostring(active.operationType or "") ~= operation_type
+        or tonumber(active.acceptedAtMs) ~= accepted_at_ms then
       BMF_game_command_tunnel_send_json({
         type = "tunnel.result",
         source = "bmf",
@@ -28562,6 +29116,11 @@ BMF_process_game_command_tunnel_request = function(decoded)
         state = "rejected",
         code = "DUPLICATE_ID_CONFLICT",
         detail = "id is already active with a different command",
+        senderUuid = sender_uuid,
+        senderName = sender_name,
+        connectionGeneration = connection_generation,
+        operationType = operation_type,
+        acceptedAtMs = accepted_at_ms,
         queueDepth = tonumber(tunnel.queued_count) or 0,
       })
       return false
@@ -28576,6 +29135,7 @@ BMF_process_game_command_tunnel_request = function(decoded)
         state = "accepted",
         duplicate = true,
         senderUuid = active.senderUuid,
+        senderName = active.senderName,
         connectionGeneration = active.connectionGeneration,
         operationType = active.operationType,
         acceptedAtMs = active.acceptedAtMs,
@@ -28592,14 +29152,18 @@ BMF_process_game_command_tunnel_request = function(decoded)
       state = "rejected",
       code = "READINESS_PENDING",
       detail = "duplicate arrived before exact native callability was proven",
+      senderUuid = sender_uuid,
+      senderName = sender_name,
+      connectionGeneration = connection_generation,
+      operationType = operation_type,
+      acceptedAtMs = accepted_at_ms,
       queueDepth = tonumber(tunnel.queued_count) or 0,
     })
     return false
   end
 
   if #idempotency_key > GAME_COMMAND_TUNNEL_MAX_IDEMPOTENCY_KEY_BYTES then
-    return BMF_game_command_tunnel_send_rejection(
-      request_id,
+    return reject(
       "rejected",
       "IDEMPOTENCY_KEY_TOO_LARGE",
       "idempotencyKey exceeds 128 bytes")
@@ -28609,6 +29173,7 @@ BMF_process_game_command_tunnel_request = function(decoded)
     if completed_key ~= nil then
       if tostring(completed_key.line or "") ~= line
           or tostring(completed_key.senderUuid or "") ~= sender_uuid
+          or tostring(completed_key.senderName or "") ~= sender_name
           or tonumber(completed_key.connectionGeneration) ~= connection_generation
           or tostring(completed_key.operationType or "") ~= operation_type then
         BMF_game_command_tunnel_send_json({
@@ -28620,6 +29185,11 @@ BMF_process_game_command_tunnel_request = function(decoded)
           state = "rejected",
           code = "IDEMPOTENCY_KEY_CONFLICT",
           detail = "idempotencyKey was already completed with a different command",
+          senderUuid = sender_uuid,
+          senderName = sender_name,
+          connectionGeneration = connection_generation,
+          operationType = operation_type,
+          acceptedAtMs = accepted_at_ms,
           queueDepth = tonumber(tunnel.queued_count) or 0,
         })
         return false
@@ -28628,6 +29198,11 @@ BMF_process_game_command_tunnel_request = function(decoded)
       replay.id = request_id
       replay.replayed = true
       replay.originalId = completed_key.requestId
+      replay.senderUuid = sender_uuid
+      replay.senderName = sender_name
+      replay.connectionGeneration = connection_generation
+      replay.operationType = operation_type
+      replay.acceptedAtMs = accepted_at_ms
       BMF_game_command_tunnel_send_json(replay)
       return true
     end
@@ -28635,6 +29210,7 @@ BMF_process_game_command_tunnel_request = function(decoded)
     local active_key = tunnel.active_by_idempotency_key[idempotency_key]
     if active_key ~= nil then
       local identity_matches = tostring(active_key.senderUuid or "") == sender_uuid
+        and tostring(active_key.senderName or "") == sender_name
         and tonumber(active_key.connectionGeneration) == connection_generation
         and tostring(active_key.operationType or "") == operation_type
       BMF_game_command_tunnel_send_json({
@@ -28649,6 +29225,11 @@ BMF_process_game_command_tunnel_request = function(decoded)
         detail = active_key.line == line and identity_matches
           and "idempotent command is already accepted under another request id"
           or "idempotencyKey is active with a different command",
+        senderUuid = sender_uuid,
+        senderName = sender_name,
+        connectionGeneration = connection_generation,
+        operationType = operation_type,
+        acceptedAtMs = accepted_at_ms,
         queueDepth = tonumber(tunnel.queued_count) or 0,
       })
       return false
@@ -28656,42 +29237,40 @@ BMF_process_game_command_tunnel_request = function(decoded)
   end
 
   if tunnel.enabled ~= true then
-    return BMF_game_command_tunnel_send_rejection(request_id, "rejected", "TUNNEL_DISABLED", "game command tunnel is disabled")
+    return reject("rejected", "TUNNEL_DISABLED", "game command tunnel is disabled")
   end
   if tunnel.worker_started ~= true
       or state.socket_worker_started ~= true
       or state.socket_worker_mode ~= "EngineTickOneShotChain" then
-    return BMF_game_command_tunnel_send_rejection(
-      request_id,
+    return reject(
       "rejected",
       "TUNNEL_UNAVAILABLE",
       "persistent game-thread socket tunnel worker is unavailable")
   end
   if tonumber(decoded.v) ~= tonumber(tunnel.protocol_version) then
-    return BMF_game_command_tunnel_send_rejection(request_id, "rejected", "UNSUPPORTED_VERSION", "only tunnel protocol v1 is supported")
+    return reject("rejected", "UNSUPPORTED_VERSION", "only tunnel protocol v1 is supported")
   end
   if tostring(decoded.channel or "") ~= tostring(tunnel.channel) then
-    return BMF_game_command_tunnel_send_rejection(request_id, "rejected", "UNSUPPORTED_CHANNEL", "channel must be " .. tostring(tunnel.channel))
+    return reject("rejected", "UNSUPPORTED_CHANNEL", "channel must be " .. tostring(tunnel.channel))
   end
   if line == "" or line:find("\n", 1, true) or line:find("\r", 1, true) then
-    return BMF_game_command_tunnel_send_rejection(request_id, "rejected", "INVALID_LINE", "line must be one non-empty command")
+    return reject("rejected", "INVALID_LINE", "line must be one non-empty command")
   end
   if #line > tunnel.max_line_bytes then
-    return BMF_game_command_tunnel_send_rejection(request_id, "rejected", "LINE_TOO_LARGE", "line exceeds configured byte limit")
+    return reject("rejected", "LINE_TOO_LARGE", "line exceeds configured byte limit")
   end
   if not BMF_game_command_tunnel_line_allowed(line) then
-    return BMF_game_command_tunnel_send_rejection(request_id, "rejected", "COMMAND_NOT_ALLOWED", "only /cityrpgRemote and /cityrpgroute are allowed")
+    return reject("rejected", "COMMAND_NOT_ALLOWED", "only /cityrpgRemote and /cityrpgroute are allowed")
   end
 
   local service_class = tostring(decoded.serviceClass or "interactive"):lower()
   if service_class ~= "interactive" and service_class ~= "bulk" then
-    return BMF_game_command_tunnel_send_rejection(request_id, "rejected", "INVALID_SERVICE_CLASS", "serviceClass must be interactive or bulk")
+    return reject("rejected", "INVALID_SERVICE_CLASS", "serviceClass must be interactive or bulk")
   end
   local now_ms = os.time() * 1000
   if state.socket_admission.enabled == true
       and (supplied_issued_at_ms or 0) <= 0 then
-    return BMF_game_command_tunnel_send_rejection(
-      request_id,
+    return reject(
       "rejected",
       "DEADLINE_REQUIRED",
       "positive issuedAtMs is required while unified bounded admission is enabled")
@@ -28702,7 +29281,7 @@ BMF_process_game_command_tunnel_request = function(decoded)
     and BMF_socket_scheduler_deadline_expired(deadline_ms, issued_at_ms, nil)
     or deadline_ms <= now_ms
   if deadline_ms <= issued_at_ms or deadline_ms <= accepted_at_ms or deadline_expired then
-    return BMF_game_command_tunnel_send_rejection(request_id, "expired", "DEADLINE_EXPIRED", "absolute deadlineMs has elapsed")
+    return reject("expired", "DEADLINE_EXPIRED", "absolute deadlineMs has elapsed")
   end
   local readiness_admitted, readiness_code = BMFConnectionReadiness.admission(
     state.connection_readiness,
@@ -28723,8 +29302,7 @@ BMF_process_game_command_tunnel_request = function(decoded)
       tunnel.readiness_rejections = (tonumber(tunnel.readiness_rejections) or 0) + 1
     end
     tunnel.last_readiness_code = tostring(readiness_code or "READINESS_REJECTED")
-    return BMF_game_command_tunnel_send_rejection(
-      request_id,
+    return reject(
       readiness_expired and "expired" or "rejected",
       tostring(readiness_code or "READINESS_REJECTED"),
       "request identity was not admitted for the current connection generation")
@@ -28734,33 +29312,31 @@ BMF_process_game_command_tunnel_request = function(decoded)
   local class_limit = service_class == "bulk" and tunnel.max_bulk_queue or tunnel.max_interactive_queue
   if state.socket_admission.enabled == true
       and BMF_socket_scheduler_total_depth() >= state.socket_admission.max_queue then
-    return BMF_game_command_tunnel_send_rejection(
-      request_id,
+    return reject(
       "rejected",
       "QUEUE_FULL",
       "unified socket admission queue is full")
   end
   if (tonumber(tunnel.queued_count) or 0) >= tunnel.max_queue then
-    return BMF_game_command_tunnel_send_rejection(request_id, "rejected", "QUEUE_FULL", "game command tunnel queue is full")
+    return reject("rejected", "QUEUE_FULL", "game command tunnel queue is full")
   end
   if #queue >= class_limit then
-    return BMF_game_command_tunnel_send_rejection(request_id, "rejected", "SERVICE_CLASS_FULL", service_class .. " queue budget is full")
+    return reject("rejected", "SERVICE_CLASS_FULL", service_class .. " queue budget is full")
   end
-  local retained_bytes = #line + #request_id + #idempotency_key + #sender_uuid + #operation_type
+  local retained_bytes = #line + #request_id + #idempotency_key + #sender_uuid + #sender_name + #operation_type
   if state.socket_admission.enabled == true
       and (BMF_socket_scheduler_total_bytes() + retained_bytes) > state.socket_admission.max_bytes then
-    return BMF_game_command_tunnel_send_rejection(
-      request_id,
+    return reject(
       "rejected",
       "QUEUE_BYTES_FULL",
       "unified socket admission byte budget is full")
   end
   if ((tonumber(tunnel.queued_bytes) or 0) + retained_bytes) > tunnel.max_bytes then
-    return BMF_game_command_tunnel_send_rejection(request_id, "rejected", "QUEUE_BYTES_FULL", "game command tunnel byte budget is full")
+    return reject("rejected", "QUEUE_BYTES_FULL", "game command tunnel byte budget is full")
   end
   local estimated_wait_ms = ((tonumber(tunnel.queued_count) or 0) + 1) * tunnel.interval_ms
   if (now_ms + estimated_wait_ms) >= deadline_ms then
-    return BMF_game_command_tunnel_send_rejection(request_id, "expired", "DEADLINE_EXPIRED", "estimated queue wait exceeds deadline")
+    return reject("expired", "DEADLINE_EXPIRED", "estimated queue wait exceeds deadline")
   end
 
   local request = {
@@ -28774,6 +29350,7 @@ BMF_process_game_command_tunnel_request = function(decoded)
     issuedAtMs = issued_at_ms,
     acceptedAtMs = accepted_at_ms,
     senderUuid = sender_uuid,
+    senderName = sender_name,
     connectionGeneration = connection_generation,
     operationType = operation_type,
     idempotencyKey = idempotency_key,

@@ -164,6 +164,47 @@ namespace
         return text != "0" && text != "false" && text != "off" && text != "no";
     }
 
+    std::string provenance_json(std::string_view writer)
+    {
+        const std::string identity_path = getenv_narrow("BMF_PROVENANCE_IDENTITY_PATH");
+        if (!identity_path.empty())
+        {
+            try
+            {
+                std::ifstream file(std::filesystem::path(identity_path), std::ios::in | std::ios::binary);
+                std::ostringstream buffer;
+                buffer << file.rdbuf();
+                std::string value = buffer.str();
+                while (!value.empty() &&
+                       (value.back() == ' ' || value.back() == '\t' || value.back() == '\r' || value.back() == '\n'))
+                {
+                    value.pop_back();
+                }
+                if (value.size() >= 2 && value.front() == '{' && value.back() == '}' && value.size() <= 65536)
+                {
+                    value.pop_back();
+                    if (value.size() > 1)
+                    {
+                        value += ',';
+                    }
+                    value += "\"telemetryWriterIdentity\":\"" + json_escape(writer) + "\",";
+                    value += "\"telemetryGenerationTimestamp\":" + std::to_string(unix_time_ms()) + "}";
+                    return value;
+                }
+            }
+            catch (...)
+            {
+            }
+        }
+
+        return "{\"environment\":\"unverified\",\"brickadiaPid\":" +
+               std::to_string(GetCurrentProcessId()) +
+               ",\"omeggaPid\":0,\"processStartTimestamp\":0,\"udpPort\":0," +
+               "\"installationRoot\":\"\",\"runtimeRoot\":\"\",\"runtimeHash\":\"\"," +
+               "\"telemetryWriterIdentity\":\"" + json_escape(writer) +
+               "\",\"telemetryGenerationTimestamp\":" + std::to_string(unix_time_ms()) + "}";
+    }
+
     struct TargetFpsConfig
     {
         uint32_t value = 60;
@@ -870,6 +911,15 @@ namespace
         uint64_t slow_100_total = 0;
     };
 
+    struct AtomicFrameSample
+    {
+        std::atomic<uint64_t> sequence{0};
+        std::atomic<uint64_t> observed_at_unix_ms{0};
+        std::atomic<uint64_t> sample{0};
+        std::atomic<uint64_t> delta_us{0};
+        std::atomic<bool> idle{false};
+    };
+
     class FrameSampler
     {
       public:
@@ -877,7 +927,8 @@ namespace
             : output_path_(default_output_path()),
               started_at_ms_(unix_time_ms()),
               enabled_(env_enabled()),
-              hitch_attribution_enabled_(env_flag_enabled("BMF_FRAME_HITCH_ATTRIBUTION_ENABLED", true))
+              hitch_attribution_enabled_(env_flag_enabled("BMF_FRAME_HITCH_ATTRIBUTION_ENABLED", true)),
+              recent_samples_enabled_(env_flag_enabled("BMF_FRAME_RECENT_SAMPLES_ENABLED", false))
         {
         }
 
@@ -927,6 +978,10 @@ namespace
 
             const uint64_t delta_us = delta_to_microseconds(delta_seconds);
             const uint64_t sample = samples_total_.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (recent_samples_enabled_)
+            {
+                record_recent_sample(delta_us, idle, sample);
+            }
             delta_us_sum_total_.fetch_add(delta_us, std::memory_order_relaxed);
             last_delta_us_.store(delta_us, std::memory_order_relaxed);
             atomic_max(max_delta_us_total_, delta_us);
@@ -1003,6 +1058,7 @@ namespace
                 << "\"started_at_unix_ms\":" << started_at_ms_ << ","
                 << "\"updated_at_unix_ms\":" << unix_time_ms() << ","
                 << "\"path\":\"" << json_escape(output_path_.string()) << "\","
+                << "\"provenance\":" << provenance_json("bmf.native.frame_telemetry") << ","
                 << "\"pacing\":" << g_frame_pacing.status_json() << ","
                 << "\"window\":{"
                 << "\"samples\":" << window.samples << ","
@@ -1029,7 +1085,8 @@ namespace
                 << "\"slow_50_total\":" << slow_50_total_.load(std::memory_order_relaxed) << ","
                 << "\"slow_100_total\":" << slow_100_total_.load(std::memory_order_relaxed)
                 << "},"
-                << "\"spikes\":" << spikes_json()
+                << "\"spikes\":" << spikes_json() << ","
+                << "\"recent_samples\":" << recent_samples_json()
                 << "}\n";
             return out.str();
         }
@@ -1110,6 +1167,54 @@ namespace
                 }
                 first = false;
                 out << spike_json(spike);
+            }
+            out << "]}";
+            return out.str();
+        }
+
+        void record_recent_sample(uint64_t delta_us, bool idle, uint64_t sample)
+        {
+            const uint64_t sequence = recent_sample_sequence_.fetch_add(1, std::memory_order_relaxed) + 1;
+            AtomicFrameSample& slot = recent_samples_[static_cast<size_t>((sequence - 1) % recent_samples_.size())];
+            slot.observed_at_unix_ms.store(unix_time_ms(), std::memory_order_relaxed);
+            slot.sample.store(sample, std::memory_order_relaxed);
+            slot.delta_us.store(delta_us, std::memory_order_relaxed);
+            slot.idle.store(idle, std::memory_order_relaxed);
+            slot.sequence.store(sequence, std::memory_order_release);
+        }
+
+        std::string recent_samples_json() const
+        {
+            std::ostringstream out;
+            out.setf(std::ios::fixed);
+            out.precision(3);
+            out << "{\"enabled\":" << (recent_samples_enabled_ ? "true" : "false") << ",\"recent\":[";
+            if (recent_samples_enabled_)
+            {
+                const uint64_t latest = recent_sample_sequence_.load(std::memory_order_acquire);
+                const uint64_t first = latest > recent_samples_.size() ? latest - recent_samples_.size() + 1 : 1;
+                bool comma = false;
+                for (uint64_t sequence = first; sequence <= latest; ++sequence)
+                {
+                    const AtomicFrameSample& slot =
+                        recent_samples_[static_cast<size_t>((sequence - 1) % recent_samples_.size())];
+                    if (slot.sequence.load(std::memory_order_acquire) != sequence)
+                    {
+                        continue;
+                    }
+                    if (comma)
+                    {
+                        out << ',';
+                    }
+                    comma = true;
+                    out << "{\"sequence\":" << sequence
+                        << ",\"observed_at_unix_ms\":"
+                        << slot.observed_at_unix_ms.load(std::memory_order_relaxed)
+                        << ",\"sample\":" << slot.sample.load(std::memory_order_relaxed)
+                        << ",\"delta_ms\":" << us_to_ms(slot.delta_us.load(std::memory_order_relaxed))
+                        << ",\"idle\":" << (slot.idle.load(std::memory_order_relaxed) ? "true" : "false")
+                        << '}';
+                }
             }
             out << "]}";
             return out.str();
@@ -1214,6 +1319,7 @@ namespace
         uint64_t started_at_ms_ = 0;
         bool enabled_ = true;
         bool hitch_attribution_enabled_ = false;
+        bool recent_samples_enabled_ = false;
         std::atomic<bool> running_{false};
         std::atomic<bool> hook_registered_{false};
         std::thread writer_;
@@ -1225,6 +1331,8 @@ namespace
         uint64_t spike_sequence_ = 0;
         uint64_t last_logged_spike_sequence_ = 0;
         FrameSpike last_spike_{};
+        std::array<AtomicFrameSample, 256> recent_samples_{};
+        std::atomic<uint64_t> recent_sample_sequence_{0};
 
         std::atomic<uint64_t> samples_total_{0};
         std::atomic<uint64_t> idle_samples_total_{0};

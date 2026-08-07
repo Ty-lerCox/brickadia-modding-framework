@@ -20,7 +20,12 @@ const MAIN_FILE_TS = 'omegga.plugin.ts';
 const DOC_FILE = 'doc.json';
 const ACCESS_FILE = 'access.json';
 const PLUGIN_FILE = 'plugin.json';
-const SAFE_WORKER_ENV_PREFIXES = ['OMEGGA_BMF_', 'OMEGGA_UE4SS_', 'CITYRPG_'];
+const SAFE_WORKER_ENV_PREFIXES = [
+  'OMEGGA_BMF_',
+  'OMEGGA_UE4SS_',
+  'BMF_PROVENANCE_',
+  'CITYRPG_',
+];
 
 function normalizeRegisteredCommands(value: unknown): string[] | undefined {
   if (
@@ -312,6 +317,26 @@ export default class NodeVmPlugin extends Plugin {
       this.commands = registers;
       this.notify(resp, true);
     });
+    this.plugin.on('join-correlation.phase', (resp, record) => {
+      const source =
+        record && typeof record === 'object' && !Array.isArray(record)
+          ? record
+          : {};
+      this.omegga.recordJoinCorrelationPhase({
+        ...source,
+        component: name,
+      });
+      if (resp) this.notify(resp, true);
+    });
+    this.plugin.on('join-attribution.operation', (resp, record) => {
+      if (record && typeof record === 'object' && !Array.isArray(record)) {
+        this.omegga.recordJoinAttributionOperation({
+          ...record,
+          component: name,
+        });
+      }
+      if (resp) this.notify(resp, true);
+    });
 
     // listen on every message, post them to to the worker
     this.eventPassthrough = this.eventPassthrough.bind(this);
@@ -570,10 +595,23 @@ export default class NodeVmPlugin extends Plugin {
     if (!this.#worker) return;
 
     try {
+      let forwardedArgs = args;
+      if (
+        args[0] === 'join' &&
+        args[2] &&
+        typeof args[2] === 'object' &&
+        !Array.isArray(args[2])
+      ) {
+        forwardedArgs = [
+          args[0],
+          args[1],
+          { ...args[2], workerDispatchStartedAtUnixMs: Date.now() },
+        ];
+      }
       // post the message
       this.#worker.postMessage({
         action: 'brickadiaEvent',
-        args,
+        args: forwardedArgs,
       });
     } catch (e) {
       // make sure post message doesn't crash the entire app

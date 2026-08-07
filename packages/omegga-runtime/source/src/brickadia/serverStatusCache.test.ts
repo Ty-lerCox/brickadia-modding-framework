@@ -175,7 +175,12 @@ describe('UE4SS server status cache', () => {
     expect(serverSource).not.toContain('readBrickadiaBuildInfo(');
     expect(serverSource).not.toContain('getBrickadiaLogPath(');
     expect(serverSource).toContain('updateBrickadiaBuildInfoSnapshot(');
-    expect(serverSource).toContain("normalizedLine === 'Server.Status'");
+    expect(serverSource).toContain(
+      "new Set(['Server.Status', 'br.Server.Status'])",
+    );
+    expect(serverSource).toContain(
+      'SERVER_STATUS_COMMANDS.has(normalizedLine)',
+    );
     expect(serverSource).toContain('this.emitSyntheticServerStatus();');
     expect(serverSource).not.toContain('.requestServerStatus(');
   });

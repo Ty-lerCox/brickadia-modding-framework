@@ -38,6 +38,12 @@ import { basename, dirname, join } from 'path';
 import { AutoRestartConfig } from '..';
 import { execFileSync } from 'node:child_process';
 import commandInjector from './commandInjector';
+import {
+  JoinCorrelationContext,
+  JoinCorrelationPhaseRecord,
+  JoinCorrelationTracker,
+  normalizeJoinCorrelationContext,
+} from './joinCorrelation';
 import MATCHERS from './matchers';
 import Player from './player';
 import { PluginLoader } from './plugin';
@@ -735,6 +741,7 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
   >();
   _privateDeliveryDropCount = 0;
   _nativePrefabFallbackCount = 0;
+  _joinCorrelation: JoinCorrelationTracker;
 
   getServerStatus: () => Promise<IServerStatus>;
   listMinigames: () => Promise<IMinigameList>;
@@ -747,6 +754,8 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
   constructor(serverPath: string, cfg: IConfig, options: IOmeggaOptions = {}) {
     super(serverPath, cfg);
     this.verbose = Logger.VERBOSE;
+    this._joinCorrelation = new JoinCorrelationTracker();
+    this.on('line', (line: string) => this._joinCorrelation.handleLine(line));
 
     Logger.verbose('Running omegga', `v${VERSION}`.green);
     Logger.verbose('Versions', process.versions);
@@ -861,18 +870,12 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
       if (!this.stopping) this.stop();
     });
 
-    this.on('join', (player: OmeggaPlayer) => {
-      this._playerJoinedAt.set(player.id, Date.now());
-      const generation = (this._playerConnectionSerial.get(player.id) ?? 0) + 1;
-      this._playerConnectionSerial.set(player.id, generation);
-      player.connectionGeneration = generation;
-      this._verifiedPrivateControllers.delete(player.id);
-      this._activePlayerConnections.set(player.id, {
-        generation,
-        controller: player.controller,
-        state: player.state,
-      });
-    });
+    this.on(
+      'join',
+      (player: OmeggaPlayer, context?: JoinCorrelationContext) => {
+        this.preparePlayerJoinLifecycle(player, context);
+      },
+    );
 
     this.on('leave', (player: OmeggaPlayer) => {
       this._playerJoinedAt.delete(player.id);
@@ -1197,6 +1200,73 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
         Logger.errorp('native prefab spawn command failed', error);
       });
     });
+  }
+
+  createJoinCorrelation(logObservedAtUnixMs = Date.now()) {
+    return this._joinCorrelation.create(logObservedAtUnixMs);
+  }
+
+  recordJoinCorrelationPhase(record: JoinCorrelationPhaseRecord | unknown) {
+    return this._joinCorrelation.record(record);
+  }
+
+  recordJoinAttributionOperation(record: {
+    operationClass: string;
+    observedAtUnixMs?: number;
+    durationMs?: number;
+    component?: string;
+  }) {
+    this._joinCorrelation.noteOperation(record);
+  }
+
+  getJoinCorrelationMetrics() {
+    return this._joinCorrelation.metricsSnapshot();
+  }
+
+  preparePlayerJoinLifecycle(
+    player: OmeggaPlayer,
+    contextValue?: JoinCorrelationContext | unknown,
+  ) {
+    const context = normalizeJoinCorrelationContext(contextValue);
+    const contextTarget =
+      contextValue &&
+      typeof contextValue === 'object' &&
+      !Array.isArray(contextValue)
+        ? (contextValue as JoinCorrelationContext)
+        : undefined;
+    const active = this._activePlayerConnections.get(player.id);
+    if (
+      active &&
+      player.connectionGeneration === active.generation &&
+      context?.connectionGeneration === active.generation
+    ) {
+      return active.generation;
+    }
+
+    const startedAtUnixMs = Date.now();
+    this._playerJoinedAt.set(player.id, startedAtUnixMs);
+    const generation = (this._playerConnectionSerial.get(player.id) ?? 0) + 1;
+    this._playerConnectionSerial.set(player.id, generation);
+    player.connectionGeneration = generation;
+    if (contextTarget) contextTarget.connectionGeneration = generation;
+    this._verifiedPrivateControllers.delete(player.id);
+    this._activePlayerConnections.set(player.id, {
+      generation,
+      controller: player.controller,
+      state: player.state,
+    });
+    if (context) {
+      this.recordJoinCorrelationPhase({
+        correlationId: context.correlationId,
+        phase: 'connection_generation',
+        outcome: 'ok',
+        startedAtUnixMs,
+        endedAtUnixMs: Date.now(),
+        component: 'omegga_lifecycle_registry',
+        detail: { connectionGeneration: generation },
+      });
+    }
+    return generation;
   }
 
   async handleBrickRegionSaveCommand(name: string, ...args: string[]) {
@@ -3483,7 +3553,8 @@ export default class Omegga extends OmeggaWrapper implements OmeggaLike {
       Boolean(active.controller) && active.controller !== controller;
     const stateReplaced = Boolean(active.state) && active.state !== state;
     if (controllerReplaced || stateReplaced) {
-      const generation = (this._playerConnectionSerial.get(player.id) ?? active.generation) + 1;
+      const generation =
+        (this._playerConnectionSerial.get(player.id) ?? active.generation) + 1;
       this._playerConnectionSerial.set(player.id, generation);
       active.generation = generation;
       player.connectionGeneration = generation;

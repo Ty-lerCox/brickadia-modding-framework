@@ -1,4 +1,8 @@
 import Player from '@omegga/player';
+import type {
+  JoinCorrelationContext,
+  JoinCorrelationPhaseRecord,
+} from '../joinCorrelation';
 import { MatchGenerator } from './types';
 
 export type StrictPlayerBindingRecord = {
@@ -11,7 +15,8 @@ const parseFields = (value: string) => {
   const fields: Record<string, string> = {};
   for (const part of value.split('|')) {
     const separator = part.indexOf('=');
-    if (separator >= 0) fields[part.slice(0, separator)] = part.slice(separator + 1);
+    if (separator >= 0)
+      fields[part.slice(0, separator)] = part.slice(separator + 1);
   }
   return fields;
 };
@@ -42,8 +47,12 @@ export const parseStrictPlayerBindingRecords = (
     const match = line.match(/^player_binding_\d+=(.*)$/);
     if (!match) continue;
     const fields = parseFields(match[1]);
-    const uuid = String(fields.uuid ?? '').trim().toLowerCase();
-    const controller = fields.controller?.match(/BP_PlayerController_C_\d+/)?.[0];
+    const uuid = String(fields.uuid ?? '')
+      .trim()
+      .toLowerCase();
+    const controller = fields.controller?.match(
+      /BP_PlayerController_C_\d+/,
+    )?.[0];
     const state = fields.state?.match(/BP_PlayerState_C_\d+/)?.[0];
     if (stableUuid.test(uuid) && controller && state)
       candidates.push({ uuid, controller, state });
@@ -65,6 +74,21 @@ export const parseStrictPlayerBindingRecords = (
 };
 
 const join: MatchGenerator<Player> = omegga => {
+  type CorrelatedPlayer = Player & {
+    joinCorrelationContext?: JoinCorrelationContext;
+  };
+  const attribution = omegga as typeof omegga & {
+    createJoinCorrelation?: (
+      logObservedAtUnixMs?: number,
+    ) => JoinCorrelationContext | undefined;
+    preparePlayerJoinLifecycle?: (
+      player: Player,
+      context?: JoinCorrelationContext,
+    ) => number;
+    recordJoinCorrelationPhase?: (
+      record: JoinCorrelationPhaseRecord,
+    ) => boolean;
+  };
   type UserJoinInfo = {
     counter: string;
     UserName?: string;
@@ -140,10 +164,11 @@ const join: MatchGenerator<Player> = omegga => {
     );
   };
 
-  const emitRawPlayers = () =>
+  const emitRawPlayers = (context?: JoinCorrelationContext) =>
     omegga.emit(
       'plugin:players:raw',
       omegga.players.map(p => p.raw()),
+      context,
     );
 
   const schedulePlayerStateLookup = () => {
@@ -200,26 +225,63 @@ const join: MatchGenerator<Player> = omegga => {
     if (typeof execute !== 'function') return false;
     const unresolved = omegga.players.filter(player => !player.controller);
     if (!unresolved.length) return true;
-    const response = await execute.call(
-      omegga,
-      'Omegga.Bridge.ListPlayerBindings',
-      5000,
-    );
+    const context = unresolved
+      .map(player => (player as CorrelatedPlayer).joinCorrelationContext)
+      .find(Boolean);
+    const startedAtUnixMs = Date.now();
+    let response: unknown;
+    try {
+      response = await execute.call(
+        omegga,
+        'Omegga.Bridge.ListPlayerBindings',
+        5000,
+      );
+    } catch (error) {
+      if (context) {
+        attribution.recordJoinCorrelationPhase?.({
+          correlationId: context.correlationId,
+          phase: 'player_lookup_reconciliation',
+          outcome: 'error',
+          startedAtUnixMs,
+          endedAtUnixMs: Date.now(),
+          component: 'omegga_join_reconciliation',
+        });
+      }
+      throw error;
+    }
     const records = parseStrictPlayerBindingRecords(response);
     const assignments = new Map<Player, StrictPlayerBindingRecord>();
     for (const player of unresolved) {
-      const uuid = String(player.id || '').trim().toLowerCase();
+      const uuid = String(player.id || '')
+        .trim()
+        .toLowerCase();
       const matches = records.filter(record => record.uuid === uuid);
       if (matches.length === 1) assignments.set(player, matches[0]);
     }
     for (const [player, record] of assignments) {
-      if (!bindControllerIdentity(player, record.controller, record.state)) continue;
+      if (!bindControllerIdentity(player, record.controller, record.state))
+        continue;
       const pending = joiningPlayers.find(
         candidate => candidate.player === player || candidate.id === player.id,
       );
       if (pending) joiningPlayers.splice(joiningPlayers.indexOf(pending), 1);
+      delete (player as CorrelatedPlayer).joinCorrelationContext;
     }
-    if (assignments.size) emitRawPlayers();
+    if (context) {
+      attribution.recordJoinCorrelationPhase?.({
+        correlationId: context.correlationId,
+        phase: 'player_lookup_reconciliation',
+        outcome: 'ok',
+        startedAtUnixMs,
+        endedAtUnixMs: Date.now(),
+        component: 'omegga_join_reconciliation',
+        detail: {
+          unresolved: unresolved.length,
+          assignments: assignments.size,
+        },
+      });
+    }
+    if (assignments.size) emitRawPlayers(context);
     return assignments.size === unresolved.length;
   };
 
@@ -291,6 +353,7 @@ const join: MatchGenerator<Player> = omegga => {
 
           // LogNet lets us know the player successfully joined
         } else if (generator == 'LogNet') {
+          const logObservedAtUnixMs = Date.now();
           // find which player joined
           const match = data.match(/^Join succeeded: (.+)$/);
 
@@ -322,6 +385,11 @@ const join: MatchGenerator<Player> = omegga => {
               '',
               '',
             );
+            const context =
+              attribution.createJoinCorrelation?.(logObservedAtUnixMs);
+            if (context) {
+              (player as CorrelatedPlayer).joinCorrelationContext = context;
+            }
 
             // found joined player, now we need to find the BRPlayerState
             joiningPlayers.push({
@@ -345,6 +413,7 @@ const join: MatchGenerator<Player> = omegga => {
     },
     // when there's a match, emit a join event and add the player to the player list
     callback(player) {
+      const context = (player as CorrelatedPlayer).joinCorrelationContext;
       const existingPlayer = omegga.players.find(
         p =>
           (player.id && p.id === player.id) ||
@@ -357,22 +426,38 @@ const join: MatchGenerator<Player> = omegga => {
         existingPlayer.displayName = player.displayName;
         existingPlayer.id = player.id;
         if (player.controller && player.state) {
-          bindControllerIdentity(existingPlayer, player.controller, player.state);
+          bindControllerIdentity(
+            existingPlayer,
+            player.controller,
+            player.state,
+          );
         }
         ensurePendingStateLookup(existingPlayer);
         scheduleControllerLookup();
-        emitRawPlayers();
+        emitRawPlayers(context);
         return;
       }
 
-      omegga.emit('join', player);
+      attribution.preparePlayerJoinLifecycle?.(player, context);
+      const emissionStartedAtUnixMs = Date.now();
+      omegga.emit('join', player, context);
+      if (context) {
+        attribution.recordJoinCorrelationPhase?.({
+          correlationId: context.correlationId,
+          phase: 'join_event_emission',
+          outcome: 'ok',
+          startedAtUnixMs: emissionStartedAtUnixMs,
+          endedAtUnixMs: Date.now(),
+          component: 'omegga_event_emitter',
+        });
+      }
       omegga.players.push(player);
       if (player.controller && player.state) {
         bindControllerIdentity(player, player.controller, player.state);
       }
       ensurePendingStateLookup(player);
       scheduleControllerLookup();
-      emitRawPlayers();
+      emitRawPlayers(context);
     },
   };
 };

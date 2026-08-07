@@ -51,6 +51,28 @@ function envFlag(name) {
   return /^(1|true|yes|on)$/i.test(String(value).trim());
 }
 
+function runtimeProvenance(writer) {
+  let identity = {};
+  const identityPath = envValue("BMF_PROVENANCE_IDENTITY_PATH");
+  try {
+    identity = JSON.parse(fs.readFileSync(identityPath, "utf8"));
+  } catch (_error) {}
+  return {
+    environment: String(identity.environment || "unverified"),
+    brickadiaPid: asNumber(identity.brickadiaPid, 0),
+    omeggaPid: asNumber(identity.omeggaPid, process.pid),
+    processStartTimestamp: asNumber(identity.processStartTimestamp, 0),
+    brickadiaStartTimestamp: asNumber(identity.brickadiaStartTimestamp, 0),
+    omeggaStartTimestamp: asNumber(identity.omeggaStartTimestamp, 0),
+    udpPort: asNumber(identity.udpPort, 0),
+    installationRoot: String(identity.installationRoot || ""),
+    runtimeRoot: String(identity.runtimeRoot || ""),
+    runtimeHash: String(identity.runtimeHash || ""),
+    telemetryWriterIdentity: String(writer || "bmf.omegga.unknown"),
+    telemetryGenerationTimestamp: Date.now(),
+  };
+}
+
 function commandValue(value) {
   return encodeURIComponent(String(value ?? ""));
 }
@@ -571,11 +593,14 @@ module.exports = class BmfPlayerSync {
     this.config = config || {};
     this.timer = null;
     this.interval = null;
+    this.provenanceTimer = null;
     this.lastPlayerCacheSignature = "";
     this.lastPublishedPlayerCacheSignature = "";
     this.lastRejectedPlayerCommandSignature = "";
     this.syncInFlight = null;
     this.pendingSyncReason = "";
+    this.pendingSyncContext = null;
+    this.scheduledSyncContext = null;
     this.connectionGenerationByUuid = new Map();
     this.syncCounters = {
       triggersCoalesced: 0,
@@ -608,6 +633,15 @@ module.exports = class BmfPlayerSync {
     }
     this.scheduleSync("init");
     this.startPeriodicSync();
+    if (envValue("BMF_PROVENANCE_IDENTITY_PATH")) {
+      this.provenanceTimer = setTimeout(() => {
+        this.provenanceTimer = null;
+        this.writeStatus("provenance-refresh");
+      }, 10000);
+      if (typeof this.provenanceTimer.unref === "function") {
+        this.provenanceTimer.unref();
+      }
+    }
     return { registeredCommands: ["bmfsyncplayers"] };
   }
 
@@ -616,6 +650,8 @@ module.exports = class BmfPlayerSync {
     this.timer = null;
     if (this.interval) clearInterval(this.interval);
     this.interval = null;
+    if (this.provenanceTimer) clearTimeout(this.provenanceTimer);
+    this.provenanceTimer = null;
     if (typeof this.omegga.off === "function") {
       this.omegga.off("join", this.handlePlayerChange);
       this.omegga.off("leave", this.handlePlayerChange);
@@ -636,12 +672,12 @@ module.exports = class BmfPlayerSync {
     }
   }
 
-  handlePlayerChange() {
-    this.scheduleSync("player-change");
+  handlePlayerChange(_player, context) {
+    this.scheduleSync("player-change", context);
   }
 
-  handleRawPlayersChanged() {
-    this.scheduleSync("raw-player-change");
+  handleRawPlayersChanged(_players, context) {
+    this.scheduleSync("raw-player-change", context);
   }
 
   handleManualSync() {
@@ -1279,6 +1315,7 @@ module.exports = class BmfPlayerSync {
       schemaVersion: 1,
       adapter: "bmf-player-sync",
       updatedAt: isoSeconds(),
+      provenance: runtimeProvenance("bmf.omegga.player_sync_status"),
       reason: reason || "sync",
       runtimeDir: this.runtimeDir,
       playerCachePath: this.playerCachePath,
@@ -1506,7 +1543,7 @@ module.exports = class BmfPlayerSync {
     return records;
   }
 
-  writePlayerCache(players, source, preparedRecords = null) {
+  writePlayerCache(players, source, preparedRecords = null, contextValue = null) {
     const cachePath = this.playerCachePath;
     if (!cachePath) {
       console.warn("[bmf-player-sync] player cache path is not configured");
@@ -1526,11 +1563,13 @@ module.exports = class BmfPlayerSync {
     if (signature === this.lastPlayerCacheSignature && fs.existsSync(cachePath))
       return false;
 
+    const context = this.normalizeJoinContext(contextValue);
     const cache = {
       schemaVersion: 1,
       adapter: "omegga-cache",
       source,
       updatedAt: isoSeconds(),
+      ...(context ? { correlationId: context.correlationId } : {}),
       players: records,
       invalid: [],
     };
@@ -1553,12 +1592,48 @@ module.exports = class BmfPlayerSync {
     }
   }
 
-  scheduleSync(reason) {
+  normalizeJoinContext(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const correlationId = String(value.correlationId || "").trim();
+    if (!/^join-[A-Za-z0-9-]{1,90}$/.test(correlationId)) return null;
+    const generation = Number(value.connectionGeneration);
+    return {
+      schemaVersion: 1,
+      correlationId,
+      logObservedAtUnixMs: Number(value.logObservedAtUnixMs) || Date.now(),
+      matcherCompletedAtUnixMs:
+        Number(value.matcherCompletedAtUnixMs) || Date.now(),
+      ...(Number.isSafeInteger(generation) && generation > 0
+        ? { connectionGeneration: generation }
+        : {}),
+    };
+  }
+
+  reportJoinPhase(contextValue, phase, startedAtUnixMs, outcome = "ok", detail) {
+    const context = this.normalizeJoinContext(contextValue);
+    if (!context || typeof this.omegga.reportJoinCorrelationPhase !== "function") {
+      return;
+    }
+    this.omegga.reportJoinCorrelationPhase({
+      correlationId: context.correlationId,
+      phase,
+      outcome,
+      startedAtUnixMs,
+      endedAtUnixMs: Date.now(),
+      ...(detail && typeof detail === "object" ? { detail } : {}),
+    });
+  }
+
+  scheduleSync(reason, contextValue) {
     if (this.timer) clearTimeout(this.timer);
+    const context = this.normalizeJoinContext(contextValue);
+    if (context) this.scheduledSyncContext = context;
     const delay = Math.max(0, asNumber(this.config.syncDelayMs, 250));
     this.timer = setTimeout(() => {
       this.timer = null;
-      this.sync(reason).catch((error) => {
+      const scheduledContext = this.scheduledSyncContext;
+      this.scheduledSyncContext = null;
+      this.sync(reason, scheduledContext).catch((error) => {
         console.warn(
           `[bmf-player-sync] sync failed: ${error.message || error}`,
         );
@@ -1566,29 +1641,36 @@ module.exports = class BmfPlayerSync {
     }, delay);
   }
 
-  async sync(reason) {
+  async sync(reason, contextValue) {
     const requestedReason = String(reason || "sync");
+    const requestedContext = this.normalizeJoinContext(contextValue);
     if (this.syncInFlight) {
       // Collapse bursts while a snapshot is being assembled. The currently
       // running sync finishes, then one pass publishes the newest state.
       this.syncCounters.triggersCoalesced += 1;
       this.pendingSyncReason = requestedReason;
+      if (requestedContext) this.pendingSyncContext = requestedContext;
       return this.syncInFlight;
     }
 
     let nextReason = requestedReason;
+    let nextContext = requestedContext;
     const run = (async () => {
       let passes = 0;
       while (nextReason && passes < 2) {
         passes += 1;
         this.pendingSyncReason = "";
-        await this.performSync(nextReason);
+        this.pendingSyncContext = null;
+        await this.performSync(nextReason, nextContext);
         nextReason = this.pendingSyncReason;
+        nextContext = this.pendingSyncContext;
       }
       if (nextReason) {
         this.pendingSyncReason = "";
+        const followUpContext = this.pendingSyncContext;
+        this.pendingSyncContext = null;
         this.syncCounters.followUpsRescheduled += 1;
-        this.scheduleSync(nextReason);
+        this.scheduleSync(nextReason, followUpContext);
       }
     })();
     this.syncInFlight = run;
@@ -1599,7 +1681,9 @@ module.exports = class BmfPlayerSync {
     }
   }
 
-  async performSync(reason) {
+  async performSync(reason, contextValue) {
+    const context = this.normalizeJoinContext(contextValue);
+    const snapshotStartedAtUnixMs = Date.now();
     const omeggaPlayers = compactPlayers(
       typeof this.omegga.getPlayers === "function"
         ? this.omegga.getPlayers()
@@ -1618,6 +1702,9 @@ module.exports = class BmfPlayerSync {
     const records = this.applyConnectionGenerations(
       stablePlayerRecords(players.map(cachePlayerRecord)),
     );
+    this.reportJoinPhase(context, "player_sync_snapshot", snapshotStartedAtUnixMs, "ok", {
+      players: records.length,
+    });
     const positionSnapshot = this.writePositionSnapshot(
       positionPlayers,
       source,
@@ -1641,7 +1728,14 @@ module.exports = class BmfPlayerSync {
     ) {
       // Keep the durable JSON snapshot on the Node side so the game-thread
       // command only publishes the already-copied records into BMF memory.
-      const cacheWritten = this.writePlayerCache(players, source, records);
+      const cacheWriteStartedAtUnixMs = Date.now();
+      const cacheWritten = this.writePlayerCache(players, source, records, context);
+      this.reportJoinPhase(
+        context,
+        "player_sync_file_publication",
+        cacheWriteStartedAtUnixMs,
+        cacheWritten ? "ok" : "dropped",
+      );
       if (cacheWritten) this.syncCounters.cacheWrites += 1;
       else this.syncCounters.cacheWritesSuppressed += 1;
       const commandRecords = records.map(commandPlayerRecord);
@@ -1651,12 +1745,22 @@ module.exports = class BmfPlayerSync {
         this.writeStatus("sync", { ...syncStatus, outcome: "unchanged" });
         return;
       }
+      const serializationStartedAtUnixMs = Date.now();
+      const serializedCommandRecords = JSON.stringify(commandRecords);
+      this.reportJoinPhase(
+        context,
+        "player_sync_serialization",
+        serializationStartedAtUnixMs,
+      );
       const command = [
         "bmf.players.sync",
         "adapter=omegga-cache",
         `source=${source}`,
         "persist=false",
-        `players=${JSON.stringify(commandRecords)}`,
+        ...(context
+          ? [`correlation=${encodeURIComponent(context.correlationId)}`]
+          : []),
+        `players=${serializedCommandRecords}`,
       ].join(" ");
       const maxCommandBytes = Math.max(
         1024,
@@ -1689,11 +1793,18 @@ module.exports = class BmfPlayerSync {
       }
       this.lastRejectedPlayerCommandSignature = "";
 
+      const bridgeStartedAtUnixMs = Date.now();
       const published = await this.queueCommand(
         "players_sync",
         command,
         `[bmf-player-sync] queued ${players.length} player(s) reason=${reason || "sync"} omegga=${omeggaPlayers.length} log=${logPlayers.length} positions=${positionPlayers.length}`,
         { serviceClass: "bulk" },
+      );
+      this.reportJoinPhase(
+        context,
+        "player_sync_bridge_transport",
+        bridgeStartedAtUnixMs,
+        published ? "ok" : "error",
       );
       if (published) {
         this.lastPublishedPlayerCacheSignature = publishedSignature;
@@ -1710,7 +1821,14 @@ module.exports = class BmfPlayerSync {
       return;
     }
 
-    const cacheWritten = this.writePlayerCache(players, source, records);
+    const cacheWriteStartedAtUnixMs = Date.now();
+    const cacheWritten = this.writePlayerCache(players, source, records, context);
+    this.reportJoinPhase(
+      context,
+      "player_sync_file_publication",
+      cacheWriteStartedAtUnixMs,
+      cacheWritten ? "ok" : "dropped",
+    );
     if (cacheWritten) {
       this.syncCounters.cacheWrites += 1;
       console.log(

@@ -30,7 +30,12 @@ const MAIN_FILE = 'omegga.plugin.js';
 const MAIN_FILE_TS = 'omegga.plugin.ts';
 const TS_BUILD_DIR = '.build';
 const TS_BUILD_FILE = 'plugin.js';
-const SAFE_VM_ENV_PREFIXES = ['OMEGGA_BMF_', 'OMEGGA_UE4SS_', 'CITYRPG_'];
+const SAFE_VM_ENV_PREFIXES = [
+  'OMEGGA_BMF_',
+  'OMEGGA_UE4SS_',
+  'BMF_PROVENANCE_',
+  'CITYRPG_',
+];
 let vm: NodeVM,
   PluginClass: {
     new (
@@ -76,6 +81,14 @@ const emit = (action: string, ...args: any[]) => {
 // to a reply.
 const respond = (action: string, ...args: any[]) => {
   parentPort.postMessage({ action, args: [null, ...args] });
+};
+
+const plainTelemetryRecord = (value: unknown) => {
+  try {
+    return JSON.parse(JSON.stringify(value ?? {}));
+  } catch (_error) {
+    return {};
+  }
 };
 
 // tell omegga to exec a command
@@ -172,6 +185,10 @@ const omegga = new ProxyOmegga(
   privateMiddlePrintTransport,
 );
 omegga.getAllPlayerPositions = getAllPlayerPositions as any;
+omegga.reportJoinCorrelationPhase = record =>
+  respond('join-correlation.phase', plainTelemetryRecord(record));
+omegga.reportJoinAttributionOperation = record =>
+  respond('join-attribution.operation', plainTelemetryRecord(record));
 
 // add plugin fetcher
 omegga.getPlugin = async name => {
@@ -205,6 +222,27 @@ parent.on('brickadiaEvent', (type, ...args) => {
   if (type === 'error') {
     Logger.errorp(pluginName.brightRed, 'Received error', ...args);
     return;
+  }
+  const context =
+    type === 'join' &&
+    args[1] &&
+    typeof args[1] === 'object' &&
+    !Array.isArray(args[1])
+      ? args[1]
+      : undefined;
+  if (
+    context &&
+    /^join-[A-Za-z0-9-]{1,90}$/.test(String(context.correlationId ?? ''))
+  ) {
+    const receivedAtUnixMs = Date.now();
+    omegga.reportJoinCorrelationPhase?.({
+      correlationId: context.correlationId,
+      phase: 'plugin_worker_transport',
+      outcome: 'ok',
+      startedAtUnixMs:
+        Number(context.workerDispatchStartedAtUnixMs) || receivedAtUnixMs,
+      endedAtUnixMs: receivedAtUnixMs,
+    });
   }
   try {
     omegga.emit(type, ...args);

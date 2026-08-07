@@ -390,6 +390,12 @@ export function buildPrometheusMetrics(server: Webserver) {
   const now = Date.now();
   const memory = process.memoryUsage();
   const cpu = process.cpuUsage();
+  const getJoinCorrelationMetrics = server.omegga?.getJoinCorrelationMetrics;
+  const joinCorrelation =
+    typeof getJoinCorrelationMetrics === 'function'
+      ? getJoinCorrelationMetrics.call(server.omegga)
+      : { enabled: false, droppedWrites: 0, phases: {} };
+  const joinCorrelationPhases = objectRecord(joinCorrelation.phases);
   const bmf = readBmfRuntimeStatus(server);
   const bmfStatus = bmf.status;
   const bmfFileAgeSeconds =
@@ -1351,6 +1357,41 @@ export function buildPrometheusMetrics(server: Webserver) {
       value: finiteMetricValue(bmfFrameLifetime.slow_100_total),
     },
   ];
+  const joinCorrelationTotalLines: MetricLine[] = Object.entries(
+    joinCorrelationPhases,
+  ).flatMap(([phase, outcomes]) =>
+    Object.entries(objectRecord(outcomes)).map(([outcome, aggregate]) => ({
+      name: 'omegga_join_phase_total',
+      labels: { phase, outcome },
+      value: finiteMetricValue(objectRecord(aggregate).count),
+    })),
+  );
+  const joinCorrelationDurationLines: MetricLine[] = Object.entries(
+    joinCorrelationPhases,
+  ).flatMap(([phase, outcomes]) =>
+    Object.entries(objectRecord(outcomes)).flatMap(([outcome, aggregate]) => {
+      const record = objectRecord(aggregate);
+      const count = finiteNumber(record.count, 0);
+      return [
+        {
+          name: 'omegga_join_phase_duration_milliseconds',
+          labels: { phase, outcome, statistic: 'avg' },
+          value:
+            count > 0 ? finiteNumber(record.durationMsSum, 0) / count : NaN,
+        },
+        {
+          name: 'omegga_join_phase_duration_milliseconds',
+          labels: { phase, outcome, statistic: 'max' },
+          value: finiteMetricValue(record.durationMsMax),
+        },
+        {
+          name: 'omegga_join_phase_duration_milliseconds',
+          labels: { phase, outcome, statistic: 'last' },
+          value: finiteMetricValue(record.durationMsLast),
+        },
+      ];
+    }),
+  );
 
   const lines: string[] = [
     '# Omegga / Brickadia Prometheus metrics',
@@ -1444,6 +1485,38 @@ export function buildPrometheusMetrics(server: Webserver) {
           value: boolGauge(server.serverStatusPollEnabled),
         },
       ],
+    ),
+    ...metricBlock(
+      'omegga_join_attribution_enabled',
+      'Whether bounded join and frame-hitch attribution is enabled.',
+      [
+        {
+          name: 'omegga_join_attribution_enabled',
+          value: boolGauge(joinCorrelation.enabled),
+        },
+      ],
+    ),
+    ...metricBlock(
+      'omegga_join_attribution_dropped_writes_total',
+      'Structured join-attribution records dropped after an asynchronous write failure.',
+      [
+        {
+          name: 'omegga_join_attribution_dropped_writes_total',
+          value: finiteMetricValue(joinCorrelation.droppedWrites),
+        },
+      ],
+      'counter',
+    ),
+    ...metricBlock(
+      'omegga_join_phase_total',
+      'Join correlation phase outcomes using fixed-cardinality phase and outcome labels.',
+      joinCorrelationTotalLines,
+      'counter',
+    ),
+    ...metricBlock(
+      'omegga_join_phase_duration_milliseconds',
+      'Join correlation phase duration using fixed-cardinality phase, outcome, and statistic labels.',
+      joinCorrelationDurationLines,
     ),
     ...metricBlock(
       'omegga_server_status_poll_total',
@@ -2168,9 +2241,7 @@ export function buildPrometheusMetrics(server: Webserver) {
       [
         {
           name: 'bmf_socket_scheduler_interval_milliseconds',
-          value: finiteMetricValue(
-            bmfSocketScheduler.current_poll_interval_ms,
-          ),
+          value: finiteMetricValue(bmfSocketScheduler.current_poll_interval_ms),
         },
       ],
     ),

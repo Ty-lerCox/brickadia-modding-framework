@@ -265,6 +265,7 @@ const STAGED_PLAYER_MUTATION_COMMAND =
 
 const WINDOWS_CONTEXT_BOOTSTRAP_DELAYS_MS = [0, 1500, 5000] as const;
 const WINDOWS_CONTEXT_BOOTSTRAP_COMMAND = 'Server.Status\n';
+const SERVER_STATUS_COMMANDS = new Set(['Server.Status', 'br.Server.Status']);
 
 /** Start a brickadia server */
 export default class BrickadiaServer extends EventEmitter {
@@ -914,7 +915,7 @@ export default class BrickadiaServer extends EventEmitter {
     admission: Partial<Ue4ssAdmissionContext> = {},
   ) {
     const normalizedLine = line.replace(/\r?\n$/, '');
-    if (normalizedLine === 'Server.Status') {
+    if (SERVER_STATUS_COMMANDS.has(normalizedLine)) {
       this.emitSyntheticServerStatus();
       return;
     }

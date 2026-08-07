@@ -882,8 +882,8 @@ test('game command tunnel uses only an exact ephemeral controller address', () =
   );
   assert.match(
     drain,
-    /live_chat_resolve_strict_target[\s\S]*?final_controller_address ~= controller_address/,
-    'tunnel dispatch must re-resolve and compare the exact UUID+generation target before invocation',
+    /live_chat_resolve_authoritative_name_target[\s\S]*?final_controller_address ~= controller_address/,
+    'tunnel dispatch must re-resolve and compare the exact UUID+name+generation target before invocation',
   );
   assert.doesNotMatch(
     drain,
@@ -943,6 +943,40 @@ test('native controller and tree target paths reject cross-frame UObject reuse',
     'bmf_socket.cpp',
   );
   const source = fs.readFileSync(nativePath, 'utf8');
+
+  const bindingStart = source.indexOf(
+    'std::string build_native_player_controller_binding_text(',
+  );
+  const bindingEnd = source.indexOf(
+    'std::string build_native_uobject_description_text(',
+    bindingStart,
+  );
+  const binding = source.slice(bindingStart, bindingEnd);
+  assert.ok(bindingStart >= 0 && bindingEnd > bindingStart);
+  assert.match(binding, /find_bounded_reciprocal_player_state\(controller\)/);
+  assert.match(binding, /count_bounded_ue_guid_matches/);
+  assert.match(binding, /identity_uuid_match=true/);
+  assert.doesNotMatch(binding, /get_object_property|export_property_text_guarded/);
+  assert.doesNotMatch(
+    binding,
+    /ForEachUObject|FindAllOf|FindFirstOf|write_player_position_memory_reference_probe/,
+    'exact controller binding description must perform no global or generic memory-reference scan',
+  );
+  assert.match(source, /parse_canonical_uuid_as_ue_guid_bytes/);
+  assert.match(
+    source,
+    /find_bounded_reciprocal_player_state[\s\S]*?kControllerScanEnd = 0x500[\s\S]*?kPlayerStateScanEnd = 0x600/,
+    'controller binding must remain bounded to reciprocal controller/PlayerState memory',
+  );
+  assert.match(
+    source,
+    /count_bounded_ue_guid_matches[\s\S]*?kIdentityScanBytes = 0x800/,
+    'UUID proof must remain bounded to the exact live PlayerState object',
+  );
+  assert.match(
+    source,
+    /register_function\("BMFSocketDescribePlayerControllerBinding", lua_socket_describe_player_controller_binding\)/,
+  );
 
   const controllerResolverStart = source.indexOf(
     'Unreal::UObject* find_live_player_controller(uint32_t& scanned',
@@ -1316,7 +1350,7 @@ test('private delivery requires an immutable UUID and generation envelope with z
   const source = fs.readFileSync(runtimePath, 'utf8');
   const strictStart = source.indexOf('function live_chat_resolve_strict_target(identity)');
   const strictEnd = source.indexOf(
-    'function live_chat_resolve_target(player)',
+    'function live_chat_validate_authoritative_identity(identity)',
     strictStart,
   );
   const targetedResolve = source.slice(strictStart, strictEnd);
@@ -1452,4 +1486,122 @@ test('frame hitch logging records 33.3 ms frames off the game thread', () => {
   assert.match(source, /threshold_ms\\\":\" << us_to_ms\(kSlow33ThresholdUs\)/);
   assert.match(source, /BMFFrameTelemetryOperationSnapshot/);
   assert.match(source, /operation_snapshot_json\(\)/);
+});
+
+test('CityRPG tunnel resolves one exact current Omegga identity and retains no UObject', () => {
+  const runtimePath = path.resolve(
+    __dirname,
+    '..',
+    'templates',
+    'windows-ue4ss',
+    'ue4ss',
+    'Mods',
+    'BMF',
+    'Scripts',
+    'bmf',
+    'runtime.lua',
+  );
+  const source = fs.readFileSync(runtimePath, 'utf8');
+  const resolverStart = source.indexOf(
+    'function live_chat_resolve_authoritative_name_target(identity)',
+  );
+  const resolverEnd = source.indexOf(
+    'function live_chat_resolve_target(player)',
+    resolverStart,
+  );
+  assert.notEqual(resolverStart, -1, 'authoritative resolver must exist');
+  assert.notEqual(resolverEnd, -1, 'authoritative resolver boundary must exist');
+  const resolver = source.slice(resolverStart, resolverEnd);
+
+  assert.match(resolver, /live_chat_validate_authoritative_identity\(identity\)/);
+  assert.match(
+    resolver,
+    /live_chat_collect_targets\(\{[\s\S]*?repair = true,[\s\S]*?expectedUuid = expected_uuid/,
+  );
+  assert.match(
+    resolver,
+    /live_chat_controller_authoritative_identity_matches/,
+    'controller repair must require the exact live UUID after validating the current UUID/name/generation envelope',
+  );
+  assert.match(source, /tostring\(cached_player\.name or ""\)/);
+  assert.match(source, /tostring\(metadata\.name or ""\)/);
+  assert.match(
+    source,
+    /function live_chat_native_controller_binding_metadata\(controller, expected_uuid\)[\s\S]*?BMFSocketDescribePlayerControllerBinding/,
+  );
+  assert.match(
+    source,
+    /metadata\.controllerPath = first_string\([\s\S]*?fields\.controller_name[\s\S]*?fields\.controller_full_name/,
+    'the UUID-proven binding must cache the resolvable exact controller instance name',
+  );
+  assert.match(
+    source,
+    /metadata\.playerStatePath = first_string\([\s\S]*?fields\.player_state_name[\s\S]*?fields\.player_state_full_name/,
+    'the UUID-proven binding must compare a stable exact PlayerState instance name',
+  );
+  assert.match(resolver, /if #matches ~= 1 then/);
+  assert.match(resolver, /exact_name_ambiguous/);
+  assert.match(resolver, /exact_name_not_found/);
+  assert.doesNotMatch(resolver, /live_chat_target_matches/);
+  assert.doesNotMatch(resolver, /state\.[A-Za-z0-9_.]+\s*=\s*repaired\.controller/);
+  assert.doesNotMatch(resolver, /cached_player\.controller\s*=/);
+  assert.match(resolver, /cached_player\.controllerPath = repaired\.controllerPath/);
+  assert.match(resolver, /cached_player\.playerStatePath = repaired\.playerStatePath/);
+
+  const nativeStateStart = source.indexOf(
+    'local function minigame_native_player_state_from_controller(controller)',
+  );
+  const nativeStateEnd = source.indexOf(
+    'local function minigame_cached_player_state_for_assignment(query)',
+    nativeStateStart,
+  );
+  const nativeStateResolver = source.slice(nativeStateStart, nativeStateEnd);
+  assert.match(nativeStateResolver, /\^player_state_full_name=/);
+  assert.match(nativeStateResolver, /\^player_state_name=/);
+  assert.match(
+    source,
+    /function live_chat_controller_metadata\(controller, expected_uuid\)[\s\S]*?canonical_expected_uuid ~= ""[\s\S]*?return metadata[\s\S]*?minigame_native_player_state_from_controller\(controller\)/,
+    'exact UUID resolution must fail closed before the broken generic PlayerState property fallback',
+  );
+
+  const exactIdentityStart = source.indexOf(
+    'function live_chat_controller_authoritative_identity_matches(',
+  );
+  const exactIdentityEnd = source.indexOf(
+    '-- Resolve a controller without ever inferring identity',
+    exactIdentityStart,
+  );
+  const exactIdentity = source.slice(exactIdentityStart, exactIdentityEnd);
+  assert.match(
+    exactIdentity,
+    /live_chat_controller_metadata\(controller, expected_uuid\)/,
+  );
+  assert.match(exactIdentity, /live_chat_stable_uuid\(expected_uuid\)/);
+  assert.match(exactIdentity, /live_uuid == ""/);
+  assert.doesNotMatch(exactIdentity, /#(?:targets|controllers)\s*==\s*1/);
+
+  const tunnelStart = source.indexOf(
+    'BMF_process_game_command_tunnel_request = function(decoded)',
+  );
+  const tunnelEnd = source.indexOf(
+    'function BMF_process_socket_message(line)',
+    tunnelStart,
+  );
+  const tunnel = source.slice(tunnelStart, tunnelEnd);
+  assert.match(tunnel, /local sender_name = trim_string\(decoded\.senderName or ""\)/);
+  assert.match(tunnel, /SENDER_NAME_REQUIRED/);
+  assert.match(tunnel, /live_chat_validate_authoritative_identity/);
+  assert.match(tunnel, /senderName = sender_name/);
+  assert.doesNotMatch(tunnel, /#(?:targets|controllers)\s*==\s*1/);
+
+  assert.equal(
+    (source.match(/live_chat_resolve_authoritative_name_target\(\{/g) || []).length,
+    2,
+    'readiness and final execution checks must both resolve the immutable envelope',
+  );
+  assert.match(
+    source,
+    /controllerAddress = controller_address/,
+    'native injection must receive only the freshly resolved address',
+  );
 });

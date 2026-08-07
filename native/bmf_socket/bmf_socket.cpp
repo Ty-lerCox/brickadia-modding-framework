@@ -629,16 +629,28 @@ namespace
             }
         }
 
-        const Unreal::FName wanted_property_name{property_name, Unreal::FNAME_Find};
         Unreal::FProperty* found = nullptr;
-        for (Unreal::FProperty* property : Unreal::TFieldRange<Unreal::FProperty>(
-                 object_class,
-                 Unreal::EFieldIterationFlags::IncludeSuper | Unreal::EFieldIterationFlags::IncludeDeprecated))
+        try
         {
-            if (property && property->GetFName().Equals(wanted_property_name))
+            found = object->GetPropertyByNameInChain(property_name);
+        }
+        catch (...)
+        {
+            found = nullptr;
+        }
+
+        if (!found)
+        {
+            const Unreal::FName wanted_property_name{property_name, Unreal::FNAME_Find};
+            for (Unreal::FProperty* property : Unreal::TFieldRange<Unreal::FProperty>(
+                     object_class,
+                     Unreal::EFieldIterationFlags::IncludeSuper | Unreal::EFieldIterationFlags::IncludeDeprecated))
             {
-                found = property;
-                break;
+                if (property && property->GetFName().Equals(wanted_property_name))
+                {
+                    found = property;
+                    break;
+                }
             }
         }
 
@@ -1483,6 +1495,356 @@ namespace
             << "object_ref_properties_emitted=" << emitted << "\n"
             << "object_ref_properties_errors=" << errors << "\n"
             << "object_ref_properties_truncated=" << (emitted >= max_refs ? "true" : "false") << "\n";
+    }
+
+    bool export_property_text_unchecked(Unreal::UObject* object,
+                                        const CharType* property_name,
+                                        std::string& value)
+    {
+        Unreal::FProperty* property =
+            get_cached_class_property_by_name_in_chain(object, property_name);
+        if (!property)
+        {
+            return false;
+        }
+        void* property_value = property->ContainerPtrToValuePtr<void>(object);
+        if (!property_value)
+        {
+            return false;
+        }
+        Unreal::FString rendered;
+        property->ExportTextItem(rendered, property_value, nullptr, object, 0);
+        value = narrow_string(StringType(*rendered));
+        return true;
+    }
+
+    bool export_property_text_guarded(Unreal::UObject* object,
+                                      const CharType* property_name,
+                                      std::string& value,
+                                      unsigned long& exception_code)
+    {
+        value.clear();
+        exception_code = 0;
+        if (!is_live_uobject(object) || !property_name)
+        {
+            return false;
+        }
+        __try
+        {
+            return export_property_text_unchecked(object, property_name, value);
+        }
+        __except ((exception_code = GetExceptionInformation()->ExceptionRecord->ExceptionCode), EXCEPTION_EXECUTE_HANDLER)
+        {
+            value.clear();
+            return false;
+        }
+    }
+
+    std::string bounded_descriptor_value(std::string value)
+    {
+        for (char& character : value)
+        {
+            if (character == '\r' || character == '\n' ||
+                static_cast<unsigned char>(character) < 0x20)
+            {
+                character = ' ';
+            }
+        }
+        value = trim_ascii(value);
+        constexpr size_t kMaxIdentityValueBytes = 512;
+        if (value.size() > kMaxIdentityValueBytes)
+        {
+            value.resize(kMaxIdentityValueBytes);
+        }
+        return value;
+    }
+
+    bool read_pointer_value_guarded(uintptr_t address, uintptr_t& value)
+    {
+        value = 0;
+        if (!is_accessible_memory(address, sizeof(value)))
+        {
+            return false;
+        }
+        __try
+        {
+            std::memcpy(&value, reinterpret_cast<const void*>(address), sizeof(value));
+            return true;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            value = 0;
+            return false;
+        }
+    }
+
+    bool parse_canonical_uuid_as_ue_guid_bytes(
+        std::string_view source,
+        std::array<unsigned char, 16>& bytes)
+    {
+        const std::string uuid = ascii_lower(trim_ascii(source));
+        if (uuid.size() != 36 || uuid[8] != '-' || uuid[13] != '-' ||
+            uuid[18] != '-' || uuid[23] != '-')
+        {
+            return false;
+        }
+
+        std::string digits;
+        digits.reserve(32);
+        for (char character : uuid)
+        {
+            if (character == '-')
+            {
+                continue;
+            }
+            if (!std::isxdigit(static_cast<unsigned char>(character)))
+            {
+                return false;
+            }
+            digits.push_back(character);
+        }
+        if (digits.size() != 32)
+        {
+            return false;
+        }
+
+        for (size_t word_index = 0; word_index < 4; ++word_index)
+        {
+            const std::string word_text = digits.substr(word_index * 8, 8);
+            char* end = nullptr;
+            const unsigned long parsed = std::strtoul(word_text.c_str(), &end, 16);
+            if (end == word_text.c_str() || (end && *end != '\0'))
+            {
+                return false;
+            }
+            const uint32_t word = static_cast<uint32_t>(parsed);
+            for (size_t byte_index = 0; byte_index < 4; ++byte_index)
+            {
+                bytes[word_index * 4 + byte_index] =
+                    static_cast<unsigned char>((word >> (byte_index * 8)) & 0xFFu);
+            }
+        }
+        return std::any_of(bytes.begin(), bytes.end(), [](unsigned char byte) {
+            return byte != 0;
+        });
+    }
+
+    struct NativeControllerPlayerStateBinding
+    {
+        Unreal::UObject* player_state{};
+        uintptr_t controller_player_state_offset{};
+        uintptr_t player_state_controller_offset{};
+        int candidates{};
+    };
+
+    NativeControllerPlayerStateBinding find_bounded_reciprocal_player_state(
+        Unreal::UObject* controller)
+    {
+        NativeControllerPlayerStateBinding binding{};
+        if (!is_live_uobject(controller))
+        {
+            return binding;
+        }
+
+        constexpr uintptr_t kControllerScanStart = 0x100;
+        constexpr uintptr_t kControllerScanEnd = 0x500;
+        constexpr uintptr_t kPlayerStateScanStart = 0x100;
+        constexpr uintptr_t kPlayerStateScanEnd = 0x600;
+        const uintptr_t controller_address = reinterpret_cast<uintptr_t>(controller);
+        std::vector<uintptr_t> seen;
+
+        for (uintptr_t controller_offset = kControllerScanStart;
+             controller_offset + sizeof(uintptr_t) <= kControllerScanEnd;
+             controller_offset += sizeof(uintptr_t))
+        {
+            uintptr_t candidate_address = 0;
+            if (!read_pointer_value_guarded(
+                    controller_address + controller_offset,
+                    candidate_address) ||
+                candidate_address == 0 || candidate_address == controller_address ||
+                std::find(seen.begin(), seen.end(), candidate_address) != seen.end())
+            {
+                continue;
+            }
+            seen.push_back(candidate_address);
+
+            Unreal::UObject* candidate =
+                reinterpret_cast<Unreal::UObject*>(candidate_address);
+            if (!is_live_uobject(candidate))
+            {
+                continue;
+            }
+            const std::string candidate_class = ascii_lower(object_class_name(candidate));
+            if (candidate_class.find("playerstate") == std::string::npos)
+            {
+                continue;
+            }
+
+            uintptr_t reciprocal_offset = 0;
+            int reciprocal_matches = 0;
+            for (uintptr_t player_state_offset = kPlayerStateScanStart;
+                 player_state_offset + sizeof(uintptr_t) <= kPlayerStateScanEnd;
+                 player_state_offset += sizeof(uintptr_t))
+            {
+                uintptr_t value = 0;
+                if (read_pointer_value_guarded(
+                        candidate_address + player_state_offset,
+                        value) &&
+                    value == controller_address)
+                {
+                    reciprocal_offset = player_state_offset;
+                    ++reciprocal_matches;
+                }
+            }
+            if (reciprocal_matches != 1)
+            {
+                continue;
+            }
+
+            ++binding.candidates;
+            if (binding.candidates == 1)
+            {
+                binding.player_state = candidate;
+                binding.controller_player_state_offset = controller_offset;
+                binding.player_state_controller_offset = reciprocal_offset;
+            }
+            else
+            {
+                binding.player_state = nullptr;
+                binding.controller_player_state_offset = 0;
+                binding.player_state_controller_offset = 0;
+            }
+        }
+        return binding;
+    }
+
+    int count_bounded_ue_guid_matches(
+        Unreal::UObject* object,
+        const std::array<unsigned char, 16>& expected,
+        uintptr_t& first_offset)
+    {
+        first_offset = 0;
+        if (!is_live_uobject(object))
+        {
+            return 0;
+        }
+
+        constexpr size_t kIdentityScanBytes = 0x800;
+        const uintptr_t address = reinterpret_cast<uintptr_t>(object);
+        if (!is_accessible_memory(address, kIdentityScanBytes))
+        {
+            return 0;
+        }
+
+        std::array<unsigned char, kIdentityScanBytes> snapshot{};
+        __try
+        {
+            std::memcpy(snapshot.data(), reinterpret_cast<const void*>(address), snapshot.size());
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return 0;
+        }
+
+        int matches = 0;
+        for (size_t offset = 0; offset + expected.size() <= snapshot.size(); ++offset)
+        {
+            if (std::memcmp(snapshot.data() + offset, expected.data(), expected.size()) == 0)
+            {
+                if (matches == 0)
+                {
+                    first_offset = static_cast<uintptr_t>(offset);
+                }
+                ++matches;
+            }
+        }
+        return matches;
+    }
+
+    std::string build_native_player_controller_binding_text(
+        std::string_view source_address,
+        std::string_view expected_uuid)
+    {
+        std::ostringstream out;
+        out << "Native player controller binding\n"
+            << "source=BMFSocketDescribePlayerControllerBinding\n"
+            << "requested_address=" << json_escape(source_address) << "\n";
+
+        std::array<unsigned char, 16> expected_uuid_bytes{};
+        if (!parse_canonical_uuid_as_ue_guid_bytes(expected_uuid, expected_uuid_bytes))
+        {
+            out << "ok=false\n"
+                << "detail=expected UUID must be canonical and non-zero\n";
+            return out.str();
+        }
+
+        uintptr_t parsed_source_address = 0;
+        if (!parse_uobject_address(source_address, parsed_source_address))
+        {
+            out << "ok=false\n"
+                << "detail=source address must be a non-zero UObject pointer\n";
+            return out.str();
+        }
+
+        Unreal::UObject* controller =
+            reinterpret_cast<Unreal::UObject*>(parsed_source_address);
+        if (!is_live_uobject(controller))
+        {
+            out << "ok=false\n"
+                << "detail=source address does not point to a live UObject\n";
+            return out.str();
+        }
+
+        const std::string controller_class = ascii_lower(object_class_name(controller));
+        const bool is_controller =
+            object_class_has_any_cast_flags_guarded(
+                controller,
+                Unreal::CASTCLASS_APlayerController) ||
+            controller_class.find("playercontroller") != std::string::npos;
+        if (!is_controller)
+        {
+            out << "ok=false\n"
+                << "detail=source UObject is not a live player controller\n";
+            return out.str();
+        }
+
+        const NativeControllerPlayerStateBinding binding =
+            find_bounded_reciprocal_player_state(controller);
+        Unreal::UObject* player_state = binding.player_state;
+        if (!is_live_uobject(player_state) || binding.candidates != 1)
+        {
+            out << "ok=false\n"
+                << "detail=controller has no unique reciprocal live PlayerState\n"
+                << "player_state_candidates=" << binding.candidates << "\n";
+            return out.str();
+        }
+
+        uintptr_t uuid_match_offset = 0;
+        const int uuid_match_count = count_bounded_ue_guid_matches(
+            player_state,
+            expected_uuid_bytes,
+            uuid_match_offset);
+        if (uuid_match_count < 1)
+        {
+            out << "ok=false\n"
+                << "detail=expected UUID is absent from reciprocal live PlayerState\n"
+                << "player_state_candidates=" << binding.candidates << "\n";
+            return out.str();
+        }
+
+        out << "ok=true\n";
+        write_object_reference_fields(out, "controller", controller);
+        write_object_reference_fields(out, "player_state", player_state);
+        out << "binding_source=bounded_reciprocal_live_memory\n"
+            << "controller_player_state_offset="
+            << json_escape(pointer_address_hex(binding.controller_player_state_offset)) << "\n"
+            << "player_state_controller_offset="
+            << json_escape(pointer_address_hex(binding.player_state_controller_offset)) << "\n"
+            << "identity_uuid_match=true\n"
+            << "identity_uuid_match_count=" << uuid_match_count << "\n"
+            << "identity_uuid_match_offset="
+            << json_escape(pointer_address_hex(uuid_match_offset)) << "\n";
+        return out.str();
     }
 
     std::string build_native_uobject_description_text(std::string_view source_address)
@@ -23414,6 +23776,21 @@ namespace
         return 1;
     }
 
+    int lua_socket_describe_player_controller_binding(const LuaMadeSimple::Lua& lua)
+    {
+        lua_State* state = lua.get_lua_state();
+        size_t address_length = 0;
+        size_t uuid_length = 0;
+        const char* address =
+            lua_isstring(state, 1) ? lua_tolstring(state, 1, &address_length) : "";
+        const char* uuid =
+            lua_isstring(state, 2) ? lua_tolstring(state, 2, &uuid_length) : "";
+        lua.set_string(build_native_player_controller_binding_text(
+            address ? std::string_view(address, address_length) : std::string_view(),
+            uuid ? std::string_view(uuid, uuid_length) : std::string_view()));
+        return 1;
+    }
+
     int lua_socket_describe_ufunction(const LuaMadeSimple::Lua& lua)
     {
         lua_State* state = lua.get_lua_state();
@@ -24481,6 +24858,7 @@ namespace
             lua.register_function("BMFSocketStatus", lua_socket_status);
             lua.register_function("BMFSocketPlayerLocation", lua_socket_player_location);
             lua.register_function("BMFSocketDescribeUObject", lua_socket_describe_uobject);
+            lua.register_function("BMFSocketDescribePlayerControllerBinding", lua_socket_describe_player_controller_binding);
             lua.register_function("BMFSocketDescribeUFunction", lua_socket_describe_ufunction);
             lua.register_function("BMFSocketChatCommandProbe", lua_socket_chat_command_probe);
             lua.register_function("BMFSocketPlayerConsoleCommandProbe", lua_socket_player_console_command_probe);

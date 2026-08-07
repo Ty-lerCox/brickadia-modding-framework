@@ -119,6 +119,90 @@ export class ProxyOmegga extends EventEmitter implements OmeggaLike {
   stopping: boolean;
   currentMap: string;
 
+  reportJoinCorrelationPhase?: (record: Record<string, unknown>) => void;
+  reportJoinAttributionOperation?: (record: Record<string, unknown>) => void;
+  private readonly joinListenerWrappers = new WeakMap<
+    (...args: any[]) => any,
+    (...args: any[]) => any
+  >();
+  private joinListenerSequence = 0;
+
+  private instrumentJoinListener(listener: (...args: any[]) => any) {
+    if (!this.reportJoinCorrelationPhase) return listener;
+    const existing = this.joinListenerWrappers.get(listener);
+    if (existing) return existing;
+    const callback = listener.name || `callback_${++this.joinListenerSequence}`;
+    const wrapped = (...args: any[]) => {
+      const context =
+        args[1] && typeof args[1] === 'object' && !Array.isArray(args[1])
+          ? args[1]
+          : undefined;
+      const correlationId = String(context?.correlationId ?? '');
+      if (!/^join-[A-Za-z0-9-]{1,90}$/.test(correlationId)) {
+        return listener(...args);
+      }
+      const startedAtUnixMs = Date.now();
+      const finish = (outcome: 'ok' | 'error') =>
+        this.reportJoinCorrelationPhase?.({
+          correlationId,
+          phase: 'plugin_join_callback',
+          outcome,
+          startedAtUnixMs,
+          endedAtUnixMs: Date.now(),
+          callback,
+        });
+      try {
+        const result = listener(...args);
+        if (result && typeof result.then === 'function') {
+          void Promise.resolve(result).then(
+            () => finish('ok'),
+            () => finish('error'),
+          );
+        } else {
+          finish('ok');
+        }
+        return result;
+      } catch (error) {
+        finish('error');
+        throw error;
+      }
+    };
+    this.joinListenerWrappers.set(listener, wrapped);
+    return wrapped;
+  }
+
+  override on(eventName: string | symbol, listener: (...args: any[]) => any) {
+    return super.on(
+      eventName,
+      eventName === 'join' ? this.instrumentJoinListener(listener) : listener,
+    );
+  }
+
+  override addListener(
+    eventName: string | symbol,
+    listener: (...args: any[]) => any,
+  ) {
+    return super.addListener(
+      eventName,
+      eventName === 'join' ? this.instrumentJoinListener(listener) : listener,
+    );
+  }
+
+  override removeListener(
+    eventName: string | symbol,
+    listener: (...args: any[]) => any,
+  ) {
+    const wrapped =
+      eventName === 'join'
+        ? this.joinListenerWrappers.get(listener)
+        : undefined;
+    return super.removeListener(eventName, wrapped ?? listener);
+  }
+
+  override off(eventName: string | symbol, listener: (...args: any[]) => any) {
+    return this.removeListener(eventName, listener);
+  }
+
   path: string;
   configPath: string;
   savePath: string;

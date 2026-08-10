@@ -167,9 +167,14 @@ try {
     -Markers @('set(TARGET BMFSocket)', 'add_library(${TARGET} SHARED bmf_socket.cpp)', 'ws2_32')
 
   Test-TextMarkers `
+    -Path (Join-Path $Root 'native/bmf_socket/bmf_socket.cpp') `
+    -Name 'BMFSocket transport-only fail-closed policy' `
+    -Markers @('socket_transport_only_enabled', 'BMF_SOCKET_TRANSPORT_ONLY', 'BMF_SOCKET_NATIVE_HELPERS_ENABLED', 'BMF_SOCKET_GAME_COMMAND_TUNNEL_HELPERS_ENABLED', 'validate_game_command_tunnel_native_target', 'kGameCommandTunnelCl15447ExecRva', 'lua_socket_describe_uobject_identity', 'lua_socket_describe_player_controller_binding', 'transport-only mode enabled; bounded UObject identity and exact player-controller binding are available; native scanners, writers, and hooks are unavailable')
+
+  Test-TextMarkers `
     -Path (Join-Path $Root 'framework/ue4ss/Mods/BMFSocket/README.md') `
     -Name 'BMFSocket README' `
-    -Markers @('BMFSocket is the optional UE4SS C++ transport mod', 'report the socket path as unavailable')
+    -Markers @('BMFSocket is the optional UE4SS C++ transport mod', 'report the socket path as unavailable', 'defaults to transport-only mode', 'BMF_SOCKET_GAME_COMMAND_TUNNEL_HELPERS_ENABLED=1', 'BMF_SOCKET_NATIVE_HELPERS_ENABLED=1')
 
   Test-TextMarkers `
     -Path (Join-Path $Root 'native/bmf_frame_telemetry/CMakeLists.txt') `

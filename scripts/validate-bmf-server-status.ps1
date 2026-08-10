@@ -158,9 +158,9 @@ try {
 
     Invoke-BmfConsoleCommand 'bmf.server.status' 'bmf-server-status' @(
       'BMF bmf.server.status OK',
-      'version=0.1.0-ea3.cl24045983',
+      'version=0.1.0-ea3.cl15447',
       'bmf_status=running',
-      'build_id=PC-Shipping-CL24045983',
+      'build_id=PC-Shipping-CL15447',
       'executable=BrickadiaServer-Win64-Shipping.exe',
       'server_name_status=unknown',
       'description_status=unknown',

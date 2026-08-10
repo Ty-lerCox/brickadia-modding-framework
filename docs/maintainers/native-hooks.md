@@ -19,10 +19,23 @@ unless they are explicitly working on hook infrastructure.
 - Record `L6 Frame Time` evidence before promoting native mutation into normal
   gameplay.
 
-Current `Release-EA3-CL-14860` Applicator RPC exec-thunk RVAs:
+Current `Release-EA3-CL-15447` live-reflected RPC exec-thunk mappings:
 
-- `ServerAddComponent`: `0x5E93250`
-- `ServerModifyComponent`: `0x5E942D0`
+- `/Script/Brickadia.BRTool_Applicator:ServerAddComponent`: `0x62937B0`
+  (`2` parameters, `ParmsSize=0x10`)
+- `/Script/Brickadia.BRTool_Applicator:ServerModifyComponentV3`: `0x6294A90`
+  (`3` parameters, `ParmsSize=0x40`)
+- `/Script/Brickadia.BRCharacter:ServerMaybeStartInteract`: `0x6AA5B60`
+  (`3` parameters, `ParmsSize=0xA`)
+- `/Script/Brickadia.BRCharacter:ServerStopAnyInteract`: `0x6AA7450`
+  (`0` parameters, `ParmsSize=0x0`)
+
+All four mappings were unique and confirmed against the live CL15447 module.
+The old `ServerModifyComponent` and `ServerInteract` names return no live hits.
+The two `BRCharacter` RPCs are discovery evidence, not drop-in replacements for
+the removed Interact hook. Keep the ModifyV3 and interaction guards disabled
+until their owner, parameter layout, and cancellation semantics are adapted and
+canary-tested.
 
 These values are build-specific and must be re-derived after a server update.
 
@@ -41,6 +54,10 @@ the running server for the Applicator component-add function, updates the native
 control file, builds/injects the native DLL if needed, and skips reinjection
 when the hook is already installed in that process.
 
+The CL15447 default RVA is refreshed, but automatic synchronization remains
+disabled until an isolated deny/allow canary proves the full hook path on a
+current process.
+
 Player and role decisions remain owned by
 `framework/ue4ss/Mods/BMF/plugins/NoSpawnItemApplicator`,
 which can write allowed contexts back into the native control file when policy
@@ -49,11 +66,16 @@ permits a retry.
 ## Interactable Prefix Guard
 
 The Interactable prefix guard blocks denied Print-to-Console tags at save time.
-Refresh it after restart:
+Its sync command is intentionally fail-closed on CL15447:
 
 ```powershell
 .\scripts\sync-interact-prefix-guard-native-hook.ps1
 ```
+
+Do not supply the known ModifyV3 RVA merely to bypass that guard. First adapt
+the native payload decoder from the old `0x20` parameter layout to the proven
+CL15447 `0x40` layout, then run negative and positive canaries before restoring
+automatic synchronization.
 
 `framework/ue4ss/Mods/BMF/plugins/InteractConsolePrefixGuard` owns whitelisted prefixes, allowed
 contexts, denial mode, and feedback event paths.
@@ -69,6 +91,22 @@ collision changes.
 See [Runtime Brick State](../api/runtime-bricks.md) for caller rules and
 [Observability and Performance](../architecture/observability-performance.md)
 for frame-time requirements.
+
+## CL15447 Placement Mapping Evidence
+
+The CL15447 binary contains the following statically derived placement targets:
+
+- PlacePrefab method block `0x82995C0`; apply body `0x68C30D0`
+- PlaceBrick method block `0x8298E40`; apply body `0x68B0920`
+- BasicBrick class getter `0x533B540`
+- ProceduralBrick class getter `0x533C110`
+- Procedural resolver `0x533D300`
+
+These are mapping evidence only. The game now inlines the old object-reference
+and primary-brick resolution, reads the primary record at `[brick+0x100]`, and
+does not preserve the old placement guard's full resolver/asset contract. Keep
+native placement action hooks disabled until the decoder and offsets are
+redesigned and canary-tested; copying these RVAs into the old hook is unsafe.
 
 ## Where Details Belong
 

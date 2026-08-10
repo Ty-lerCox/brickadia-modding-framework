@@ -48,7 +48,7 @@ const CUSTOM_GAME_CONFIG_ALIASES = [
   'BrickadiaServer-Win64-Shipping',
 ] as const;
 const UE4SS_PINNED_COMPATIBILITY_BUNDLE_ID =
-  process.env.OMEGGA_UE4SS_COMPAT_BUNDLE ?? 'CL24045983';
+  process.env.OMEGGA_UE4SS_COMPAT_BUNDLE ?? 'CL15447';
 const COMPATIBILITY_BUNDLE_REQUIRED_FILES = [
   UE4SS_VTABLE_LAYOUT_FILENAME,
   UE4SS_MEMBER_VARIABLE_LAYOUT_FILENAME,
@@ -589,11 +589,29 @@ function getManagedBmfMod() {
 }
 
 function getManagedBmfSocketMod() {
-  return getManagedBmfNativeMod(BMF_SOCKET_MOD_NAME);
+  const mod = getManagedBmfNativeMod(BMF_SOCKET_MOD_NAME);
+  if (
+    mod &&
+    /^(?:0|false|off|no)$/i.test(
+      process.env.OMEGGA_BMF_SOCKET_MOD_ENABLED?.trim() ?? '',
+    )
+  ) {
+    mod.enabled = false;
+  }
+  return mod;
 }
 
 function getManagedBmfFrameTelemetryMod() {
-  return getManagedBmfNativeMod(BMF_FRAME_TELEMETRY_MOD_NAME);
+  const mod = getManagedBmfNativeMod(BMF_FRAME_TELEMETRY_MOD_NAME);
+  if (
+    mod &&
+    /^(?:0|false|off|no)$/i.test(
+      process.env.OMEGGA_BMF_FRAME_TELEMETRY_MOD_ENABLED?.trim() ?? '',
+    )
+  ) {
+    mod.enabled = false;
+  }
+  return mod;
 }
 
 function getManagedBmfNativeMod(modName: string) {

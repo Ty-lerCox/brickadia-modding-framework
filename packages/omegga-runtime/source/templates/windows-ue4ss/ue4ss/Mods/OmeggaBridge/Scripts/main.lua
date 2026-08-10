@@ -92,6 +92,8 @@ local status_snapshot_logged = false
 local DEBUG_STATUS_SNAPSHOT = os.getenv("OMEGGA_UE4SS_DEBUG_STATUS_SNAPSHOT") == "1"
 local DEBUG_SCHEDULER = os.getenv("OMEGGA_UE4SS_DEBUG_SCHEDULER") == "1"
 local ALLOW_UNSAFE_PROBES = os.getenv("OMEGGA_UE4SS_UNSAFE_PROBES") == "1"
+local ENABLE_NATIVE_UNKNOWN_COMMAND_PATCH =
+    os.getenv("OMEGGA_UE4SS_NATIVE_UNKNOWN_COMMAND_PATCH") ~= "0"
 ALLOW_PREFAB_PASTE =
     ALLOW_UNSAFE_PROBES or os.getenv("OMEGGA_UE4SS_PREFAB_PASTE") == "1"
 local CHAT_TRACE_ENABLED = os.getenv("OMEGGA_UE4SS_CHAT_TRACE") == "1"
@@ -6521,7 +6523,8 @@ local function execute_command(id, command, deadline_ms, quiet)
 
     if command == "Chat.MessageForUnknownCommands 0"
         or command == "br.Chat.MessageForUnknownCommands 0" then
-        if type(BMFSocketSetUnknownCommandMessages) == "function" then
+        if ENABLE_NATIVE_UNKNOWN_COMMAND_PATCH
+            and type(BMFSocketSetUnknownCommandMessages) == "function" then
             local call_ok, applied, output = pcall(BMFSocketSetUnknownCommandMessages, false)
             if call_ok and applied then
                 finish_command_success(
@@ -6538,8 +6541,10 @@ local function execute_command(id, command, deadline_ms, quiet)
                 "Native Chat.MessageForUnknownCommands backing-flag update failed: "
                     .. tostring(call_ok and output or applied)
             )
-        else
+        elseif ENABLE_NATIVE_UNKNOWN_COMMAND_PATCH then
             bridge_log("warn", "BMFSocketSetUnknownCommandMessages helper is unavailable")
+        else
+            bridge_log("warn", "Native unknown-command flag patch is disabled for this game build")
         end
 
         local has_engine_tick_scheduler = type(ExecuteInGameThread) == "function"

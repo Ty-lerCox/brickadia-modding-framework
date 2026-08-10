@@ -31,6 +31,10 @@ const tempDirs: string[] = [];
 const originalUe4ssSource = process.env.OMEGGA_UE4SS_SOURCE;
 const originalUe4ssReRoot = process.env.OMEGGA_UE4SS_RE_ROOT;
 const originalBmfSource = process.env.OMEGGA_BMF_SOURCE_DIR;
+const originalBmfSocketModEnabled =
+  process.env.OMEGGA_BMF_SOCKET_MOD_ENABLED;
+const originalBmfFrameTelemetryModEnabled =
+  process.env.OMEGGA_BMF_FRAME_TELEMETRY_MOD_ENABLED;
 
 const makeTempDir = () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'omegga-windows-'));
@@ -114,6 +118,15 @@ afterEach(() => {
   else process.env.OMEGGA_UE4SS_RE_ROOT = originalUe4ssReRoot;
   if (originalBmfSource === undefined) delete process.env.OMEGGA_BMF_SOURCE_DIR;
   else process.env.OMEGGA_BMF_SOURCE_DIR = originalBmfSource;
+  if (originalBmfSocketModEnabled === undefined)
+    delete process.env.OMEGGA_BMF_SOCKET_MOD_ENABLED;
+  else
+    process.env.OMEGGA_BMF_SOCKET_MOD_ENABLED = originalBmfSocketModEnabled;
+  if (originalBmfFrameTelemetryModEnabled === undefined)
+    delete process.env.OMEGGA_BMF_FRAME_TELEMETRY_MOD_ENABLED;
+  else
+    process.env.OMEGGA_BMF_FRAME_TELEMETRY_MOD_ENABLED =
+      originalBmfFrameTelemetryModEnabled;
 
   vi.restoreAllMocks();
 
@@ -474,6 +487,27 @@ windowsDescribe('Windows platform support', () => {
     ).toContainEqual({
       mod_name: 'BMFFrameTelemetry',
       mod_enabled: true,
+    });
+
+    process.env.OMEGGA_BMF_FRAME_TELEMETRY_MOD_ENABLED = '0';
+    installManagedUe4ss(targetRoot);
+
+    expect(
+      fs.readFileSync(
+        path.join(targetRoot, 'ue4ss', 'Mods', 'mods.txt'),
+        'utf8',
+      ),
+    ).not.toContain('BMFFrameTelemetry : 1');
+    expect(
+      JSON.parse(
+        fs.readFileSync(
+          path.join(targetRoot, 'ue4ss', 'Mods', 'mods.json'),
+          'utf8',
+        ),
+      ),
+    ).toContainEqual({
+      mod_name: 'BMFFrameTelemetry',
+      mod_enabled: false,
     });
   });
 

@@ -12,7 +12,7 @@ param(
   [string]$InjectScript = '',
   [string]$SourcePath = '',
   [string]$DllName = '',
-  [UInt64[]]$ServerModifyComponentRvas = @([UInt64]0x5E942D0),
+  [UInt64[]]$ServerModifyComponentRvas = @(),
   [string[]]$AllowedPrefix = @('buyweapon:'),
   [string[]]$AllowedContext = @(),
   [switch]$TrustExistingStatus,
@@ -25,6 +25,10 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+if (@($ServerModifyComponentRvas).Count -eq 0) {
+  throw 'Interact prefix native sync is fail-closed on CL15447. ServerModifyComponentV3 maps to RVA 0x6294A90, but its 0x40-byte parameter payload is not compatible-proofed against the existing 0x20-byte decoder. Pass an explicit RVA only after adapting and canary-validating the decoder.'
+}
 
 function Format-Hex64([UInt64]$Value) {
   return ('0x{0:X}' -f $Value)

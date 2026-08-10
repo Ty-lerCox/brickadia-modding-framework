@@ -1,6 +1,6 @@
 {
   "name": "@bmf/orchestrator-core",
-  "version": "0.1.0-ea3.cl24045983",
+  "version": "0.1.0-ea3.cl15447",
   "private": true,
   "description": "Shared BMF install, profile, health, manifest, and orchestration primitives.",
   "main": "src/index.js",

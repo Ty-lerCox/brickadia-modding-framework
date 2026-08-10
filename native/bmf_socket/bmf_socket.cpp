@@ -152,6 +152,17 @@ namespace
         return value == "1" || value == "true" || value == "yes" || value == "on";
     }
 
+    bool socket_transport_only_enabled()
+    {
+        return env_flag_enabled("BMF_SOCKET_TRANSPORT_ONLY") ||
+               !env_flag_enabled("BMF_SOCKET_NATIVE_HELPERS_ENABLED");
+    }
+
+    bool socket_game_command_tunnel_helpers_enabled()
+    {
+        return env_flag_enabled("BMF_SOCKET_GAME_COMMAND_TUNNEL_HELPERS_ENABLED");
+    }
+
     uint64_t env_u64(const char* name, uint64_t fallback, uint64_t min_value, uint64_t max_value)
     {
         const char* raw = std::getenv(name);
@@ -1847,6 +1858,34 @@ namespace
         return out.str();
     }
 
+    std::string build_native_uobject_identity_text(std::string_view source_address)
+    {
+        std::ostringstream out;
+        out << "Native UObject identity\n"
+            << "source=BMFSocketDescribeUObject\n"
+            << "requested_address=" << json_escape(source_address) << "\n";
+
+        uintptr_t parsed_source_address = 0;
+        if (!parse_uobject_address(source_address, parsed_source_address))
+        {
+            out << "ok=false\n"
+                << "detail=source address must be a non-zero UObject pointer\n";
+            return out.str();
+        }
+
+        Unreal::UObject* source = reinterpret_cast<Unreal::UObject*>(parsed_source_address);
+        if (!is_live_uobject(source))
+        {
+            out << "ok=false\n"
+                << "detail=source address does not point to a live UObject\n";
+            return out.str();
+        }
+
+        out << "ok=true\n";
+        write_object_reference_fields(out, "object", source);
+        return out.str();
+    }
+
     std::string build_native_uobject_description_text(std::string_view source_address)
     {
         std::ostringstream out;
@@ -2297,8 +2336,19 @@ namespace
     static_assert(sizeof(ChatCommandWithArgsProcessEventParams) == 40, "Unexpected CallChatCommandWithArgs param packing");
     static_assert(sizeof(PlayerChatMessageProcessEventParams) == 16, "Unexpected ServerPushChatMessage param packing");
 
-    constexpr std::size_t kServerPushChatMessageImplementationVTableOffset{0x1018};
+    // CL15447 BRPlayerController instances point at the vtable entry whose
+    // +0x1020 slot exactly matches the implementation called by the reflected
+    // ServerPushChatMessage thunk. The previous build used +0x1018.
+    constexpr std::size_t kServerPushChatMessageImplementationVTableOffset{0x1020};
     constexpr uintptr_t kUFunctionNativeFuncOffset{0xD8};
+
+    // Release-EA3-CL-15447 proof for the one native lane used by the opaque
+    // cityrpg.command.v1 tunnel. These values are deliberately not shared with
+    // any of the optional scanners, brick writers, or runtime hook families.
+    constexpr uint32_t kGameCommandTunnelCl15447ImageTimestamp{0xEBF8F536};
+    constexpr uint32_t kGameCommandTunnelCl15447ImageSize{0x0A3F8000};
+    constexpr uintptr_t kGameCommandTunnelCl15447ExecRva{0x06AF31F0};
+    constexpr uintptr_t kGameCommandTunnelCl15447ImplementationRva{0x06B05D70};
 
     using ServerPushChatMessageImplementationFn = void(__fastcall*)(void*, const Unreal::FString&);
     using ReservedChatExecFn = void(__fastcall*)(void*, void*, void*);
@@ -2577,6 +2627,202 @@ namespace
         {
             return false;
         }
+    }
+
+    template <std::size_t Size>
+    bool memory_matches_guarded(uintptr_t address, const std::array<uint8_t, Size>& expected)
+    {
+        if (!is_accessible_memory(address, Size))
+        {
+            return false;
+        }
+        __try
+        {
+            return std::memcmp(reinterpret_cast<const void*>(address), expected.data(), Size) == 0;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+    }
+
+    bool read_game_command_tunnel_image_identity_guarded(uintptr_t module_base,
+                                                          uint32_t& timestamp,
+                                                          uint32_t& image_size)
+    {
+        timestamp = 0;
+        image_size = 0;
+        if (module_base == 0 || !is_accessible_memory(module_base, sizeof(IMAGE_DOS_HEADER)))
+        {
+            return false;
+        }
+        __try
+        {
+            const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(module_base);
+            if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0)
+            {
+                return false;
+            }
+            const uintptr_t nt_address = module_base + static_cast<uintptr_t>(dos->e_lfanew);
+            if (!is_accessible_memory(nt_address, sizeof(IMAGE_NT_HEADERS64)))
+            {
+                return false;
+            }
+            const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(nt_address);
+            if (nt->Signature != IMAGE_NT_SIGNATURE ||
+                nt->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64 ||
+                nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)
+            {
+                return false;
+            }
+            timestamp = nt->FileHeader.TimeDateStamp;
+            image_size = nt->OptionalHeader.SizeOfImage;
+            return true;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            timestamp = 0;
+            image_size = 0;
+            return false;
+        }
+    }
+
+    struct GameCommandTunnelNativeTarget
+    {
+        uintptr_t module_base{0};
+        Unreal::UFunction* function{nullptr};
+        void** native_exec_slot{nullptr};
+        void* native_exec{nullptr};
+        void* implementation{nullptr};
+    };
+
+    bool validate_game_command_tunnel_native_target(Unreal::UObject* controller,
+                                                     bool require_controller_implementation,
+                                                     GameCommandTunnelNativeTarget& out,
+                                                     std::string& detail)
+    {
+        out = {};
+        const uintptr_t module_base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        uint32_t timestamp = 0;
+        uint32_t image_size = 0;
+        if (!read_game_command_tunnel_image_identity_guarded(module_base, timestamp, image_size))
+        {
+            detail = "Brickadia server PE identity was unreadable";
+            return false;
+        }
+        if (timestamp != kGameCommandTunnelCl15447ImageTimestamp ||
+            image_size != kGameCommandTunnelCl15447ImageSize)
+        {
+            std::ostringstream mismatch;
+            mismatch << "unsupported Brickadia image for game-command tunnel: timestamp=0x"
+                     << std::uppercase << std::hex << timestamp
+                     << " image_size=0x" << image_size << std::dec;
+            detail = mismatch.str();
+            return false;
+        }
+
+        const uintptr_t expected_exec = module_base + kGameCommandTunnelCl15447ExecRva;
+        const uintptr_t expected_implementation =
+            module_base + kGameCommandTunnelCl15447ImplementationRva;
+        constexpr std::array<uint8_t, 13> kExecPrefix{
+            0x56, 0x57, 0x48, 0x83, 0xEC, 0x48, 0x48,
+            0x89, 0xD7, 0x48, 0x89, 0xCE, 0x48,
+        };
+        constexpr std::array<uint8_t, 13> kExecImplementationCall{
+            0x48, 0x8D, 0x54, 0x24, 0x30, 0x48, 0x89,
+            0xF1, 0xE8, 0xA2, 0x2A, 0x01, 0x00,
+        };
+        constexpr std::array<uint8_t, 18> kImplementationPrefix{
+            0x41, 0x57, 0x41, 0x56, 0x41, 0x54, 0x56, 0x57, 0x55,
+            0x53, 0x48, 0x81, 0xEC, 0x90, 0x00, 0x00, 0x00, 0x48,
+        };
+        if (!is_executable_memory(expected_exec) ||
+            !is_executable_memory(expected_implementation) ||
+            !memory_matches_guarded(expected_exec, kExecPrefix) ||
+            !memory_matches_guarded(expected_exec + 0xD1, kExecImplementationCall) ||
+            !memory_matches_guarded(expected_implementation, kImplementationPrefix))
+        {
+            detail = "CL15447 ServerPushChatMessage code signatures did not match";
+            return false;
+        }
+
+        const ReflectedFunctionCandidate server_push_chat_message{
+            STR("ServerPushChatMessage"),
+            STR("/Script/Brickadia.BRPlayerController:ServerPushChatMessage"),
+            STR("/Script/Brickadia.BRPlayerController.ServerPushChatMessage"),
+            "BRPlayerController.ServerPushChatMessage",
+        };
+        std::string function_detail;
+        Unreal::UFunction* function = find_reflected_function(
+            controller,
+            server_push_chat_message,
+            function_detail);
+        if (!is_live_uobject(function))
+        {
+            detail = "ServerPushChatMessage UFunction was not found: " + function_detail;
+            return false;
+        }
+        if (function->GetNumParms() != 1 ||
+            function->GetParmsSize() != static_cast<int32_t>(sizeof(PlayerChatMessageProcessEventParams)) ||
+            (static_cast<uint64_t>(function->GetFunctionFlags()) & 0x400ULL) == 0)
+        {
+            detail = "ServerPushChatMessage reflected ABI did not match one native FString parameter";
+            return false;
+        }
+
+        const uintptr_t function_address = reinterpret_cast<uintptr_t>(function);
+        void** native_exec_slot = reinterpret_cast<void**>(function_address + kUFunctionNativeFuncOffset);
+        uintptr_t native_exec = 0;
+        if (!read_pointer_value_guarded(reinterpret_cast<uintptr_t>(native_exec_slot), native_exec))
+        {
+            detail = "ServerPushChatMessage native exec slot was unreadable";
+            return false;
+        }
+        const uintptr_t guard_detour = reinterpret_cast<uintptr_t>(&reserved_chat_guard_detour);
+        const bool validated_guard_owns_slot =
+            native_exec == guard_detour &&
+            g_reserved_chat_guard_installed.load() &&
+            g_reserved_chat_guard_slot.load() == native_exec_slot &&
+            reinterpret_cast<uintptr_t>(g_reserved_chat_guard_original.load()) == expected_exec;
+        if (native_exec != expected_exec && !validated_guard_owns_slot)
+        {
+            detail = "ServerPushChatMessage native exec slot did not match the validated CL15447 thunk or owned reserved-command guard";
+            return false;
+        }
+
+        void* implementation = reinterpret_cast<void*>(expected_implementation);
+        if (require_controller_implementation)
+        {
+            if (!controller || !player_controller_lifecycle_is_usable_guarded(controller))
+            {
+                detail = "exact player controller was not lifecycle-usable";
+                return false;
+            }
+            void* vtable_implementation = nullptr;
+            unsigned long vtable_exception_code = 0;
+            if (!get_uobject_vtable_entry_guarded(
+                    controller,
+                    kServerPushChatMessageImplementationVTableOffset,
+                    vtable_implementation,
+                    vtable_exception_code) ||
+                vtable_implementation != implementation)
+            {
+                std::ostringstream mismatch;
+                mismatch << "ServerPushChatMessage vtable entry did not match CL15447 implementation"
+                         << " exception=0x" << std::uppercase << std::hex
+                         << vtable_exception_code << std::dec;
+                detail = mismatch.str();
+                return false;
+            }
+        }
+
+        out.module_base = module_base;
+        out.function = function;
+        out.native_exec_slot = native_exec_slot;
+        out.native_exec = reinterpret_cast<void*>(expected_exec);
+        out.implementation = implementation;
+        detail = "validated Release-EA3-CL-15447 ServerPushChatMessage native tunnel target";
+        return true;
     }
 
     struct CapturingOutputDevice : public Unreal::FOutputDevice
@@ -3736,32 +3982,22 @@ namespace
             detail = "reserved chat guard is already installed";
             return true;
         }
-        const ReflectedFunctionCandidate server_push_chat_message{
-            STR("ServerPushChatMessage"),
-            STR("/Script/Brickadia.BRPlayerController:ServerPushChatMessage"),
-            STR("/Script/Brickadia.BRPlayerController.ServerPushChatMessage"),
-            "BRPlayerController.ServerPushChatMessage",
-        };
-        std::string function_detail;
-        Unreal::UFunction* function = find_reflected_function(
-            nullptr,
-            server_push_chat_message,
-            function_detail);
-        if (!is_live_uobject(function))
+        GameCommandTunnelNativeTarget target;
+        std::string validation_detail;
+        if (!validate_game_command_tunnel_native_target(
+                nullptr,
+                false,
+                target,
+                validation_detail))
         {
-            detail = function_detail;
+            detail = validation_detail;
             return false;
         }
 
+        Unreal::UFunction* function = target.function;
         const uintptr_t function_address = reinterpret_cast<uintptr_t>(function);
-        void** slot = reinterpret_cast<void**>(function_address + kUFunctionNativeFuncOffset);
-        if (!slot || !is_accessible_memory(reinterpret_cast<uintptr_t>(slot), sizeof(void*)))
-        {
-            detail = "ServerPushChatMessage UFunction native exec slot is inaccessible";
-            return false;
-        }
-
-        void* current = *slot;
+        void** slot = target.native_exec_slot;
+        void* current = target.native_exec;
         if (current == reinterpret_cast<void*>(&reserved_chat_guard_detour))
         {
             g_reserved_chat_guard_slot.store(slot);
@@ -3816,7 +4052,7 @@ namespace
             g_reserved_chat_guard_last_error.clear();
         }
         detail = "reserved chat guard installed on ServerPushChatMessage UFunction native exec slot; " +
-                 function_detail;
+                 validation_detail;
         return true;
     }
 
@@ -4211,31 +4447,26 @@ namespace
             return out.str();
         }
 
-        void* implementation = nullptr;
-        unsigned long vtable_exception_code = 0;
-        const bool vtable_read = get_uobject_vtable_entry_guarded(
+        GameCommandTunnelNativeTarget target;
+        std::string validation_detail;
+        const bool target_valid = validate_game_command_tunnel_native_target(
             controller,
-            kServerPushChatMessageImplementationVTableOffset,
-            implementation,
-            vtable_exception_code);
+            true,
+            target,
+            validation_detail);
+        void* implementation = target.implementation;
         out << "controller=" << json_escape(controller_full_name) << "\n"
             << "controller_class=" << json_escape(controller_class_full_name) << "\n"
+            << "target_build=Release-EA3-CL-15447\n"
             << "implementation_vtable_offset=0x" << std::uppercase << std::hex
             << kServerPushChatMessageImplementationVTableOffset << std::dec << "\n"
-            << "implementation_vtable_read=" << (vtable_read ? "true" : "false") << "\n"
+            << "implementation_vtable_read=" << (target_valid ? "true" : "false") << "\n"
             << "implementation_entry=" << pointer_hex(reinterpret_cast<uintptr_t>(implementation)) << "\n";
-        if (!vtable_read)
+        if (!target_valid || !implementation)
         {
             out << "ok=false\n"
-                << "stage=read_vtable\n"
-                << "exception_code=0x" << std::uppercase << std::hex << vtable_exception_code << std::dec << "\n";
-            return out.str();
-        }
-        if (!implementation)
-        {
-            out << "ok=false\n"
-                << "stage=read_vtable\n"
-                << "detail=ServerPushChatMessage implementation vtable entry was not executable\n";
+                << "stage=validate_target\n"
+                << "detail=" << json_escape(validation_detail) << "\n";
             return out.str();
         }
 
@@ -4332,29 +4563,29 @@ namespace
             return out.str();
         }
 
-        void* implementation = nullptr;
-        unsigned long vtable_exception_code = 0;
-        const bool vtable_read = get_uobject_vtable_entry_guarded(
+        GameCommandTunnelNativeTarget target;
+        std::string validation_detail;
+        const bool target_valid = validate_game_command_tunnel_native_target(
             controller,
-            kServerPushChatMessageImplementationVTableOffset,
-            implementation,
-            vtable_exception_code);
+            true,
+            target,
+            validation_detail);
+        void* implementation = target.implementation;
         out << "controller=" << json_escape(controller_full_name) << "\n"
             << "controller_class=" << json_escape(controller_class_full_name) << "\n"
             << "controller_hint=" << json_escape(controller_address) << "\n"
             << "controller_hint_matched=true\n"
             << "controller_scanned=0\n"
+            << "target_build=Release-EA3-CL-15447\n"
             << "implementation_vtable_offset=0x" << std::uppercase << std::hex
             << kServerPushChatMessageImplementationVTableOffset << std::dec << "\n"
-            << "implementation_vtable_read=" << (vtable_read ? "true" : "false") << "\n"
+            << "implementation_vtable_read=" << (target_valid ? "true" : "false") << "\n"
             << "implementation_entry=" << pointer_hex(reinterpret_cast<uintptr_t>(implementation)) << "\n";
-        if (!vtable_read || !implementation)
+        if (!target_valid || !implementation)
         {
             out << "ok=false\n"
-                << "stage=read_vtable\n"
-                << "exception_code=0x" << std::uppercase << std::hex
-                << vtable_exception_code << std::dec << "\n"
-                << "detail=ServerPushChatMessage implementation is not callable\n";
+                << "stage=validate_target\n"
+                << "detail=" << json_escape(validation_detail) << "\n";
             return out.str();
         }
 
@@ -23421,6 +23652,7 @@ namespace
             out << "{"
                 << "\"running\":" << (running_.load() ? "true" : "false") << ","
                 << "\"connected\":" << (connected_.load() ? "true" : "false") << ","
+                << "\"transportOnly\":" << (socket_transport_only_enabled() ? "true" : "false") << ","
                 << "\"host\":\"" << json_escape(host_) << "\","
                 << "\"port\":" << port_ << ","
                 << "\"inboundQueued\":" << inbound_.size() << ","
@@ -23772,6 +24004,16 @@ namespace
         size_t address_length = 0;
         const char* address = lua_isstring(state, 1) ? lua_tolstring(state, 1, &address_length) : "";
         lua.set_string(build_native_uobject_description_text(
+            address ? std::string_view(address, address_length) : std::string_view()));
+        return 1;
+    }
+
+    int lua_socket_describe_uobject_identity(const LuaMadeSimple::Lua& lua)
+    {
+        lua_State* state = lua.get_lua_state();
+        size_t address_length = 0;
+        const char* address = lua_isstring(state, 1) ? lua_tolstring(state, 1, &address_length) : "";
+        lua.set_string(build_native_uobject_identity_text(
             address ? std::string_view(address, address_length) : std::string_view()));
         return 1;
     }
@@ -24856,6 +25098,24 @@ namespace
             lua.register_function("BMFSocketSend", lua_socket_send);
             lua.register_function("BMFSocketReceive", lua_socket_receive);
             lua.register_function("BMFSocketStatus", lua_socket_status);
+            if (socket_transport_only_enabled())
+            {
+                lua.register_function("BMFSocketDescribeUObject", lua_socket_describe_uobject_identity);
+                lua.register_function("BMFSocketDescribePlayerControllerBinding", lua_socket_describe_player_controller_binding);
+                if (socket_game_command_tunnel_helpers_enabled())
+                {
+                    lua.register_function("BMFSocketPlayerChatMessageImplementationProbe", lua_socket_player_chat_message_implementation_probe);
+                    lua.register_function("BMFSocketPlayerChatMessageImplementationReadiness", lua_socket_player_chat_message_implementation_readiness);
+                    lua.register_function("BMFSocketReservedChatGuardInstall", lua_socket_reserved_chat_guard_install);
+                    lua.register_function("BMFSocketReservedChatGuardStatus", lua_socket_reserved_chat_guard_status);
+                    std::printf("[BMFSocket] transport-only mode enabled with CL15447-validated game-command tunnel helpers; scanners, writers, and unrelated hooks remain unavailable\n");
+                }
+                else
+                {
+                    std::printf("[BMFSocket] transport-only mode enabled; bounded UObject identity and exact player-controller binding are available; native scanners, writers, and hooks are unavailable\n");
+                }
+                return;
+            }
             lua.register_function("BMFSocketPlayerLocation", lua_socket_player_location);
             lua.register_function("BMFSocketDescribeUObject", lua_socket_describe_uobject);
             lua.register_function("BMFSocketDescribePlayerControllerBinding", lua_socket_describe_player_controller_binding);

@@ -8,6 +8,10 @@ local Plugin = {
     trace = true,
     refreshIntervalMilliseconds = 5000,
     eventPollIntervalMilliseconds = 500,
+    lastPlayerCacheGeneration = -1,
+    generationChecks = 0,
+    unchangedRefreshSkips = 0,
+    lastGenerationCheckCode = "NOT_CHECKED",
     cursor = 0,
     lastControl = "",
     lastWriteCode = "NOT_WRITTEN",
@@ -390,6 +394,45 @@ local function writeNativePolicy(BMF, reason)
   return true
 end
 
+local function currentPlayerCacheGeneration(BMF)
+  local listed = BMF.players and BMF.players.list and BMF.players.list() or nil
+  local generation = listed and listed.ok and listed.data
+    and tonumber(listed.data.cacheGeneration) or nil
+  Plugin.native.generationChecks = Plugin.native.generationChecks + 1
+  if generation == nil then
+    Plugin.native.lastGenerationCheckCode = "CACHE_GENERATION_UNAVAILABLE"
+    return nil
+  end
+  return generation
+end
+
+local function rememberCurrentPlayerCacheGeneration(BMF)
+  local generation = currentPlayerCacheGeneration(BMF)
+  if generation ~= nil then
+    Plugin.native.lastPlayerCacheGeneration = generation
+    Plugin.native.lastGenerationCheckCode = "RECORDED"
+  end
+  return generation
+end
+
+local function refreshNativePolicyIfChanged(BMF)
+  local generation = currentPlayerCacheGeneration(BMF)
+  if generation == nil then return false end
+  if generation == Plugin.native.lastPlayerCacheGeneration then
+    Plugin.native.unchangedRefreshSkips = Plugin.native.unchangedRefreshSkips + 1
+    Plugin.native.lastGenerationCheckCode = "UNCHANGED"
+    return true
+  end
+
+  Plugin.native.lastGenerationCheckCode = "CHANGED"
+  local written = writeNativePolicy(BMF, "player-cache-generation")
+  -- A live-controller repair performed by writeNativePolicy can advance the
+  -- registry generation. Record the post-refresh value so the timer does not
+  -- trigger itself again on the next pass.
+  rememberCurrentPlayerCacheGeneration(BMF)
+  return written
+end
+
 local function readNewEvents()
   local size = fileSize(Plugin.native.eventPath)
   if size <= 0 then Plugin.native.cursor = 0 return "" end
@@ -487,6 +530,10 @@ local function statusLines()
     "restricted_prefab_hash_count=" .. tostring(#Plugin.prefabs.entries),
     "native_policy_write_code=" .. tostring(Plugin.native.lastWriteCode),
     "native_policy_write_count=" .. tostring(Plugin.native.writeCount),
+    "player_cache_generation=" .. tostring(Plugin.native.lastPlayerCacheGeneration),
+    "generation_checks=" .. tostring(Plugin.native.generationChecks),
+    "unchanged_refresh_skips=" .. tostring(Plugin.native.unchangedRefreshSkips),
+    "generation_check_code=" .. tostring(Plugin.native.lastGenerationCheckCode),
     "native_blocks=" .. tostring(Plugin.stats.nativeBlocks),
     "native_allows=" .. tostring(Plugin.stats.nativeAllows),
     "feedback_delivered=" .. tostring(Plugin.stats.feedbackDelivered),
@@ -503,11 +550,13 @@ function Plugin.onLoad(BMF)
   loadPrefabIndex(BMF)
   Plugin.native.cursor = fileSize(Plugin.native.eventPath)
   writeNativePolicy(BMF, "plugin-load")
+  rememberCurrentPlayerCacheGeneration(BMF)
 
   BMF.commands.register("bmf.tieredplacement.status", "Show tiered brick placement policy status.", function()
     refreshRoleAssignments(BMF, true)
     loadPrefabIndex(BMF)
     writeNativePolicy(BMF, "status-command")
+    rememberCurrentPlayerCacheGeneration(BMF)
     pollEvents(BMF)
     return BMF.result(true, "OK", "Tiered brick placement guard status", { lines = statusLines() })
   end)
@@ -516,6 +565,7 @@ function Plugin.onLoad(BMF)
     refreshRoleAssignments(BMF, true)
     loadPrefabIndex(BMF)
     local written = writeNativePolicy(BMF, "refresh-command")
+    rememberCurrentPlayerCacheGeneration(BMF)
     return BMF.result(written, written and "OK" or Plugin.native.lastWriteCode, "Tiered placement policy refreshed", {
       lines = statusLines(),
     })
@@ -523,7 +573,7 @@ function Plugin.onLoad(BMF)
 
   if BMF.timers and type(BMF.timers.every) == "function" then
     BMF.timers.every(Plugin.native.eventPollIntervalMilliseconds, function() pollEvents(BMF) end)
-    BMF.timers.every(Plugin.native.refreshIntervalMilliseconds, function() writeNativePolicy(BMF, "timer") end)
+    BMF.timers.every(Plugin.native.refreshIntervalMilliseconds, function() refreshNativePolicyIfChanged(BMF) end)
   end
   BMF.logInfo("TieredBrickPlacementGuard loaded", {
     tiers = #capabilityList((function() local out = {}; for capability in pairs(Plugin.policy.tiers) do out[capability] = true end; return out end)()),

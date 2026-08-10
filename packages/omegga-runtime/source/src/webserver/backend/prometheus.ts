@@ -445,6 +445,12 @@ export function buildPrometheusMetrics(server: Webserver) {
     bmfOperations.by_cache_result,
   );
   const bmfPlayerRegistry = objectRecord(bmfTelemetryRecord.player_registry);
+  const bmfConnectionReadiness = objectRecord(
+    bmfTelemetryRecord.connection_readiness,
+  );
+  const bmfGameCommandTunnel = objectRecord(
+    bmfTelemetryRecord.game_command_tunnel,
+  );
   const bmfSocketScheduler = objectRecord(bmfTelemetryRecord.socket_scheduler);
   const bmfSocketSchedulerByPath = objectRecord(bmfSocketScheduler.by_path);
   const bmfNativeDrains = objectRecord(bmfSocketScheduler.native_drains);
@@ -1215,6 +1221,96 @@ export function buildPrometheusMetrics(server: Webserver) {
         ),
     ),
   ];
+  const bmfConnectionReadinessCounterMetricDefinitions = [
+    [
+      'bmf_connection_readiness_path_preservations_total',
+      'Validated plain controller/player-state path pairs preserved across same-session blank snapshots.',
+      'pathPreservations',
+    ],
+    [
+      'bmf_connection_readiness_path_replacements_total',
+      'Retained path pairs replaced by nonblank same-session snapshot paths.',
+      'pathReplacements',
+    ],
+    [
+      'bmf_connection_readiness_path_clears_total',
+      'Retained path pairs cleared on lifecycle or identity invalidation.',
+      'pathClears',
+    ],
+    [
+      'bmf_connection_readiness_path_reuses_total',
+      'Preserved plain path pairs successfully re-resolved and lifecycle-validated.',
+      'pathReuses',
+    ],
+    [
+      'bmf_connection_readiness_session_repair_attempts_total',
+      'Exact UUID and connection-generation repair attempts admitted by the per-session window.',
+      'repairAttempts',
+    ],
+    [
+      'bmf_connection_readiness_session_repair_deferrals_total',
+      'Exact-session repair attempts deferred inside the active repair window.',
+      'repairDeferrals',
+    ],
+  ] as const;
+  const bmfConnectionReadinessMetricBlocks =
+    bmfConnectionReadinessCounterMetricDefinitions.flatMap(
+      ([name, help, field]) =>
+        metricBlock(
+          name,
+          help,
+          [{ name, value: finiteMetricValue(bmfConnectionReadiness[field]) }],
+          'counter',
+        ),
+    );
+  const bmfTunnelReadinessCounterMetricDefinitions = [
+    ['probes', 'readiness_probes'],
+    ['retries', 'readiness_retries'],
+    ['deferrals', 'readiness_deferrals'],
+    ['event_wakeups', 'readiness_event_wakeups'],
+  ] as const;
+  const bmfTunnelReadinessMetricBlocks = [
+    ...metricBlock(
+      'bmf_game_command_tunnel_readiness_total',
+      'Game-command tunnel readiness probes, retries, deferred pump passes, and cache-sync wakeups.',
+      bmfTunnelReadinessCounterMetricDefinitions.map(([outcome, field]) => ({
+        name: 'bmf_game_command_tunnel_readiness_total',
+        labels: { outcome },
+        value: finiteMetricValue(bmfGameCommandTunnel[field]),
+      })),
+      'counter',
+    ),
+    ...metricBlock(
+      'bmf_game_command_tunnel_readiness_retry_milliseconds',
+      'Configured bounded readiness retry delay.',
+      [
+        {
+          name: 'bmf_game_command_tunnel_readiness_retry_milliseconds',
+          labels: { bound: 'base' },
+          value: finiteMetricValue(
+            bmfGameCommandTunnel.readiness_retry_base_ms,
+          ),
+        },
+        {
+          name: 'bmf_game_command_tunnel_readiness_retry_milliseconds',
+          labels: { bound: 'max' },
+          value: finiteMetricValue(bmfGameCommandTunnel.readiness_retry_max_ms),
+        },
+      ],
+    ),
+    ...metricBlock(
+      'bmf_game_command_tunnel_readiness_retries_per_request_max',
+      'Maximum readiness retries observed for one tunnel request.',
+      [
+        {
+          name: 'bmf_game_command_tunnel_readiness_retries_per_request_max',
+          value: finiteMetricValue(
+            bmfGameCommandTunnel.max_readiness_retries_per_request,
+          ),
+        },
+      ],
+    ),
+  ];
   const bmfPlayerRegistryDurationLines: MetricLine[] = [
     [
       'repair',
@@ -1874,6 +1970,8 @@ export function buildPrometheusMetrics(server: Webserver) {
       'counter',
     ),
     ...bmfPlayerRegistryMetricBlocks,
+    ...bmfConnectionReadinessMetricBlocks,
+    ...bmfTunnelReadinessMetricBlocks,
     ...metricBlock(
       'bmf_player_registry_duration_milliseconds',
       'Player-registry repair and global-scan duration.',

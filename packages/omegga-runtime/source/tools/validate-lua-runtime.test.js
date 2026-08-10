@@ -120,8 +120,14 @@ test('idle socket backoff reuses the existing scheduler and stays bounded', () =
   assert.notEqual(updateEnd, -1, 'idle backoff boundary must exist');
   assert.match(update, /recent_work_passes_remaining = 4/);
   assert.match(update, /next_interval = 25/);
-  assert.match(update, /consecutive_empty_passes <= 6[\s\S]*?next_interval = 50/);
-  assert.match(update, /else[\s\S]*?next_tier = "deep_idle"[\s\S]*?next_interval = 100/);
+  assert.match(
+    update,
+    /consecutive_empty_passes <= 6[\s\S]*?next_interval = 50/,
+  );
+  assert.match(
+    update,
+    /else[\s\S]*?next_tier = "deep_idle"[\s\S]*?next_interval = 100/,
+  );
   assert.match(update, /work_wakeups_total/);
   assert.match(update, /backoff_transitions_total/);
   assert.match(
@@ -278,7 +284,11 @@ test('OmeggaBridge does not retain typed-chat UObjects across frames', () => {
     cachedContextStart,
   );
   assert.notEqual(cachedContextStart, -1, 'cached context guard must exist');
-  assert.notEqual(cachedContextEnd, -1, 'cached context guard boundary must exist');
+  assert.notEqual(
+    cachedContextEnd,
+    -1,
+    'cached context guard boundary must exist',
+  );
   const cachedContextGuard = source.slice(cachedContextStart, cachedContextEnd);
   assert.doesNotMatch(cachedContextGuard, /OmeggaGetCachedCommandContext/);
   assert.match(
@@ -375,7 +385,10 @@ test('prefab capture retains only inert snapshots and reacquires replay contexts
   );
   const placeResolver = source.slice(placeResolverStart, placeResolverEnd);
   assert.doesNotMatch(placeResolver, /record\.context|state\.last/);
-  assert.match(placeResolver, /OmeggaFindRawServerPlaceCurrentPrefabContext\(\)/);
+  assert.match(
+    placeResolver,
+    /OmeggaFindRawServerPlaceCurrentPrefabContext\(\)/,
+  );
   assert.match(placeResolver, /OmeggaFindServerPastePrefabContext\(\)/);
 
   const replayStart = source.indexOf(
@@ -590,7 +603,11 @@ test('native tree and zone drains share the socket-pump budget in one-event unit
     'if scheduler.native_drains.budget_enabled == true then',
   );
   const rollbackStart = drain.indexOf('else', enabledStart);
-  assert.notEqual(enabledStart, -1, 'socket pump must select bounded native drains');
+  assert.notEqual(
+    enabledStart,
+    -1,
+    'socket pump must select bounded native drains',
+  );
   assert.notEqual(rollbackStart, -1, 'native drain rollback branch must exist');
   assert.doesNotMatch(
     drain.slice(enabledStart, rollbackStart),
@@ -674,10 +691,7 @@ test('unified socket admission owns direct and tunnel dispatch with bounded weig
   assert.notEqual(fairnessStart, -1);
   assert.notEqual(fairnessEnd, -1);
   const fairness = source.slice(fairnessStart, fairnessEnd);
-  assert.equal(
-    fairness.match(/"direct_socket:interactive"/g)?.length,
-    4,
-  );
+  assert.equal(fairness.match(/"direct_socket:interactive"/g)?.length, 4);
   assert.equal(fairness.match(/"tunnel:interactive"/g)?.length, 4);
   assert.equal(fairness.match(/"direct_socket:bulk"/g)?.length, 1);
   assert.equal(fairness.match(/"tunnel:bulk"/g)?.length, 1);
@@ -742,10 +756,7 @@ test('unified socket admission owns direct and tunnel dispatch with bounded weig
     'local function BMF_game_command_tunnel_send_rejection',
     tunnelTerminalStart,
   );
-  const tunnelTerminal = source.slice(
-    tunnelTerminalStart,
-    tunnelTerminalEnd,
-  );
+  const tunnelTerminal = source.slice(tunnelTerminalStart, tunnelTerminalEnd);
   assert.match(tunnelTerminal, /if request\.terminalSent == true then/);
   assert.ok(
     tunnelTerminal.indexOf('request.terminalSent = true') <
@@ -814,7 +825,10 @@ test('command output and completed replay caches are bounded by count and bytes'
   );
   const directRemember = source.slice(directRememberStart, directRememberEnd);
   assert.match(directRemember, /retainedBytes = retained_bytes/);
-  assert.match(directRemember, /while #admission\.completed_order > retention do/);
+  assert.match(
+    directRemember,
+    /while #admission\.completed_order > retention do/,
+  );
   assert.match(
     directRemember,
     /BMF_socket_replay_compact_cache_to_budget\(admission, max_bytes, "direct"\)/,
@@ -864,7 +878,7 @@ test('game command tunnel uses only an exact ephemeral controller address', () =
     'bmf',
     'runtime.lua',
   );
-  const source = fs.readFileSync(runtimePath, 'utf8');
+  const source = fs.readFileSync(runtimePath, 'utf8').replace(/\r\n/g, '\n');
   const drainStart = source.indexOf(
     'BMF_game_command_tunnel_drain_once = function',
   );
@@ -902,6 +916,20 @@ test('game command tunnel uses only an exact ephemeral controller address', () =
   );
   assert.match(source, /controller_address_reuse_enabled = false/);
   assert.match(source, /controllerAddressReuseEnabled = false/);
+  assert.ok(
+    drain.indexOf('readiness_not_before_tick') <
+      drain.indexOf('BMF_game_command_tunnel_readiness_probe(request)'),
+    'deferred retries must skip authoritative/native readiness work before probing',
+  );
+  assert.match(
+    source,
+    /BMFConnectionReadiness\.repair_decision\([\s\S]*?identity\.uuid,[\s\S]*?identity\.connectionGeneration/,
+    'repair admission must be keyed to the exact UUID and connection generation',
+  );
+  assert.match(
+    source,
+    /BMF_game_command_tunnel_defer_retry\(request, readiness_retry_detail\)/,
+  );
 
   const probeStart = source.indexOf(
     'local function BMF_player_message_implementation_probe',
@@ -956,7 +984,10 @@ test('native controller and tree target paths reject cross-frame UObject reuse',
   assert.match(binding, /find_bounded_reciprocal_player_state\(controller\)/);
   assert.match(binding, /count_bounded_ue_guid_matches/);
   assert.match(binding, /identity_uuid_match=true/);
-  assert.doesNotMatch(binding, /get_object_property|export_property_text_guarded/);
+  assert.doesNotMatch(
+    binding,
+    /get_object_property|export_property_text_guarded/,
+  );
   assert.doesNotMatch(
     binding,
     /ForEachUObject|FindAllOf|FindFirstOf|write_player_position_memory_reference_probe/,
@@ -1196,7 +1227,9 @@ test('player registry keeps ordinary player and chat paths cache-first with expl
     'only an explicit list repair request may authorize broad controller repair',
   );
 
-  const syncStart = source.indexOf('BMF.players.sync = function(records, options)');
+  const syncStart = source.indexOf(
+    'BMF.players.sync = function(records, options)',
+  );
   const syncEnd = source.indexOf('function player_query_text', syncStart);
   const playerSync = source.slice(syncStart, syncEnd);
   assert.match(
@@ -1305,15 +1338,27 @@ test('operation attribution stays bounded, plain-data-only, and attached to the 
     directAdmissionStart,
     directAdmissionEnd,
   );
-  assert.match(directAdmission, /request\.operationContext = BMF_operation_begin/);
-  assert.match(source, /BMF_operation_start_execution\(request\.operationContext\)/);
-  assert.match(source, /BMF_operation_finish\(request\.operationContext, normalized_state\)/);
+  assert.match(
+    directAdmission,
+    /request\.operationContext = BMF_operation_begin/,
+  );
+  assert.match(
+    source,
+    /BMF_operation_start_execution\(request\.operationContext\)/,
+  );
+  assert.match(
+    source,
+    /BMF_operation_finish\(request\.operationContext, normalized_state\)/,
+  );
   assert.match(
     source,
     /budget_admission_stopped = true\s+BMF_operation_note_queued_budget_defer\(\)/,
     'the existing elapsed-time budget must attribute admission deferrals without a second queue',
   );
-  assert.match(source, /BMF_operation_update_stage\(request\.operationContext, "queued"\)/);
+  assert.match(
+    source,
+    /BMF_operation_update_stage\(request\.operationContext, "queued"\)/,
+  );
   assert.match(source, /BMFFrameTelemetryOperationSnapshot/);
 
   const prometheusPath = path.join(
@@ -1331,7 +1376,10 @@ test('operation attribution stays bounded, plain-data-only, and attached to the 
     'correlation IDs must never enter Prometheus labels',
   );
   assert.match(prometheus, /bmf_operation_duration_milliseconds/);
-  assert.match(prometheus, /labels: \{ operation_class: operationClass, phase, statistic:/);
+  assert.match(
+    prometheus,
+    /labels: \{ operation_class: operationClass, phase, statistic:/,
+  );
 });
 
 test('private delivery requires an immutable UUID and generation envelope with zero global scans', () => {
@@ -1348,7 +1396,9 @@ test('private delivery requires an immutable UUID and generation envelope with z
     'runtime.lua',
   );
   const source = fs.readFileSync(runtimePath, 'utf8');
-  const strictStart = source.indexOf('function live_chat_resolve_strict_target(identity)');
+  const strictStart = source.indexOf(
+    'function live_chat_resolve_strict_target(identity)',
+  );
   const strictEnd = source.indexOf(
     'function live_chat_validate_authoritative_identity(identity)',
     strictStart,
@@ -1379,16 +1429,26 @@ test('private delivery requires an immutable UUID and generation envelope with z
   assert.match(privateChat, /BMF\.chat\.whisper = function/);
   assert.match(privateChat, /BMF\.chat\.statusMessage = function/);
 
-  const envelopeStart = source.indexOf('local function parse_private_delivery_envelope');
-  const envelopeEnd = source.indexOf('local function private_delivery_lines', envelopeStart);
+  const envelopeStart = source.indexOf(
+    'local function parse_private_delivery_envelope',
+  );
+  const envelopeEnd = source.indexOf(
+    'local function private_delivery_lines',
+    envelopeStart,
+  );
   const envelope = source.slice(envelopeStart, envelopeEnd);
   assert.match(envelope, /sender_uuid/);
   assert.match(envelope, /connection_generation/);
   assert.match(envelope, /deadline_ms/);
   assert.doesNotMatch(envelope, /controllerpath|playerstatepath|senderhash/i);
 
-  const collectStart = source.indexOf('function live_chat_collect_targets(options)');
-  const collectEnd = source.indexOf('function live_chat_target_summary', collectStart);
+  const collectStart = source.indexOf(
+    'function live_chat_collect_targets(options)',
+  );
+  const collectEnd = source.indexOf(
+    'function live_chat_target_summary',
+    collectStart,
+  );
   const collectTargets = source.slice(collectStart, collectEnd);
   assert.match(
     collectTargets,
@@ -1415,7 +1475,9 @@ test('legacy OmeggaBridge name-only private delivery is disabled', () => {
     'main.lua',
   );
   const source = fs.readFileSync(bridgePath, 'utf8');
-  const handlerStart = source.indexOf('local function handle_typed_chat_whisper');
+  const handlerStart = source.indexOf(
+    'local function handle_typed_chat_whisper',
+  );
   const handlerEnd = source.indexOf(
     'local function handle_typed_chat_status_message',
     handlerStart,
@@ -1441,7 +1503,13 @@ test('Omegga accepts the native unknown-command flag only after verified applica
     'Scripts',
     'main.lua',
   );
-  const serverPath = path.join(__dirname, '..', 'src', 'brickadia', 'server.ts');
+  const serverPath = path.join(
+    __dirname,
+    '..',
+    'src',
+    'brickadia',
+    'server.ts',
+  );
   const bridgeSource = fs.readFileSync(bridgePath, 'utf8');
   const serverSource = fs.readFileSync(serverPath, 'utf8');
 
@@ -1474,7 +1542,10 @@ test('frame hitch logging records 33.3 ms frames off the game thread', () => {
   assert.doesNotMatch(
     source.slice(
       source.indexOf('void observe(float delta_seconds'),
-      source.indexOf('std::string status_json', source.indexOf('void observe(float delta_seconds')),
+      source.indexOf(
+        'std::string status_json',
+        source.indexOf('void observe(float delta_seconds'),
+      ),
     ),
     /printf|BMF_SLOW_FRAME/,
     'the game-thread frame observer must not perform synchronous logging',
@@ -1510,10 +1581,17 @@ test('CityRPG tunnel resolves one exact current Omegga identity and retains no U
     resolverStart,
   );
   assert.notEqual(resolverStart, -1, 'authoritative resolver must exist');
-  assert.notEqual(resolverEnd, -1, 'authoritative resolver boundary must exist');
+  assert.notEqual(
+    resolverEnd,
+    -1,
+    'authoritative resolver boundary must exist',
+  );
   const resolver = source.slice(resolverStart, resolverEnd);
 
-  assert.match(resolver, /live_chat_validate_authoritative_identity\(identity\)/);
+  assert.match(
+    resolver,
+    /live_chat_validate_authoritative_identity\(identity\)/,
+  );
   assert.match(
     resolver,
     /live_chat_collect_targets\(\{[\s\S]*?repair = true,[\s\S]*?expectedUuid = expected_uuid/,
@@ -1543,10 +1621,19 @@ test('CityRPG tunnel resolves one exact current Omegga identity and retains no U
   assert.match(resolver, /exact_name_ambiguous/);
   assert.match(resolver, /exact_name_not_found/);
   assert.doesNotMatch(resolver, /live_chat_target_matches/);
-  assert.doesNotMatch(resolver, /state\.[A-Za-z0-9_.]+\s*=\s*repaired\.controller/);
+  assert.doesNotMatch(
+    resolver,
+    /state\.[A-Za-z0-9_.]+\s*=\s*repaired\.controller/,
+  );
   assert.doesNotMatch(resolver, /cached_player\.controller\s*=/);
-  assert.match(resolver, /cached_player\.controllerPath = repaired\.controllerPath/);
-  assert.match(resolver, /cached_player\.playerStatePath = repaired\.playerStatePath/);
+  assert.match(
+    resolver,
+    /cached_player\.controllerPath = repaired\.controllerPath/,
+  );
+  assert.match(
+    resolver,
+    /cached_player\.playerStatePath = repaired\.playerStatePath/,
+  );
 
   const nativeStateStart = source.indexOf(
     'local function minigame_native_player_state_from_controller(controller)',
@@ -1588,14 +1675,18 @@ test('CityRPG tunnel resolves one exact current Omegga identity and retains no U
     tunnelStart,
   );
   const tunnel = source.slice(tunnelStart, tunnelEnd);
-  assert.match(tunnel, /local sender_name = trim_string\(decoded\.senderName or ""\)/);
+  assert.match(
+    tunnel,
+    /local sender_name = trim_string\(decoded\.senderName or ""\)/,
+  );
   assert.match(tunnel, /SENDER_NAME_REQUIRED/);
   assert.match(tunnel, /live_chat_validate_authoritative_identity/);
   assert.match(tunnel, /senderName = sender_name/);
   assert.doesNotMatch(tunnel, /#(?:targets|controllers)\s*==\s*1/);
 
   assert.equal(
-    (source.match(/live_chat_resolve_authoritative_name_target\(\{/g) || []).length,
+    (source.match(/live_chat_resolve_authoritative_name_target\(\{/g) || [])
+      .length,
     2,
     'readiness and final execution checks must both resolve the immutable envelope',
   );

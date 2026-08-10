@@ -66,6 +66,8 @@ BMF_COMMAND_WORKER_DEFAULT_MAX_FILES_PER_POLL = 1
 BMF_STATUS_HEARTBEAT_DEFAULT_SECONDS = 15
 local SOCKET_DEFAULT_POLL_MS = 25
 local GAME_COMMAND_TUNNEL_DEFAULT_INTERVAL_MS = 50
+GAME_COMMAND_TUNNEL_DEFAULT_READINESS_RETRY_BASE_MS = 250
+GAME_COMMAND_TUNNEL_DEFAULT_READINESS_RETRY_MAX_MS = 5000
 local GAME_COMMAND_TUNNEL_DEFAULT_MAX_QUEUE = 64
 local GAME_COMMAND_TUNNEL_DEFAULT_MAX_INTERACTIVE_QUEUE = 48
 local GAME_COMMAND_TUNNEL_DEFAULT_MAX_BULK_QUEUE = 32
@@ -591,6 +593,13 @@ local state = {
     readiness_rejections = 0,
     readiness_expirations = 0,
     readiness_ack_failures = 0,
+    readiness_probes = 0,
+    readiness_retries = 0,
+    readiness_deferrals = 0,
+    readiness_event_wakeups = 0,
+    readiness_retry_base_ms = GAME_COMMAND_TUNNEL_DEFAULT_READINESS_RETRY_BASE_MS,
+    readiness_retry_max_ms = GAME_COMMAND_TUNNEL_DEFAULT_READINESS_RETRY_MAX_MS,
+    max_readiness_retries_per_request = 0,
     last_readiness_code = "",
     dispatch_count = 0,
     active_by_id = {},
@@ -684,6 +693,9 @@ local state = {
     authoritative_name_failures = 0,
     authoritative_name_ambiguities = 0,
     authoritative_name_scans = 0,
+    controller_path_reuses = 0,
+    session_repair_attempts = 0,
+    session_repair_deferrals = 0,
     broad_repairs = 0,
     broad_repair_skipped = 0,
     broad_repair_failures = 0,
@@ -1709,6 +1721,9 @@ function BMF_telemetry_snapshot()
     authoritative_name_failures = tonumber(player_registry.authoritative_name_failures) or 0,
     authoritative_name_ambiguities = tonumber(player_registry.authoritative_name_ambiguities) or 0,
     authoritative_name_scans = tonumber(player_registry.authoritative_name_scans) or 0,
+    controller_path_reuses = tonumber(player_registry.controller_path_reuses) or 0,
+    session_repair_attempts = tonumber(player_registry.session_repair_attempts) or 0,
+    session_repair_deferrals = tonumber(player_registry.session_repair_deferrals) or 0,
     broad_repairs = tonumber(player_registry.broad_repairs) or 0,
     broad_repair_skipped = tonumber(player_registry.broad_repair_skipped) or 0,
     broad_repair_failures = tonumber(player_registry.broad_repair_failures) or 0,
@@ -1817,6 +1832,13 @@ function BMF_telemetry_snapshot()
     readiness_rejections = tonumber(tunnel.readiness_rejections) or 0,
     readiness_expirations = tonumber(tunnel.readiness_expirations) or 0,
     readiness_ack_failures = tonumber(tunnel.readiness_ack_failures) or 0,
+    readiness_probes = tonumber(tunnel.readiness_probes) or 0,
+    readiness_retries = tonumber(tunnel.readiness_retries) or 0,
+    readiness_deferrals = tonumber(tunnel.readiness_deferrals) or 0,
+    readiness_event_wakeups = tonumber(tunnel.readiness_event_wakeups) or 0,
+    readiness_retry_base_ms = tonumber(tunnel.readiness_retry_base_ms) or 0,
+    readiness_retry_max_ms = tonumber(tunnel.readiness_retry_max_ms) or 0,
+    max_readiness_retries_per_request = tonumber(tunnel.max_readiness_retries_per_request) or 0,
     last_readiness_code = tostring(tunnel.last_readiness_code or ""),
     duplicate_requests = tonumber(tunnel.duplicate_requests) or 0,
     scheduler_failures = tonumber(tunnel.scheduler_failures) or 0,
@@ -2256,6 +2278,10 @@ write_status = function()
     "\"game_command_tunnel_readiness_rejections\":" .. tostring(state.game_command_tunnel.readiness_rejections or 0),
     "\"game_command_tunnel_readiness_expirations\":" .. tostring(state.game_command_tunnel.readiness_expirations or 0),
     "\"game_command_tunnel_readiness_ack_failures\":" .. tostring(state.game_command_tunnel.readiness_ack_failures or 0),
+    "\"game_command_tunnel_readiness_probes\":" .. tostring(state.game_command_tunnel.readiness_probes or 0),
+    "\"game_command_tunnel_readiness_retries\":" .. tostring(state.game_command_tunnel.readiness_retries or 0),
+    "\"game_command_tunnel_readiness_deferrals\":" .. tostring(state.game_command_tunnel.readiness_deferrals or 0),
+    "\"game_command_tunnel_readiness_event_wakeups\":" .. tostring(state.game_command_tunnel.readiness_event_wakeups or 0),
     "\"game_command_tunnel_last_readiness_code\":" .. json_string(state.game_command_tunnel.last_readiness_code or ""),
     "\"game_command_tunnel_last_result_state\":" .. json_string(state.game_command_tunnel.last_result_state or ""),
     "\"game_command_tunnel_last_result_code\":" .. json_string(state.game_command_tunnel.last_result_code or ""),
@@ -3207,6 +3233,16 @@ function BMF_game_command_tunnel_configure_from_env()
     "BMF_GAME_COMMAND_TUNNEL_INTERACTIVE_BURST",
     GAME_COMMAND_TUNNEL_DEFAULT_INTERACTIVE_BURST,
     1)))
+  tunnel.readiness_retry_base_ms = math.max(100, math.min(5000, BMF_env_number(
+    "BMF_GAME_COMMAND_TUNNEL_READINESS_RETRY_BASE_MS",
+    GAME_COMMAND_TUNNEL_DEFAULT_READINESS_RETRY_BASE_MS,
+    100)))
+  tunnel.readiness_retry_max_ms = math.max(
+    tunnel.readiness_retry_base_ms,
+    math.min(30000, BMF_env_number(
+      "BMF_GAME_COMMAND_TUNNEL_READINESS_RETRY_MAX_MS",
+      GAME_COMMAND_TUNNEL_DEFAULT_READINESS_RETRY_MAX_MS,
+      tunnel.readiness_retry_base_ms)))
   tunnel.completed_retention = math.max(64, math.min(8192, BMF_env_number(
     "BMF_GAME_COMMAND_TUNNEL_COMPLETED_RETENTION",
     GAME_COMMAND_TUNNEL_COMPLETED_RETENTION,
@@ -6649,6 +6685,11 @@ local function register_builtin_commands()
       "rejected=" .. tostring(snapshot.rejected or 0),
       "expired=" .. tostring(snapshot.expired or 0),
       "outcome_unknown=" .. tostring(snapshot.outcomeUnknown or 0),
+      "readiness_probes=" .. tostring(snapshot.readinessProbes or 0),
+      "readiness_retries=" .. tostring(snapshot.readinessRetries or 0),
+      "readiness_deferrals=" .. tostring(snapshot.readinessDeferrals or 0),
+      "session_repair_attempts=" .. tostring(snapshot.sessionRepairAttempts or 0),
+      "session_repair_deferrals=" .. tostring(snapshot.sessionRepairDeferrals or 0),
     }
     return result(true, "OK", "Game command tunnel status", snapshot)
   end)
@@ -23084,6 +23125,21 @@ function live_chat_controller_authoritative_identity_matches(
   return true, metadata
 end
 
+function live_chat_invalidate_cached_paths(cached_player, identity, reason)
+  if type(cached_player) == "table" then
+    cached_player.controllerPath = ""
+    cached_player.playerStatePath = ""
+    cached_player.controllerAvailable = false
+    cached_player.bmfControllerPathPreserved = false
+  end
+  BMFConnectionReadiness.invalidate_paths(
+    state.connection_readiness,
+    identity and identity.uuid,
+    identity and identity.connectionGeneration,
+    reason,
+    os.time() * 1000)
+end
+
 -- Resolve a controller without ever inferring identity from controller count,
 -- array order, a previous recipient, or a partial name. A broad scan is only
 -- allowed as a bounded repair after the UUID+generation+name envelope matches
@@ -23109,20 +23165,68 @@ function live_chat_resolve_authoritative_name_target(identity)
       expected_uuid,
       expected_name)
     if exact then
+      if BMFConnectionReadiness.note_path_reuse(
+          state.connection_readiness,
+          identity.uuid,
+          identity.connectionGeneration,
+          os.time() * 1000) then
+        registry.controller_path_reuses =
+          (tonumber(registry.controller_path_reuses) or 0) + 1
+        cached_player.bmfControllerPathPreserved = false
+      end
       registry.authoritative_name_resolutions =
         (tonumber(registry.authoritative_name_resolutions) or 0) + 1
       return strict_target, strict_targets, "ok"
     end
     registry.authoritative_name_failures =
       (tonumber(registry.authoritative_name_failures) or 0) + 1
+    live_chat_invalidate_cached_paths(cached_player, identity, "live_sender_name_mismatch")
     return nil, {}, "live_sender_name_mismatch"
   end
   if strict_reason ~= "current_paths_unavailable"
       and strict_reason ~= "controller_unavailable" then
+    if strict_reason == "live_player_state_mismatch"
+        or strict_reason == "live_uuid_mismatch"
+        or strict_reason == "live_name_mismatch"
+        or strict_reason == "snapshot_generation_mismatch" then
+      live_chat_invalidate_cached_paths(cached_player, identity, strict_reason)
+    end
     registry.authoritative_name_failures =
       (tonumber(registry.authoritative_name_failures) or 0) + 1
     return nil, {}, strict_reason
   end
+
+  if strict_reason == "controller_unavailable" then
+    live_chat_invalidate_cached_paths(cached_player, identity, strict_reason)
+  end
+
+  local repair_now_ms = os.time() * 1000
+  local repair_window_ms = math.max(
+    tonumber(registry.repair_cooldown_ms) or BMF_PLAYER_REGISTRY_DEFAULT_REPAIR_COOLDOWN_MS,
+    tonumber(registry.repair_backoff_ms) or 0)
+  local repair_allowed, repair_decision, repair_next_at_ms =
+    BMFConnectionReadiness.repair_decision(
+      state.connection_readiness,
+      identity.uuid,
+      identity.connectionGeneration,
+      repair_now_ms,
+      repair_window_ms,
+      strict_reason)
+  if not repair_allowed then
+    registry.session_repair_deferrals =
+      (tonumber(registry.session_repair_deferrals) or 0) + 1
+    registry.authoritative_name_failures =
+      (tonumber(registry.authoritative_name_failures) or 0) + 1
+    if repair_decision == "deferred" then
+      return nil, {}, "exact_name_repair_deferred", {
+        retryAfterMs = math.max(0, repair_next_at_ms - repair_now_ms),
+        repairNextAtMs = repair_next_at_ms,
+      }
+    end
+    return nil, {}, "repair_session_invalid"
+  end
+  registry.session_repair_attempts =
+    (tonumber(registry.session_repair_attempts) or 0) + 1
 
   local targets, repair_detail = live_chat_collect_targets({
     repair = true,
@@ -23157,7 +23261,10 @@ function live_chat_resolve_authoritative_name_target(identity)
       return nil, matches, "exact_name_ambiguous"
     end
     if repair_detail and repair_detail.skipped == true then
-      return nil, {}, "exact_name_repair_deferred"
+      return nil, {}, "exact_name_repair_deferred", {
+        retryAfterMs = math.max(0, repair_next_at_ms - repair_now_ms),
+        repairNextAtMs = repair_next_at_ms,
+      }
     end
     return nil, {}, "exact_name_not_found"
   end
@@ -23453,7 +23560,13 @@ function publish_player_cache(cache, options)
   state.player_cache_error = ""
   local readiness_started_clock = os.clock()
   local readiness_transitions_before = tonumber(state.connection_readiness.transitions) or 0
+  local path_preservations_before = tonumber(state.connection_readiness.pathPreservations) or 0
+  local path_replacements_before = tonumber(state.connection_readiness.pathReplacements) or 0
+  local path_clears_before = tonumber(state.connection_readiness.pathClears) or 0
   BMFConnectionReadiness.sync(state.connection_readiness, players, os.time() * 1000)
+  if type(BMF_game_command_tunnel_wake_sessions) == "function" then
+    BMF_game_command_tunnel_wake_sessions(players)
+  end
   BMF_join_correlation_phase(
     cache.correlationId,
     "bmf_readiness_transition",
@@ -23463,6 +23576,15 @@ function publish_player_cache(cache, options)
       transitions = math.max(
         0,
         (tonumber(state.connection_readiness.transitions) or 0) - readiness_transitions_before),
+      pathPreservations = math.max(
+        0,
+        (tonumber(state.connection_readiness.pathPreservations) or 0) - path_preservations_before),
+      pathReplacements = math.max(
+        0,
+        (tonumber(state.connection_readiness.pathReplacements) or 0) - path_replacements_before),
+      pathClears = math.max(
+        0,
+        (tonumber(state.connection_readiness.pathClears) or 0) - path_clears_before),
     })
   return cache
 end
@@ -28253,6 +28375,8 @@ end
 function BMF_game_command_tunnel_snapshot()
   BMF_socket_scheduler_refresh_queue_telemetry()
   local tunnel = state.game_command_tunnel
+  local readiness_snapshot = BMFConnectionReadiness.snapshot(state.connection_readiness)
+  local repair_snapshot = BMFConnectionReadiness.repair_snapshot(state.connection_readiness, 64)
   local dispatch_count = tonumber(tunnel.dispatch_count) or 0
   local tunnel_ready = tunnel.enabled == true
     and tunnel.worker_started == true
@@ -28294,6 +28418,18 @@ function BMF_game_command_tunnel_snapshot()
     readinessRejections = tonumber(tunnel.readiness_rejections) or 0,
     readinessExpirations = tonumber(tunnel.readiness_expirations) or 0,
     readinessAckFailures = tonumber(tunnel.readiness_ack_failures) or 0,
+    readinessProbes = tonumber(tunnel.readiness_probes) or 0,
+    readinessRetries = tonumber(tunnel.readiness_retries) or 0,
+    readinessDeferrals = tonumber(tunnel.readiness_deferrals) or 0,
+    readinessEventWakeups = tonumber(tunnel.readiness_event_wakeups) or 0,
+    readinessRetryBaseMs = tonumber(tunnel.readiness_retry_base_ms) or 0,
+    readinessRetryMaxMs = tonumber(tunnel.readiness_retry_max_ms) or 0,
+    maxReadinessRetriesPerRequest = tonumber(tunnel.max_readiness_retries_per_request) or 0,
+    sessionRepairAttempts = tonumber(readiness_snapshot.repairAttempts) or 0,
+    sessionRepairDeferrals = tonumber(readiness_snapshot.repairDeferrals) or 0,
+    repairSessions = repair_snapshot.sessions or {},
+    repairSessionsTotal = tonumber(repair_snapshot.total) or 0,
+    repairSessionsTruncated = tonumber(repair_snapshot.truncated) or 0,
     lastReadinessCode = tostring(tunnel.last_readiness_code or ""),
     duplicateRequests = tonumber(tunnel.duplicate_requests) or 0,
     schedulerFailures = tonumber(tunnel.scheduler_failures) or 0,
@@ -28529,11 +28665,82 @@ function BMF_game_command_tunnel_requeue(request)
   return true
 end
 
+function BMF_game_command_tunnel_wake_sessions(players)
+  local tunnel = state.game_command_tunnel
+  local sessions = {}
+  for _, player in ipairs(type(players) == "table" and players or {}) do
+    if type(player) == "table" then
+      local uuid = trim_string(tostring(
+        player.uuid or player.id or player.playerId or "")):lower()
+      local generation = tonumber(player.connectionGeneration) or 0
+      if uuid ~= "" and generation >= 1 and generation % 1 == 0
+          and trim_string(tostring(player.controllerPath or "")) ~= ""
+          and trim_string(tostring(player.playerStatePath or "")) ~= "" then
+        sessions[uuid .. ":" .. tostring(generation)] = true
+      end
+    end
+  end
+  if next(sessions) == nil then return 0 end
+  local woken = 0
+  for _, queue in pairs(tunnel.queues or {}) do
+    for _, request in ipairs(queue or {}) do
+      local request_key = tostring(request.senderUuid or ""):lower()
+        .. ":" .. tostring(tonumber(request.connectionGeneration) or 0)
+      if sessions[request_key] == true
+          and (tonumber(request.readinessNotBeforeTick) or 0) > 0 then
+        request.readinessNotBeforeTick = 0
+        woken = woken + 1
+      end
+    end
+  end
+  if woken > 0 then
+    tunnel.readiness_event_wakeups =
+      (tonumber(tunnel.readiness_event_wakeups) or 0) + woken
+    tunnel.cooldown_ticks = 0
+    tunnel.scheduled = true
+  end
+  return woken
+end
+
+function BMF_game_command_tunnel_defer_retry(request, retry_detail)
+  if type(request) ~= "table" then return false end
+  local tunnel = state.game_command_tunnel
+  local retries = (tonumber(request.readinessRetryCount) or 0) + 1
+  request.readinessRetryCount = retries
+  local base_ms = math.max(
+    100,
+    tonumber(tunnel.readiness_retry_base_ms)
+      or GAME_COMMAND_TUNNEL_DEFAULT_READINESS_RETRY_BASE_MS)
+  local max_ms = math.max(
+    base_ms,
+    tonumber(tunnel.readiness_retry_max_ms)
+      or GAME_COMMAND_TUNNEL_DEFAULT_READINESS_RETRY_MAX_MS)
+  local exponential_ms = math.min(
+    max_ms,
+    base_ms * (2 ^ math.min(8, math.max(0, retries - 1))))
+  local requested_ms = type(retry_detail) == "table"
+    and math.max(0, tonumber(retry_detail.retryAfterMs) or 0)
+    or 0
+  local delay_ms = math.min(max_ms, math.max(exponential_ms, requested_ms))
+  local poll_ms = math.max(
+    1,
+    tonumber(state.socket.poll_interval_ms) or SOCKET_DEFAULT_POLL_MS)
+  request.readinessNotBeforeTick =
+    (tonumber(tunnel.worker_ticks) or 0) + math.max(1, math.ceil(delay_ms / poll_ms))
+  request.lastReadinessDelayMs = delay_ms
+  tunnel.readiness_retries = (tonumber(tunnel.readiness_retries) or 0) + 1
+  tunnel.max_readiness_retries_per_request = math.max(
+    tonumber(tunnel.max_readiness_retries_per_request) or 0,
+    retries)
+  return true
+end
+
 function BMF_game_command_tunnel_readiness_probe(request)
   local tunnel = state.game_command_tunnel
+  tunnel.readiness_probes = (tonumber(tunnel.readiness_probes) or 0) + 1
   local uuid = trim_string(request and request.senderUuid or ""):lower()
   local generation = tonumber(request and request.connectionGeneration) or 0
-  local target, _, resolve_reason = live_chat_resolve_authoritative_name_target({
+  local target, _, resolve_reason, resolve_detail = live_chat_resolve_authoritative_name_target({
     uuid = uuid,
     senderName = request and request.senderName,
     connectionGeneration = generation,
@@ -28548,7 +28755,9 @@ function BMF_game_command_tunnel_readiness_probe(request)
       code,
       os.time() * 1000)
     tunnel.last_readiness_code = code
-    return false, "", code, "exact UUID, current name, and connection generation are not currently resolvable"
+    return false, "", code,
+      "exact UUID, current name, and connection generation are not currently resolvable",
+      resolve_detail
   end
 
   local controller_address = type(live_chat_object_key) == "function"
@@ -28753,6 +28962,33 @@ BMF_game_command_tunnel_drain_once = function(request)
   local injection_started = false
   local processing_ok, processing_error = pcall(function()
     local now_ms = os.time() * 1000
+    local readiness_not_before_tick = tonumber(request.readinessNotBeforeTick) or 0
+    if readiness_not_before_tick > (tonumber(tunnel.worker_ticks) or 0) then
+      if BMF_game_command_tunnel_request_expired(request) then
+        tunnel.readiness_expirations = (tonumber(tunnel.readiness_expirations) or 0) + 1
+        tunnel.last_readiness_code = "DEADLINE_EXPIRED"
+        BMF_game_command_tunnel_send_terminal(
+          request,
+          "expired",
+          "DEADLINE_EXPIRED",
+          "native readiness retry remained deferred until the absolute deadline",
+          nil,
+          0)
+      elseif BMF_game_command_tunnel_requeue(request) then
+        tunnel.readiness_deferrals = (tonumber(tunnel.readiness_deferrals) or 0) + 1
+      else
+        tunnel.readiness_rejections = (tonumber(tunnel.readiness_rejections) or 0) + 1
+        BMF_game_command_tunnel_send_terminal(
+          request,
+          "rejected",
+          "READINESS_REQUEUE_FAILED",
+          "deferred native readiness wait could not be queued",
+          nil,
+          0)
+      end
+      return
+    end
+    request.readinessNotBeforeTick = 0
     local admitted, admission_code = BMFConnectionReadiness.admission(
       state.connection_readiness,
       BMF_game_command_tunnel_identity_operation(request),
@@ -28773,7 +29009,7 @@ BMF_game_command_tunnel_drain_once = function(request)
         nil,
         0)
     else
-      local ready, controller_address, readiness_code, readiness_detail =
+      local ready, controller_address, readiness_code, readiness_detail, readiness_retry_detail =
         BMF_game_command_tunnel_readiness_probe(request)
       if not ready then
         if BMF_game_command_tunnel_request_expired(request) then
@@ -28795,7 +29031,8 @@ BMF_game_command_tunnel_drain_once = function(request)
             tostring(readiness_detail or "native callability could not be proven exactly"),
             nil,
             0)
-        elseif BMF_game_command_tunnel_requeue(request) then
+        elseif BMF_game_command_tunnel_defer_retry(request, readiness_retry_detail)
+            and BMF_game_command_tunnel_requeue(request) then
           tunnel.readiness_waits = (tonumber(tunnel.readiness_waits) or 0) + 1
           tunnel.last_readiness_code = tostring(readiness_code or "NATIVE_NOT_CALLABLE")
         else

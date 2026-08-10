@@ -209,6 +209,23 @@ describe('buildPrometheusMetrics', () => {
           repair_running: false,
           repair_cooldown_ms: 15000,
         },
+        connection_readiness: {
+          pathPreservations: 12,
+          pathReplacements: 2,
+          pathClears: 4,
+          pathReuses: 11,
+          repairAttempts: 3,
+          repairDeferrals: 17,
+        },
+        game_command_tunnel: {
+          readiness_probes: 6,
+          readiness_retries: 4,
+          readiness_deferrals: 20,
+          readiness_event_wakeups: 2,
+          readiness_retry_base_ms: 250,
+          readiness_retry_max_ms: 5000,
+          max_readiness_retries_per_request: 3,
+        },
         commands: {
           by_name: {
             'bmf.status': {
@@ -563,6 +580,23 @@ describe('buildPrometheusMetrics', () => {
       'omegga_ue4ss_deadline_missing_total{stage="ue4ss_runtime"} 1',
       'omegga_ue4ss_client_timeouts_total{stage="node_inbox"} 4',
       'omegga_ue4ss_queue_age_high_water_milliseconds{stage="ue4ss_runtime"} 90',
+    ]) {
+      expect(output).toContain(sample);
+    }
+    for (const sample of [
+      'bmf_connection_readiness_path_preservations_total 12',
+      'bmf_connection_readiness_path_replacements_total 2',
+      'bmf_connection_readiness_path_clears_total 4',
+      'bmf_connection_readiness_path_reuses_total 11',
+      'bmf_connection_readiness_session_repair_attempts_total 3',
+      'bmf_connection_readiness_session_repair_deferrals_total 17',
+      'bmf_game_command_tunnel_readiness_total{outcome="probes"} 6',
+      'bmf_game_command_tunnel_readiness_total{outcome="retries"} 4',
+      'bmf_game_command_tunnel_readiness_total{outcome="deferrals"} 20',
+      'bmf_game_command_tunnel_readiness_total{outcome="event_wakeups"} 2',
+      'bmf_game_command_tunnel_readiness_retry_milliseconds{bound="base"} 250',
+      'bmf_game_command_tunnel_readiness_retry_milliseconds{bound="max"} 5000',
+      'bmf_game_command_tunnel_readiness_retries_per_request_max 3',
     ]) {
       expect(output).toContain(sample);
     }

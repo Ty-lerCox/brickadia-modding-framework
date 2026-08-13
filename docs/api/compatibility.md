@@ -7,7 +7,7 @@
 Server operators should use this page to confirm the supported Brickadia build and UE4SS helper assumptions. Maintainers should use it when changing build gates.
 
 BMF currently targets Windows dedicated servers for Brickadia EA3.1
-`PC-Shipping-CL15501` with the patched UE4SS runtime from the Brickadia
+`PC-Shipping-CL15526` with the patched UE4SS runtime from the Brickadia
 reverse-engineering workspace.
 
 ## Examples
@@ -29,7 +29,7 @@ end
 
 Important fields:
 
-- `targetBuild`: `PC-Shipping-CL15501`
+- `targetBuild`: `PC-Shipping-CL15526`
 - `platform`: `windows-dedicated-server`
 - `serverExecutable`: `BrickadiaServer-Win64-Shipping.exe`
 - `buildDetection`: `declared-target-only`
@@ -74,7 +74,7 @@ Example lines:
 
 ```text
 compatibility_status=ok
-target_build=PC-Shipping-CL15501
+target_build=PC-Shipping-CL15526
 build_detection=declared-target-only
 unsupported_build_policy=report-only
 required_helper_groups=2

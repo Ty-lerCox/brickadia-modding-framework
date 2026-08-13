@@ -22,7 +22,7 @@ test('bmfctl health reads shared local profile observations from runtime files',
     path.join(runtimeDir, 'status.json'),
     JSON.stringify({
       state: 'running',
-      version: '0.1.0-ea3.cl15501',
+      version: '0.1.0-ea3.cl15526',
       updated_at: new Date().toISOString(),
       server_ready: true,
       command_worker_mode: 'async',

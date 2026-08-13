@@ -19,15 +19,17 @@ unless they are explicitly working on hook infrastructure.
 - Record `L6 Frame Time` evidence before promoting native mutation into normal
   gameplay.
 
-Current `Release-EA3-CL-15501` hotfix mapping:
+Current `Release-EA3-CL-15526` live-confirmed hotfix mapping:
 
-- `/Script/Brickadia.BRTool_Applicator:ServerAddComponent`: `0x629CB30`
+- `/Script/Brickadia.BRTool_Applicator:ServerAddComponent`: `0x62A5450`
   (`FunctionFlags=0x4220CC0`, `2` parameters, `ParmsSize=0x10`)
 
 The mapping was derived by a relocation-aware semantic match against the
-preserved CL15447 executable, then confirmed on the live CL15501 process by a
-unique UFunction native-slot match. The live ItemSpawn registry object was also
-resolved and identity-checked before the blocker was permitted to install.
+preserved CL15501 executable. Twenty-five neighboring functions also matched
+exactly after relocation normalization. The live CL15526 process then returned
+one exact `/Script/Brickadia.BRTool_Applicator:ServerAddComponent` UFunction
+with the expected flags, parameter ABI, and native slot. The installed blocker
+subsequently emitted a live `ItemSpawnDenied` event.
 
 Prior `Release-EA3-CL-15447` live-reflected RPC exec-thunk mappings:
 
@@ -64,9 +66,9 @@ the running server for the Applicator component-add function, updates the native
 control file, builds/injects the native DLL if needed, and skips reinjection
 when the hook is already installed in that process.
 
-The CL15501 default RVA is refreshed. Automatic synchronization may be enabled
-only after an isolated deny/allow canary proves the full hook path on the exact
-current process.
+The CL15526 default RVA and automatic synchronization are active in the
+production supervisor after the exact-build identity and denial canary passed.
+Placement synchronization remains independently disabled.
 
 Player and role decisions remain owned by
 `framework/ue4ss/Mods/BMF/plugins/NoSpawnItemApplicator`,

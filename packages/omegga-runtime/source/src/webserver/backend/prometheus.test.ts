@@ -142,6 +142,7 @@ describe('buildPrometheusMetrics', () => {
               duration_ms_sum: 8,
               duration_ms_max: 4,
               last_ms: 2,
+              last_at: '2026-08-13T20:40:13Z',
               queue_wait_ms_sum: 20,
               queue_wait_ms_max: 8,
               admission_defer_ms_sum: 4,
@@ -169,6 +170,9 @@ describe('buildPrometheusMetrics', () => {
           last: {
             correlation_id: 'bmf-secret-correlation-id',
             operation_class: 'bmf.players.list',
+            finish_timestamp_ms: 1786653610200,
+            frame_duration_ms_near_completion: 16.25,
+            frame_observed_at_ms: 1786653610261,
           },
         },
         player_registry: {
@@ -615,6 +619,10 @@ describe('buildPrometheusMetrics', () => {
       'bmf_operation_cache_result_total{cache_result="hit"} 4',
       'bmf_operation_duration_milliseconds{operation_class="bmf.players.list",phase="queue_wait",statistic="avg"} 5',
       'bmf_operation_duration_milliseconds{operation_class="bmf.players.list",phase="game_thread",statistic="max"} 4',
+      'bmf_operation_last_duration_milliseconds{operation_class="bmf.players.list"} 2',
+      'bmf_operation_last_timestamp_seconds{operation_class="bmf.players.list"} 1786653613',
+      'bmf_operation_last_frame_delta_milliseconds{operation_class="bmf.players.list"} 16.25',
+      'bmf_operation_last_frame_timestamp_seconds{operation_class="bmf.players.list"} 1786653610.261',
       'bmf_operation_slow_total 2',
       'bmf_operation_budget_overrun_total 3',
       'bmf_operation_admission_defer_total 4',
@@ -710,6 +718,9 @@ describe('buildPrometheusMetrics', () => {
     );
     expect(output).toContain(
       'brickadia_frame_spike_last_delta_milliseconds 125.5',
+    );
+    expect(output).toMatch(
+      /brickadia_frame_spike_last_timestamp_seconds \d+(?:\.\d+)?/,
     );
     expect(output).toContain('bmf_plugins_loaded 2');
     expect(output).toContain('bmf_plugin_errors_total 1');

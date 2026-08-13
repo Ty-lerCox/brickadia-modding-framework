@@ -444,6 +444,7 @@ export function buildPrometheusMetrics(server: Webserver) {
   const bmfOperationsByCacheResult = objectRecord(
     bmfOperations.by_cache_result,
   );
+  const bmfOperationsLast = objectRecord(bmfOperations.last);
   const bmfPlayerRegistry = objectRecord(bmfTelemetryRecord.player_registry);
   const bmfConnectionReadiness = objectRecord(
     bmfTelemetryRecord.connection_readiness,
@@ -1399,6 +1400,26 @@ export function buildPrometheusMetrics(server: Webserver) {
       },
     ]);
   });
+  const bmfOperationLastDurationLines: MetricLine[] = Object.entries(
+    bmfOperationsByClass,
+  ).map(([operationClass, value]) => ({
+    name: 'bmf_operation_last_duration_milliseconds',
+    labels: { operation_class: operationClass },
+    value: finiteMetricValue(objectRecord(value).last_ms),
+  }));
+  const bmfOperationLastTimestampLines: MetricLine[] = Object.entries(
+    bmfOperationsByClass,
+  ).map(([operationClass, value]) => {
+    const timestampMs = Date.parse(String(objectRecord(value).last_at ?? ''));
+    return {
+      name: 'bmf_operation_last_timestamp_seconds',
+      labels: { operation_class: operationClass },
+      value: Number.isFinite(timestampMs) ? timestampMs / 1_000 : NaN,
+    };
+  });
+  const bmfLastOperationClass = String(
+    bmfOperationsLast.operation_class ?? 'unknown',
+  );
   const bmfFrameDurationLines: MetricLine[] = [
     {
       name: 'brickadia_frame_delta_milliseconds',
@@ -1924,6 +1945,41 @@ export function buildPrometheusMetrics(server: Webserver) {
       bmfOperationDurationLines,
     ),
     ...metricBlock(
+      'bmf_operation_last_duration_milliseconds',
+      'Most recent attributed operation duration by bounded handler class.',
+      bmfOperationLastDurationLines,
+    ),
+    ...metricBlock(
+      'bmf_operation_last_timestamp_seconds',
+      'Completion timestamp of the most recent attributed operation by bounded handler class.',
+      bmfOperationLastTimestampLines,
+    ),
+    ...metricBlock(
+      'bmf_operation_last_frame_delta_milliseconds',
+      'Native frame delta sampled nearest the most recently completed attributed operation.',
+      [
+        {
+          name: 'bmf_operation_last_frame_delta_milliseconds',
+          labels: { operation_class: bmfLastOperationClass },
+          value: finiteMetricValue(
+            bmfOperationsLast.frame_duration_ms_near_completion,
+          ),
+        },
+      ],
+    ),
+    ...metricBlock(
+      'bmf_operation_last_frame_timestamp_seconds',
+      'Native frame sample timestamp nearest the most recently completed attributed operation.',
+      [
+        {
+          name: 'bmf_operation_last_frame_timestamp_seconds',
+          labels: { operation_class: bmfLastOperationClass },
+          value:
+            finiteMetricValue(bmfOperationsLast.frame_observed_at_ms) / 1_000,
+        },
+      ],
+    ),
+    ...metricBlock(
       'bmf_operation_slow_total',
       'Attributed operations that crossed a slow-operation threshold.',
       [
@@ -2223,6 +2279,17 @@ export function buildPrometheusMetrics(server: Webserver) {
         {
           name: 'brickadia_frame_spike_last_delta_milliseconds',
           value: finiteMetricValue(bmfFrameLastSpike.delta_ms),
+        },
+      ],
+    ),
+    ...metricBlock(
+      'brickadia_frame_spike_last_timestamp_seconds',
+      'Unix timestamp of the most recent native frame spike.',
+      [
+        {
+          name: 'brickadia_frame_spike_last_timestamp_seconds',
+          value:
+            bmfFrameLastSpikeAtMs > 0 ? bmfFrameLastSpikeAtMs / 1_000 : NaN,
         },
       ],
     ),

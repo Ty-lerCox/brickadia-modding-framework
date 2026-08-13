@@ -302,7 +302,7 @@ prometheus.remote_write "grafana_cloud" {
     environment     = "local",
     instance        = "local",
     server_profile  = "local",
-    brickadia_build = "PC-Shipping-CL15447",
+    brickadia_build = "PC-Shipping-CL15501",
   }
 }
 

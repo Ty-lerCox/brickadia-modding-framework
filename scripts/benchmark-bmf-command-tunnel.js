@@ -616,6 +616,11 @@ class BmfSocketClient {
         deadlineMs,
         issuedAtMs,
         idempotencyKey: options.idempotencyKey || '',
+        senderUuid: options.senderUuid || '',
+        senderName: options.senderName || '',
+        connectionGeneration: Number(options.connectionGeneration) || 0,
+        operationType: options.operationType || '',
+        acceptedAtMs: Number(options.acceptedAtMs) || issuedAtMs,
       },
       { ackType: 'tunnel.ack' },
     );
@@ -792,6 +797,38 @@ function ensureLoopback(host) {
   }
 }
 
+function resolveTunnelIdentity(socketPath, player) {
+  const playersPath = path.join(path.dirname(socketPath), 'players.json');
+  if (!fs.existsSync(playersPath)) {
+    throw new Error(`BMF player cache does not exist: ${playersPath}`);
+  }
+  const cache = JSON.parse(fs.readFileSync(playersPath, 'utf8').replace(/^\uFEFF/, ''));
+  const requested = String(player || '').trim().toLowerCase();
+  const matches = (Array.isArray(cache.players) ? cache.players : []).filter(record =>
+    [record?.username, record?.playerName, record?.originalName, record?.displayName]
+      .some(value => String(value || '').trim().toLowerCase() === requested),
+  );
+  if (matches.length !== 1) {
+    throw new Error(`Expected one current BMF player-cache identity for ${player}; found ${matches.length}.`);
+  }
+  const record = matches[0];
+  const senderUuid = String(record.uuid || record.id || '').trim().toLowerCase();
+  const senderName = String(record.username || record.playerName || player || '').trim();
+  const connectionGeneration = Number(record.connectionGeneration);
+  if (
+    !senderUuid ||
+    senderUuid.length > 128 ||
+    !senderName ||
+    senderName.length > 128 ||
+    /[\r\n]/.test(senderName) ||
+    !Number.isSafeInteger(connectionGeneration) ||
+    connectionGeneration < 1
+  ) {
+    throw new Error(`BMF player-cache identity for ${player} is incomplete or invalid.`);
+  }
+  return { senderUuid, senderName, connectionGeneration, playersPath };
+}
+
 function defaultOutPath(root, label) {
   return path.join(root, 'artifacts', 'local', `bmf-command-tunnel-${label}.json`);
 }
@@ -821,6 +858,7 @@ async function runBenchmark(args) {
   let metricsBefore = null;
   let metricsActiveEnd = null;
   let metricsAfter = null;
+  let tunnelIdentity = null;
 
   try {
     metadata = JSON.parse(fs.readFileSync(socketPath, 'utf8').replace(/^\uFEFF/, ''));
@@ -830,6 +868,9 @@ async function runBenchmark(args) {
     }
     if (/command|all/.test(args.mode)) {
       if (!fs.existsSync(logPath)) throw new Error(`Brickadia log does not exist: ${logPath}`);
+      if (args.commandProtocol === 'tunnel') {
+        tunnelIdentity = resolveTunnelIdentity(socketPath, args.player);
+      }
     }
 
     metricsBaselineStart = await fetchMetricsSnapshot(args.metricsUrl, args.metricsTimeoutMs);
@@ -865,6 +906,11 @@ async function runBenchmark(args) {
           ? socket.tunnel(probe.opaqueCommand, {
               deadlineMs: args.timeoutMs,
               idempotencyKey: marker,
+              senderUuid: tunnelIdentity.senderUuid,
+              senderName: tunnelIdentity.senderName,
+              connectionGeneration: tunnelIdentity.connectionGeneration,
+              operationType: 'bmf.live-command-canary',
+              acceptedAtMs: Date.now(),
             })
           : socket.command(probe.bmfCommand);
         let sample;
@@ -1201,6 +1247,7 @@ module.exports = {
   parseBrickadiaTimestamp,
   parsePrometheusSnapshot,
   percentile,
+  resolveTunnelIdentity,
   summarize,
   waitForLogMarker,
 };

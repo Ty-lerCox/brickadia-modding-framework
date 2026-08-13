@@ -184,9 +184,9 @@ return {
 
   Start-Sleep -Seconds 4
 
-  Invoke-BmfConsoleCommand 'bmf.status' 'bmf-status' @('BMF bmf.status OK', 'version=0.1.0-ea3.cl15447')
-  Invoke-BmfConsoleCommand 'bmf.health' 'bmf-health' @('BMF bmf.health OK', 'target_build=PC-Shipping-CL15447', 'plugins_loaded=')
-  Invoke-BmfConsoleCommand 'bmf.version' 'bmf-version' @('BMF bmf.version OK', 'version=0.1.0-ea3.cl15447', 'target_build=PC-Shipping-CL15447')
+  Invoke-BmfConsoleCommand 'bmf.status' 'bmf-status' @('BMF bmf.status OK', 'version=0.1.0-ea3.cl15501')
+  Invoke-BmfConsoleCommand 'bmf.health' 'bmf-health' @('BMF bmf.health OK', 'target_build=PC-Shipping-CL15501', 'plugins_loaded=')
+  Invoke-BmfConsoleCommand 'bmf.version' 'bmf-version' @('BMF bmf.version OK', 'version=0.1.0-ea3.cl15501', 'target_build=PC-Shipping-CL15501')
   Invoke-BmfConsoleCommand 'bmf.plugins' 'bmf-plugins' @('BMF bmf.plugins OK', 'plugin=CommandCanary')
   Invoke-BmfConsoleCommand 'bmf.commands' 'bmf-commands' @('BMF bmf.commands OK', 'bmf.status', 'bmf.health', 'bmf.version', 'bmf.load', 'bmf.unload', 'bmf.canary')
   Invoke-BmfConsoleCommand 'bmf.canary' 'bmf-canary' @('BMF bmf.canary OK', 'canary_plugin=CommandCanary')

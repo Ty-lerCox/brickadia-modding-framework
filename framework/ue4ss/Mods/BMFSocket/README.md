@@ -17,13 +17,13 @@ controller and player state contain the expected player UUID. These checks retur
 identity and exact-binding evidence only; native scanners, writers, probes, and
 hook installers remain unavailable.
 
-On `Release-EA3-CL-15447`, the narrow opt-in
+On `Release-EA3-CL-15501`, the narrow opt-in
 `BMF_SOCKET_GAME_COMMAND_TUNNEL_HELPERS_ENABLED=1` additionally exposes only the
 side-effect-free `ServerPushChatMessage` readiness check, the authenticated
 implementation-call adapter used by `cityrpg.command.v1`, and the reserved
 player-command guard. Each call fails closed unless the server PE identity,
 reflected one-`FString` ABI, UFunction exec thunk, implementation signature, and
-controller vtable target all match the validated CL15447 layout. It does not
+controller vtable target all match the validated CL15501 layout. It does not
 enable unknown-command scanning, brick writers, setters, or unrelated hooks.
 
 Full native helper registration requires the explicit opt-in

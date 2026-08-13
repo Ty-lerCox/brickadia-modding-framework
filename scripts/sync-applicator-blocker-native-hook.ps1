@@ -10,7 +10,7 @@ param(
   [string]$InjectScript = '',
   [string]$DllName = '',
   [string]$DeniedComponent = '',
-  [UInt64[]]$ServerAddComponentRvas = @([UInt64]0x62937B0),
+  [UInt64[]]$ServerAddComponentRvas = @([UInt64]0x629CB30),
   [int]$CommandTimeoutSeconds = 30,
   [int]$ResponseTimeoutSeconds = 20,
   [int]$VerificationTimeoutSeconds = 20,

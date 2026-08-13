@@ -19,7 +19,17 @@ unless they are explicitly working on hook infrastructure.
 - Record `L6 Frame Time` evidence before promoting native mutation into normal
   gameplay.
 
-Current `Release-EA3-CL-15447` live-reflected RPC exec-thunk mappings:
+Current `Release-EA3-CL-15501` hotfix mapping:
+
+- `/Script/Brickadia.BRTool_Applicator:ServerAddComponent`: `0x629CB30`
+  (`FunctionFlags=0x4220CC0`, `2` parameters, `ParmsSize=0x10`)
+
+The mapping was derived by a relocation-aware semantic match against the
+preserved CL15447 executable, then confirmed on the live CL15501 process by a
+unique UFunction native-slot match. The live ItemSpawn registry object was also
+resolved and identity-checked before the blocker was permitted to install.
+
+Prior `Release-EA3-CL-15447` live-reflected RPC exec-thunk mappings:
 
 - `/Script/Brickadia.BRTool_Applicator:ServerAddComponent`: `0x62937B0`
   (`2` parameters, `ParmsSize=0x10`)
@@ -54,8 +64,8 @@ the running server for the Applicator component-add function, updates the native
 control file, builds/injects the native DLL if needed, and skips reinjection
 when the hook is already installed in that process.
 
-The CL15447 default RVA is refreshed, but automatic synchronization remains
-disabled until an isolated deny/allow canary proves the full hook path on a
+The CL15501 default RVA is refreshed. Automatic synchronization may be enabled
+only after an isolated deny/allow canary proves the full hook path on the exact
 current process.
 
 Player and role decisions remain owned by

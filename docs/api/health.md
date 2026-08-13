@@ -21,8 +21,8 @@ Returns the standard BMF result shape:
   code = "OK",
   message = "BMF runtime is loaded",
   data = {
-    version = "0.1.0-ea3.cl15447",
-    target_build = "PC-Shipping-CL15447",
+    version = "0.1.0-ea3.cl15501",
+    target_build = "PC-Shipping-CL15501",
     compatibility_status = "ok",
     build_detection = "declared-target-only",
     runtime_required_helper_groups = 2,

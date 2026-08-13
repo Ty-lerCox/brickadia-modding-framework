@@ -1,6 +1,6 @@
 {
   "name": "@bmf/desktop",
-  "version": "0.1.0-ea3.cl15447",
+  "version": "0.1.0-ea3.cl15501",
   "private": true,
   "description": "BMF Desktop operations console for managing local Brickadia/Omegga/BMF server profiles.",
   "author": "BMF",

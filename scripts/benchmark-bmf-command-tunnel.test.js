@@ -15,6 +15,7 @@ const {
   parseArgs,
   parseBrickadiaTimestamp,
   parsePrometheusSnapshot,
+  resolveTunnelIdentity,
   summarize,
   waitForLogMarker,
 } = require('./benchmark-bmf-command-tunnel.js');
@@ -114,6 +115,38 @@ test('safe probe always uses the fixed cityrpgRemote whisper shape', () => {
   assert.doesNotMatch(probe.bmfCommand, /[\r\n]/);
   assert.throws(() => buildSafeCommandProbe('Player:One', 'MARKER_123'), /player field/);
   assert.throws(() => buildSafeCommandProbe('Player One', 'MARKER\n123'), /line break/);
+});
+
+test('tunnel identity comes from one current player-cache record', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bmf-tunnel-identity-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const socketPath = path.join(root, 'socket.json');
+  fs.writeFileSync(socketPath, '{}');
+  fs.writeFileSync(
+    path.join(root, 'players.json'),
+    JSON.stringify({
+      players: [
+        {
+          uuid: '33333333-3333-4333-8333-333333333333',
+          username: 'Ty',
+          connectionGeneration: 7,
+        },
+      ],
+    }),
+  );
+
+  assert.deepEqual(resolveTunnelIdentity(socketPath, 'ty'), {
+    senderUuid: '33333333-3333-4333-8333-333333333333',
+    senderName: 'Ty',
+    connectionGeneration: 7,
+    playersPath: path.join(root, 'players.json'),
+  });
+
+  fs.writeFileSync(
+    path.join(root, 'players.json'),
+    JSON.stringify({ players: [{ uuid: '33333333-3333-4333-8333-333333333333', username: 'Ty' }] }),
+  );
+  assert.throws(() => resolveTunnelIdentity(socketPath, 'Ty'), /incomplete or invalid/);
 });
 
 test('latency summaries use interpolated percentiles', () => {

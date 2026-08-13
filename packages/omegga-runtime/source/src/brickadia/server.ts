@@ -232,13 +232,19 @@ export const isOmeggaBookkeepingCommand = (line: string) =>
   /^(?:br\.)?Chat\.MessageForUnknownCommands\s+(?:0|false)$/i.test(line.trim());
 
 export const isEnvironmentControlCommand = (line: string) =>
-  /^(?:br\.)?Server\.Environment\.(?:LoadPreset|Reset)\b.*$/i.test(line);
+  /^(?:br\.)?Server\.Environment\.(?:LoadPreset|SavePreset|Reset)\b.*$/i.test(
+    line,
+  );
 
 const DEGRADED_WORLD_COMMAND_PATTERN =
   /^(?:BR\.World\.(?:SaveAs|LoadAdditive|ClearRegion|ClearAll)|Bricks\.(?:Save|SaveRegion|Load|ClearRegion)|br\.Prefab\.(?:SaveRegion|Load))\b.*$/i;
 
 export const isDegradedWorldCommand = (line: string) =>
   DEGRADED_WORLD_COMMAND_PATTERN.test(line);
+
+export const shouldUseWindowsConsoleControl = (line: string) =>
+  isDegradedWorldCommand(line.trim()) ||
+  isEnvironmentControlCommand(line.trim());
 
 const getWindowsUe4ssWriteSpacingMs = () => {
   const value = Number(
@@ -1026,15 +1032,6 @@ export default class BrickadiaServer extends EventEmitter {
         return true;
       }
 
-      if (isEnvironmentControlCommand(normalizedLine)) {
-        await this.#ue4ssBridge.execCommand(
-          `Omegga.Bridge.ForceConsoleExecutor consolemanager ${normalizedLine}`,
-          undefined,
-          admission,
-        );
-        return true;
-      }
-
       return false;
     };
     const allowUnsafePositionProbes =
@@ -1782,7 +1779,7 @@ export default class BrickadiaServer extends EventEmitter {
         if (IS_WINDOWS) {
           if (
             this.#windowsBackend === 'ue4ss' &&
-            !isDegradedWorldCommand(line.trim())
+            !shouldUseWindowsConsoleControl(line)
           ) {
             await this.writeToUe4ssControl(line, admission);
 

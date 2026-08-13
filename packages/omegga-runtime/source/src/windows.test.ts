@@ -1,5 +1,8 @@
 import { write as writeServerConfig } from '@brickadia/config';
-import { isEnvironmentControlCommand } from '@brickadia/server';
+import {
+  isEnvironmentControlCommand,
+  shouldUseWindowsConsoleControl,
+} from '@brickadia/server';
 import Ue4ssBridgeHost from '@brickadia/ue4ssBridge';
 import RpcPlugin from '@omegga/plugin/plugin_jsonrpc_stdio';
 import { getProcessInvocation } from '@util/process';
@@ -146,6 +149,11 @@ windowsDescribe('Windows platform support', () => {
         'br.Server.Environment.LoadPreset omegga_cityrpg_temp',
       ),
     ).toBe(true);
+    expect(
+      isEnvironmentControlCommand(
+        'br.Server.Environment.SavePreset omegga_cityrpg_temp',
+      ),
+    ).toBe(true);
     expect(isEnvironmentControlCommand('Server.Environment.Reset')).toBe(true);
     expect(isEnvironmentControlCommand('br.Server.Environment.Reset')).toBe(
       true,
@@ -153,6 +161,25 @@ windowsDescribe('Windows platform support', () => {
     expect(isEnvironmentControlCommand('br.Server.Minigames.Reset')).toBe(
       false,
     );
+  });
+
+  it('routes context-dependent environment commands through Windows console control', () => {
+    expect(
+      shouldUseWindowsConsoleControl(
+        'br.Server.Environment.LoadPreset omegga_cityrpg_temp',
+      ),
+    ).toBe(true);
+    expect(
+      shouldUseWindowsConsoleControl(
+        'br.Server.Environment.SavePreset omegga_cityrpg_temp',
+      ),
+    ).toBe(true);
+    expect(shouldUseWindowsConsoleControl('br.Server.Environment.Reset')).toBe(
+      true,
+    );
+    expect(
+      shouldUseWindowsConsoleControl('br.Chat.Broadcast "weather changed"'),
+    ).toBe(false);
   });
 
   it('writes server config to WindowsServer', () => {

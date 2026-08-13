@@ -103,11 +103,13 @@ Brickadia data path. It still writes `adapter=omegga-cache`, but the source is
 reported as `omegga.players.raw.<reason>.log-fallback`.
 
 Weather and environment changes currently remain Omegga-owned. The supported
-fork routes `Server.Environment.LoadPreset ...` and `Server.Environment.Reset`
-through `Omegga.Bridge.ForceConsoleExecutor consolemanager ...` on Windows
-UE4SS launches, which avoids the normal console-exec completion stall observed
-with direct environment reloads. BMF should treat that as an Omegga runtime
-shim unless weather becomes a gameplay hook surface later.
+fork routes `Server.Environment.LoadPreset ...`,
+`Server.Environment.SavePreset ...`, and `Server.Environment.Reset` through
+the native Windows server-console control channel. These commands require the
+live console world context; the UE4SS `consolemanager` executor can accept
+their transport while reporting `success=false` and leaving the environment
+unchanged. BMF should treat the Windows console route as an Omegga runtime shim
+unless weather becomes a gameplay hook surface later.
 
 ## Supported Omegga Assets
 

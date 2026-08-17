@@ -19,17 +19,29 @@ unless they are explicitly working on hook infrastructure.
 - Record `L6 Frame Time` evidence before promoting native mutation into normal
   gameplay.
 
-Current `Release-EA3-CL-15526` live-confirmed hotfix mapping:
+Current `Release-EA3-CL-15565` live-confirmed hotfix mapping:
+
+- `/Script/Brickadia.BRTool_Applicator:ServerAddComponent`: `0x62AB0A0`
+  (`FunctionFlags=0x4220CC0`, `2` parameters, `ParmsSize=0x10`)
+
+The mapping was derived by a relocation-aware semantic match against the
+preserved CL15526 executable. All twenty-five neighboring functions matched
+exactly after relocation normalization; the next-best candidates matched only
+nine. The live CL15565 process then returned
+one exact `/Script/Brickadia.BRTool_Applicator:ServerAddComponent` UFunction
+with the expected flags, parameter ABI, native slot, and original implementation
+at module RVA `0x62AB0A0`. The exact-build native blocker was installed only
+after its reflected identity and `SpawnItem` deny/`Light` allow policy canaries
+passed.
+
+Prior `Release-EA3-CL-15526` live-confirmed hotfix mapping:
 
 - `/Script/Brickadia.BRTool_Applicator:ServerAddComponent`: `0x62A5450`
   (`FunctionFlags=0x4220CC0`, `2` parameters, `ParmsSize=0x10`)
 
-The mapping was derived by a relocation-aware semantic match against the
-preserved CL15501 executable. Twenty-five neighboring functions also matched
-exactly after relocation normalization. The live CL15526 process then returned
-one exact `/Script/Brickadia.BRTool_Applicator:ServerAddComponent` UFunction
-with the expected flags, parameter ABI, and native slot. The installed blocker
-subsequently emitted a live `ItemSpawnDenied` event.
+The CL15526 process returned one exact UFunction and the installed blocker
+emitted a live `ItemSpawnDenied` event. This mapping is historical evidence and
+must not be applied to CL15565.
 
 Prior `Release-EA3-CL-15447` live-reflected RPC exec-thunk mappings:
 
@@ -66,7 +78,7 @@ the running server for the Applicator component-add function, updates the native
 control file, builds/injects the native DLL if needed, and skips reinjection
 when the hook is already installed in that process.
 
-The CL15526 default RVA and automatic synchronization are active in the
+The CL15565 default RVA and automatic synchronization are active in the
 production supervisor after the exact-build identity and denial canary passed.
 Placement synchronization remains independently disabled.
 

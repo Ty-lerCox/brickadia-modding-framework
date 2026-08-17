@@ -132,7 +132,7 @@
     "prepare": "ts-patch install",
     "start": "node --enable-source-maps index.js",
     "test:backend": "vitest --config vitest.backend.config.mts --dir ./src",
-    "test:lua-runtime-guard": "node --test tools/*.test.js",
+    "test:lua-runtime-guard": "node --test tools/validate-lua-runtime.test.js",
     "test": "npm run test:backend && npm run test:lua-runtime-guard",
     "watch": "npm run build:frontend -- --watch",
     "build:bridge": "cargo build --release --manifest-path tools/windows-console-bridge/Cargo.toml",

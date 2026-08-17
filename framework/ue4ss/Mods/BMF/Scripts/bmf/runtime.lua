@@ -1,5 +1,5 @@
 local MOD_NAME = "BMF"
-local VERSION = "0.1.0-ea3.cl15526"
+local VERSION = "0.1.0-ea3.cl15565"
 local ROOT = (function()
   if type(debug) == "table" and type(debug.getinfo) == "function" then
     local info = debug.getinfo(1, "S")
@@ -42,7 +42,7 @@ local COMMAND_DIR = RUNTIME_DIR .. "/commands"
 local PLAYER_CACHE_PATH = RUNTIME_DIR .. "/players.json"
 local PLAYER_POSITIONS_SNAPSHOT_PATH = RUNTIME_DIR .. "/player-positions.json"
 local MINIGAME_DEFINITIONS_PATH = RUNTIME_DIR .. "/minigames/definitions.json"
-local TARGET_BRICKADIA_BUILD = "PC-Shipping-CL15526"
+local TARGET_BRICKADIA_BUILD = "PC-Shipping-CL15565"
 local TARGET_BRICKADIA_NAME = "Brickadia EA3.1"
 local TARGET_SERVER_EXECUTABLE = "BrickadiaServer-Win64-Shipping.exe"
 local TARGET_PLATFORM = "windows-dedicated-server"
@@ -6526,6 +6526,7 @@ local function register_builtin_commands()
     local options = parse_command_options(text)
     local request_id = percent_decode(options.requestid or "")
     local sender_uuid = percent_decode(options.senderuuid or "")
+    local sender_name = percent_decode(options.sendername or "")
     local connection_generation = tonumber(options.connectiongeneration) or 0
     local issued_at_ms = tonumber(options.issuedat) or 0
     local deadline_ms = tonumber(options.deadline) or 0
@@ -6536,6 +6537,9 @@ local function register_builtin_commands()
     if request_id == ""
         or #request_id > 128
         or sender_uuid == ""
+        or sender_name == ""
+        or #sender_name > 128
+        or sender_name:find("[%c]") ~= nil
         or connection_generation < 1
         or connection_generation % 1 ~= 0
         or issued_at_ms < 1
@@ -6574,6 +6578,7 @@ local function register_builtin_commands()
     BMF_operation_note_private_identity(request_id, sender_uuid, connection_generation)
     return {
       uuid = sender_uuid,
+      senderName = sender_name,
       requestId = request_id,
       connectionGeneration = connection_generation,
       issuedAtMs = issued_at_ms,
@@ -23302,6 +23307,9 @@ end
 
 function live_chat_resolve_target(player)
   if type(player) == "table" and player.strictPrivateIdentity == true then
+    if trim_string(tostring(player.senderName or "")) ~= "" then
+      return live_chat_resolve_authoritative_name_target(player)
+    end
     return live_chat_resolve_strict_target(player)
   end
   local registry = state.player_registry or {}

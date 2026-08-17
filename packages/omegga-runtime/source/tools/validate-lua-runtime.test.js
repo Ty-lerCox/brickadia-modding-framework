@@ -1382,7 +1382,7 @@ test('operation attribution stays bounded, plain-data-only, and attached to the 
   );
 });
 
-test('private delivery requires an immutable UUID and generation envelope with zero global scans', () => {
+test('private delivery requires immutable identity and bounds exact-name repair', () => {
   const runtimePath = path.join(
     __dirname,
     '..',
@@ -1438,9 +1438,16 @@ test('private delivery requires an immutable UUID and generation envelope with z
   );
   const envelope = source.slice(envelopeStart, envelopeEnd);
   assert.match(envelope, /sender_uuid/);
+  assert.match(envelope, /sender_name/);
   assert.match(envelope, /connection_generation/);
   assert.match(envelope, /deadline_ms/);
   assert.doesNotMatch(envelope, /controllerpath|playerstatepath|senderhash/i);
+
+  const resolveStart = source.indexOf('function live_chat_resolve_target(player)');
+  const resolveEnd = source.indexOf('function live_chat_send_to_targets', resolveStart);
+  const resolveTarget = source.slice(resolveStart, resolveEnd);
+  assert.match(resolveTarget, /player\.senderName/);
+  assert.match(resolveTarget, /live_chat_resolve_authoritative_name_target\(player\)/);
 
   const collectStart = source.indexOf(
     'function live_chat_collect_targets(options)',

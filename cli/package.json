@@ -1,6 +1,6 @@
 {
   "name": "@bmf/bmfctl",
-  "version": "0.1.0-ea3.cl15526",
+  "version": "0.1.0-ea3.cl15565",
   "private": true,
   "description": "CLI doctor, repair, and snapshot tool for BMF environments.",
   "bin": {

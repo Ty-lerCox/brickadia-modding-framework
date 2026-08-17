@@ -76,8 +76,8 @@ try {
     if ([string]$packageManifest.compatibilityManifest -ne 'manifests/compatibility.json') {
       $errors.Add('UE4SS compatibility package must point at manifests/compatibility.json.')
     }
-    if ([string]$packageManifest.targetBrickadiaBuild -ne 'PC-Shipping-CL15526') {
-      $errors.Add('UE4SS compatibility package targetBrickadiaBuild must be PC-Shipping-CL15526.')
+    if ([string]$packageManifest.targetBrickadiaBuild -ne 'PC-Shipping-CL15565') {
+      $errors.Add('UE4SS compatibility package targetBrickadiaBuild must be PC-Shipping-CL15565.')
     }
     if ([string]$packageManifest.serverExecutable -ne 'BrickadiaServer-Win64-Shipping.exe') {
       $errors.Add('UE4SS compatibility package serverExecutable must be BrickadiaServer-Win64-Shipping.exe.')
@@ -104,8 +104,8 @@ try {
   }
 
   if ($compatibility) {
-    if ([string]$compatibility.brickadia.primaryTarget -notmatch 'PC-Shipping-CL15526') {
-      $errors.Add('Compatibility manifest primary target must include PC-Shipping-CL15526.')
+    if ([string]$compatibility.brickadia.primaryTarget -notmatch 'PC-Shipping-CL15565') {
+      $errors.Add('Compatibility manifest primary target must include PC-Shipping-CL15565.')
     }
     if ([string]$compatibility.brickadia.serverExecutable -ne 'BrickadiaServer-Win64-Shipping.exe') {
       $errors.Add('Compatibility manifest server executable must be BrickadiaServer-Win64-Shipping.exe.')
@@ -148,7 +148,7 @@ try {
 
   if (Test-Path -LiteralPath $readmePath) {
     $readme = Get-Content -Raw -LiteralPath $readmePath
-    foreach ($needle in @('UE4SS compatibility component', 'manifests/compatibility.json', 'PC-Shipping-CL15526', 'compat/ue4ss')) {
+    foreach ($needle in @('UE4SS compatibility component', 'manifests/compatibility.json', 'PC-Shipping-CL15565', 'compat/ue4ss')) {
       if ($readme -notmatch [regex]::Escape($needle)) {
         $errors.Add("UE4SS compatibility README does not contain expected marker: $needle")
       }
@@ -167,7 +167,7 @@ $result = [ordered]@{
   data = [ordered]@{
     packageRoot = [System.IO.Path]::GetFullPath((Join-Path $Root 'compat/ue4ss'))
     compatibilityManifest = [System.IO.Path]::GetFullPath((Join-Path $Root 'manifests/compatibility.json'))
-    targetBrickadiaBuild = 'PC-Shipping-CL15526'
+    targetBrickadiaBuild = 'PC-Shipping-CL15565'
   }
   evidence = $evidence.ToArray()
   errors = $errors.ToArray()

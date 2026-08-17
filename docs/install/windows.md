@@ -7,7 +7,7 @@ should be able to download the portable app, point it at a Brickadia Dedicated
 Server folder, and use the Easy-mode action buttons to install, repair, start,
 or restart the required services.
 
-Current target: Brickadia EA3.1 PC-Shipping-CL15526.
+Current target: Brickadia EA3.1 PC-Shipping-CL15565.
 
 ## Who Should Read This?
 
@@ -22,7 +22,7 @@ portable Desktop flow before script or package internals.
 ## What You Need
 
 - Windows 10 x64, Windows 11 x64, or Windows Server 2019+ x64.
-- Brickadia Dedicated Server for Brickadia EA3.1 `PC-Shipping-CL15526`.
+- Brickadia Dedicated Server for Brickadia EA3.1 `PC-Shipping-CL15565`.
 - Required BMF-vendored Omegga Windows runtime for Windows server launch, command
   transport, bridge helpers, logs, and validation:
   <https://github.com/Ty-lerCox/brickadia-modding-framework/tree/main/packages/omegga-runtime>.

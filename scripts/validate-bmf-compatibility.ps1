@@ -241,7 +241,7 @@ return {
     Invoke-BmfConsoleCommand 'bmf.compatibility.canary' 'bmf-compatibility-canary' @(
       'BMF bmf.compatibility.canary OK',
       'compatibility_status=ok',
-      'target_build=PC-Shipping-CL15526',
+      'target_build=PC-Shipping-CL15565',
       'platform=windows-dedicated-server',
       'build_detection=declared-target-only',
       'unsupported_build_policy=report-only',
@@ -252,14 +252,14 @@ return {
       'helper_group_count_at_least_5=true',
       'api_stability=stable',
       'api_risk=low',
-      'health_target_build=PC-Shipping-CL15526',
+      'health_target_build=PC-Shipping-CL15565',
       'health_compatibility_status=ok'
     )
 
     Invoke-BmfConsoleCommand 'bmf.compatibility' 'bmf-compatibility' @(
       'BMF bmf.compatibility OK',
       'compatibility_status=ok',
-      'target_build=PC-Shipping-CL15526',
+      'target_build=PC-Shipping-CL15565',
       'platform=windows-dedicated-server',
       'build_detection=declared-target-only',
       'unsupported_build_policy=report-only',
@@ -276,7 +276,7 @@ return {
 
     Invoke-BmfConsoleCommand 'bmf.status' 'bmf-status-compatibility' @(
       'BMF bmf.status OK',
-      'target_build=PC-Shipping-CL15526',
+      'target_build=PC-Shipping-CL15565',
       'compatibility_status=ok',
       'build_detection=declared-target-only',
       'runtime_required_helper_groups=2',
@@ -285,9 +285,9 @@ return {
 
     Invoke-BmfConsoleCommand 'bmf.server.status' 'bmf-server-status-compatibility' @(
       'BMF bmf.server.status OK',
-      'build_id=PC-Shipping-CL15526',
+      'build_id=PC-Shipping-CL15565',
       'compatibility_status=ok',
-      'target_build=PC-Shipping-CL15526',
+      'target_build=PC-Shipping-CL15565',
       'build_detection=declared-target-only',
       'required_helper_groups=2',
       'required_helper_groups_available=2',
@@ -340,8 +340,8 @@ if (Test-Path -LiteralPath $runtimeStatusPath) {
   Add-Evidence 'json' $statusPath 'BMF runtime status after compatibility canary'
   try {
     $status = Read-JsonFile $statusPath
-    if ([string]$status.target_build -ne 'PC-Shipping-CL15526') {
-      $errors.Add("Expected target_build=PC-Shipping-CL15526, got $($status.target_build).")
+    if ([string]$status.target_build -ne 'PC-Shipping-CL15565') {
+      $errors.Add("Expected target_build=PC-Shipping-CL15565, got $($status.target_build).")
     }
     if ([string]$status.build_detection -ne 'declared-target-only') {
       $errors.Add("Expected build_detection=declared-target-only, got $($status.build_detection).")

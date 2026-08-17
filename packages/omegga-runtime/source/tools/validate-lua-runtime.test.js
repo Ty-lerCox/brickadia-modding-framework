@@ -865,6 +865,52 @@ test('command output and completed replay caches are bounded by count and bytes'
   );
 });
 
+test('game command tunnel admits only the reviewed CityRPG command prefixes', () => {
+  const runtimePath = path.join(
+    __dirname,
+    '..',
+    'templates',
+    'windows-ue4ss',
+    'ue4ss',
+    'Mods',
+    'BMF',
+    'Scripts',
+    'bmf',
+    'runtime.lua',
+  );
+  const source = fs.readFileSync(runtimePath, 'utf8').replace(/\r\n/g, '\n');
+  const allowlistStart = source.indexOf(
+    'local function BMF_game_command_tunnel_line_allowed',
+  );
+  const allowlistEnd = source.indexOf(
+    'function BMF_game_command_tunnel_identity_operation',
+    allowlistStart,
+  );
+  const allowlist = source.slice(allowlistStart, allowlistEnd);
+
+  assert.ok(allowlistStart >= 0 && allowlistEnd > allowlistStart);
+  for (const command of [
+    'cityrpgremote',
+    'cityrpgroute',
+    'cityrpgpositionsnapshot',
+  ]) {
+    assert.match(allowlist, new RegExp(`normalized == "/${command}"`));
+    assert.match(
+      allowlist,
+      new RegExp(`normalized:match\\(\\"\\^/${command}%s\\"\\)`),
+    );
+  }
+  assert.doesNotMatch(
+    allowlist,
+    /normalized:match\("\^\/cityrpg%s"\)/,
+    'the allowlist must not broaden to arbitrary CityRPG-prefixed commands',
+  );
+  assert.match(
+    source,
+    /only \/cityrpgRemote, \/cityrpgroute, and \/cityrpgPositionSnapshot are allowed/,
+  );
+});
+
 test('game command tunnel uses only an exact ephemeral controller address', () => {
   const runtimePath = path.join(
     __dirname,

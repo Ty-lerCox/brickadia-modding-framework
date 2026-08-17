@@ -28646,6 +28646,8 @@ local function BMF_game_command_tunnel_line_allowed(line)
     or normalized:match("^/cityrpgremote%s") ~= nil
     or normalized == "/cityrpgroute"
     or normalized:match("^/cityrpgroute%s") ~= nil
+    or normalized == "/cityrpgpositionsnapshot"
+    or normalized:match("^/cityrpgpositionsnapshot%s") ~= nil
 end
 
 function BMF_game_command_tunnel_identity_operation(request)
@@ -29505,7 +29507,10 @@ BMF_process_game_command_tunnel_request = function(decoded)
     return reject("rejected", "LINE_TOO_LARGE", "line exceeds configured byte limit")
   end
   if not BMF_game_command_tunnel_line_allowed(line) then
-    return reject("rejected", "COMMAND_NOT_ALLOWED", "only /cityrpgRemote and /cityrpgroute are allowed")
+    return reject(
+      "rejected",
+      "COMMAND_NOT_ALLOWED",
+      "only /cityrpgRemote, /cityrpgroute, and /cityrpgPositionSnapshot are allowed")
   end
 
   local service_class = tostring(decoded.serviceClass or "interactive"):lower()

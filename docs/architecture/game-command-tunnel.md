@@ -2,7 +2,8 @@
 
 The game-command tunnel is the standard low-latency path for moving an opaque
 CityRPG command from an Omegga plugin into Brickadia. It carries the complete
-`/cityrpgRemote ...` or `/cityrpgroute ...` line without interpreting its
+`/cityrpgRemote ...`, `/cityrpgroute ...`, or bounded standalone
+`/cityrpgPositionSnapshot bootstrapV1` line without interpreting its
 action fields. BMF does
 not know about team, whisper, leaderboard, or other CityRPG actions and does not
 add one native hook per action.
@@ -11,7 +12,11 @@ add one native hook per action.
 Wire payload: `/cityrpgRemote action:field1:field2`. Spaces are ordinary field
 content. Intermediate fields cannot contain colons or line breaks; the final
 field is the unsplit remainder and may contain colons. `/cityrpgroute` remains
-a separate legacy grammar.
+a separate legacy grammar. `/cityrpgPositionSnapshot` is the narrow exception
+used to bootstrap the standalone Wire position sampler after a successful
+authenticated join. Its only accepted Wire action is `bootstrapV1`, and the
+Wire graph can register only the exact tunnel sender; BMF never reads player
+positions.
 
 The tunnel is authenticated by the existing loopback BMF socket. Omegga routes
 each request to exactly one writable BMF native client, BMF admits it to a
@@ -21,7 +26,8 @@ game thread.
 
 ## Server-Only Command Boundary
 
-`/cityrpgRemote` and `/cityrpgroute` are reserved server-only command prefixes.
+`/cityrpgRemote`, `/cityrpgroute`, and `/cityrpgPositionSnapshot` are reserved
+server-only command prefixes.
 BMF installs a native detour on the validated
 `BRPlayerController.ServerPushChatMessage` UFunction exec slot at startup.
 Calls arriving through the ordinary player RPC path are inspected there and

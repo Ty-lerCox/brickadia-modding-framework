@@ -2384,7 +2384,9 @@ namespace
                    message.compare(0, command.size(), command) == 0 &&
                    std::isspace(static_cast<unsigned char>(message[command.size()]));
         };
-        return matches("/cityrpgremote") || matches("/cityrpgroute");
+        return matches("/cityrpgremote") ||
+               matches("/cityrpgroute") ||
+               matches("/cityrpgpositionsnapshot");
     }
 
     bool inspect_reserved_cityrpg_chat_message(const Unreal::FString& message)

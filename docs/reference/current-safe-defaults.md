@@ -82,8 +82,10 @@ one-shot Lua pump may decode and dispatch received messages.
 
 ## Generic Game-Command Tunnel
 
-The supported tunnel accepts only opaque `/cityrpgRemote` and `/cityrpgroute`
-lines. It uses one bounded `EngineTickOneShotChain` shared with socket ingress,
+The supported tunnel accepts only opaque `/cityrpgRemote`, `/cityrpgroute`, and
+`/cityrpgPositionSnapshot` lines. The last prefix is limited by its Wire graph
+to the sender-only `bootstrapV1` position-sampler registration; BMF does not
+sample positions. It uses one bounded `EngineTickOneShotChain` shared with socket ingress,
 not one callback per request. Each successor is scheduled every two frames via
 a simple-queue trampoline, so expect roughly 33 ms game-thread quantization.
 

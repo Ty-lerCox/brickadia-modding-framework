@@ -1,6 +1,6 @@
 {
   "name": "BMF",
-  "version": "0.1.0-ea3.cl15565",
+  "version": "0.1.0-ea3.cl15581",
   "description": "Brickadia Modding Framework bootstrap for UE4SS Lua.",
   "entrypoint": "Scripts/main.lua",
   "pluginDirectory": "plugins"

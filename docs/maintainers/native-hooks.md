@@ -19,7 +19,18 @@ unless they are explicitly working on hook infrastructure.
 - Record `L6 Frame Time` evidence before promoting native mutation into normal
   gameplay.
 
-Current `Release-EA3-CL-15565` live-confirmed hotfix mapping:
+Current `Release-EA3-CL-15581` static hotfix mapping, pending live confirmation:
+
+- `/Script/Brickadia.BRTool_Applicator:ServerAddComponent`: `0x62AADF0`
+  (expected `FunctionFlags=0x4220CC0`, `2` parameters, `ParmsSize=0x10`)
+
+The mapping is the unique twenty-five-of-twenty-five relocation-normalized
+semantic neighborhood match against the preserved CL15565 executable. The
+next-best candidates matched only nine neighbors. Automatic synchronization
+remains disabled until the CL15581 process confirms the exact reflected owner,
+name, flags, parameter ABI, native slot, and deny/allow behavior.
+
+Prior `Release-EA3-CL-15565` live-confirmed hotfix mapping:
 
 - `/Script/Brickadia.BRTool_Applicator:ServerAddComponent`: `0x62AB0A0`
   (`FunctionFlags=0x4220CC0`, `2` parameters, `ParmsSize=0x10`)
@@ -40,8 +51,8 @@ Prior `Release-EA3-CL-15526` live-confirmed hotfix mapping:
   (`FunctionFlags=0x4220CC0`, `2` parameters, `ParmsSize=0x10`)
 
 The CL15526 process returned one exact UFunction and the installed blocker
-emitted a live `ItemSpawnDenied` event. This mapping is historical evidence and
-must not be applied to CL15565.
+  emitted a live `ItemSpawnDenied` event. This mapping is historical evidence and
+  must not be applied to later builds.
 
 Prior `Release-EA3-CL-15447` live-reflected RPC exec-thunk mappings:
 
@@ -78,9 +89,9 @@ the running server for the Applicator component-add function, updates the native
 control file, builds/injects the native DLL if needed, and skips reinjection
 when the hook is already installed in that process.
 
-The CL15565 default RVA and automatic synchronization are active in the
-production supervisor after the exact-build identity and denial canary passed.
-Placement synchronization remains independently disabled.
+The CL15581 default RVA is recorded for canary use, but automatic synchronization
+remains disabled during recovery. Placement synchronization remains
+independently disabled.
 
 Player and role decisions remain owned by
 `framework/ue4ss/Mods/BMF/plugins/NoSpawnItemApplicator`,

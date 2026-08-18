@@ -17,7 +17,7 @@ const TELEMETRY_GUARDRAILS = [
 ];
 
 const DEFAULT_SCRAPE_INTERVAL = '15s';
-const DEFAULT_BRICKADIA_BUILD = 'PC-Shipping-CL15565';
+const DEFAULT_BRICKADIA_BUILD = 'PC-Shipping-CL15581';
 const DEFAULT_GRAFANA_API_TOKEN_ENV = 'BMF_GRAFANA_API_TOKEN';
 
 function createTelemetryOnboardingPlan(input = {}, options = {}) {

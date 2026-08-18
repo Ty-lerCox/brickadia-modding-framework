@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedFor": "BMF 0.1.0-ea3.cl15565",
+  "generatedFor": "BMF 0.1.0-ea3.cl15581",
   "dependencies": [
     {
       "id": "bmf-compatible-omegga-runtime",
@@ -15,7 +15,7 @@
       },
       "compatibility": {
         "requiresBmfWindowsSupport": true,
-        "requiresBrickadiaBuild": "PC-Shipping-CL15565",
+        "requiresBrickadiaBuild": "PC-Shipping-CL15581",
         "requiresWindowsDedicatedServer": true
       },
       "provides": [

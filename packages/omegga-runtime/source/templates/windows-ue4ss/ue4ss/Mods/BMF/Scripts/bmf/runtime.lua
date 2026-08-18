@@ -1,5 +1,5 @@
 local MOD_NAME = "BMF"
-local VERSION = "0.1.0-ea3.cl15565"
+local VERSION = "0.1.0-ea3.cl15581"
 local ROOT = (function()
   if type(debug) == "table" and type(debug.getinfo) == "function" then
     local info = debug.getinfo(1, "S")
@@ -42,7 +42,7 @@ local COMMAND_DIR = RUNTIME_DIR .. "/commands"
 local PLAYER_CACHE_PATH = RUNTIME_DIR .. "/players.json"
 local PLAYER_POSITIONS_SNAPSHOT_PATH = RUNTIME_DIR .. "/player-positions.json"
 local MINIGAME_DEFINITIONS_PATH = RUNTIME_DIR .. "/minigames/definitions.json"
-local TARGET_BRICKADIA_BUILD = "PC-Shipping-CL15565"
+local TARGET_BRICKADIA_BUILD = "PC-Shipping-CL15581"
 local TARGET_BRICKADIA_NAME = "Brickadia EA3.1"
 local TARGET_SERVER_EXECUTABLE = "BrickadiaServer-Win64-Shipping.exe"
 local TARGET_PLATFORM = "windows-dedicated-server"

@@ -1,6 +1,6 @@
 {
   "name": "@bmf/desktop-packaged-assets",
-  "version": "0.1.0-ea3.cl15565",
+  "version": "0.1.0-ea3.cl15581",
   "private": true,
   "description": "Packaged BMF Desktop component boundary marker for installed MSI resources."
 }

@@ -359,6 +359,9 @@ function Get-AlloyStatus {
   if ($componentsResponse.ok) {
     try {
       $componentsRaw = (Invoke-WebRequest -Uri "http://127.0.0.1:$Port/api/v0/web/components" -UseBasicParsing -TimeoutSec 3).Content
+      if ($componentsRaw -is [byte[]]) {
+        $componentsRaw = [System.Text.Encoding]::UTF8.GetString($componentsRaw)
+      }
       $parsedComponents = $componentsRaw | ConvertFrom-Json
       $ids = @()
       if ($parsedComponents) {

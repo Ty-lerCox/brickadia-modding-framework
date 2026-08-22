@@ -2,7 +2,7 @@
   "name": "bmf",
   "displayName": "BMF",
   "fullName": "Brickadia Modding Framework",
-  "version": "0.1.0-ea3.cl15581",
+  "version": "0.1.0-ea3.cl15648",
   "status": "experimental",
   "runtime": {
     "type": "UE4SS Lua",
@@ -40,9 +40,9 @@
   ],
   "supportedBrickadiaBuilds": [
     {
-      "build": "PC-Shipping-CL15581",
+      "build": "PC-Shipping-CL15648",
       "status": "staged",
-      "notes": "Current reverse-engineering target. Core UE4SS startup, BMF initialization, and Omegga metrics have local live evidence; native BMF modules, the dumper, and player-dependent surfaces remain pending CL15581 remapping and validation."
+      "notes": "Current reverse-engineering target. The production subset has exact-build live evidence for UE4SS/BMF startup, BMFSocket, CityRPG command delivery, frame telemetry and pacing, the Applicator blocker, Omegga, and required plugins. Generic native mutation surfaces remain fail-closed."
     }
   ],
   "capabilities": [

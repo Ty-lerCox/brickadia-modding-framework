@@ -19,16 +19,16 @@ unless they are explicitly working on hook infrastructure.
 - Record `L6 Frame Time` evidence before promoting native mutation into normal
   gameplay.
 
-Current `Release-EA3-CL-15581` static hotfix mapping, pending live confirmation:
+Current `Release-EA3-CL-15648` live-confirmed hotfix mapping:
 
-- `/Script/Brickadia.BRTool_Applicator:ServerAddComponent`: `0x62AADF0`
+- `/Script/Brickadia.BRTool_Applicator:ServerAddComponent`: `0x62AAE50`
   (expected `FunctionFlags=0x4220CC0`, `2` parameters, `ParmsSize=0x10`)
 
-The mapping is the unique twenty-five-of-twenty-five relocation-normalized
-semantic neighborhood match against the preserved CL15565 executable. The
-next-best candidates matched only nine neighbors. Automatic synchronization
-remains disabled until the CL15581 process confirms the exact reflected owner,
-name, flags, parameter ABI, native slot, and deny/allow behavior.
+The mapping is the unique sixty-one-of-sixty-one relocation-normalized semantic
+neighborhood match against the preserved CL15581 executable. The live CL15648
+process then confirmed the exact executable version and hash, reflected owner,
+name, flags, parameter ABI, native slot, and deny/allow policy before automatic
+synchronization was restored.
 
 Prior `Release-EA3-CL-15565` live-confirmed hotfix mapping:
 
@@ -89,9 +89,9 @@ the running server for the Applicator component-add function, updates the native
 control file, builds/injects the native DLL if needed, and skips reinjection
 when the hook is already installed in that process.
 
-The CL15581 default RVA is recorded for canary use, but automatic synchronization
-remains disabled during recovery. Placement synchronization remains
-independently disabled.
+The CL15648 default RVA is recorded for canary use, and automatic Applicator
+synchronization is enabled after exact-build validation. Placement
+synchronization remains independently disabled.
 
 Player and role decisions remain owned by
 `framework/ue4ss/Mods/BMF/plugins/NoSpawnItemApplicator`,

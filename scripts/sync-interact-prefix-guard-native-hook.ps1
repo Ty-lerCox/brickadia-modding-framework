@@ -27,7 +27,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 if (@($ServerModifyComponentRvas).Count -eq 0) {
-  throw 'Interact prefix native sync is fail-closed on CL15581. The EA3.1 ServerModifyComponentV3 0x40-byte parameter payload is not compatible-proofed against the existing 0x20-byte decoder. Pass an explicit RVA only after remapping, adapting, and canary-validating the decoder.'
+  throw 'Interact prefix native sync is fail-closed on CL15648. The EA3.1 ServerModifyComponentV3 0x40-byte parameter payload is not compatible-proofed against the existing 0x20-byte decoder. Pass an explicit RVA only after remapping, adapting, and canary-validating the decoder.'
 }
 
 function Format-Hex64([UInt64]$Value) {

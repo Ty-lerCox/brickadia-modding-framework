@@ -10,7 +10,9 @@ param(
   [string]$InjectScript = '',
   [string]$DllName = '',
   [string]$DeniedComponent = '',
-  [UInt64[]]$ServerAddComponentRvas = @([UInt64]0x62AADF0),
+  [UInt64[]]$ServerAddComponentRvas = @([UInt64]0x62AAE50),
+  [string]$ExpectedFileVersion = 'Release-EA3-CL-15648',
+  [string]$ExpectedSha256 = '902C4244570FCEFE457E39795938065238A9A14967C7BE9911D606BD34E91CCB',
   [int]$CommandTimeoutSeconds = 30,
   [int]$ResponseTimeoutSeconds = 20,
   [int]$VerificationTimeoutSeconds = 20,
@@ -502,6 +504,16 @@ if (!$module) {
   throw "Could not resolve Brickadia server main module for PID $ProcessId"
 }
 
+$modulePath = [System.IO.Path]::GetFullPath($module.FileName)
+$moduleVersion = [string](Get-Item -LiteralPath $modulePath).VersionInfo.FileVersion
+if ($ExpectedFileVersion -and $moduleVersion -ne $ExpectedFileVersion) {
+  throw "Refusing native Applicator sync: expected $ExpectedFileVersion but PID $ProcessId is $moduleVersion ($modulePath)."
+}
+$moduleSha256 = [string](Get-FileHash -LiteralPath $modulePath -Algorithm SHA256).Hash
+if ($ExpectedSha256 -and $moduleSha256 -ne $ExpectedSha256.ToUpperInvariant()) {
+  throw "Refusing native Applicator sync: PID $ProcessId executable SHA256 $moduleSha256 does not match the CL15648 canary hash $ExpectedSha256."
+}
+
 $moduleBase = [UInt64]$module.BaseAddress.ToInt64()
 $nativeTargets = New-Object System.Collections.Generic.List[UInt64]
 foreach ($rva in $ServerAddComponentRvas) {
@@ -604,6 +616,9 @@ $result = [ordered]@{
   status = 'ready'
   processId = $ProcessId
   processName = $serverProcess.ProcessName
+  modulePath = $modulePath
+  moduleVersion = $moduleVersion
+  moduleSha256 = $moduleSha256
   moduleBase = Format-Hex64 $moduleBase
   serverAddComponentNativeTargets = @($nativeTargets | ForEach-Object { Format-Hex64 $_ })
   function = Format-Hex64 $functionValue

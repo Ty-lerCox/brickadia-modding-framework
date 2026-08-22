@@ -7,7 +7,7 @@ manifest while preserving the current authoritative compatibility manifest:
 manifests/compatibility.json
 ```
 
-The current BMF Windows target is Brickadia `PC-Shipping-CL15581` with the
+The current BMF Windows target is Brickadia `PC-Shipping-CL15648` with the
 server executable `BrickadiaServer-Win64-Shipping.exe`. Runtime files still
 stage from the existing `framework/ue4ss/Mods/*` paths until a dedicated UE4SS
 bundle layout lands under `compat/ue4ss`.

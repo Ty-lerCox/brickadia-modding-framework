@@ -1,13 +1,32 @@
 import { randomBytes, randomInt } from 'node:crypto';
 import EventEmitter from 'node:events';
 import { createServer, Server, Socket } from 'node:net';
+import MotionLatestValueLane from './motionLatestValueLane';
 
-type ClientRole = 'bmf-native' | 'plugin' | 'unknown';
+type ClientRole = 'bmf-native' | 'plugin' | 'companion' | 'unknown';
+
+type MotionSchemaState = {
+  event: typeof MOTION_EVENT_NAME;
+  schemaVersion: number;
+  generation: string;
+};
+
+type MotionEventRecord = {
+  type: 'event';
+  event: typeof MOTION_EVENT_NAME;
+  payload: Record<string, unknown>;
+};
 
 type ClientState = {
   authenticated: boolean;
   role: ClientRole;
   buffer: string;
+  motionLeaseExpiresAtMs: number;
+  motionPlayerId: string;
+  motionRateHz: number;
+  motionLastForwardedAtMs: number;
+  motionRateTimer: NodeJS.Timeout | null;
+  motionLane: MotionLatestValueLane;
 };
 
 type BridgeMessage = {
@@ -24,6 +43,16 @@ type BridgeMessage = {
   connectionGeneration?: number;
   operationRequestId?: string;
   offThreadMs?: number;
+  source?: string;
+  event?: string;
+  schemaVersion?: number;
+  available?: boolean;
+  generation?: string;
+  leaseMs?: number;
+  playerId?: string;
+  rateHz?: number;
+  capability?: string;
+  record?: unknown;
 };
 
 export type BmfCommandServiceClass = 'interactive' | 'bulk';
@@ -44,6 +73,7 @@ export type BmfSocketBridgeOptions = {
   boundedAdmissionEnabled?: boolean;
   maxPendingCommands?: number;
   maxClientBufferBytes?: number;
+  maxMotionPayloadBytes?: number;
 };
 
 const DEFAULT_HOST = '127.0.0.1';
@@ -56,6 +86,32 @@ const MAX_TUNNEL_ROUTE_TIMEOUT_MS = 300000;
 const MAX_PENDING_TUNNEL_ROUTES = 512;
 const DEFAULT_MAX_PENDING_COMMANDS = 64;
 const DEFAULT_MAX_CLIENT_BUFFER_BYTES = 256 * 1024;
+const DEFAULT_MAX_MOTION_PAYLOAD_BYTES = 16 * 1024;
+const MOTION_CAPABILITY = 'player-motion-v1' as const;
+const MOTION_EVENT_NAME = 'players.motion.v1' as const;
+const MOTION_SCHEMA_VERSION = 1;
+const MOTION_SCHEMA_MESSAGE = 'motion.schema';
+const MOTION_SUBSCRIBE_MESSAGE = 'motion.subscribe';
+const MOTION_UNSUBSCRIBE_MESSAGE = 'motion.unsubscribe';
+const DEFAULT_MOTION_LEASE_MS = 5_000;
+const MIN_MOTION_LEASE_MS = 1_000;
+const MAX_MOTION_LEASE_MS = 15_000;
+const DEFAULT_MOTION_RATE_HZ = 10;
+const MIN_MOTION_RATE_HZ = 1;
+const MAX_MOTION_RATE_HZ = 20;
+const MAX_MOTION_COORDINATE_ABS = 10_000_000;
+const MAX_MOTION_SAMPLE_AGE_MS = 30_000;
+const MAX_MOTION_SAMPLE_FUTURE_MS = 5_000;
+const PLAYER_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const MOTION_HEADING_SOURCES = new Set([
+  'view',
+  'body',
+  'vehicle',
+  'velocity',
+  'travel',
+  'none',
+]);
 const RETRYABLE_BIND_ERROR_CODES = new Set(['EADDRINUSE', 'EACCES']);
 
 export default class BmfSocketBridgeHost extends EventEmitter {
@@ -65,6 +121,7 @@ export default class BmfSocketBridgeHost extends EventEmitter {
   readonly boundedAdmissionEnabled: boolean;
   readonly maxPendingCommands: number;
   readonly maxClientBufferBytes: number;
+  readonly maxMotionPayloadBytes: number;
 
   #server: Server = null;
   #configuredPort: number;
@@ -89,6 +146,19 @@ export default class BmfSocketBridgeHost extends EventEmitter {
   >();
   #commandCounter = 0;
   #stopped = true;
+  #motionSchema: MotionSchemaState | null = null;
+  #motionSchemaSource: Socket | null = null;
+  #motionMetrics = {
+    schemaAdvertisements: 0,
+    subscriptionsAccepted: 0,
+    subscriptionsRejected: 0,
+    forwarded: 0,
+    coalesced: 0,
+    expiredLeases: 0,
+    droppedOversize: 0,
+    droppedInvalid: 0,
+    droppedUnavailable: 0,
+  };
 
   constructor(options: BmfSocketBridgeOptions = {}) {
     super();
@@ -120,6 +190,16 @@ export default class BmfSocketBridgeHost extends EventEmitter {
             DEFAULT_MAX_CLIENT_BUFFER_BYTES,
         ),
       ) || DEFAULT_MAX_CLIENT_BUFFER_BYTES,
+    );
+    this.maxMotionPayloadBytes = Math.max(
+      1,
+      Math.floor(
+        Number(
+          options.maxMotionPayloadBytes ??
+            process.env.OMEGGA_BMF_SOCKET_MAX_MOTION_PAYLOAD_BYTES ??
+            DEFAULT_MAX_MOTION_PAYLOAD_BYTES,
+        ),
+      ) || DEFAULT_MAX_MOTION_PAYLOAD_BYTES,
     );
   }
 
@@ -228,12 +308,17 @@ export default class BmfSocketBridgeHost extends EventEmitter {
     }
     this.#pendingTunnelRoutes.clear();
 
-    for (const socket of this.#clients.keys()) {
+    for (const [socket, client] of this.#clients) {
+      if (client.role === 'companion') {
+        this.clearCompanionMotionClient(client);
+      }
       socket.removeAllListeners();
       socket.destroy();
     }
     this.#clients.clear();
     this.#bmfClients.clear();
+    this.#motionSchema = null;
+    this.#motionSchemaSource = null;
 
     if (this.#server) {
       this.#server.removeAllListeners();
@@ -246,6 +331,26 @@ export default class BmfSocketBridgeHost extends EventEmitter {
 
   get hasBmfClients() {
     return this.#bmfClients.size > 0;
+  }
+
+  get motionStatus() {
+    const nowMs = Date.now();
+    let companionClients = 0;
+    let activeLeases = 0;
+    for (const client of this.#clients.values()) {
+      if (client.role !== 'companion') continue;
+      companionClients += 1;
+      if (client.motionLeaseExpiresAtMs > nowMs) activeLeases += 1;
+    }
+    return {
+      available: this.#motionSchema !== null,
+      event: MOTION_EVENT_NAME,
+      schemaVersion: this.#motionSchema?.schemaVersion ?? null,
+      generation: this.#motionSchema?.generation ?? '',
+      companionClients,
+      activeLeases,
+      ...this.#motionMetrics,
+    };
   }
 
   execCommand(
@@ -379,9 +484,16 @@ export default class BmfSocketBridgeHost extends EventEmitter {
       authenticated: false,
       role: 'unknown',
       buffer: '',
+      motionLeaseExpiresAtMs: 0,
+      motionPlayerId: '',
+      motionRateHz: 0,
+      motionLastForwardedAtMs: 0,
+      motionRateTimer: null,
+      motionLane: new MotionLatestValueLane(),
     });
 
     socket.on('data', chunk => this.handleData(socket, chunk));
+    socket.on('drain', () => this.flushMotionLane(socket));
     socket.on('close', () => this.removeClient(socket));
     socket.on('error', error => {
       this.emit('log', {
@@ -417,6 +529,421 @@ export default class BmfSocketBridgeHost extends EventEmitter {
     }
   }
 
+  private writeJson(socket: Socket, message: Record<string, unknown>) {
+    if (socket.destroyed || !socket.writable) return false;
+    socket.write(`${JSON.stringify(message)}\n`);
+    return true;
+  }
+
+  private publicMotionSchema() {
+    return {
+      available: this.#motionSchema !== null,
+      capability: MOTION_CAPABILITY,
+      capabilities: this.#motionSchema ? [MOTION_CAPABILITY] : [],
+      event: MOTION_EVENT_NAME,
+      schemaVersion: this.#motionSchema?.schemaVersion ?? null,
+      generation: this.#motionSchema?.generation ?? '',
+      minLeaseMs: MIN_MOTION_LEASE_MS,
+      maxLeaseMs: MAX_MOTION_LEASE_MS,
+      minRateHz: MIN_MOTION_RATE_HZ,
+      maxRateHz: MAX_MOTION_RATE_HZ,
+    };
+  }
+
+  private publishMotionSchema() {
+    const message = {
+      type: MOTION_SCHEMA_MESSAGE,
+      source: 'omegga-broker',
+      ...this.publicMotionSchema(),
+    };
+    for (const [socket, client] of this.#clients) {
+      if (!client.authenticated || client.role !== 'companion') continue;
+      this.writeJson(socket, message);
+    }
+  }
+
+  private clearCompanionMotionClient(
+    client: ClientState,
+    countPendingAsUnavailable = false,
+  ) {
+    if (client.motionRateTimer) {
+      clearTimeout(client.motionRateTimer);
+      client.motionRateTimer = null;
+    }
+    client.motionLeaseExpiresAtMs = 0;
+    client.motionPlayerId = '';
+    client.motionRateHz = 0;
+    client.motionLastForwardedAtMs = 0;
+    if (client.motionLane.clear() && countPendingAsUnavailable) {
+      this.#motionMetrics.droppedUnavailable += 1;
+    }
+  }
+
+  private clearCompanionMotionState() {
+    for (const client of this.#clients.values()) {
+      if (client.role !== 'companion') continue;
+      this.clearCompanionMotionClient(client, true);
+    }
+  }
+
+  private setMotionSchemaUnavailable() {
+    if (!this.#motionSchema && !this.#motionSchemaSource) return;
+    this.#motionSchema = null;
+    this.#motionSchemaSource = null;
+    this.clearCompanionMotionState();
+    this.publishMotionSchema();
+  }
+
+  private handleMotionSchemaAdvertisement(
+    socket: Socket,
+    message: BridgeMessage,
+  ) {
+    if (message.available !== true) {
+      if (
+        message.capability === MOTION_CAPABILITY &&
+        message.event === MOTION_EVENT_NAME &&
+        this.#motionSchemaSource === socket
+      ) {
+        this.setMotionSchemaUnavailable();
+      }
+      return;
+    }
+
+    const schemaVersion = message.schemaVersion;
+    const generation =
+      typeof message.generation === 'string' ? message.generation.trim() : '';
+    const valid =
+      message.capability === MOTION_CAPABILITY &&
+      message.event === MOTION_EVENT_NAME &&
+      schemaVersion === MOTION_SCHEMA_VERSION &&
+      /^[A-Za-z0-9._:-]{1,80}$/.test(generation);
+    if (!valid) {
+      this.emit('log', {
+        level: 'warn',
+        message: 'BMF socket ignored invalid motion schema metadata.',
+      });
+      return;
+    }
+
+    if (this.#motionSchemaSource && this.#motionSchemaSource !== socket) {
+      this.emit('log', {
+        level: 'warn',
+        message:
+          'BMF socket ignored motion schema metadata from a second native source.',
+      });
+      return;
+    }
+
+    const changed =
+      !this.#motionSchema ||
+      this.#motionSchema.schemaVersion !== schemaVersion ||
+      this.#motionSchema.generation !== generation ||
+      this.#motionSchemaSource !== socket;
+    this.#motionSchema = {
+      event: MOTION_EVENT_NAME,
+      schemaVersion,
+      generation,
+    };
+    this.#motionSchemaSource = socket;
+    this.#motionMetrics.schemaAdvertisements += 1;
+    if (changed) this.clearCompanionMotionState();
+    this.publishMotionSchema();
+  }
+
+  private handleCompanionMessage(
+    socket: Socket,
+    client: ClientState,
+    message: BridgeMessage,
+  ) {
+    if (message.type === 'ping') {
+      this.writeJson(socket, {
+        type: 'pong',
+        id: message.id,
+        source: 'omegga-broker',
+      });
+      return;
+    }
+
+    if (message.type === MOTION_UNSUBSCRIBE_MESSAGE) {
+      const playerId = client.motionPlayerId;
+      this.clearCompanionMotionClient(client);
+      this.writeJson(socket, {
+        type: 'motion.subscribe.ack',
+        accepted: true,
+        playerId,
+        rateHz: 0,
+        leaseMs: 0,
+        expiresAtMs: 0,
+      });
+      return;
+    }
+
+    if (message.type !== MOTION_SUBSCRIBE_MESSAGE) {
+      this.writeJson(socket, {
+        type: 'error',
+        ok: false,
+        code: 'ROLE_NOT_AUTHORIZED',
+        detail: 'companion role only supports motion leases and broker ping',
+      });
+      return;
+    }
+
+    const playerId = String(message.playerId || '')
+      .trim()
+      .toLowerCase();
+    if (
+      !this.#motionSchema ||
+      message.schemaVersion !== this.#motionSchema.schemaVersion
+    ) {
+      this.#motionMetrics.subscriptionsRejected += 1;
+      this.clearCompanionMotionClient(client, true);
+      this.writeJson(socket, {
+        type: 'motion.subscribe.ack',
+        accepted: false,
+        playerId,
+        code: 'SCHEMA_UNAVAILABLE',
+        leaseMs: 0,
+        expiresAtMs: 0,
+      });
+      return;
+    }
+
+    if (!PLAYER_ID_PATTERN.test(playerId)) {
+      this.#motionMetrics.subscriptionsRejected += 1;
+      this.clearCompanionMotionClient(client, true);
+      this.writeJson(socket, {
+        type: 'motion.subscribe.ack',
+        accepted: false,
+        playerId,
+        code: 'INVALID_SUBSCRIPTION',
+        leaseMs: 0,
+        expiresAtMs: 0,
+      });
+      return;
+    }
+
+    const requestedLeaseMs = Number(message.leaseMs);
+    const leaseMs = Math.max(
+      MIN_MOTION_LEASE_MS,
+      Math.min(
+        MAX_MOTION_LEASE_MS,
+        Number.isFinite(requestedLeaseMs)
+          ? Math.floor(requestedLeaseMs)
+          : DEFAULT_MOTION_LEASE_MS,
+      ),
+    );
+    const requestedRateHz = Number(message.rateHz);
+    const rateHz = Math.max(
+      MIN_MOTION_RATE_HZ,
+      Math.min(
+        MAX_MOTION_RATE_HZ,
+        Number.isFinite(requestedRateHz)
+          ? Math.floor(requestedRateHz)
+          : DEFAULT_MOTION_RATE_HZ,
+      ),
+    );
+    if (client.motionPlayerId && client.motionPlayerId !== playerId) {
+      this.clearCompanionMotionClient(client);
+    }
+    client.motionPlayerId = playerId;
+    client.motionRateHz = rateHz;
+    client.motionLeaseExpiresAtMs = Date.now() + leaseMs;
+    this.#motionMetrics.subscriptionsAccepted += 1;
+    this.writeJson(socket, {
+      type: 'motion.subscribe.ack',
+      accepted: true,
+      playerId,
+      rateHz,
+      schemaVersion: this.#motionSchema.schemaVersion,
+      generation: this.#motionSchema.generation,
+      leaseMs,
+      expiresAtMs: client.motionLeaseExpiresAtMs,
+    });
+  }
+
+  private motionEventRecord(message: BridgeMessage): MotionEventRecord | null {
+    if (message.type !== 'event' || !message.record) return null;
+    if (message.source !== 'bmf') return null;
+    if (typeof message.record !== 'object') return null;
+    const record = message.record as {
+      type?: unknown;
+      event?: unknown;
+      payload?: unknown;
+    };
+    if (
+      record.type !== 'event' ||
+      record.event !== MOTION_EVENT_NAME ||
+      !record.payload ||
+      typeof record.payload !== 'object' ||
+      Array.isArray(record.payload)
+    )
+      return null;
+    return record as MotionEventRecord;
+  }
+
+  private motionEventMatchesActiveSchema(message: BridgeMessage) {
+    const record = this.motionEventRecord(message);
+    if (!record || !this.#motionSchema) return false;
+    const payload = record.payload;
+    const schemaVersion = payload.schemaVersion;
+    const playerId = String(payload.playerId || '')
+      .trim()
+      .toLowerCase();
+    const sequence = payload.sequence;
+    const sampledAtMs = payload.sampledAtMs;
+    const x = payload.x;
+    const y = payload.y;
+    const z = payload.z;
+    const headingDegrees = payload.headingDegrees;
+    const speedMetersPerSecond = payload.speedMetersPerSecond;
+    const nowMs = Date.now();
+    const validHeading =
+      headingDegrees === null ||
+      (typeof headingDegrees === 'number' &&
+        Number.isFinite(headingDegrees) &&
+        headingDegrees >= 0 &&
+        headingDegrees < 360);
+    const headingSource = String(payload.headingSource);
+    const validHeadingSource = MOTION_HEADING_SOURCES.has(headingSource);
+    const headingMatchesSource =
+      (headingSource === 'none' && headingDegrees === null) ||
+      (headingSource !== 'none' && headingDegrees !== null);
+    const matches =
+      typeof schemaVersion === 'number' &&
+      schemaVersion === this.#motionSchema.schemaVersion &&
+      payload.generation === this.#motionSchema.generation &&
+      PLAYER_ID_PATTERN.test(playerId) &&
+      typeof sequence === 'number' &&
+      Number.isSafeInteger(sequence) &&
+      sequence >= 0 &&
+      typeof sampledAtMs === 'number' &&
+      Number.isSafeInteger(sampledAtMs) &&
+      sampledAtMs >= nowMs - MAX_MOTION_SAMPLE_AGE_MS &&
+      sampledAtMs <= nowMs + MAX_MOTION_SAMPLE_FUTURE_MS &&
+      typeof x === 'number' &&
+      Number.isFinite(x) &&
+      Math.abs(x) <= MAX_MOTION_COORDINATE_ABS &&
+      typeof y === 'number' &&
+      Number.isFinite(y) &&
+      Math.abs(y) <= MAX_MOTION_COORDINATE_ABS &&
+      typeof z === 'number' &&
+      Number.isFinite(z) &&
+      Math.abs(z) <= MAX_MOTION_COORDINATE_ABS &&
+      validHeading &&
+      validHeadingSource &&
+      headingMatchesSource &&
+      typeof speedMetersPerSecond === 'number' &&
+      Number.isFinite(speedMetersPerSecond) &&
+      speedMetersPerSecond >= 0 &&
+      speedMetersPerSecond <= 500 &&
+      typeof payload.vehicleActive === 'boolean';
+    return matches ? { record, playerId } : false;
+  }
+
+  private hasActiveMotionLease(client: ClientState, nowMs: number) {
+    if (client.motionLeaseExpiresAtMs <= 0) return false;
+    if (client.motionLeaseExpiresAtMs > nowMs) return true;
+    this.clearCompanionMotionClient(client, true);
+    this.#motionMetrics.expiredLeases += 1;
+    return false;
+  }
+
+  private motionIntervalMs(client: ClientState) {
+    return 1_000 / Math.max(MIN_MOTION_RATE_HZ, client.motionRateHz);
+  }
+
+  private scheduleMotionLaneFlush(socket: Socket, delayMs: number) {
+    const client = this.#clients.get(socket);
+    if (!client || client.motionRateTimer) return;
+    client.motionRateTimer = setTimeout(
+      () => {
+        client.motionRateTimer = null;
+        this.flushMotionLane(socket);
+      },
+      Math.max(1, Math.ceil(delayMs)),
+    );
+    client.motionRateTimer.unref?.();
+  }
+
+  private offerMotionPayload(
+    socket: Socket,
+    client: ClientState,
+    payload: string,
+  ) {
+    const nowMs = Date.now();
+    const rateDelayMs = Math.max(
+      0,
+      client.motionLastForwardedAtMs + this.motionIntervalMs(client) - nowMs,
+    );
+    const result = client.motionLane.offer(
+      payload,
+      socket.writableNeedDrain || rateDelayMs > 0,
+      value => socket.write(value),
+    );
+    if (result.sent) {
+      client.motionLastForwardedAtMs = nowMs;
+      this.#motionMetrics.forwarded += 1;
+    } else if (rateDelayMs > 0) {
+      this.scheduleMotionLaneFlush(socket, rateDelayMs);
+    }
+    if (result.coalesced) this.#motionMetrics.coalesced += 1;
+  }
+
+  private sendMotionEvent(line: string, playerId: string) {
+    const payload = `${line}\n`;
+    if (Buffer.byteLength(payload, 'utf8') > this.maxMotionPayloadBytes) {
+      this.#motionMetrics.droppedOversize += 1;
+      return;
+    }
+    const nowMs = Date.now();
+    for (const [socket, client] of this.#clients) {
+      if (
+        !client.authenticated ||
+        client.role !== 'companion' ||
+        client.motionPlayerId !== playerId ||
+        socket.destroyed ||
+        !socket.writable ||
+        !this.hasActiveMotionLease(client, nowMs)
+      )
+        continue;
+      this.offerMotionPayload(socket, client, payload);
+    }
+  }
+
+  private flushMotionLane(socket: Socket) {
+    const client = this.#clients.get(socket);
+    if (!client) return;
+    if (
+      client.role !== 'companion' ||
+      !this.#motionSchema ||
+      !client.motionPlayerId ||
+      !this.hasActiveMotionLease(client, Date.now())
+    ) {
+      if (client.motionLane.clear())
+        this.#motionMetrics.droppedUnavailable += 1;
+      return;
+    }
+    if (socket.destroyed || !socket.writable) {
+      this.clearCompanionMotionClient(client, true);
+      return;
+    }
+    if (socket.writableNeedDrain) return;
+    const nowMs = Date.now();
+    const rateDelayMs = Math.max(
+      0,
+      client.motionLastForwardedAtMs + this.motionIntervalMs(client) - nowMs,
+    );
+    if (rateDelayMs > 0) {
+      this.scheduleMotionLaneFlush(socket, rateDelayMs);
+      return;
+    }
+    const result = client.motionLane.drain(value => socket.write(value));
+    if (result.sent) {
+      client.motionLastForwardedAtMs = nowMs;
+      this.#motionMetrics.forwarded += 1;
+    }
+  }
+
   private handleLine(socket: Socket, client: ClientState, line: string) {
     const trimmed = line.trim();
     if (!trimmed) return;
@@ -449,6 +976,14 @@ export default class BmfSocketBridgeHost extends EventEmitter {
               'commands will use the first writable native client.',
           });
         }
+      } else if (client.role === 'companion') {
+        this.writeJson(socket, {
+          type: 'hello.ack',
+          role: 'companion',
+          source: 'omegga-broker',
+          capabilities: this.#motionSchema ? [MOTION_CAPABILITY] : [],
+          motion: this.publicMotionSchema(),
+        });
       }
       this.emit('client', {
         role: client.role,
@@ -469,11 +1004,29 @@ export default class BmfSocketBridgeHost extends EventEmitter {
       if (message.type === 'response' && message.id) {
         this.resolvePendingCommand(message);
       }
-      this.broadcast(
-        trimmed,
-        socket,
-        socket => this.#clients.get(socket)?.role !== 'bmf-native',
-      );
+      if (message.type === MOTION_SCHEMA_MESSAGE) {
+        this.handleMotionSchemaAdvertisement(socket, message);
+      }
+      this.broadcast(trimmed, socket, socket => {
+        const role = this.#clients.get(socket)?.role;
+        return role !== 'bmf-native' && role !== 'companion';
+      });
+      const motionRecord = this.motionEventRecord(message);
+      if (motionRecord) {
+        const match = this.motionEventMatchesActiveSchema(message);
+        if (match) {
+          this.sendMotionEvent(trimmed, match.playerId);
+        } else if (this.#motionSchema) {
+          this.#motionMetrics.droppedInvalid += 1;
+        } else {
+          this.#motionMetrics.droppedUnavailable += 1;
+        }
+      }
+      return;
+    }
+
+    if (client.role === 'companion') {
+      this.handleCompanionMessage(socket, client, message);
       return;
     }
 
@@ -512,6 +1065,7 @@ export default class BmfSocketBridgeHost extends EventEmitter {
       .trim()
       .toLowerCase();
     if (role === 'bmf-native') return 'bmf-native';
+    if (role === 'companion') return 'companion';
     if (role === 'cityrpg' || role === 'plugin') return 'plugin';
     return 'unknown';
   }
@@ -679,8 +1233,14 @@ export default class BmfSocketBridgeHost extends EventEmitter {
 
   private removeClient(socket: Socket) {
     if (!this.#clients.has(socket)) return;
+    const wasMotionSchemaSource = this.#motionSchemaSource === socket;
+    const client = this.#clients.get(socket);
+    if (client?.role === 'companion') {
+      this.clearCompanionMotionClient(client);
+    }
     this.#clients.delete(socket);
     this.#bmfClients.delete(socket);
+    if (wasMotionSchemaSource) this.setMotionSchemaUnavailable();
     for (const [id, pending] of this.#pendingCommands) {
       if (pending.native !== socket) continue;
       clearTimeout(pending.timeout);

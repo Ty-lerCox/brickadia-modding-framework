@@ -22,7 +22,7 @@ The supported Windows runtime is:
 Brickadia dedicated server + UE4SS + BMF + BMF-vendored Omegga Windows runtime
 ```
 
-Current target: Brickadia EA3.1 PC-Shipping-CL15648.
+Current target: Brickadia EA3.1 PC-Shipping-CL15714.
 
 Stock upstream Omegga and the global npm package are not the current supported
 BMF runtime.

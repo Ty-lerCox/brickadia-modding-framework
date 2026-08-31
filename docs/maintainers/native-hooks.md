@@ -19,15 +19,15 @@ unless they are explicitly working on hook infrastructure.
 - Record `L6 Frame Time` evidence before promoting native mutation into normal
   gameplay.
 
-Current `Release-EA3-CL-15648` live-confirmed hotfix mapping:
+Current `Release-EA3-CL-15714` live-confirmed hotfix mapping:
 
-- `/Script/Brickadia.BRTool_Applicator:ServerAddComponent`: `0x62AAE50`
+- `/Script/Brickadia.BRTool_Applicator:ServerAddComponent`: `0x62C90E0`
   (expected `FunctionFlags=0x4220CC0`, `2` parameters, `ParmsSize=0x10`)
 
-The mapping is the unique sixty-one-of-sixty-one relocation-normalized semantic
-neighborhood match against the preserved CL15581 executable. The live CL15648
-process then confirmed the exact executable version and hash, reflected owner,
-name, flags, parameter ABI, native slot, and deny/allow policy before automatic
+The mapping is the unique best forty-nine-of-sixty-one relocation-normalized
+semantic-neighborhood match against the preserved CL15648 executable. The live
+CL15714 process then confirmed the exact executable version and hash, target
+identity, native slot, installation, and deny/allow policy before automatic
 synchronization was restored.
 
 Prior `Release-EA3-CL-15565` live-confirmed hotfix mapping:
@@ -89,7 +89,7 @@ the running server for the Applicator component-add function, updates the native
 control file, builds/injects the native DLL if needed, and skips reinjection
 when the hook is already installed in that process.
 
-The CL15648 default RVA is recorded for canary use, and automatic Applicator
+The CL15714 default RVA is recorded for canary use, and automatic Applicator
 synchronization is enabled after exact-build validation. Placement
 synchronization remains independently disabled.
 

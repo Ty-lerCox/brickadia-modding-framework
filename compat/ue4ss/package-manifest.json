@@ -6,7 +6,7 @@
   "status": "current-layout-package-boundary",
   "owner": "compat/ue4ss",
   "compatibilityManifest": "manifests/compatibility.json",
-  "targetBrickadiaBuild": "PC-Shipping-CL15648",
+  "targetBrickadiaBuild": "PC-Shipping-CL15714",
   "serverExecutable": "BrickadiaServer-Win64-Shipping.exe",
   "platform": "Windows",
   "sourceRoots": [

@@ -1,7 +1,7 @@
 {
-  "generatedFor": "BMF 0.1.0-ea3.cl15648",
+  "generatedFor": "BMF 0.1.0-ea3.cl15714",
   "brickadia": {
-    "primaryTarget": "Brickadia EA3.1 (PC-Shipping-CL15648)",
+    "primaryTarget": "Brickadia EA3.1 (PC-Shipping-CL15714)",
     "serverExecutable": "BrickadiaServer-Win64-Shipping.exe",
     "platform": "Windows"
   },
@@ -70,7 +70,7 @@
     "compatibility.diagnostics": {
       "status": "headless-proven",
       "minimumValidation": "L2 Headless for BMF.compatibility.check/helpers, bmf.compatibility output, health/status compatibility fields, target build metadata, and UE4SS helper availability",
-      "notes": "BMF reports the declared target Brickadia build PC-Shipping-CL15648, Windows dedicated-server scope, report-only unsupported-build policy, and required/optional runtime helper groups. Full unsupported-build refusal waits for reliable runtime Brickadia build detection."
+      "notes": "BMF reports the declared target Brickadia build PC-Shipping-CL15714, Windows dedicated-server scope, report-only unsupported-build policy, and required/optional runtime helper groups. Full unsupported-build refusal waits for reliable runtime Brickadia build detection."
     },
     "apiLabels.runtime": {
       "status": "headless-proven",

@@ -10,9 +10,9 @@ param(
   [string]$InjectScript = '',
   [string]$DllName = '',
   [string]$DeniedComponent = '',
-  [UInt64[]]$ServerAddComponentRvas = @([UInt64]0x62AAE50),
-  [string]$ExpectedFileVersion = 'Release-EA3-CL-15648',
-  [string]$ExpectedSha256 = '902C4244570FCEFE457E39795938065238A9A14967C7BE9911D606BD34E91CCB',
+  [UInt64[]]$ServerAddComponentRvas = @([UInt64]0x62C90E0),
+  [string]$ExpectedFileVersion = 'Release-EA3-CL-15714',
+  [string]$ExpectedSha256 = 'CFC56901C067509ED91B9A5D125B5BDE3B6CE1928F75C6FC41407578693082DC',
   [int]$CommandTimeoutSeconds = 30,
   [int]$ResponseTimeoutSeconds = 20,
   [int]$VerificationTimeoutSeconds = 20,
@@ -511,7 +511,7 @@ if ($ExpectedFileVersion -and $moduleVersion -ne $ExpectedFileVersion) {
 }
 $moduleSha256 = [string](Get-FileHash -LiteralPath $modulePath -Algorithm SHA256).Hash
 if ($ExpectedSha256 -and $moduleSha256 -ne $ExpectedSha256.ToUpperInvariant()) {
-  throw "Refusing native Applicator sync: PID $ProcessId executable SHA256 $moduleSha256 does not match the CL15648 canary hash $ExpectedSha256."
+  throw "Refusing native Applicator sync: PID $ProcessId executable SHA256 $moduleSha256 does not match the CL15714 canary hash $ExpectedSha256."
 }
 
 $moduleBase = [UInt64]$module.BaseAddress.ToInt64()

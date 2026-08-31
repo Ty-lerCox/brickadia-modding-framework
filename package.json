@@ -1,6 +1,6 @@
 {
   "name": "@bmf/workspace",
-  "version": "0.1.0-ea3.cl15648",
+  "version": "0.1.0-ea3.cl15714",
   "private": true,
   "description": "Unified Brickadia Modding Framework monorepo workspace.",
   "engines": {

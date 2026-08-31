@@ -2336,18 +2336,18 @@ namespace
     static_assert(sizeof(ChatCommandWithArgsProcessEventParams) == 40, "Unexpected CallChatCommandWithArgs param packing");
     static_assert(sizeof(PlayerChatMessageProcessEventParams) == 16, "Unexpected ServerPushChatMessage param packing");
 
-    // The CL15565 live controller used +0x1030. CL15648 keeps this value
+    // The CL15565 live controller used +0x1030. CL15714 carries this value as
     // fail-closed behind exact implementation identity until its live canary.
     constexpr std::size_t kServerPushChatMessageImplementationVTableOffset{0x1030};
     constexpr uintptr_t kUFunctionNativeFuncOffset{0xD8};
 
-    // Release-EA3-CL-15648 proof for the one native lane used by the opaque
+    // Release-EA3-CL-15714 candidate for the one native lane used by the opaque
     // cityrpg.command.v1 tunnel. These values are deliberately not shared with
     // any of the optional scanners, brick writers, or runtime hook families.
-    constexpr uint32_t kGameCommandTunnelCl15648ImageTimestamp{0x80B590CD};
-    constexpr uint32_t kGameCommandTunnelCl15648ImageSize{0x0A465000};
-    constexpr uintptr_t kGameCommandTunnelCl15648ExecRva{0x06B4F000};
-    constexpr uintptr_t kGameCommandTunnelCl15648ImplementationRva{0x06B62580};
+    constexpr uint32_t kGameCommandTunnelCl15714ImageTimestamp{0x9E13CF8D};
+    constexpr uint32_t kGameCommandTunnelCl15714ImageSize{0x0A71C000};
+    constexpr uintptr_t kGameCommandTunnelCl15714ExecRva{0x06B74F20};
+    constexpr uintptr_t kGameCommandTunnelCl15714ImplementationRva{0x06B88150};
 
     using ServerPushChatMessageImplementationFn = void(__fastcall*)(void*, const Unreal::FString&);
     using ReservedChatExecFn = void(__fastcall*)(void*, void*, void*);
@@ -2711,8 +2711,8 @@ namespace
             detail = "Brickadia server PE identity was unreadable";
             return false;
         }
-        if (timestamp != kGameCommandTunnelCl15648ImageTimestamp ||
-            image_size != kGameCommandTunnelCl15648ImageSize)
+        if (timestamp != kGameCommandTunnelCl15714ImageTimestamp ||
+            image_size != kGameCommandTunnelCl15714ImageSize)
         {
             std::ostringstream mismatch;
             mismatch << "unsupported Brickadia image for game-command tunnel: timestamp=0x"
@@ -2722,20 +2722,20 @@ namespace
             return false;
         }
 
-        const uintptr_t expected_exec = module_base + kGameCommandTunnelCl15648ExecRva;
+        const uintptr_t expected_exec = module_base + kGameCommandTunnelCl15714ExecRva;
         const uintptr_t expected_implementation =
-            module_base + kGameCommandTunnelCl15648ImplementationRva;
+            module_base + kGameCommandTunnelCl15714ImplementationRva;
         constexpr std::array<uint8_t, 13> kExecPrefix{
             0x56, 0x57, 0x48, 0x83, 0xEC, 0x48, 0x48,
             0x89, 0xD7, 0x48, 0x89, 0xCE, 0x48,
         };
         constexpr std::array<uint8_t, 13> kExecImplementationCall{
             0x48, 0x8D, 0x54, 0x24, 0x30, 0x48, 0x89,
-            0xF1, 0xE8, 0xA2, 0x34, 0x01, 0x00,
+            0xF1, 0xE8, 0x52, 0x31, 0x01, 0x00,
         };
-        constexpr std::array<uint8_t, 18> kImplementationPrefix{
-            0x41, 0x57, 0x41, 0x56, 0x41, 0x54, 0x56, 0x57, 0x55,
-            0x53, 0x48, 0x81, 0xEC, 0x90, 0x00, 0x00, 0x00, 0x48,
+        constexpr std::array<uint8_t, 20> kImplementationPrefix{
+            0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x56, 0x57,
+            0x55, 0x53, 0x48, 0x81, 0xEC, 0x88, 0x00, 0x00, 0x00, 0x48,
         };
         if (!is_executable_memory(expected_exec) ||
             !is_executable_memory(expected_implementation) ||
@@ -2743,7 +2743,7 @@ namespace
             !memory_matches_guarded(expected_exec + 0xD1, kExecImplementationCall) ||
             !memory_matches_guarded(expected_implementation, kImplementationPrefix))
         {
-            detail = "CL15648 ServerPushChatMessage code signatures did not match";
+            detail = "CL15714 ServerPushChatMessage code signatures did not match";
             return false;
         }
 
@@ -2787,7 +2787,7 @@ namespace
             reinterpret_cast<uintptr_t>(g_reserved_chat_guard_original.load()) == expected_exec;
         if (native_exec != expected_exec && !validated_guard_owns_slot)
         {
-            detail = "ServerPushChatMessage native exec slot did not match the validated CL15648 thunk or owned reserved-command guard";
+            detail = "ServerPushChatMessage native exec slot did not match the validated CL15714 thunk or owned reserved-command guard";
             return false;
         }
 
@@ -2809,7 +2809,7 @@ namespace
                 vtable_implementation != implementation)
             {
                 std::ostringstream mismatch;
-                mismatch << "ServerPushChatMessage vtable entry did not match CL15648 implementation"
+                mismatch << "ServerPushChatMessage vtable entry did not match CL15714 implementation"
                          << " exception=0x" << std::uppercase << std::hex
                          << vtable_exception_code << std::dec;
                 detail = mismatch.str();
@@ -2822,7 +2822,7 @@ namespace
         out.native_exec_slot = native_exec_slot;
         out.native_exec = reinterpret_cast<void*>(expected_exec);
         out.implementation = implementation;
-        detail = "validated Release-EA3-CL-15648 ServerPushChatMessage native tunnel target";
+        detail = "validated Release-EA3-CL-15714 ServerPushChatMessage native tunnel target";
         return true;
     }
 
@@ -4458,7 +4458,7 @@ namespace
         void* implementation = target.implementation;
         out << "controller=" << json_escape(controller_full_name) << "\n"
             << "controller_class=" << json_escape(controller_class_full_name) << "\n"
-            << "target_build=Release-EA3-CL-15648\n"
+            << "target_build=Release-EA3-CL-15714\n"
             << "implementation_vtable_offset=0x" << std::uppercase << std::hex
             << kServerPushChatMessageImplementationVTableOffset << std::dec << "\n"
             << "implementation_vtable_read=" << (target_valid ? "true" : "false") << "\n"
@@ -4577,7 +4577,7 @@ namespace
             << "controller_hint=" << json_escape(controller_address) << "\n"
             << "controller_hint_matched=true\n"
             << "controller_scanned=0\n"
-            << "target_build=Release-EA3-CL-15648\n"
+            << "target_build=Release-EA3-CL-15714\n"
             << "implementation_vtable_offset=0x" << std::uppercase << std::hex
             << kServerPushChatMessageImplementationVTableOffset << std::dec << "\n"
             << "implementation_vtable_read=" << (target_valid ? "true" : "false") << "\n"
@@ -25109,7 +25109,7 @@ namespace
                     lua.register_function("BMFSocketPlayerChatMessageImplementationReadiness", lua_socket_player_chat_message_implementation_readiness);
                     lua.register_function("BMFSocketReservedChatGuardInstall", lua_socket_reserved_chat_guard_install);
                     lua.register_function("BMFSocketReservedChatGuardStatus", lua_socket_reserved_chat_guard_status);
-                    std::printf("[BMFSocket] transport-only mode enabled with CL15648-validated game-command tunnel helpers; scanners, writers, and unrelated hooks remain unavailable\n");
+                    std::printf("[BMFSocket] transport-only mode enabled with CL15714-validated game-command tunnel helpers; scanners, writers, and unrelated hooks remain unavailable\n");
                 }
                 else
                 {
